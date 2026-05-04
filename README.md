@@ -30,6 +30,8 @@ FLS 是一个基于 Flask 的轻量级脚本任务管理面板，支持通过 We
 
 - 支持 **Python / Shell / Node.js / TypeScript / PowerShell / Batch / PHP / Ruby / Perl / Lua / Java Jar**
 - 支持 **Cron 定时任务**
+- 支持 **任务超时控制**
+- 支持 **随机延迟启动**
 - 支持 **脚本拉取 / 导入 / 在线编辑 / 改名**
 - 支持 **日志查看 / 日志管理 / 自动清理**
 - 支持 **代理管理**
@@ -37,7 +39,8 @@ FLS 是一个基于 Flask 的轻量级脚本任务管理面板，支持通过 We
 - 支持 **通知推送**
 - 支持 **备份恢复**
 - 支持 **Linux / Windows / Termux**
-- 自带 **启动 / 停止 / 重启 / 状态 / 日志** 管理脚本
+- 支持 **KernelSU / Magisk 调用 Termux 环境启动**
+- 自带 **启动 / 停止 / 重启 / 状态 / 日志 / 更新** 管理脚本
 
 ---
 
@@ -49,6 +52,22 @@ fls/
 ├─ fls.sh
 ├─ fls.ps1
 ├─ fls.bat
+├─ fls-a.sh
+├─ fls_manager/
+│  ├─ app.py
+│  ├─ auth.py
+│  ├─ command.py
+│  ├─ config.py
+│  ├─ logs.py
+│  ├─ models.py
+│  ├─ notify.py
+│  ├─ paths.py
+│  ├─ proxy.py
+│  ├─ scheduler.py
+│  ├─ state.py
+│  ├─ task_runner.py
+│  ├─ ui/
+│  └─ routes/
 ├─ data/
 ├─ log/
 ├─ scripts/
@@ -57,10 +76,12 @@ fls/
 
 ### 目录说明
 
-- `fls-manager.py`：主程序，Web 面板入口
+- `fls-manager.py`：主入口文件
+- `fls_manager/`：模块化核心代码
 - `fls.sh`：Linux / Termux 启停脚本
 - `fls.ps1`：Windows PowerShell 启停脚本
-- `fls.bat`：Windows CMD 启停脚本
+- `fls.bat`：Windows CMD 启停入口
+- `fls-a.sh`：KernelSU / Magisk / adb root 环境调用 Termux 的启动脚本
 - `data/`：配置、任务、代理、通知等数据
 - `log/`：运行日志
 - `scripts/`：脚本目录
@@ -71,18 +92,11 @@ fls/
 ## 脚本说明
 
 ### `fls-manager.py`
-主程序，负责：
 
-- 启动 Web 面板
-- 管理任务调度
-- 执行脚本
-- 管理日志
-- 管理依赖
-- 管理通知
-- 备份恢复
-- 配置管理
+主程序入口，负责启动模块化 FLS Web 面板。
 
 ### `fls.sh`
+
 Linux / Termux 启停脚本。
 
 支持：
@@ -93,17 +107,25 @@ sh fls.sh stop
 sh fls.sh restart
 sh fls.sh status
 sh fls.sh log
-sh fls.sh menu
-sh fls.sh ensure-manager
+sh fls.sh update
+sh fls.sh ensure-repo
 ```
 
 临时参数：
 
 ```bash
-sh fls.sh start -t 123456 -p 5701
+sh fls.sh start -p 5701 -t 123456
+sh fls.sh restart -p 5701 -t 123456
 ```
 
+说明：
+
+- 无参数时只显示帮助，不进入交互菜单。
+- `ensure-repo` 会检查或拉取完整仓库。
+- `update` 会执行 `git pull` 更新程序。
+
 ### `fls.ps1`
+
 Windows PowerShell 启停脚本。
 
 支持：
@@ -114,12 +136,20 @@ Windows PowerShell 启停脚本。
 .\fls.ps1 restart
 .\fls.ps1 status
 .\fls.ps1 log
+.\fls.ps1 update
+.\fls.ps1 ensure-repo
 .\fls.ps1 menu
-.\fls.ps1 ensure-manager
 ```
 
+说明：
+
+- Windows 版本保留前台菜单。
+- 双击或无参数默认进入菜单。
+- 可以关闭窗口退出菜单，不影响已后台启动的 FLS 面板进程。
+
 ### `fls.bat`
-Windows CMD 启停脚本。
+
+Windows CMD 启停入口。
 
 支持：
 
@@ -129,9 +159,38 @@ fls.bat stop
 fls.bat restart
 fls.bat status
 fls.bat log
+fls.bat update
+fls.bat ensure-repo
 fls.bat menu
-fls.bat ensure-manager
 ```
+
+说明：
+
+- `fls.bat` 会调用同目录下的 `fls.ps1`。
+- 建议将 `fls.bat` 和 `fls.ps1` 放在同一目录。
+
+### `fls-a.sh`
+
+KernelSU / Magisk / adb root 环境调用 Termux 运行 FLS 的脚本。
+
+支持：
+
+```bash
+sh fls-a.sh start
+sh fls-a.sh stop
+sh fls-a.sh restart
+sh fls-a.sh status
+sh fls-a.sh log
+sh fls-a.sh update
+sh fls-a.sh ensure-repo
+```
+
+说明：
+
+- 手动无参数执行时，只显示帮助，不进入菜单。
+- 放入 `/data/adb/service.d/` 后无参数默认执行 `start`。
+- 如果 Termux 中没有 FLS 文件，会自动在 Termux 环境中安装 git 并 `git clone` 完整仓库。
+- 不提供交互菜单，避免 Android 文件管理器或后台环境断开输入后造成异常。
 
 ---
 
@@ -139,7 +198,7 @@ fls.bat ensure-manager
 
 ---
 
-### 一、Linux 安装
+## 一、Linux 安装
 
 适用于：
 
@@ -148,28 +207,28 @@ fls.bat ensure-manager
 - Alpine
 - 其他 Linux 环境
 
-#### 1. 安装 Python
+### 1. 安装基础环境
 
-**Debian / Ubuntu**
+Debian / Ubuntu：
 
 ```bash
 apt update
-apt install -y python3 python3-pip python3-venv
+apt install -y python3 python3-pip python3-venv git
 ```
 
-**CentOS / Rocky / AlmaLinux**
+CentOS / Rocky / AlmaLinux：
 
 ```bash
-yum install -y python3 python3-pip
+yum install -y python3 python3-pip git
 ```
 
-**Alpine**
+Alpine：
 
 ```bash
-apk add --no-cache python3 py3-pip
+apk add --no-cache python3 py3-pip py3-virtualenv git
 ```
 
-#### 2. 下载项目
+### 2. 下载项目
 
 ```bash
 git clone https://github.com/liyw0205/fls.git
@@ -177,13 +236,13 @@ cd fls
 chmod +x fls.sh
 ```
 
-#### 3. 启动
+### 3. 启动
 
 ```bash
 sh fls.sh start
 ```
 
-#### 4. 访问
+### 4. 访问
 
 默认地址：
 
@@ -205,9 +264,9 @@ http://服务器IP:5701
 
 ---
 
-### 二、Termux 安装
+## 二、Termux 安装
 
-#### 1. 安装基础环境
+### 1. 安装基础环境
 
 ```bash
 pkg update -y
@@ -220,7 +279,7 @@ pkg install -y python git
 pkg install -y clang make openssl libffi
 ```
 
-#### 2. 下载项目
+### 2. 下载项目
 
 ```bash
 git clone https://github.com/liyw0205/fls.git
@@ -228,7 +287,7 @@ cd fls
 chmod +x fls.sh
 ```
 
-#### 3. 启动
+### 3. 启动
 
 ```bash
 sh fls.sh start
@@ -236,13 +295,76 @@ sh fls.sh start
 
 ---
 
-### 三、Windows 安装
+## 三、KernelSU / Magisk 启动 Termux 中的 FLS
 
-#### 方式 1：PowerShell
+适用于：
 
-1. 安装 Python：<https://www.python.org/downloads/windows/>
-2. 下载项目文件
-3. 执行：
+- KernelSU
+- Magisk
+- adb shell root
+- 需要开机自启 FLS 的 Android 环境
+
+### 1. 前提
+
+请先安装并初始化 Termux。
+
+如果希望 `fls-a.sh` 自动 clone 项目，需要 Termux 可正常使用 `pkg`。
+
+### 2. 放置脚本
+
+将 `fls-a.sh` 放到：
+
+```text
+/data/adb/service.d/fls-a.sh
+```
+
+赋予权限：
+
+```bash
+chmod 755 /data/adb/service.d/fls-a.sh
+```
+
+### 3. 手动测试
+
+```bash
+su -c 'sh /data/adb/service.d/fls-a.sh start'
+```
+
+### 4. 查看日志
+
+查看 `fls-a.sh` 日志：
+
+```bash
+su -c 'cat /data/adb/fls-a.log'
+```
+
+查看 FLS 主进程日志：
+
+```bash
+su -c 'cat /data/data/com.termux/files/home/fls/log/fls-manager-daemon.log'
+```
+
+---
+
+## 四、Windows 安装
+
+### 1. 安装基础环境
+
+需要安装：
+
+- Python：<https://www.python.org/downloads/windows/>
+- Git：<https://git-scm.com/download/win>
+
+也可以让脚本尝试通过 `winget` 自动安装 Git。
+
+### 2. 下载项目
+
+```powershell
+git clone https://github.com/liyw0205/fls.git
+cd fls
+```
+
+### 3. PowerShell 启动
 
 ```powershell
 .\fls.ps1 start
@@ -254,13 +376,27 @@ sh fls.sh start
 powershell -ExecutionPolicy Bypass -File .\fls.ps1 start
 ```
 
-#### 方式 2：CMD
-
-执行：
+### 4. CMD 启动
 
 ```bat
 fls.bat start
 ```
+
+### 5. Windows 菜单
+
+双击：
+
+```text
+fls.bat
+```
+
+或执行：
+
+```powershell
+.\fls.ps1 menu
+```
+
+可以进入前台菜单。
 
 ---
 
@@ -274,23 +410,31 @@ fls.bat start
 5700
 ```
 
-可临时指定：
+临时指定端口：
+
+Linux / Termux：
 
 ```bash
 sh fls.sh start -p 5701
 ```
 
-或：
+Windows PowerShell：
 
 ```powershell
 .\fls.ps1 start -p 5701
+```
+
+Windows CMD：
+
+```bat
+fls.bat start -p 5701
 ```
 
 ### 登录 Token
 
 #### 方式 1：启动时临时指定
 
-Linux：
+Linux / Termux：
 
 ```bash
 sh fls.sh start -t 123456
@@ -306,6 +450,12 @@ Windows CMD：
 
 ```bat
 fls.bat start -t 123456
+```
+
+KernelSU / Magisk：
+
+```bash
+su -c 'FLS_TOKEN=123456 sh /data/adb/service.d/fls-a.sh start'
 ```
 
 #### 方式 2：首次访问网页设置
@@ -330,7 +480,16 @@ sh fls.sh stop
 sh fls.sh restart
 sh fls.sh status
 sh fls.sh log
-sh fls.sh menu
+sh fls.sh update
+```
+
+### KernelSU / Magisk
+
+```bash
+su -c 'sh /data/adb/service.d/fls-a.sh start'
+su -c 'sh /data/adb/service.d/fls-a.sh stop'
+su -c 'sh /data/adb/service.d/fls-a.sh restart'
+su -c 'sh /data/adb/service.d/fls-a.sh status'
 ```
 
 ### Windows PowerShell
@@ -341,6 +500,7 @@ sh fls.sh menu
 .\fls.ps1 restart
 .\fls.ps1 status
 .\fls.ps1 log
+.\fls.ps1 update
 ```
 
 ### Windows CMD
@@ -351,6 +511,7 @@ fls.bat stop
 fls.bat restart
 fls.bat status
 fls.bat log
+fls.bat update
 ```
 
 ---
@@ -438,30 +599,20 @@ node /root/demo.js
 - PushPlus
 - Telegram Bot
 - 企业微信机器人
-- 企业微信应用
 - 钉钉机器人
 - 飞书机器人
 - SMTP 邮件
 - Ntfy
 - WxPusher
-- 自定义 Webhook
-- go-cqhttp
 - Gotify
-- iGot
 - PushDeer
-- Synology Chat
-- 微加机器人
-- Qmsg 酱
-- 智能微秘书
-- PushMe
-- Chronocat
-- OpeniLink
+- 自定义 Webhook
 
 说明：
 
 - 可配置多个通知实例
 - 同一渠道可配置多份
-- 任务可独立指定通知方式
+- 任务可选择不通知、使用全局默认通知或指定通知渠道
 
 ---
 
@@ -472,6 +623,7 @@ node /root/demo.js
 - `data/proxies.json`：代理配置
 - `data/config.json`：系统配置
 - `data/fls-manager.pid`：主进程 PID
+- `data/secret_key.txt`：Flask Session 密钥
 
 ---
 
@@ -491,6 +643,20 @@ log/
 - 系统环境安装日志
 - 备份恢复日志
 
+查看主进程日志：
+
+Linux / Termux：
+
+```bash
+sh fls.sh log
+```
+
+Windows：
+
+```powershell
+.\fls.ps1 log
+```
+
 ---
 
 ## 备份恢复
@@ -499,17 +665,13 @@ log/
 
 - `.tar.gz`
 - `.tgz`
-- `.gz`
-- `.zip`
-- `.rar`
-- `.7z`
 - `.tar`
+- `.zip`
 
 说明：
 
 - 备份时会自动导出依赖列表
 - 恢复时可选择同时恢复 Python 依赖
-- `rar / 7z` 需要系统安装解压工具
 
 ---
 
@@ -519,7 +681,7 @@ log/
 
 查看日志：
 
-Linux：
+Linux / Termux：
 
 ```bash
 sh fls.sh log
@@ -535,6 +697,13 @@ Windows CMD：
 
 ```bat
 fls.bat log
+```
+
+KernelSU / Magisk：
+
+```bash
+su -c 'cat /data/adb/fls-a.log'
+su -c 'cat /data/data/com.termux/files/home/fls/log/fls-manager-daemon.log'
 ```
 
 ### 2. 提示没有 git
@@ -580,11 +749,19 @@ Windows：
 - 任务是否选择了“不通知”
 - 通知渠道配置是否正确
 
+### 6. Android 上为什么不提供 menu？
+
+`fls-a.sh` 主要面向 KernelSU / Magisk / adb root 等非交互环境。  
+为了避免文件管理器后台被杀、标准输入断开后造成脚本残留或异常占用，不提供交互菜单。  
+请直接使用 `start / stop / restart / status / log` 等一次性命令。
+
 ---
 
 ## AI 说明
 
 本项目在开发过程中使用了 AI 辅助生成、重构、润色和整理部分代码与文档，最终内容由项目维护者审阅、整合与维护。
+
+详见：[AI-NOTICE.md](./AI-NOTICE.md)
 
 ---
 
