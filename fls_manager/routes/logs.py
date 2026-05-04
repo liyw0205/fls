@@ -1,5 +1,7 @@
 from datetime import datetime
 from math import ceil
+from urllib.parse import quote
+
 from flask import Blueprint, abort, redirect, url_for, request, Response
 
 from ..paths import LOG_DIR
@@ -22,12 +24,23 @@ def page_links(base, q, page, pages):
         url = f"{base}?page={i}"
 
         if q:
-            from urllib.parse import quote
             url += "&q=" + quote(q)
 
         links += f'<a class="btn {cls}" href="{h(url)}">{i}</a>'
 
     return f'<div class="card"><div class="action-row">{links}</div></div>'
+
+
+def log_group_title(task_name, count):
+    if task_name == "其他日志":
+        title = "其他日志"
+    else:
+        title = f"任务：{task_name}"
+
+    if int(count or 0) > 1:
+        title += f"（{int(count)}）"
+
+    return title
 
 
 @bp.route("/logs")
@@ -82,8 +95,8 @@ def logs_page():
 <div class="card">
     <div class="card-title">日志管理</div>
     <div class="help">
-        支持搜索；手机端日志分组采用双排显示。<br>
-        同一分组超过 5 条日志会折叠。
+        日志按任务分组显示。每个分组默认折叠，点击卡片可展开查看日志文件。<br>
+        支持搜索任务名 / 日志文件名。
     </div>
     <br>
     <div class="form-grid">
@@ -102,21 +115,43 @@ def logs_page():
 """
 
     if not show:
-        content += '<div class="card"><div class="help">暂无匹配日志</div></div>'
+        content += """
+<div class="card">
+    <div class="help">暂无匹配日志</div>
+</div>
+"""
     else:
         content += '<div id="logsGroupGrid">'
 
         for task_name, log_files in show:
             rows = ""
 
+            latest_time = "-"
+            latest_file = "-"
+
+            try:
+                latest = max(log_files, key=lambda x: x.stat().st_mtime)
+                latest_time = datetime.fromtimestamp(latest.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+                latest_file = latest.name
+            except Exception:
+                pass
+
             for f in log_files:
-                size = f.stat().st_size / 1024
-                mtime = datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+                try:
+                    size = f.stat().st_size / 1024
+                    size_text = f"{size:.1f} KB"
+                except Exception:
+                    size_text = "-"
+
+                try:
+                    mtime = datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    mtime = "-"
 
                 rows += f"""
 <tr>
     <td>{h(f.name)}</td>
-    <td>{size:.1f} KB</td>
+    <td>{h(size_text)}</td>
     <td>{h(mtime)}</td>
     <td>
         <a class="btn btn-orange" href="/logfile/{h(f.name)}">查看</a>
@@ -141,34 +176,36 @@ def logs_page():
 </div>
 """
 
-            title = "其他日志" if task_name == "其他日志" else f"任务：{task_name}"
+            title = log_group_title(task_name, len(log_files))
 
-            if len(log_files) > 1:
-                title += f"（{len(log_files)}）"
+            content += f"""
+<details class="log-group-card">
+    <summary>
+        <div class="log-group-head">
+            <div>
+                <div class="log-group-title">{h(title)}</div>
+                <div class="log-group-sub">
+                    最新日志：{h(latest_file)}<br>
+                    最新时间：{h(latest_time)}
+                </div>
+            </div>
+            <div class="log-group-meta">
+                <span class="badge blue">{len(log_files)} 条</span>
+            </div>
+        </div>
+    </summary>
 
-            if len(log_files) > 5:
-                content += f"""
-<div class="card">
-    <details>
-        <summary style="cursor:pointer;font-weight:900;">{h(title)}</summary>
-        <br>
+    <div class="log-group-body">
         {table}
-    </details>
-</div>
-"""
-            else:
-                content += f"""
-<div class="card">
-    <div class="card-title">{h(title)}</div>
-    {table}
-</div>
+    </div>
+</details>
 """
 
-        content += '</div>'
+        content += "</div>"
 
     content += page_links("/logs", q, page, pages)
-    return layout("日志管理", "logs", content)
 
+    return layout("日志管理", "logs", content)
 
 
 @bp.route("/logfile/<filename>")

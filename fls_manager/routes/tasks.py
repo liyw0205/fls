@@ -393,7 +393,9 @@ def tasks_page():
     </div>
 </div>
 <div class="card">
-    <div class="table-wrap">{tasks_table(tasks)}</div>
+    <div class="card">
+    {tasks_table(tasks)}
+    </div>
 </div>
 """
     return layout("任务管理", "tasks", body)

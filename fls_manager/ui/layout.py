@@ -12,7 +12,7 @@ def layout(title, active, body):
         ("deps", "/deps", "📦 依赖管理"),
         ("logs", "/logs", "📁 日志管理"),
         ("notify", "/notify", "🔔 通知管理"),
-        ("status", "/panel/status", "🖥️ 环境状态"),
+        ("status", "/panel/status", "🖥️ 运行环境"),
         ("config", "/config", "🔧 配置"),
         ("about", "/about", "⚙️ 关于"),
     ]
@@ -373,7 +373,7 @@ pre.log {
 }
 
 /* ============================================================
-   手机端悬浮菜单按钮
+   手机端悬浮菜单按钮：已调小，避免超出
    ============================================================ */
 .fls-float-menu-btn {
     display:none;
@@ -382,20 +382,20 @@ pre.log {
 body.fls-mobile .fls-float-menu-btn {
     display:flex!important;
     position:fixed;
-    left:12px;
-    top:calc(env(safe-area-inset-top, 0px) + 12px);
-    width:46px;
-    height:46px;
+    left:8px;
+    top:calc(env(safe-area-inset-top, 0px) + 8px);
+    width:38px;
+    height:38px;
     border:1px solid rgba(255,255,255,.45);
     border-radius:999px;
     background:rgba(255,255,255,.58);
     color:#111827;
-    font-size:22px;
+    font-size:18px;
     font-weight:900;
     align-items:center;
     justify-content:center;
     z-index:10001;
-    box-shadow:0 8px 24px rgba(0,0,0,.18);
+    box-shadow:0 6px 18px rgba(0,0,0,.16);
     backdrop-filter:blur(14px) saturate(180%);
     -webkit-backdrop-filter:blur(14px) saturate(180%);
     cursor:pointer;
@@ -436,8 +436,8 @@ body.fls-mobile .menu-btn {
 }
 
 body.fls-mobile .topbar {
-    height:56px!important;
-    padding:0 12px 0 64px!important;
+    height:52px!important;
+    padding:0 10px 0 52px!important;
 }
 
 body.fls-mobile .title {
@@ -598,59 +598,8 @@ body.fls-mobile.page-deps .table-wrap td:last-child .btn {
 }
 
 /* ============================================================
-   环境状态：基础信息双列卡片，运行环境保持横向表格
+   运行环境：运行环境表格保持横向滚动
    ============================================================ */
-body.fls-mobile.page-status #statusInfoTable {
-    display:block!important;
-    min-width:0!important;
-    width:100%!important;
-}
-
-body.fls-mobile.page-status #statusInfoTable thead {
-    display:none!important;
-}
-
-body.fls-mobile.page-status #statusInfoTable tbody {
-    display:grid!important;
-    grid-template-columns:repeat(2,minmax(0,1fr))!important;
-    gap:12px!important;
-}
-
-body.fls-mobile.page-status #statusInfoTable tr {
-    display:block!important;
-    margin:0!important;
-    padding:12px!important;
-    border:1px solid #e5e7eb!important;
-    border-radius:14px!important;
-    background:#fff!important;
-    box-shadow:0 4px 16px rgba(0,0,0,.04)!important;
-}
-
-body.fls-mobile.page-status #statusInfoTable td {
-    display:block!important;
-    border-bottom:0!important;
-    padding:3px 0!important;
-    width:100%!important;
-}
-
-body.fls-mobile.page-status #statusInfoTable td::before {
-    display:none!important;
-}
-
-body.fls-mobile.page-status #statusInfoTable td:first-child {
-    color:#6b7280!important;
-    font-size:12px!important;
-    font-weight:700!important;
-}
-
-body.fls-mobile.page-status #statusInfoTable td:nth-child(2) {
-    color:#111827!important;
-    font-size:14px!important;
-    font-weight:800!important;
-    word-break:break-word!important;
-}
-
-/* 脚本运行环境表格：移动端保持横向滚动 */
 body.fls-mobile.page-status #runtimeTable {
     display:table!important;
     min-width:760px!important;
@@ -693,41 +642,128 @@ body.fls-mobile.page-status #runtimeTable td::before {
 }
 
 /* ============================================================
-   日志管理：日志分组双列
+   日志管理：卡片折叠样式
    ============================================================ */
+#logsGroupGrid {
+    display:grid;
+    grid-template-columns:repeat(2,minmax(0,1fr));
+    gap:14px;
+}
+
+.log-group-card {
+    background:#fff;
+    border:1px solid #e5e7eb;
+    border-radius:14px;
+    box-shadow:0 4px 16px rgba(0,0,0,.04);
+    overflow:hidden;
+    margin:0;
+}
+
+.log-group-card summary {
+    cursor:pointer;
+    list-style:none;
+    padding:14px;
+}
+
+.log-group-card summary::-webkit-details-marker {
+    display:none;
+}
+
+.log-group-card summary::after {
+    content:"点击展开";
+    display:block;
+    margin-top:8px;
+    color:#6b7280;
+    font-size:12px;
+    font-weight:700;
+}
+
+.log-group-card[open] summary::after {
+    content:"点击收起";
+}
+
+.log-group-head {
+    display:flex;
+    justify-content:space-between;
+    align-items:flex-start;
+    gap:10px;
+}
+
+.log-group-title {
+    font-size:15px;
+    font-weight:900;
+    color:#111827;
+    line-height:1.4;
+    word-break:break-word;
+}
+
+.log-group-meta {
+    display:flex;
+    gap:6px;
+    flex-wrap:wrap;
+    justify-content:flex-end;
+    min-width:76px;
+}
+
+.log-group-sub {
+    margin-top:6px;
+    color:#6b7280;
+    font-size:12px;
+    line-height:1.5;
+    word-break:break-word;
+}
+
+.log-group-body {
+    padding:0 14px 14px;
+}
+
+.log-group-body .table-wrap table {
+    min-width:560px;
+}
+
+.log-empty-card {
+    padding:16px;
+    color:#6b7280;
+    background:#fff;
+    border-radius:12px;
+}
+
+/* 移动端日志管理仍然双列，极窄屏单列 */
 body.fls-mobile.page-logs #logsGroupGrid {
     display:grid!important;
     grid-template-columns:repeat(2,minmax(0,1fr))!important;
     gap:12px!important;
 }
 
-body.fls-mobile.page-logs #logsGroupGrid > .card {
-    margin-bottom:0!important;
+body.fls-mobile.page-logs .log-group-card summary {
+    padding:12px!important;
 }
 
-body.fls-mobile.page-logs #logsGroupGrid .card-title,
-body.fls-mobile.page-logs #logsGroupGrid summary {
+body.fls-mobile.page-logs .log-group-body {
+    padding:0 12px 12px!important;
+}
+
+body.fls-mobile.page-logs .log-group-title {
     font-size:14px!important;
-    line-height:1.4!important;
-    word-break:break-word!important;
 }
 
-body.fls-mobile.page-logs #logsGroupGrid .table-wrap table {
+/* 日志卡片内部日志文件表格保持横向滚动 */
+body.fls-mobile.page-logs .log-group-body .table-wrap table {
     display:table!important;
-    min-width:520px!important;
+    min-width:560px!important;
     width:100%!important;
     border-collapse:collapse!important;
 }
 
-body.fls-mobile.page-logs #logsGroupGrid .table-wrap thead {
+body.fls-mobile.page-logs .log-group-body .table-wrap thead {
     display:table-header-group!important;
 }
 
-body.fls-mobile.page-logs #logsGroupGrid .table-wrap tbody {
+body.fls-mobile.page-logs .log-group-body .table-wrap tbody {
     display:table-row-group!important;
 }
 
-body.fls-mobile.page-logs #logsGroupGrid .table-wrap tr {
+body.fls-mobile.page-logs .log-group-body .table-wrap tr {
     display:table-row!important;
     box-shadow:none!important;
     border:0!important;
@@ -735,16 +771,17 @@ body.fls-mobile.page-logs #logsGroupGrid .table-wrap tr {
     margin:0!important;
 }
 
-body.fls-mobile.page-logs #logsGroupGrid .table-wrap th,
-body.fls-mobile.page-logs #logsGroupGrid .table-wrap td {
+body.fls-mobile.page-logs .log-group-body .table-wrap th,
+body.fls-mobile.page-logs .log-group-body .table-wrap td {
     display:table-cell!important;
     padding:8px 6px!important;
     border-bottom:1px solid #e5e7eb!important;
     font-size:12px!important;
 }
 
-body.fls-mobile.page-logs #logsGroupGrid .table-wrap td::before {
+body.fls-mobile.page-logs .log-group-body .table-wrap td::before {
     display:none!important;
+    content:""!important;
 }
 
 /* ============================================================
@@ -958,7 +995,6 @@ body.fls-mobile:not(.page-pull):not(.page-proxy):not(.page-deps):not(.page-statu
 
 @media(max-width:390px) {
     body.fls-mobile.page-deps .table-wrap tbody,
-    body.fls-mobile.page-status #statusInfoTable tbody,
     body.fls-mobile.page-logs #logsGroupGrid {
         grid-template-columns:1fr!important;
     }

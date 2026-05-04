@@ -22,8 +22,8 @@ def _task_action_buttons(task_id, enabled):
 
 def tasks_table(tasks):
     """
-    桌面端：普通表格
-    手机端：卡片布局，操作按钮放到底部第二排。
+    桌面端：普通表格。
+    手机端：折叠卡片布局，默认折叠，避免单个任务卡片过长。
     """
     desktop_rows = ""
     mobile_cards = ""
@@ -44,7 +44,11 @@ def tasks_table(tasks):
 
             running = is_running(task_id)
             pid = RUNNING.get(task_id, {}).get("pid", "-") if running else "-"
-            process_name = RUNNING.get(task_id, {}).get("process_name", "-") if running else safe_process_name(name)
+            process_name = (
+                RUNNING.get(task_id, {}).get("process_name", "-")
+                if running
+                else safe_process_name(name)
+            )
 
             enabled_badge = '<span class="badge green">启用</span>' if enabled else '<span class="badge gray">禁用</span>'
             status_badge = '<span class="badge blue">运行中</span>' if running else '<span class="badge red">已停止</span>'
@@ -58,10 +62,10 @@ def tasks_table(tasks):
             remark_mobile = ""
             if remark:
                 remark_mobile = f"""
-        <div class="task-mobile-item">
-            <div class="task-mobile-label">备注</div>
-            <div class="task-mobile-value">{h(remark)}</div>
-        </div>
+            <div class="task-mobile-item">
+                <div class="task-mobile-label">备注</div>
+                <div class="task-mobile-value">{h(remark)}</div>
+            </div>
 """
 
             desktop_rows += f"""
@@ -80,54 +84,59 @@ def tasks_table(tasks):
 """
 
             mobile_cards += f"""
-<div class="task-mobile-card" data-task-id="{h(task_id)}">
-    <div class="task-mobile-head">
-        <div>
-            <div class="task-mobile-title">{h(name)}</div>
-            {f'<div class="help" style="margin-top:4px;">备注：{h(remark)}</div>' if remark else ''}
+<details class="task-mobile-card" data-task-id="{h(task_id)}">
+    <summary>
+        <div class="task-mobile-head">
+            <div>
+                <div class="task-mobile-title">{h(name)}</div>
+                {f'<div class="help" style="margin-top:4px;">备注：{h(remark)}</div>' if remark else ''}
+            </div>
+            <div class="task-mobile-badges">
+                {enabled_badge}
+                {status_badge}
+            </div>
         </div>
-        <div class="task-mobile-badges">
-            {enabled_badge}
-            {status_badge}
+    </summary>
+
+    <div class="task-mobile-card-body">
+        <div class="task-mobile-info">
+            {remark_mobile}
+
+            <div class="task-mobile-item">
+                <div class="task-mobile-label">命令</div>
+                <div class="task-mobile-value code-like">{h(command)}</div>
+            </div>
+
+            <div class="task-mobile-item">
+                <div class="task-mobile-label">Cron</div>
+                <div class="task-mobile-value">{h(cron)}</div>
+            </div>
+
+            <div class="task-mobile-item">
+                <div class="task-mobile-label">下次执行</div>
+                <div class="task-mobile-value">{h(next_run_text)}</div>
+            </div>
+
+            <div class="task-mobile-item">
+                <div class="task-mobile-label">运行次数</div>
+                <div class="task-mobile-value">{run_count}</div>
+            </div>
+
+            <div class="task-mobile-item">
+                <div class="task-mobile-label">PID</div>
+                <div class="task-mobile-value">{h(pid)}</div>
+            </div>
+
+            <div class="task-mobile-item">
+                <div class="task-mobile-label">进程名</div>
+                <div class="task-mobile-value">{h(process_name)}</div>
+            </div>
         </div>
+
+        <div class="task-mobile-action-title">操作</div>
+        {actions}
     </div>
-
-    <div class="task-mobile-info">
-        {remark_mobile}
-        <div class="task-mobile-item">
-            <div class="task-mobile-label">命令</div>
-            <div class="task-mobile-value code-like">{h(command)}</div>
-        </div>
-
-        <div class="task-mobile-item">
-            <div class="task-mobile-label">Cron</div>
-            <div class="task-mobile-value">{h(cron)}</div>
-        </div>
-
-        <div class="task-mobile-item">
-            <div class="task-mobile-label">下次执行</div>
-            <div class="task-mobile-value">{h(next_run_text)}</div>
-        </div>
-
-        <div class="task-mobile-item">
-            <div class="task-mobile-label">运行次数</div>
-            <div class="task-mobile-value">{run_count}</div>
-        </div>
-
-        <div class="task-mobile-item">
-            <div class="task-mobile-label">PID</div>
-            <div class="task-mobile-value">{h(pid)}</div>
-        </div>
-
-        <div class="task-mobile-item">
-            <div class="task-mobile-label">进程名</div>
-            <div class="task-mobile-value">{h(process_name)}</div>
-        </div>
-    </div>
-
-    <div class="task-mobile-action-title">操作</div>
-    {actions}
-</div>
+</details>
 """
 
     html_text = f"""
@@ -147,13 +156,44 @@ def tasks_table(tasks):
     margin:2px;
 }}
 
+/* ============================================================
+   手机任务卡片：默认折叠
+   ============================================================ */
 .task-mobile-card {{
     background:#fff;
     border:1px solid #e5e7eb;
     border-radius:14px;
-    padding:14px;
+    padding:0;
     margin-bottom:14px;
     box-shadow:0 4px 16px rgba(0,0,0,.04);
+    overflow:hidden;
+}}
+
+.task-mobile-card summary {{
+    cursor:pointer;
+    list-style:none;
+    padding:14px;
+}}
+
+.task-mobile-card summary::-webkit-details-marker {{
+    display:none;
+}}
+
+.task-mobile-card summary::after {{
+    content:"点击展开";
+    display:block;
+    margin-top:8px;
+    color:#6b7280;
+    font-size:12px;
+    font-weight:700;
+}}
+
+.task-mobile-card[open] summary::after {{
+    content:"点击收起";
+}}
+
+.task-mobile-card-body {{
+    padding:0 14px 14px;
 }}
 
 .task-mobile-head {{
@@ -161,7 +201,6 @@ def tasks_table(tasks):
     justify-content:space-between;
     align-items:flex-start;
     gap:10px;
-    margin-bottom:12px;
 }}
 
 .task-mobile-title {{
@@ -226,6 +265,7 @@ def tasks_table(tasks):
     border-radius:12px;
 }}
 
+/* JS 判断为手机时强制显示卡片 */
 body.fls-mobile #tasksTableDesktop {{
     display:none!important;
 }}
@@ -234,6 +274,7 @@ body.fls-mobile #tasksMobileCards {{
     display:block!important;
 }}
 
+/* 窄屏兜底 */
 @media(max-width:900px) {{
     #tasksTableDesktop {{
         display:none!important;
@@ -251,8 +292,15 @@ body.fls-mobile #tasksMobileCards {{
     }}
 
     .task-mobile-card {{
-        padding:12px;
         border-radius:12px;
+    }}
+
+    .task-mobile-card summary {{
+        padding:12px;
+    }}
+
+    .task-mobile-card-body {{
+        padding:0 12px 12px;
     }}
 
     .task-mobile-title {{
@@ -373,6 +421,12 @@ async function refreshTasksBlockPartial(){{
             const scripts = newBlock.querySelectorAll("script");
             scripts.forEach(function(oldScript){{
                 const script = document.createElement("script");
+
+                for(let i = 0; i < oldScript.attributes.length; i++){{
+                    const attr = oldScript.attributes[i];
+                    script.setAttribute(attr.name, attr.value);
+                }}
+
                 script.textContent = oldScript.textContent;
                 oldScript.parentNode.replaceChild(script, oldScript);
             }});
