@@ -23,6 +23,7 @@ from ..proxy import (
     requests_proxy_dict,
     apply_proxy_env,
     github_proxy_url,
+    build_git_command_with_github_proxy,
 )
 
 bp = Blueprint("online_scripts", __name__)
@@ -31,6 +32,7 @@ DEFAULT_ONLINE_SCRIPT_SOURCE = "https://cdn.jsdelivr.net/gh/liyw0205/fls-scripts
 ONLINE_SCRIPT_CACHE_FILE = DATA_DIR / "online_scripts_cache.json"
 
 ONLINE_INSTALL_RUNNING = {}
+
 ONLINE_REFRESH_STATE = {
     "running": False,
     "message": "",
@@ -43,6 +45,18 @@ ONLINE_REFRESH_STATE = {
 def get_online_script_source():
     cfg = load_config()
     return str(cfg.get("online_script_source") or DEFAULT_ONLINE_SCRIPT_SOURCE).strip()
+
+
+def online_script_task_crons(item):
+    task_cron = item.get("task_cron")
+
+    if isinstance(task_cron, dict):
+        return [task_cron]
+
+    if isinstance(task_cron, list):
+        return [x for x in task_cron if isinstance(x, dict)]
+
+    return []
 
 
 def normalize_online_scripts(data):
@@ -76,6 +90,14 @@ def normalize_online_scripts(data):
         item["link"] = link
         item["link_name"] = link_name.strip().strip("/")
         item["install"] = str(item.get("install", "") or "").strip()
+
+        task_cron = item.get("task_cron")
+        if isinstance(task_cron, dict):
+            item["task_cron"] = task_cron
+        elif isinstance(task_cron, list):
+            item["task_cron"] = [x for x in task_cron if isinstance(x, dict)]
+        else:
+            item.pop("task_cron", None)
 
         result.append(item)
 
@@ -141,7 +163,6 @@ def fetch_online_scripts(proxy_id="", timeout=12):
     except Exception as e:
         preview = text[:800].replace("\n", "\\n")
         ctype = r.headers.get("Content-Type", "")
-
         raise RuntimeError(
             f"脚本源不是合法 JSON：{e}。"
             f"请求地址：{real_url}。"
@@ -151,12 +172,16 @@ def fetch_online_scripts(proxy_id="", timeout=12):
 
     items = normalize_online_scripts(data)
     save_online_script_cache(items)
-
     return items
 
 
 def online_refresh_log_file(refresh_id):
     return LOG_DIR / f"online-script-source-refresh-{refresh_id}.log"
+
+
+def online_install_log_file(install_id, script_name):
+    safe_pkg = safe_name(script_name or "online-script")
+    return LOG_DIR / f"online-script-install-{safe_pkg}-{install_id}.log"
 
 
 def append_log(log_file, text):
@@ -190,7 +215,6 @@ def refresh_worker(proxy_id=""):
     try:
         items = fetch_online_scripts(proxy_id=proxy_id, timeout=20)
         msg = f"远程脚本源刷新成功，共 {len(items)} 条"
-
         append_log(log_file, msg)
 
         ONLINE_REFRESH_STATE.update({
@@ -203,7 +227,6 @@ def refresh_worker(proxy_id=""):
 
     except Exception as e:
         err = f"远程脚本源刷新失败：{e}"
-
         append_log(log_file, err)
 
         ONLINE_REFRESH_STATE.update({
@@ -219,7 +242,6 @@ def get_online_script(script_id):
     for item in load_online_script_cache():
         if item.get("id") == script_id:
             return item
-
     return None
 
 
@@ -238,16 +260,11 @@ def online_script_target(item):
     return target
 
 
-def online_install_log_file(install_id, script_name):
-    safe_pkg = safe_name(script_name or "online-script")
-    return LOG_DIR / f"online-script-install-{safe_pkg}-{install_id}.log"
-
-
 def guess_task_command(item):
-    task_cron = item.get("task_cron") or {}
+    task_crons = online_script_task_crons(item)
 
-    if isinstance(task_cron, dict):
-        command = str(task_cron.get("command", "") or "").strip()
+    if task_crons:
+        command = str(task_crons[0].get("command", "") or "").strip()
         if command:
             return command
 
@@ -264,75 +281,109 @@ def guess_task_command(item):
 
 
 def import_task_if_needed(item, log_file=None):
-    task_cron = item.get("task_cron")
+    task_crons = online_script_task_crons(item)
 
-    if not isinstance(task_cron, dict):
+    if not task_crons:
         msg = "脚本源未提供 task_cron，跳过任务导入"
         if log_file:
             append_log(log_file, msg)
         return False, msg
 
-    name = str(task_cron.get("name") or item.get("name") or "").strip()
-    cron_expr = str(task_cron.get("cron") or "").strip()
-    command = guess_task_command(item)
-
-    if not name:
-        msg = "task_cron.name 为空，跳过任务导入"
-        if log_file:
-            append_log(log_file, msg)
-        return False, msg
-
-    if not command:
-        msg = "无法推导任务命令，请在 task_cron.command 中显式指定"
-        if log_file:
-            append_log(log_file, msg)
-        return False, msg
-
-    if cron_expr:
-        try:
-            cron_to_trigger(cron_expr)
-        except Exception as e:
-            msg = f"Cron 不合法：{e}"
-            if log_file:
-                append_log(log_file, msg)
-            return False, msg
-
     tasks = load_tasks()
     online_id = item.get("id")
 
-    for task in tasks:
-        if task.get("online_script_id") == online_id:
-            msg = "任务已导入过，跳过"
+    imported = 0
+    skipped = 0
+    messages = []
+
+    for idx, task_cron in enumerate(task_crons, 1):
+        name = str(task_cron.get("name") or item.get("name") or "").strip()
+        cron_expr = str(task_cron.get("cron") or "").strip()
+        command = str(task_cron.get("command") or "").strip() or guess_task_command(item)
+
+        if not name:
+            msg = f"第 {idx} 个任务 task_cron.name 为空，跳过"
+            skipped += 1
+            messages.append(msg)
             if log_file:
                 append_log(log_file, msg)
-            return False, msg
+            continue
 
-    task = {
-        "id": uuid.uuid4().hex,
-        "name": name,
-        "remark": f"从在线脚本导入：{item.get('name')}",
-        "command": command,
-        "cron": cron_expr,
-        "enabled": True,
-        "env": {},
-        "proxy_id": "",
-        "notify": {"mode": "default", "ids": []},
-        "random_delay": {"mode": "none", "seconds": 0},
-        "run_count": 0,
-        "online_script_id": online_id,
-        "created_at": now_str(),
-        "updated_at": now_str(),
-    }
+        if not command:
+            msg = f"第 {idx} 个任务无法推导任务命令，请在 task_cron.command 中显式指定"
+            skipped += 1
+            messages.append(msg)
+            if log_file:
+                append_log(log_file, msg)
+            continue
 
-    tasks.append(task)
-    save_tasks(tasks)
-    reload_scheduler()
+        if cron_expr:
+            try:
+                cron_to_trigger(cron_expr)
+            except Exception as e:
+                msg = f"第 {idx} 个任务 Cron 不合法：{e}"
+                skipped += 1
+                messages.append(msg)
+                if log_file:
+                    append_log(log_file, msg)
+                continue
 
-    msg = f"任务已导入：{name} / {cron_expr or '手动'} / {command}"
+        online_task_key = f"{online_id}:{idx}:{name}"
+
+        exists = False
+        for task in tasks:
+            if task.get("online_script_task_key") == online_task_key:
+                exists = True
+                break
+
+            if len(task_crons) == 1 and task.get("online_script_id") == online_id:
+                exists = True
+                break
+
+        if exists:
+            msg = f"任务已导入过，跳过：{name}"
+            skipped += 1
+            messages.append(msg)
+            if log_file:
+                append_log(log_file, msg)
+            continue
+
+        task = {
+            "id": uuid.uuid4().hex,
+            "name": name,
+            "remark": f"从在线脚本导入：{item.get('name')}",
+            "command": command,
+            "cron": cron_expr,
+            "enabled": True,
+            "env": {},
+            "proxy_id": "",
+            "notify": {"mode": "default", "ids": []},
+            "random_delay": {"mode": "none", "seconds": 0},
+            "run_count": 0,
+            "online_script_id": online_id,
+            "online_script_task_key": online_task_key,
+            "created_at": now_str(),
+            "updated_at": now_str(),
+        }
+
+        tasks.append(task)
+        imported += 1
+
+        msg = f"任务已导入：{name} / {cron_expr or '手动'} / {command}"
+        messages.append(msg)
+        if log_file:
+            append_log(log_file, msg)
+
+    if imported > 0:
+        save_tasks(tasks)
+        reload_scheduler()
+
+    summary = f"任务导入完成：新增 {imported} 个，跳过 {skipped} 个"
+
     if log_file:
-        append_log(log_file, msg)
+        append_log(log_file, summary)
 
-    return True, msg
+    return imported > 0, summary + "\n" + "\n".join(messages)
 
 
 def command_list_to_text(cmd):
@@ -354,7 +405,6 @@ def run_logged_command(cmd, cwd, log_file, env=None, shell=False):
             env=env or os.environ.copy(),
             shell=shell,
         )
-
         return_code = proc.wait()
 
     append_log(log_file, "------------------------------------------------------------")
@@ -383,13 +433,22 @@ def download_online_script_logged(item, proxy_id, log_file, force=False):
     if target.exists() and not force:
         raise FileExistsError(f"目标已存在，为避免意外覆盖已停止：{target}")
 
+    # ============================================================
+    # raw：直接下载文件
+    # GitHub 代理：先测试，测试不通过则自动回退原始 URL
+    # ============================================================
     if script_type == "raw":
         if target.exists() and target.is_dir():
             raise RuntimeError(f"目标已存在且是文件夹，无法覆盖为文件：{target}")
 
         target.parent.mkdir(parents=True, exist_ok=True)
 
-        real_url = github_proxy_url(link, proxy_id)
+        real_url = github_proxy_url(link, proxy_id, verify=True)
+
+        if real_url == link:
+            append_log(log_file, "GitHub 代理不可用或未启用，使用原始下载地址")
+        else:
+            append_log(log_file, f"使用 GitHub 代理下载地址：{real_url}")
 
         append_log(log_file, f"开始下载文件：{real_url}")
 
@@ -402,26 +461,10 @@ def download_online_script_logged(item, proxy_id, log_file, force=False):
         )
         r.raise_for_status()
 
-        total = int(r.headers.get("content-length", "0") or 0)
-        downloaded = 0
-        last_report = 0
-
         with open(target, "wb") as f:
             for chunk in r.iter_content(chunk_size=1024 * 128):
-                if not chunk:
-                    continue
-
-                f.write(chunk)
-                downloaded += len(chunk)
-
-                now_ts = time.time()
-                if now_ts - last_report >= 1:
-                    if total > 0:
-                        percent = downloaded / total * 100
-                        append_log(log_file, f"下载进度：{downloaded}/{total} bytes，{percent:.1f}%")
-                    else:
-                        append_log(log_file, f"下载进度：{downloaded} bytes")
-                    last_report = now_ts
+                if chunk:
+                    f.write(chunk)
 
         append_log(log_file, f"文件下载完成：{target}")
 
@@ -434,6 +477,11 @@ def download_online_script_logged(item, proxy_id, log_file, force=False):
 
         return target
 
+    # ============================================================
+    # repo：git clone / git pull
+    # GitHub 代理：使用 git 临时配置 insteadOf
+    # 测试不通过则自动不用代理
+    # ============================================================
     if script_type == "repo":
         git_bin = shutil.which("git")
         if not git_bin:
@@ -442,15 +490,26 @@ def download_online_script_logged(item, proxy_id, log_file, force=False):
         env = os.environ.copy()
         env = apply_proxy_env(env, proxy_id)
 
-        real_link = github_proxy_url(link, proxy_id)
-
         if target.exists():
             if not (target / ".git").exists():
                 raise RuntimeError(f"目标目录已存在且不是 git 仓库，请手动处理后重试：{target}")
 
             append_log(log_file, "目标 Git 仓库已存在，执行 git pull 更新")
+
+            git_cmd = build_git_command_with_github_proxy(
+                git_bin,
+                proxy_id,
+                ["pull"],
+                verify=True,
+            )
+
+            if len(git_cmd) > 1:
+                append_log(log_file, "GitHub 代理可用，使用 git 临时配置方式更新仓库")
+            else:
+                append_log(log_file, "GitHub 代理不可用或未启用，直接执行原始 git pull")
+
             run_logged_command(
-                [git_bin, "pull"],
+                git_cmd,
                 cwd=target,
                 log_file=log_file,
                 env=env,
@@ -458,8 +517,21 @@ def download_online_script_logged(item, proxy_id, log_file, force=False):
             )
         else:
             append_log(log_file, "目标目录不存在，执行 git clone")
+
+            git_cmd = build_git_command_with_github_proxy(
+                git_bin,
+                proxy_id,
+                ["clone", link, str(target)],
+                verify=True,
+            )
+
+            if len(git_cmd) > 1:
+                append_log(log_file, "GitHub 代理可用，使用 git 临时配置方式 clone 仓库")
+            else:
+                append_log(log_file, "GitHub 代理不可用或未启用，直接执行原始 git clone")
+
             run_logged_command(
-                [git_bin, "clone", real_link, str(target)],
+                git_cmd,
                 cwd=SCRIPT_DIR,
                 log_file=log_file,
                 env=env,
@@ -546,7 +618,7 @@ def install_worker(install_id, item, proxy_id="", import_task=False, force=False
 
 
 def script_has_task(item):
-    return isinstance(item.get("task_cron"), dict)
+    return len(online_script_task_crons(item)) > 0
 
 
 def script_has_install(item):
@@ -568,7 +640,7 @@ def render_online_script_rows(items):
     cards = ""
 
     for item in items:
-        task_cron = item.get("task_cron")
+        task_crons = online_script_task_crons(item)
         has_task = script_has_task(item)
         has_install = script_has_install(item)
 
@@ -584,15 +656,26 @@ def render_online_script_rows(items):
 
         type_badge = f'<span class="badge blue">{h(item.get("type"))}</span>'
         exists_badge = '<span class="badge orange">目标已存在</span>' if exists else '<span class="badge green">可安装</span>'
-        task_badge = '<span class="badge blue">可导入任务</span>' if has_task else '<span class="badge gray">无任务</span>'
+        task_badge = f'<span class="badge blue">可导入 {len(task_crons)} 个任务</span>' if has_task else '<span class="badge gray">无任务</span>'
         install_badge = '<span class="badge orange">有安装命令</span>' if has_install else '<span class="badge gray">无安装命令</span>'
 
         cron_text = "-"
         command_text = "-"
 
-        if has_task and isinstance(task_cron, dict):
-            cron_text = task_cron.get("cron") or "手动"
-            command_text = task_cron.get("command") or guess_task_command(item) or "-"
+        if task_crons:
+            cron_parts = []
+            command_parts = []
+
+            for idx, tc in enumerate(task_crons, 1):
+                tname = str(tc.get("name") or f"任务{idx}").strip()
+                tcron = str(tc.get("cron") or "手动").strip()
+                tcmd = str(tc.get("command") or guess_task_command(item) or "-").strip()
+
+                cron_parts.append(f"{tname}：{tcron}")
+                command_parts.append(f"{tname}：{tcmd}")
+
+            cron_text = "\n".join(cron_parts)
+            command_text = "\n".join(command_parts)
 
         proxy_options = proxy_select_options("")
 
@@ -631,13 +714,13 @@ def render_online_script_rows(items):
                 <div class="fls-info-label">任务</div>
                 <div class="fls-info-value">
                     {task_badge}
-                    <div class="help" style="margin-top:4px;">Cron：{h(cron_text)}</div>
+                    <pre style="margin:6px 0 0;white-space:pre-wrap;word-break:break-word;background:transparent;padding:0;font-family:inherit;font-size:12px;color:#6b7280;">{h(cron_text)}</pre>
                 </div>
             </div>
 
             <div class="fls-info-item">
                 <div class="fls-info-label">任务命令</div>
-                <div class="fls-info-value code-like">{h(command_text)}</div>
+                <pre class="fls-info-value code-like" style="margin:0;white-space:pre-wrap;">{h(command_text)}</pre>
             </div>
 
             <div class="fls-info-item">
@@ -742,7 +825,7 @@ def online_scripts_page():
 
     <div class="fls-summary-item">
         <div class="fls-summary-label">可导入任务</div>
-        <div class="fls-summary-num">{sum(1 for x in items if script_has_task(x))}</div>
+        <div class="fls-summary-num">{sum(len(online_script_task_crons(x)) for x in items)}</div>
     </div>
 
     <div class="fls-summary-item">
@@ -851,7 +934,12 @@ updateOnlineRefreshStatus();
 @bp.route("/online-scripts/refresh", methods=["POST"])
 def online_scripts_refresh():
     if ONLINE_REFRESH_STATE.get("running"):
-        return redirect(url_for("online_scripts.online_scripts_page", msg="脚本源正在后台拉取中，请稍候"))
+        return redirect(
+            url_for(
+                "online_scripts.online_scripts_page",
+                msg="脚本源正在后台拉取中，请稍候",
+            )
+        )
 
     proxy_id = request.form.get("proxy_id", "").strip()
 
@@ -863,7 +951,12 @@ def online_scripts_refresh():
     )
     th.start()
 
-    return redirect(url_for("online_scripts.online_scripts_page", msg="已提交后台刷新，正在拉取中"))
+    return redirect(
+        url_for(
+            "online_scripts.online_scripts_page",
+            msg="已提交后台刷新，正在拉取中",
+        )
+    )
 
 
 @bp.route("/api/online-scripts/refresh-status")
@@ -896,10 +989,7 @@ def online_scripts_source():
             except Exception as e:
                 err = f"脚本源 JSON 保存失败：{e}"
 
-    cache_text = read_cache_text()
-
-    if not cache_text:
-        cache_text = "[]"
+    cache_text = read_cache_text() or "[]"
 
     body = f"""
 <div class="card">
@@ -976,16 +1066,21 @@ def online_scripts_install(script_id):
 <div class="card">
     <form method="post" action="/online-scripts/install/{h(script_id)}">
         <input type="hidden" name="force" value="1">
+
         <div class="form-item">
             <label>代理</label>
             <select name="proxy_id">{proxy_options}</select>
         </div>
+
         <br>
+
         <label>
             <input type="checkbox" name="import_task" value="1" {"checked" if import_task and has_task else ""} {"disabled" if not has_task else ""} style="width:auto;">
             导入任务
         </label>
+
         <br><br>
+
         <button class="btn btn-orange" type="submit" onclick="return confirm('确定继续吗？可能会覆盖文件或更新仓库。')">确认继续</button>
         <a class="btn btn-gray" href="/online-scripts">取消</a>
     </form>
@@ -1024,7 +1119,7 @@ def online_install_log(install_id):
     info = ONLINE_INSTALL_RUNNING.get(install_id)
 
     if not info:
-        body = f"""
+        body = """
 <div class="card">
     <div class="card-title">在线脚本日志</div>
     <div class="help">

@@ -362,7 +362,12 @@ def scripts_delete(rel_path):
 import requests
 import subprocess
 from urllib.parse import urlparse
-from ..proxy import proxy_select_options, github_proxy_url, requests_proxy_dict
+from ..proxy import (
+    proxy_select_options,
+    github_proxy_url,
+    requests_proxy_dict,
+    build_git_command_with_github_proxy,
+)
 
 
 def guess_filename_from_url(url):
@@ -434,8 +439,15 @@ def pull_fetch():
                     from ..proxy import apply_proxy_env
                     env = apply_proxy_env(env, proxy_id)
 
+                    git_cmd = build_git_command_with_github_proxy(
+                        git_bin,
+                        proxy_id,
+                        ["clone", url, str(target)],
+                        verify=True,
+                    )
+
                     subprocess.check_call(
-                        [git_bin, "clone", url_for_pull, str(target)],
+                        git_cmd,
                         cwd=str(SCRIPT_DIR),
                         env=env
                     )

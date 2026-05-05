@@ -18,7 +18,7 @@ def config_page():
         cfg = {
             "admin_token": request.form.get("admin_token", "").strip(),
             "port": max(1, min(65535, int(request.form.get("port", "5700") or 5700))),
-            "online_script_source": request.form.get("online_script_source", "").strip() or "https://cdn.jsdelivr.net/gh/liyw0205/fls-scripts@main/index.json",
+            "online_script_source": request.form.get("online_script_source", "").strip() or "https://raw.githubusercontent.com/liyw0205/fls-scripts/main/index.json",
             "log_cleanup_minutes": max(1, min(1440, int(request.form.get("log_cleanup_minutes", "30") or 30))),
             "log_max_size_mb": max(1, int(request.form.get("log_max_size_mb", "10") or 10)),
             "log_keep_per_task": max(1, int(request.form.get("log_keep_per_task", "10") or 10)),
@@ -91,10 +91,10 @@ def config_page():
     <div class="card-title">在线脚本源</div>
     <div class="form-item">
         <label>脚本源 index.json 地址</label>
-        <input name="online_script_source" value="{h(cfg.get('online_script_source', 'https://cdn.jsdelivr.net/gh/liyw0205/fls-scripts@main/index.json'))}">
+        <input name="online_script_source" value="{h(cfg.get('online_script_source', 'https://raw.githubusercontent.com/liyw0205/fls-scripts/main/index.json'))}">
         <div class="help">
             在线脚本页面会从该 JSON 地址读取脚本列表。<br>
-            默认：<code>https://cdn.jsdelivr.net/gh/liyw0205/fls-scripts@main/index.json</code>
+            默认：<code>https://raw.githubusercontent.com/liyw0205/fls-scripts/main/index.json</code>
         </div>
     </div>
 </div>

@@ -17,7 +17,7 @@ DEFAULT_CONFIG = {
     # 全局随机延迟，单位秒；0 表示不启用；启用范围 1-120
     "random_delay_seconds": 0,
     
-    "online_script_source": "https://cdn.jsdelivr.net/gh/liyw0205/fls-scripts@main/index.json",
+    "online_script_source": "https://raw.githubusercontent.com/liyw0205/fls-scripts/main/index.json",
 
     "task_types": {
         "py": True,
