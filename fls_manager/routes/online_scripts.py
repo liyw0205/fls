@@ -1,7 +1,9 @@
 import os
+import re
 import json
 import uuid
 import time
+import html
 import shutil
 import threading
 import subprocess
@@ -90,6 +92,7 @@ def normalize_online_scripts(data):
         item["link"] = link
         item["link_name"] = link_name.strip().strip("/")
         item["install"] = str(item.get("install", "") or "").strip()
+        item["doc_link"] = str(item.get("doc_link", "") or "").strip()
 
         task_cron = item.get("task_cron")
         if isinstance(task_cron, dict):
@@ -433,10 +436,6 @@ def download_online_script_logged(item, proxy_id, log_file, force=False):
     if target.exists() and not force:
         raise FileExistsError(f"目标已存在，为避免意外覆盖已停止：{target}")
 
-    # ============================================================
-    # raw：直接下载文件
-    # GitHub 代理：先测试，测试不通过则自动回退原始 URL
-    # ============================================================
     if script_type == "raw":
         if target.exists() and target.is_dir():
             raise RuntimeError(f"目标已存在且是文件夹，无法覆盖为文件：{target}")
@@ -477,11 +476,6 @@ def download_online_script_logged(item, proxy_id, log_file, force=False):
 
         return target
 
-    # ============================================================
-    # repo：git clone / git pull
-    # GitHub 代理：使用 git 临时配置 insteadOf
-    # 测试不通过则自动不用代理
-    # ============================================================
     if script_type == "repo":
         git_bin = shutil.which("git")
         if not git_bin:
@@ -625,6 +619,10 @@ def script_has_install(item):
     return bool(str(item.get("install") or "").strip())
 
 
+def script_has_doc(item):
+    return bool(str(item.get("doc_link") or "").strip())
+
+
 def render_online_script_rows(items):
     if not items:
         return """
@@ -643,6 +641,7 @@ def render_online_script_rows(items):
         task_crons = online_script_task_crons(item)
         has_task = script_has_task(item)
         has_install = script_has_install(item)
+        has_doc = script_has_doc(item)
 
         target = "-"
         exists = False
@@ -658,6 +657,7 @@ def render_online_script_rows(items):
         exists_badge = '<span class="badge orange">目标已存在</span>' if exists else '<span class="badge green">可安装</span>'
         task_badge = f'<span class="badge blue">可导入 {len(task_crons)} 个任务</span>' if has_task else '<span class="badge gray">无任务</span>'
         install_badge = '<span class="badge orange">有安装命令</span>' if has_install else '<span class="badge gray">无安装命令</span>'
+        doc_badge = '<span class="badge blue">有文档</span>' if has_doc else '<span class="badge gray">无文档</span>'
 
         cron_text = "-"
         command_text = "-"
@@ -679,6 +679,10 @@ def render_online_script_rows(items):
 
         proxy_options = proxy_select_options("")
 
+        doc_btn = ""
+        if has_doc:
+            doc_btn = f'<a class="btn btn-orange" href="/online-scripts/doc/{h(item.get("id"))}">查看文档</a>'
+
         cards += f"""
 <details class="fls-fold-card">
     <summary>
@@ -694,6 +698,7 @@ def render_online_script_rows(items):
             <div class="fls-card-badges">
                 {type_badge}
                 {exists_badge}
+                {doc_badge}
             </div>
         </div>
     </summary>
@@ -706,8 +711,11 @@ def render_online_script_rows(items):
             </div>
 
             <div class="fls-info-item">
-                <div class="fls-info-label">安装</div>
-                <div class="fls-info-value">{install_badge}</div>
+                <div class="fls-info-label">安装 / 文档</div>
+                <div class="fls-info-value">
+                    {install_badge}
+                    {doc_badge}
+                </div>
             </div>
 
             <div class="fls-info-item">
@@ -741,6 +749,8 @@ def render_online_script_rows(items):
             </div>
         </div>
 
+        {"<div class='fls-card-section'><div class='fls-info-label'>文档地址</div><div class='fls-info-value'><a href='" + h(item.get("doc_link")) + "' target='_blank'>" + h(item.get("doc_link")) + "</a></div></div>" if has_doc else ""}
+
         <div class="fls-card-actions">
             <form method="post" action="/online-scripts/install/{h(item.get("id"))}">
                 <div class="fls-action-line">
@@ -754,6 +764,7 @@ def render_online_script_rows(items):
 
                 <div class="fls-btn-line">
                     <a class="btn btn-blue" href="{h(item.get("link"))}" target="_blank">查看源</a>
+                    {doc_btn}
                     <button class="btn btn-primary" type="submit">下载安装</button>
                 </div>
             </form>
@@ -763,6 +774,160 @@ def render_online_script_rows(items):
 """
 
     return cards
+
+
+def markdown_inline(text):
+    text = h(text)
+
+    text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
+    text = re.sub(r"!\[([^\]]*)\]\((https?://[^)]+)\)", r'<img alt="\1" src="\2" style="max-width:100%;border-radius:10px;margin:8px 0;">', text)
+    text = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", r'<a href="\2" target="_blank">\1</a>', text)
+    text = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", text)
+    text = re.sub(r"__([^_]+)__", r"<strong>\1</strong>", text)
+    text = re.sub(r"\*([^*]+)\*", r"<em>\1</em>", text)
+
+    return text
+
+
+def render_markdown_to_html(text):
+    text = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    lines = text.split("\n")
+
+    out = []
+    in_code = False
+    code_lines = []
+    in_ul = False
+    in_ol = False
+
+    def close_lists():
+        nonlocal in_ul, in_ol
+        if in_ul:
+            out.append("</ul>")
+            in_ul = False
+        if in_ol:
+            out.append("</ol>")
+            in_ol = False
+
+    def flush_code():
+        nonlocal code_lines
+        out.append('<pre class="fls-md-code"><code>{}</code></pre>'.format(h("\n".join(code_lines))))
+        code_lines = []
+
+    for line in lines:
+        raw = line.rstrip("\n")
+
+        if raw.strip().startswith("```"):
+            if in_code:
+                flush_code()
+                in_code = False
+            else:
+                close_lists()
+                in_code = True
+                code_lines = []
+            continue
+
+        if in_code:
+            code_lines.append(raw)
+            continue
+
+        if not raw.strip():
+            close_lists()
+            out.append("")
+            continue
+
+        m = re.match(r"^(#{1,6})\s+(.+)$", raw)
+        if m:
+            close_lists()
+            level = len(m.group(1))
+            out.append(f"<h{level}>{markdown_inline(m.group(2).strip())}</h{level}>")
+            continue
+
+        if re.match(r"^\s*[-*_]{3,}\s*$", raw):
+            close_lists()
+            out.append("<hr>")
+            continue
+
+        m = re.match(r"^\s*[-*+]\s+(.+)$", raw)
+        if m:
+            if in_ol:
+                out.append("</ol>")
+                in_ol = False
+            if not in_ul:
+                out.append("<ul>")
+                in_ul = True
+            out.append(f"<li>{markdown_inline(m.group(1).strip())}</li>")
+            continue
+
+        m = re.match(r"^\s*\d+\.\s+(.+)$", raw)
+        if m:
+            if in_ul:
+                out.append("</ul>")
+                in_ul = False
+            if not in_ol:
+                out.append("<ol>")
+                in_ol = True
+            out.append(f"<li>{markdown_inline(m.group(1).strip())}</li>")
+            continue
+
+        m = re.match(r"^\s*>\s*(.*)$", raw)
+        if m:
+            close_lists()
+            out.append(f"<blockquote>{markdown_inline(m.group(1).strip())}</blockquote>")
+            continue
+
+        close_lists()
+        out.append(f"<p>{markdown_inline(raw.strip())}</p>")
+
+    if in_code:
+        flush_code()
+
+    close_lists()
+
+    return "\n".join(out)
+
+
+def doc_url_looks_markdown(url):
+    u = str(url or "").lower().split("?", 1)[0]
+    return u.endswith((".md", ".markdown", ".mdown", ".mkd", ".txt"))
+
+
+def doc_content_looks_markdown(text):
+    text = str(text or "")
+    sample = text[:4000]
+    patterns = [
+        r"^#\s+",
+        r"^##\s+",
+        r"```",
+        r"^\s*[-*+]\s+",
+        r"^\s*\d+\.\s+",
+        r"\[[^\]]+\]\(https?://",
+    ]
+    for p in patterns:
+        if re.search(p, sample, re.M):
+            return True
+    return False
+
+
+def doc_response_is_html(resp, text):
+    ctype = str(resp.headers.get("Content-Type", "") or "").lower()
+    if "text/html" in ctype:
+        return True
+
+    s = str(text or "").lstrip().lower()
+    return s.startswith("<!doctype html") or s.startswith("<html") or "<body" in s[:1000]
+
+
+def doc_response_is_text(resp):
+    ctype = str(resp.headers.get("Content-Type", "") or "").lower()
+    if not ctype:
+        return True
+    return (
+        "text/" in ctype
+        or "json" in ctype
+        or "xml" in ctype
+        or "markdown" in ctype
+        or "javascript" in ctype
+    )
 
 
 @bp.route("/online-scripts")
@@ -799,7 +964,8 @@ def online_scripts_page():
             <div class="card-title">在线脚本</div>
             <div class="help">
                 默认读取本地缓存，不会因为脚本源网络问题卡住。<br>
-                点击“刷新远程脚本源”后会后台拉取，页面不会变白，也不影响其它操作。
+                点击“刷新远程脚本源”后会后台拉取，页面不会变白，也不影响其它操作。<br>
+                脚本源支持 <code>doc_link</code> 字段，可在面板内查看 Markdown 文档或网页文档。
             </div>
             <div class="fls-source-code">{h(source)}</div>
         </div>
@@ -931,6 +1097,315 @@ updateOnlineRefreshStatus();
     return layout("在线脚本", "online_scripts", body)
 
 
+@bp.route("/online-scripts/doc/<script_id>")
+def online_script_doc(script_id):
+    item = get_online_script(script_id)
+
+    if not item:
+        abort(404)
+
+    doc_link = str(item.get("doc_link") or "").strip()
+
+    if not doc_link:
+        body = f"""
+<div class="card">
+    <div class="card-title">脚本文档</div>
+    <div class="help">该脚本未提供 doc_link。</div>
+    <br>
+    <a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>
+</div>
+"""
+        return layout("脚本文档", "online_scripts", body)
+
+    proxy_id = request.args.get("proxy_id", "").strip()
+    mode = request.args.get("mode", "auto").strip().lower()
+
+    if mode not in ("auto", "render", "web", "raw"):
+        mode = "auto"
+
+    proxy_options = proxy_select_options(proxy_id)
+    real_url = github_proxy_url(doc_link, proxy_id, verify=True)
+
+    doc_text = ""
+    doc_html = ""
+    content_type = "-"
+    detected = "-"
+    err = ""
+
+    if mode == "web":
+        detected = "网页窗口"
+        doc_html = f"""
+<div class="fls-doc-window">
+    <iframe src="{h(real_url)}" class="fls-doc-iframe"></iframe>
+</div>
+<div class="help" style="margin-top:10px;">
+    如果网页无法嵌入显示，可能是对方网站禁止 iframe。请点击“打开原文”。
+</div>
+"""
+    else:
+        try:
+            r = requests.get(
+                real_url,
+                timeout=25,
+                headers={"User-Agent": "Mozilla/5.0 FLS-Manager"},
+                proxies=requests_proxy_dict(proxy_id),
+            )
+            r.raise_for_status()
+
+            content_type = r.headers.get("Content-Type", "-")
+            doc_text = r.text or ""
+
+            is_html = doc_response_is_html(r, doc_text)
+            is_text = doc_response_is_text(r)
+            is_md = doc_url_looks_markdown(doc_link) or "markdown" in str(content_type).lower() or doc_content_looks_markdown(doc_text)
+
+            if mode == "raw":
+                detected = "原文源码"
+                doc_html = f'<pre class="fls-doc-raw">{h(doc_text or "暂无内容")}</pre>'
+
+            elif mode == "render":
+                if is_md:
+                    detected = "Markdown 渲染"
+                    doc_html = f'<div class="fls-doc-md">{render_markdown_to_html(doc_text)}</div>'
+                elif is_text:
+                    detected = "文本渲染"
+                    doc_html = f'<pre class="fls-doc-raw">{h(doc_text or "暂无内容")}</pre>'
+                else:
+                    detected = "网页窗口"
+                    doc_html = f'<div class="fls-doc-window"><iframe src="{h(real_url)}" class="fls-doc-iframe"></iframe></div>'
+
+            else:
+                if is_html and not doc_url_looks_markdown(doc_link):
+                    detected = "网页窗口"
+                    doc_html = f"""
+<div class="fls-doc-window">
+    <iframe src="{h(real_url)}" class="fls-doc-iframe"></iframe>
+</div>
+<div class="help" style="margin-top:10px;">
+    已自动识别为网页。如果无法显示，请点击“打开原文”。
+</div>
+"""
+                elif is_md:
+                    detected = "Markdown 渲染"
+                    doc_html = f'<div class="fls-doc-md">{render_markdown_to_html(doc_text)}</div>'
+                elif is_text:
+                    detected = "文本渲染"
+                    doc_html = f'<pre class="fls-doc-raw">{h(doc_text or "暂无内容")}</pre>'
+                else:
+                    detected = "网页窗口"
+                    doc_html = f"""
+<div class="fls-doc-window">
+    <iframe src="{h(real_url)}" class="fls-doc-iframe"></iframe>
+</div>
+<div class="help" style="margin-top:10px;">
+    已自动识别为网页或非文本内容。如果无法显示，请点击“打开原文”。
+</div>
+"""
+
+        except Exception as e:
+            err = str(e)
+
+            if mode == "auto":
+                detected = "请求失败，尝试网页窗口"
+                doc_html = f"""
+<div class="fls-doc-window">
+    <iframe src="{h(real_url)}" class="fls-doc-iframe"></iframe>
+</div>
+<div class="help" style="margin-top:10px;">
+    文档内容拉取失败，已尝试用网页窗口打开。若仍无法显示，请点击“打开原文”。
+</div>
+"""
+
+    body = f"""
+<style>
+.fls-doc-toolbar {{
+    display:flex;
+    flex-wrap:wrap;
+    gap:8px;
+    align-items:center;
+}}
+
+.fls-doc-toolbar select {{
+    width:auto;
+    min-width:180px;
+}}
+
+.fls-doc-toolbar .btn {{
+    margin:0;
+}}
+
+.fls-doc-window {{
+    width:100%;
+    height:calc(100vh - 220px);
+    min-height:620px;
+    background:#fff;
+    border:1px solid #e5e7eb;
+    border-radius:14px;
+    overflow:hidden;
+}}
+
+.fls-doc-iframe {{
+    width:100%;
+    height:100%;
+    border:0;
+    background:#fff;
+}}
+
+.fls-doc-md {{
+    background:#fff;
+    border:1px solid #e5e7eb;
+    border-radius:14px;
+    padding:18px;
+    line-height:1.75;
+    color:#111827;
+    overflow:auto;
+}}
+
+.fls-doc-md h1,
+.fls-doc-md h2,
+.fls-doc-md h3,
+.fls-doc-md h4,
+.fls-doc-md h5,
+.fls-doc-md h6 {{
+    margin:18px 0 10px;
+    line-height:1.35;
+    color:#111827;
+}}
+
+.fls-doc-md h1 {{
+    font-size:28px;
+    border-bottom:1px solid #e5e7eb;
+    padding-bottom:10px;
+}}
+
+.fls-doc-md h2 {{
+    font-size:23px;
+    border-bottom:1px solid #f1f5f9;
+    padding-bottom:8px;
+}}
+
+.fls-doc-md h3 {{
+    font-size:19px;
+}}
+
+.fls-doc-md p {{
+    margin:10px 0;
+}}
+
+.fls-doc-md ul,
+.fls-doc-md ol {{
+    padding-left:24px;
+}}
+
+.fls-doc-md li {{
+    margin:5px 0;
+}}
+
+.fls-doc-md blockquote {{
+    margin:12px 0;
+    padding:8px 12px;
+    border-left:4px solid #18a058;
+    background:#f0fdf4;
+    color:#374151;
+    border-radius:8px;
+}}
+
+.fls-doc-md code {{
+    background:#f3f4f6;
+    color:#dc2626;
+    padding:2px 5px;
+    border-radius:6px;
+    font-family:Consolas,Menlo,monospace;
+}}
+
+.fls-md-code {{
+    background:#0b1020;
+    color:#d1d5db;
+    border-radius:12px;
+    padding:14px;
+    overflow:auto;
+    white-space:pre;
+}}
+
+.fls-md-code code {{
+    background:transparent;
+    color:inherit;
+    padding:0;
+}}
+
+.fls-doc-raw {{
+    background:#0b1020;
+    color:#d1d5db;
+    border-radius:14px;
+    padding:16px;
+    min-height:620px;
+    white-space:pre-wrap;
+    word-break:break-word;
+    overflow:auto;
+    font-family:Consolas,Menlo,monospace;
+    font-size:13px;
+    line-height:1.55;
+}}
+
+body.fls-mobile .fls-doc-window {{
+    height:calc(100vh - 190px);
+    min-height:520px;
+    border-radius:12px;
+}}
+
+body.fls-mobile .fls-doc-md {{
+    padding:13px;
+    border-radius:12px;
+}}
+
+body.fls-mobile .fls-doc-md h1 {{
+    font-size:23px;
+}}
+
+body.fls-mobile .fls-doc-md h2 {{
+    font-size:20px;
+}}
+
+body.fls-mobile .fls-doc-raw {{
+    min-height:520px;
+    font-size:12px;
+}}
+</style>
+
+<div class="card">
+    <div class="card-title">脚本文档：{h(item.get("name") or script_id)}</div>
+    <div class="help">
+        脚本 ID：{h(item.get("id"))}<br>
+        识别结果：<b>{h(detected)}</b><br>
+        Content-Type：{h(content_type)}<br>
+        文档地址：<a href="{h(doc_link)}" target="_blank">{h(doc_link)}</a><br>
+        实际地址：<a href="{h(real_url)}" target="_blank">{h(real_url)}</a>
+    </div>
+    <br>
+
+    <form method="get" class="fls-doc-toolbar">
+        <select name="proxy_id">{proxy_options}</select>
+        <select name="mode">
+            <option value="auto" {"selected" if mode == "auto" else ""}>自动识别</option>
+            <option value="render" {"selected" if mode == "render" else ""}>渲染 Markdown / 文本</option>
+            <option value="web" {"selected" if mode == "web" else ""}>网页窗口</option>
+            <option value="raw" {"selected" if mode == "raw" else ""}>原文源码</option>
+        </select>
+        <button class="btn btn-primary" type="submit">重新加载</button>
+        <a class="btn btn-blue" href="{h(real_url)}" target="_blank">打开原文</a>
+        <a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>
+    </form>
+</div>
+
+{"<div class='card'><div class='help' style='color:#dc2626;font-weight:800;'>文档加载失败：" + h(err) + "</div></div>" if err else ""}
+
+<div class="card">
+    {doc_html or '<div class="help">暂无文档内容</div>'}
+</div>
+"""
+    return layout("脚本文档", "online_scripts", body)
+
+
 @bp.route("/online-scripts/refresh", methods=["POST"])
 def online_scripts_refresh():
     if ONLINE_REFRESH_STATE.get("running"):
@@ -997,7 +1472,8 @@ def online_scripts_source():
     <div class="help">
         这里显示当前本地缓存的脚本源 JSON。<br>
         如果服务器无法访问远程源，可以手动复制远程 index.json 内容，粘贴到这里保存。<br>
-        保存后“在线脚本”列表会直接使用这份缓存。
+        保存后“在线脚本”列表会直接使用这份缓存。<br>
+        支持字段：<code>doc_link</code>，可用于在线脚本页面查看文档。
     </div>
     <br>
     <a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>
