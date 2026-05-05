@@ -205,7 +205,11 @@ def task_form(task=None):
 
     <div class="form-item">
         <label>命令，必填</label>
-        <input name="command" required value="{h(task.get('command', ''))}" placeholder="task 1.py">
+        <textarea name="command" required style="min-height:160px;" placeholder="task 1.py&#10;&#10;也可以写多行命令，例如：&#10;cd /root/fls/scripts&#10;python3 test.py&#10;echo 完成">{h(task.get('command', ''))}</textarea>
+        <div class="help">
+            单行运行脚本可以写：<code>task 1.py</code><br>
+            如果要写多行命令，请不要以 <code>task</code> 开头，直接写 Shell 命令即可。
+        </div>
     </div>
 
     <br>
@@ -587,7 +591,12 @@ async function loadLog(){{
         const old = window.__FLS_LOG_LAST_TEXT__ || "";
         const changed = text !== old;
 
-        document.getElementById("log").textContent = text;
+        var logEl = document.getElementById("log");
+        if(typeof flsRenderLogText === "function"){{
+            flsRenderLogText(logEl, text);
+        }}else{{
+            logEl.textContent = text;
+        }}
         window.__FLS_LOG_LAST_TEXT__ = text;
 
         if(changed){{

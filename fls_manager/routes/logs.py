@@ -249,7 +249,12 @@ async function loadLog(){{
         const old = window.__FLS_LOG_LAST_TEXT__ || "";
         const changed = text !== old;
 
-        document.getElementById("log").textContent = text;
+        var logEl = document.getElementById("log");
+        if(typeof flsRenderLogText === "function"){{
+            flsRenderLogText(logEl, text);
+        }}else{{
+            logEl.textContent = text;
+        }}
         window.__FLS_LOG_LAST_TEXT__ = text;
 
         if(changed){{

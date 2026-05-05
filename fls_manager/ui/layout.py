@@ -373,6 +373,80 @@ pre.log {
 }
 
 /* ============================================================
+   日志增强：ANSI 颜色 / Base64 图片预览
+   ============================================================ */
+.fls-log-image-wrap {
+    display:inline-block;
+    max-width:100%;
+    margin:8px 0;
+    padding:8px;
+    background:#111827;
+    border:1px solid rgba(255,255,255,.12);
+    border-radius:10px;
+}
+
+.fls-log-image {
+    display:block;
+    max-width:100%;
+    height:auto;
+    border-radius:8px;
+    background:#fff;
+    cursor:pointer;
+}
+
+.fls-log-image-tip {
+    margin-top:6px;
+    color:#9ca3af;
+    font-size:12px;
+    line-height:1.4;
+}
+
+.fls-log-base64-raw {
+    display:inline-block;
+    max-width:100%;
+    white-space:pre-wrap;
+    word-break:break-all;
+    color:#93c5fd;
+    background:rgba(37,99,235,.12);
+    border:1px solid rgba(147,197,253,.35);
+    border-radius:8px;
+    padding:8px;
+    margin:6px 0;
+    cursor:pointer;
+}
+
+/* ANSI 前景色 */
+.ansi-fg-30 { color:#111827; }
+.ansi-fg-31 { color:#ef4444; }
+.ansi-fg-32 { color:#22c55e; }
+.ansi-fg-33 { color:#eab308; }
+.ansi-fg-34 { color:#3b82f6; }
+.ansi-fg-35 { color:#d946ef; }
+.ansi-fg-36 { color:#06b6d4; }
+.ansi-fg-37 { color:#e5e7eb; }
+
+.ansi-fg-90 { color:#6b7280; }
+.ansi-fg-91 { color:#f87171; }
+.ansi-fg-92 { color:#4ade80; }
+.ansi-fg-93 { color:#fde047; }
+.ansi-fg-94 { color:#60a5fa; }
+.ansi-fg-95 { color:#e879f9; }
+.ansi-fg-96 { color:#22d3ee; }
+.ansi-fg-97 { color:#ffffff; }
+
+.ansi-bold {
+    font-weight:800;
+}
+
+.ansi-dim {
+    opacity:.72;
+}
+
+.ansi-underline {
+    text-decoration:underline;
+}
+
+/* ============================================================
    手机端悬浮菜单按钮：已调小，避免超出
    ============================================================ */
 .fls-float-menu-btn {
@@ -1345,6 +1419,257 @@ if (document.readyState === "loading") {
     });
 })();
 
+/* ============================================================
+   日志增强：ANSI 颜色 / Base64 图片预览
+   ============================================================ */
+function flsEscapeHtml(s){
+    return String(s).replace(/[&<>"']/g, function(c){
+        return {
+            "&":"&amp;",
+            "<":"&lt;",
+            ">":"&gt;",
+            '"':"&quot;",
+            "'":"&#39;"
+        }[c];
+    });
+}
+
+function flsEscapeAttr(s){
+    return flsEscapeHtml(s).replace(/`/g, "&#96;");
+}
+
+function flsAnsiClassFromCodes(codes){
+    var classes = [];
+    var fg = "";
+    var bold = false;
+    var dim = false;
+    var underline = false;
+
+    codes.forEach(function(code){
+        code = String(code || "").trim();
+
+        if(code === "" || code === "0"){
+            fg = "";
+            bold = false;
+            dim = false;
+            underline = false;
+            return;
+        }
+
+        if(code === "1"){
+            bold = true;
+            return;
+        }
+
+        if(code === "2"){
+            dim = true;
+            return;
+        }
+
+        if(code === "4"){
+            underline = true;
+            return;
+        }
+
+        if(code === "22"){
+            bold = false;
+            dim = false;
+            return;
+        }
+
+        if(code === "24"){
+            underline = false;
+            return;
+        }
+
+        if(code === "39"){
+            fg = "";
+            return;
+        }
+
+        if(
+            ["30","31","32","33","34","35","36","37",
+             "90","91","92","93","94","95","96","97"].indexOf(code) >= 0
+        ){
+            fg = "ansi-fg-" + code;
+            return;
+        }
+    });
+
+    if(fg) classes.push(fg);
+    if(bold) classes.push("ansi-bold");
+    if(dim) classes.push("ansi-dim");
+    if(underline) classes.push("ansi-underline");
+
+    return classes.join(" ");
+}
+
+function flsRenderAnsiToHtml(text){
+    text = String(text || "");
+
+    /*
+      同时兼容：
+      1. 真正 ANSI：\x1b[35m
+      2. 日志中被显示成：[35m
+    */
+    var regex = /(?:\x1b\[|\[)([0-9;]*)m/g;
+
+    var html = "";
+    var last = 0;
+    var match;
+    var currentCodes = [];
+    var currentClass = "";
+
+    function appendText(part){
+        if(!part) return;
+
+        var escaped = flsEscapeHtml(part);
+
+        if(currentClass){
+            html += '<span class="' + currentClass + '">' + escaped + '</span>';
+        }else{
+            html += escaped;
+        }
+    }
+
+    while((match = regex.exec(text)) !== null){
+        appendText(text.slice(last, match.index));
+
+        var rawCodes = match[1] || "0";
+        var codes = rawCodes.split(";");
+
+        if(codes.indexOf("0") >= 0 || rawCodes === ""){
+            currentCodes = [];
+            currentClass = "";
+        }else{
+            /*
+              简单处理：
+              新颜色/样式在当前样式上叠加；
+              遇到 39 / 22 / 24 会在 flsAnsiClassFromCodes 里修正。
+            */
+            currentCodes = currentCodes.concat(codes);
+
+            /*
+              如果 codes 里有明确重置前景色 / 样式，需要压缩状态。
+              为了稳定，直接重新解释最近状态。
+            */
+            currentClass = flsAnsiClassFromCodes(currentCodes);
+        }
+
+        last = regex.lastIndex;
+    }
+
+    appendText(text.slice(last));
+
+    return html;
+}
+
+function flsLooksLikeBase64Image(raw){
+    raw = String(raw || "");
+    return /^data:image\/(png|jpg|jpeg|gif|webp|bmp|svg\+xml);base64,[A-Za-z0-9+/=\s\r\n]+$/i.test(raw);
+}
+
+function flsNormalizeBase64Image(raw){
+    raw = String(raw || "");
+
+    var m = raw.match(/^(data:image\/(?:png|jpg|jpeg|gif|webp|bmp|svg\+xml);base64,)([\s\S]+)$/i);
+    if(!m) return raw;
+
+    var prefix = m[1];
+    var body = m[2].replace(/\s+/g, "");
+
+    return prefix + body;
+}
+
+function flsRenderBase64Images(html){
+    /*
+      在已经 escape 后的 HTML 里处理 data:image。
+      因为 base64 不含 < > &，可以安全匹配。
+      支持日志里 base64 被换行拆开。
+    */
+    var regex = /(data:image\/(?:png|jpg|jpeg|gif|webp|bmp|svg\+xml);base64,[A-Za-z0-9+/=\s\r\n]{80,})/gi;
+
+    return html.replace(regex, function(raw){
+        var normalized = flsNormalizeBase64Image(raw);
+
+        if(!flsLooksLikeBase64Image(normalized)){
+            return raw;
+        }
+
+        var safeSrc = flsEscapeAttr(normalized);
+        var safeRaw = flsEscapeAttr(normalized);
+
+        return (
+            '<span class="fls-log-image-wrap" data-raw="' + safeRaw + '">' +
+                '<img class="fls-log-image" src="' + safeSrc + '" title="点击变回 Base64 原文">' +
+                '<div class="fls-log-image-tip">Base64 图片已自动预览，点击图片可变回原文</div>' +
+            '</span>'
+        );
+    });
+}
+
+function flsRenderLogText(el, text){
+    if(!el) return;
+
+    text = String(text || "");
+
+    /*
+      先渲染 ANSI，再把 base64 图片替换成 img。
+      pre.log 会保留换行和空格。
+    */
+    var html = flsRenderAnsiToHtml(text);
+    html = flsRenderBase64Images(html);
+
+    el.innerHTML = html;
+    el.dataset.rawLogText = text;
+}
+
+/*
+  点击图片 => 变回 Base64 原文
+  点击 Base64 原文 => 变回图片
+*/
+document.addEventListener("click", function(e){
+    var img = e.target.closest(".fls-log-image");
+    if(img){
+        var wrap = img.closest(".fls-log-image-wrap");
+        if(!wrap) return;
+
+        var raw = wrap.getAttribute("data-raw") || "";
+        var code = document.createElement("code");
+        code.className = "fls-log-base64-raw";
+        code.setAttribute("data-raw", raw);
+        code.setAttribute("title", "点击重新显示图片");
+        code.textContent = raw;
+
+        wrap.replaceWith(code);
+        return;
+    }
+
+    var rawEl = e.target.closest(".fls-log-base64-raw");
+    if(rawEl){
+        var rawText = rawEl.getAttribute("data-raw") || rawEl.textContent || "";
+        var src = flsNormalizeBase64Image(rawText);
+
+        var wrap2 = document.createElement("span");
+        wrap2.className = "fls-log-image-wrap";
+        wrap2.setAttribute("data-raw", src);
+
+        var image = document.createElement("img");
+        image.className = "fls-log-image";
+        image.src = src;
+        image.title = "点击变回 Base64 原文";
+
+        var tip = document.createElement("div");
+        tip.className = "fls-log-image-tip";
+        tip.textContent = "Base64 图片已自动预览，点击图片可变回原文";
+
+        wrap2.appendChild(image);
+        wrap2.appendChild(tip);
+
+        rawEl.replaceWith(wrap2);
+    }
+}, true);
+
 function flsLogCopyAll(){
     const el = document.getElementById("log");
 
@@ -1353,7 +1678,7 @@ function flsLogCopyAll(){
         return;
     }
 
-    const text = el.textContent || "";
+    const text = el.dataset.rawLogText || el.textContent || "";
 
     if (!text) {
         alert("暂无日志可复制");

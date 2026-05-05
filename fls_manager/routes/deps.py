@@ -251,6 +251,14 @@ async function loadLog(){{
         const json = await res.json();
 
         document.getElementById("log").textContent = json.log || "暂无日志";
+        var logEl = document.getElementById("log");
+        var logText = json.log || "暂无日志";
+
+        if(typeof flsRenderLogText === "function"){{
+            flsRenderLogText(logEl, logText);
+        }}else{{
+            logEl.textContent = logText;
+        }}
         document.getElementById("installStatus").textContent = json.running ? "安装中" : "已结束";
 
         if(json.running){{
