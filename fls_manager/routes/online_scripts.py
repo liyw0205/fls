@@ -357,7 +357,7 @@ def import_task_if_needed(item, log_file=None):
             "remark": f"从在线脚本导入：{item.get('name')}",
             "command": command,
             "cron": cron_expr,
-            "enabled": True,
+            "enabled": False,
             "env": {},
             "proxy_id": "",
             "notify": {"mode": "default", "ids": []},
