@@ -8,6 +8,7 @@ def layout(title, active, body):
         ("env", "/env", "🌐 全局变量"),
         ("proxy", "/proxy", "🧩 代理管理"),
         ("pull", "/pull", "📂 脚本管理"),
+        ("online_scripts", "/online-scripts", "🌍 在线脚本"),
         ("backup", "/backup", "💾 备份恢复"),
         ("deps", "/deps", "📦 依赖管理"),
         ("logs", "/logs", "📁 日志管理"),
@@ -74,7 +75,7 @@ a {
 }
 
 /* ============================================================
-   桌面端：侧边栏一直显示
+   桌面端侧边栏
    ============================================================ */
 .sidebar {
     position:fixed;
@@ -373,6 +374,219 @@ pre.log {
 }
 
 /* ============================================================
+   通用卡片网格 / 折叠卡片组件
+   可用于：在线脚本、任务、日志、通知、代理等
+   ============================================================ */
+.fls-card-grid {
+    display:grid;
+    grid-template-columns:repeat(2,minmax(0,1fr));
+    gap:14px;
+}
+
+.fls-fold-card {
+    background:#fff;
+    border:1px solid #e5e7eb;
+    border-radius:16px;
+    box-shadow:0 4px 16px rgba(0,0,0,.04);
+    overflow:hidden;
+}
+
+.fls-fold-card summary {
+    cursor:pointer;
+    list-style:none;
+    padding:15px;
+}
+
+.fls-fold-card summary::-webkit-details-marker {
+    display:none;
+}
+
+.fls-fold-card summary::after {
+    content:"点击展开";
+    display:block;
+    margin-top:10px;
+    color:#6b7280;
+    font-size:12px;
+    font-weight:800;
+}
+
+.fls-fold-card[open] summary::after {
+    content:"点击收起";
+}
+
+.fls-card-head {
+    display:flex;
+    justify-content:space-between;
+    align-items:flex-start;
+    gap:12px;
+}
+
+.fls-card-main {
+    min-width:0;
+}
+
+.fls-card-title-main {
+    font-size:17px;
+    line-height:1.35;
+    font-weight:900;
+    color:#111827;
+    word-break:break-word;
+}
+
+.fls-card-sub {
+    margin-top:6px;
+    color:#6b7280;
+    font-size:12px;
+    line-height:1.55;
+    word-break:break-word;
+}
+
+.fls-card-badges {
+    display:flex;
+    flex-wrap:wrap;
+    justify-content:flex-end;
+    gap:6px;
+    min-width:88px;
+}
+
+.fls-card-body {
+    padding:0 15px 15px;
+}
+
+.fls-info-grid {
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:10px;
+}
+
+.fls-info-item {
+    background:#f9fafb;
+    border:1px solid #f1f5f9;
+    border-radius:12px;
+    padding:10px;
+    min-width:0;
+}
+
+.fls-info-label {
+    color:#6b7280;
+    font-size:12px;
+    font-weight:800;
+    margin-bottom:5px;
+}
+
+.fls-info-value {
+    color:#111827;
+    font-size:13px;
+    line-height:1.45;
+    font-weight:700;
+    word-break:break-word;
+}
+
+.fls-info-value.code-like {
+    font-family:Consolas,Menlo,monospace;
+    font-size:12px;
+}
+
+.fls-card-section {
+    margin-top:10px;
+    background:#f9fafb;
+    border:1px solid #f1f5f9;
+    border-radius:12px;
+    padding:10px;
+}
+
+.fls-card-actions {
+    margin-top:12px;
+    padding-top:12px;
+    border-top:1px solid #f1f5f9;
+}
+
+.fls-action-line {
+    display:flex;
+    flex-wrap:wrap;
+    gap:8px;
+    align-items:center;
+    margin-bottom:10px;
+}
+
+.fls-action-line select {
+    flex:1 1 180px;
+    min-width:0;
+}
+
+.fls-inline-check {
+    display:inline-flex;
+    align-items:center;
+    gap:6px;
+    color:#374151;
+    font-size:13px;
+    font-weight:700;
+    white-space:nowrap;
+}
+
+.fls-btn-line {
+    display:flex;
+    flex-wrap:wrap;
+    gap:8px;
+}
+
+.fls-btn-line .btn {
+    flex:1 1 120px;
+    margin:0;
+}
+
+.fls-empty-card {
+    grid-column:1 / -1;
+    background:#fff;
+    border:1px dashed #d1d5db;
+    border-radius:16px;
+    padding:28px 18px;
+    text-align:center;
+    color:#6b7280;
+}
+
+.fls-source-code {
+    margin-top:10px;
+    background:#f3f4f6;
+    border:1px solid #e5e7eb;
+    border-radius:12px;
+    padding:10px 12px;
+    font-family:Consolas,Menlo,monospace;
+    font-size:13px;
+    line-height:1.55;
+    word-break:break-all;
+    color:#374151;
+}
+
+.fls-summary-grid {
+    display:grid;
+    grid-template-columns:repeat(3,minmax(0,1fr));
+    gap:12px;
+    margin-bottom:18px;
+}
+
+.fls-summary-item {
+    background:#fff;
+    border:1px solid #e5e7eb;
+    border-radius:14px;
+    padding:13px 14px;
+    box-shadow:0 4px 16px rgba(0,0,0,.04);
+}
+
+.fls-summary-label {
+    color:#6b7280;
+    font-size:12px;
+    font-weight:700;
+}
+
+.fls-summary-num {
+    margin-top:6px;
+    color:#111827;
+    font-size:24px;
+    font-weight:900;
+}
+
+/* ============================================================
    日志增强：ANSI 颜色 / Base64 图片预览
    ============================================================ */
 .fls-log-image-wrap {
@@ -415,7 +629,6 @@ pre.log {
     cursor:pointer;
 }
 
-/* ANSI 前景色 */
 .ansi-fg-30 { color:#111827; }
 .ansi-fg-31 { color:#ef4444; }
 .ansi-fg-32 { color:#22c55e; }
@@ -424,7 +637,6 @@ pre.log {
 .ansi-fg-35 { color:#d946ef; }
 .ansi-fg-36 { color:#06b6d4; }
 .ansi-fg-37 { color:#e5e7eb; }
-
 .ansi-fg-90 { color:#6b7280; }
 .ansi-fg-91 { color:#f87171; }
 .ansi-fg-92 { color:#4ade80; }
@@ -447,7 +659,7 @@ pre.log {
 }
 
 /* ============================================================
-   手机端悬浮菜单按钮：已调小，避免超出
+   手机端悬浮菜单按钮
    ============================================================ */
 .fls-float-menu-btn {
     display:none;
@@ -488,7 +700,7 @@ body.fls-mobile .fls-float-menu-btn:active {
 }
 
 /* ============================================================
-   手机端：侧边栏默认关闭
+   手机端布局
    ============================================================ */
 body.fls-mobile .sidebar {
     transform:translateX(-100%)!important;
@@ -564,6 +776,43 @@ body.fls-mobile .content > .card[style*="max-width"] {
     max-width:none!important;
     width:100%!important;
     margin:16px 0!important;
+}
+
+/* 通用卡片移动端 */
+body.fls-mobile .fls-card-grid {
+    grid-template-columns:1fr!important;
+    gap:12px!important;
+}
+
+body.fls-mobile .fls-fold-card {
+    border-radius:14px!important;
+}
+
+body.fls-mobile .fls-fold-card summary {
+    padding:13px!important;
+}
+
+body.fls-mobile .fls-card-body {
+    padding:0 13px 13px!important;
+}
+
+body.fls-mobile .fls-info-grid {
+    grid-template-columns:1fr 1fr!important;
+    gap:8px!important;
+}
+
+body.fls-mobile .fls-summary-grid {
+    grid-template-columns:repeat(3,minmax(0,1fr))!important;
+    gap:8px!important;
+}
+
+body.fls-mobile .fls-summary-item {
+    padding:10px!important;
+    border-radius:12px!important;
+}
+
+body.fls-mobile .fls-summary-num {
+    font-size:20px!important;
 }
 
 /* ============================================================
@@ -672,7 +921,7 @@ body.fls-mobile.page-deps .table-wrap td:last-child .btn {
 }
 
 /* ============================================================
-   运行环境：运行环境表格保持横向滚动
+   运行环境：横向滚动
    ============================================================ */
 body.fls-mobile.page-status #runtimeTable {
     display:table!important;
@@ -802,7 +1051,6 @@ body.fls-mobile.page-status #runtimeTable td::before {
     border-radius:12px;
 }
 
-/* 移动端日志管理仍然双列，极窄屏单列 */
 body.fls-mobile.page-logs #logsGroupGrid {
     display:grid!important;
     grid-template-columns:repeat(2,minmax(0,1fr))!important;
@@ -821,7 +1069,6 @@ body.fls-mobile.page-logs .log-group-title {
     font-size:14px!important;
 }
 
-/* 日志卡片内部日志文件表格保持横向滚动 */
 body.fls-mobile.page-logs .log-group-body .table-wrap table {
     display:table!important;
     min-width:560px!important;
@@ -1022,6 +1269,10 @@ body.fls-mobile:not(.page-pull):not(.page-proxy):not(.page-deps):not(.page-statu
         grid-template-columns:repeat(2,minmax(0,1fr));
         gap:12px;
     }
+
+    .fls-card-grid {
+        grid-template-columns:1fr;
+    }
 }
 
 @media(max-width:520px) {
@@ -1064,6 +1315,16 @@ body.fls-mobile:not(.page-pull):not(.page-proxy):not(.page-deps):not(.page-statu
     pre.log {
         min-height:480px;
         font-size:12px;
+    }
+}
+
+@media(max-width:420px) {
+    .fls-info-grid {
+        grid-template-columns:1fr!important;
+    }
+
+    .fls-summary-grid {
+        grid-template-columns:1fr 1fr!important;
     }
 }
 
@@ -1506,12 +1767,6 @@ function flsAnsiClassFromCodes(codes){
 
 function flsRenderAnsiToHtml(text){
     text = String(text || "");
-
-    /*
-      同时兼容：
-      1. 真正 ANSI：\x1b[35m
-      2. 日志中被显示成：[35m
-    */
     var regex = /(?:\x1b\[|\[)([0-9;]*)m/g;
 
     var html = "";
@@ -1542,17 +1797,7 @@ function flsRenderAnsiToHtml(text){
             currentCodes = [];
             currentClass = "";
         }else{
-            /*
-              简单处理：
-              新颜色/样式在当前样式上叠加；
-              遇到 39 / 22 / 24 会在 flsAnsiClassFromCodes 里修正。
-            */
             currentCodes = currentCodes.concat(codes);
-
-            /*
-              如果 codes 里有明确重置前景色 / 样式，需要压缩状态。
-              为了稳定，直接重新解释最近状态。
-            */
             currentClass = flsAnsiClassFromCodes(currentCodes);
         }
 
@@ -1582,11 +1827,6 @@ function flsNormalizeBase64Image(raw){
 }
 
 function flsRenderBase64Images(html){
-    /*
-      在已经 escape 后的 HTML 里处理 data:image。
-      因为 base64 不含 < > &，可以安全匹配。
-      支持日志里 base64 被换行拆开。
-    */
     var regex = /(data:image\/(?:png|jpg|jpeg|gif|webp|bmp|svg\+xml);base64,[A-Za-z0-9+/=\s\r\n]{80,})/gi;
 
     return html.replace(regex, function(raw){
@@ -1613,10 +1853,6 @@ function flsRenderLogText(el, text){
 
     text = String(text || "");
 
-    /*
-      先渲染 ANSI，再把 base64 图片替换成 img。
-      pre.log 会保留换行和空格。
-    */
     var html = flsRenderAnsiToHtml(text);
     html = flsRenderBase64Images(html);
 
@@ -1624,10 +1860,6 @@ function flsRenderLogText(el, text){
     el.dataset.rawLogText = text;
 }
 
-/*
-  点击图片 => 变回 Base64 原文
-  点击 Base64 原文 => 变回图片
-*/
 document.addEventListener("click", function(e){
     var img = e.target.closest(".fls-log-image");
     if(img){

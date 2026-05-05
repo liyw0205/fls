@@ -21,6 +21,7 @@ from .routes.backup import bp as backup_bp
 from .routes.notify import bp as notify_bp
 from .routes.api import bp as api_bp
 from .routes.runtime import bp as runtime_bp
+from .routes.online_scripts import bp as online_scripts_bp
 
 
 def get_persistent_secret_key():
@@ -86,6 +87,7 @@ def create_app():
     app.register_blueprint(tasks_bp)
     app.register_blueprint(env_bp)
     app.register_blueprint(scripts_bp)
+    app.register_blueprint(online_scripts_bp)
     app.register_blueprint(logs_bp)
     app.register_blueprint(config_bp)
     app.register_blueprint(proxy_bp)
