@@ -5,7 +5,7 @@ import sys
 import subprocess
 from pathlib import Path
 
-from .paths import BASE_DIR, SCRIPT_DIR
+from .paths import SCRIPT_DIR
 from .config import task_type_enabled
 
 PYTHON_BIN = os.environ.get("FLS_PYTHON") or sys.executable
@@ -202,11 +202,6 @@ def parse_task_line_to_cmd(line):
         task demo.mjs
         task folder/a.py arg1 arg2
         task /root/test.py
-
-    注意：
-    - 混合命令里建议 task 独占一行；
-    - 不建议写：task a.py && echo ok
-      因为 && 会被当成脚本参数。
     """
     try:
         parts = shlex.split(line)
@@ -242,8 +237,6 @@ def fls_kill_shell_function():
       fls_kill -d PID
 
     适配 Linux / Termux。
-    尽量使用系统已有命令：
-      fuser / lsof / ss / netstat / pgrep / ps
     """
     return r'''
 # ============================================================
@@ -265,12 +258,10 @@ fls_kill() {
                 ;;
         esac
 
-        # 不杀当前 shell
         if [ "$_pid" = "$$" ]; then
             return 0
         fi
 
-        # 不杀父进程，避免误杀 FLS 任务壳
         if [ -n "${PPID:-}" ] && [ "$_pid" = "$PPID" ]; then
             return 0
         fi
@@ -299,19 +290,16 @@ fls_kill() {
 
         fls_kill_say "按端口查找: $_port"
 
-        # 方案1：fuser，Linux / Termux 安装 psmisc 后可用
         if command -v fuser >/dev/null 2>&1; then
             _found="$(fuser "${_port}/tcp" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -u)"
             [ -n "$_found" ] && fls_kill_add_pids $_found
         fi
 
-        # 方案2：lsof
         if command -v lsof >/dev/null 2>&1; then
             _found="$(lsof -ti tcp:"$_port" 2>/dev/null | sort -u)"
             [ -n "$_found" ] && fls_kill_add_pids $_found
         fi
 
-        # 方案3：ss
         if command -v ss >/dev/null 2>&1; then
             _found="$(
                 ss -ltnp 2>/dev/null \
@@ -322,7 +310,6 @@ fls_kill() {
             [ -n "$_found" ] && fls_kill_add_pids $_found
         fi
 
-        # 方案4：netstat
         if command -v netstat >/dev/null 2>&1; then
             _found="$(
                 netstat -ltnp 2>/dev/null \
@@ -349,19 +336,16 @@ fls_kill() {
             _abs_file="$(realpath "$_file" 2>/dev/null || echo "$_file")"
         fi
 
-        # 方案1：fuser 查正在使用该文件的进程
         if command -v fuser >/dev/null 2>&1; then
             _found="$(fuser "$_abs_file" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -u)"
             [ -n "$_found" ] && fls_kill_add_pids $_found
         fi
 
-        # 方案2：lsof 查打开该文件的进程
         if command -v lsof >/dev/null 2>&1; then
             _found="$(lsof -t "$_abs_file" 2>/dev/null | sort -u)"
             [ -n "$_found" ] && fls_kill_add_pids $_found
         fi
 
-        # 方案3：按命令行关键字匹配文件路径
         if command -v pgrep >/dev/null 2>&1; then
             _found="$(pgrep -f "$_file" 2>/dev/null | sort -u)"
             [ -n "$_found" ] && fls_kill_add_pids $_found
@@ -502,12 +486,6 @@ EOF
 def has_fls_kill_command(raw):
     """
     判断任务命令中是否使用了 fls_kill。
-    只要有一行使用 fls_kill，就注入内置函数。
-
-    支持：
-      fls_kill -p 3000
-      trap 'fls_kill -p 3000' EXIT
-      cleanup(){ fls_kill -p 3000; }
     """
     lines = str(raw or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
 
@@ -546,10 +524,6 @@ def expand_mixed_command(raw):
         cd kgcheckin
         npm install
         node /root/fls/scripts/demo.mjs
-
-    另外：
-        fls_kill -p 3000
-    会作为 shell 函数调用，不会被转换。
     """
     lines = str(raw or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
 
@@ -558,28 +532,19 @@ def expand_mixed_command(raw):
     for line in lines:
         stripped = line.strip()
 
-        # 空行保留，方便日志里看结构。
         if not stripped:
             expanded.append(line)
             continue
 
-        # 注释行保留。
         if stripped.startswith("#"):
             expanded.append(line)
             continue
 
-        # task 行转换为真实命令。
         if is_task_line(stripped):
             cmd = parse_task_line_to_cmd(stripped)
             expanded.append(command_list_to_shell(cmd))
             continue
 
-        # fls_kill 是内置 shell 函数，原样保留。
-        if stripped == "fls_kill" or stripped.startswith("fls_kill "):
-            expanded.append(line)
-            continue
-
-        # 普通系统命令原样保留。
         expanded.append(line)
 
     return "\n".join(expanded)
@@ -588,12 +553,6 @@ def expand_mixed_command(raw):
 def is_pure_single_task_command(raw):
     """
     是否是单行纯 task 命令。
-
-    这些走非 shell 模式：
-        task 1.py
-        task demo.mjs arg1
-
-    多行或混合命令走 shell 模式。
     """
     text = str(raw or "").strip()
 
@@ -613,18 +572,17 @@ def build_command(task):
         raise ValueError("任务命令为空")
 
     # ============================================================
-    # 1. 单行纯 task 命令：保持原来的直接执行模式。
+    # 1. 单行纯 task 命令：保持直接执行模式。
     # ============================================================
     if is_pure_single_task_command(raw):
         cmd = parse_task_line_to_cmd(raw)
 
-        # 第二个参数是脚本路径。
-        # parse_task_line_to_cmd 已经做过校验，这里只用于 cwd。
         parts = shlex.split(raw)
         script_path = task_script_path(parts[1])
 
         return {
             "cmd": cmd,
+            "display_cmd": command_list_to_shell(cmd),
             "shell": False,
             "cwd": str(script_path.parent),
             "mode": "task",
@@ -632,24 +590,19 @@ def build_command(task):
 
     # ============================================================
     # 2. 多行 / 混合命令：shell 模式。
-    #
-    # 支持：
-    #   cd kgcheckin || exit 1
-    #   npm install
-    #   task ../demo.py
-    #   task ../test.mjs
-    #   fls_kill -p 3000
-    #
-    # 默认工作目录使用 scripts 目录，方便相对路径操作。
     # ============================================================
     expanded_raw = expand_mixed_command(raw)
 
-    # 如果任务命令使用了 fls_kill，则在 shell 开头注入内置函数。
+    display_cmd = expanded_raw
+
     if has_fls_kill_command(raw):
-        expanded_raw = fls_kill_shell_function() + "\n\n" + expanded_raw
+        run_cmd = fls_kill_shell_function() + "\n\n" + expanded_raw
+    else:
+        run_cmd = expanded_raw
 
     return {
-        "cmd": expanded_raw,
+        "cmd": run_cmd,
+        "display_cmd": display_cmd,
         "shell": True,
         "cwd": str(SCRIPT_DIR),
         "mode": "mixed",

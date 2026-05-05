@@ -261,6 +261,8 @@ def _start_task_worker(task_id, task_snapshot, cmd_info, process_name, log_file,
         env["FLS_TASK_NAME"] = task_snapshot.get("name") or task_snapshot.get("command") or task_id
         env["FLS_TASK_PROCESS_NAME"] = process_name
 
+        display_cmd = cmd_info.get("display_cmd", cmd_info.get("cmd"))
+
         header = (
             f"===== 启动任务: {env['FLS_TASK_NAME']} =====\n"
             f"时间: {now_str()}\n"
@@ -269,7 +271,7 @@ def _start_task_worker(task_id, task_snapshot, cmd_info, process_name, log_file,
             f"命令: {task_snapshot.get('command')}\n"
             f"代理ID: {task_snapshot.get('proxy_id', '') or '不使用代理'}\n"
             f"工作目录: {cmd_info.get('cwd')}\n"
-            f"实际启动命令: {cmd_info.get('cmd')}\n"
+            f"实际启动命令: {display_cmd}\n"
             f"============================================================\n"
         )
 
