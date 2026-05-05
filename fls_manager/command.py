@@ -231,6 +231,304 @@ def is_task_line(line):
     return stripped == "task" or stripped.startswith("task ")
 
 
+def fls_kill_shell_function():
+    """
+    返回注入到混合 Shell 命令里的 fls_kill 内置函数。
+
+    支持：
+      fls_kill -p 3000
+      fls_kill -f 文件或路径
+      fls_kill -n 名称或命令关键字
+      fls_kill -d PID
+
+    适配 Linux / Termux。
+    尽量使用系统已有命令：
+      fuser / lsof / ss / netstat / pgrep / ps
+    """
+    return r'''
+# ============================================================
+# FLS 内置命令：fls_kill
+# ============================================================
+fls_kill() {
+    FLS_KILL_PIDS=""
+
+    fls_kill_say() {
+        echo "[fls_kill] $*"
+    }
+
+    fls_kill_add_pid() {
+        _pid="$1"
+
+        case "$_pid" in
+            ''|*[!0-9]*)
+                return 0
+                ;;
+        esac
+
+        # 不杀当前 shell
+        if [ "$_pid" = "$$" ]; then
+            return 0
+        fi
+
+        # 不杀父进程，避免误杀 FLS 任务壳
+        if [ -n "${PPID:-}" ] && [ "$_pid" = "$PPID" ]; then
+            return 0
+        fi
+
+        FLS_KILL_PIDS="$FLS_KILL_PIDS $_pid"
+    }
+
+    fls_kill_add_pids() {
+        for _pid in "$@"; do
+            fls_kill_add_pid "$_pid"
+        done
+    }
+
+    fls_kill_uniq_pids() {
+        echo "$FLS_KILL_PIDS" \
+            | tr ' ' '\n' \
+            | grep -E '^[0-9]+$' \
+            | sort -u \
+            | tr '\n' ' '
+    }
+
+    fls_kill_by_port() {
+        _port="$1"
+
+        [ -n "$_port" ] || return 0
+
+        fls_kill_say "按端口查找: $_port"
+
+        # 方案1：fuser，Linux / Termux 安装 psmisc 后可用
+        if command -v fuser >/dev/null 2>&1; then
+            _found="$(fuser "${_port}/tcp" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -u)"
+            [ -n "$_found" ] && fls_kill_add_pids $_found
+        fi
+
+        # 方案2：lsof
+        if command -v lsof >/dev/null 2>&1; then
+            _found="$(lsof -ti tcp:"$_port" 2>/dev/null | sort -u)"
+            [ -n "$_found" ] && fls_kill_add_pids $_found
+        fi
+
+        # 方案3：ss
+        if command -v ss >/dev/null 2>&1; then
+            _found="$(
+                ss -ltnp 2>/dev/null \
+                | grep ":$_port " \
+                | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' \
+                | sort -u
+            )"
+            [ -n "$_found" ] && fls_kill_add_pids $_found
+        fi
+
+        # 方案4：netstat
+        if command -v netstat >/dev/null 2>&1; then
+            _found="$(
+                netstat -ltnp 2>/dev/null \
+                | grep ":$_port " \
+                | awk '{print $7}' \
+                | cut -d/ -f1 \
+                | grep -E '^[0-9]+$' \
+                | sort -u
+            )"
+            [ -n "$_found" ] && fls_kill_add_pids $_found
+        fi
+    }
+
+    fls_kill_by_file() {
+        _file="$1"
+
+        [ -n "$_file" ] || return 0
+
+        fls_kill_say "按文件/路径查找: $_file"
+
+        _abs_file="$_file"
+
+        if command -v realpath >/dev/null 2>&1; then
+            _abs_file="$(realpath "$_file" 2>/dev/null || echo "$_file")"
+        fi
+
+        # 方案1：fuser 查正在使用该文件的进程
+        if command -v fuser >/dev/null 2>&1; then
+            _found="$(fuser "$_abs_file" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -u)"
+            [ -n "$_found" ] && fls_kill_add_pids $_found
+        fi
+
+        # 方案2：lsof 查打开该文件的进程
+        if command -v lsof >/dev/null 2>&1; then
+            _found="$(lsof -t "$_abs_file" 2>/dev/null | sort -u)"
+            [ -n "$_found" ] && fls_kill_add_pids $_found
+        fi
+
+        # 方案3：按命令行关键字匹配文件路径
+        if command -v pgrep >/dev/null 2>&1; then
+            _found="$(pgrep -f "$_file" 2>/dev/null | sort -u)"
+            [ -n "$_found" ] && fls_kill_add_pids $_found
+
+            if [ "$_abs_file" != "$_file" ]; then
+                _found="$(pgrep -f "$_abs_file" 2>/dev/null | sort -u)"
+                [ -n "$_found" ] && fls_kill_add_pids $_found
+            fi
+        else
+            _found="$(
+                ps -ef 2>/dev/null \
+                | grep "$_file" \
+                | grep -v grep \
+                | awk '{print $2}' \
+                | sort -u
+            )"
+            [ -n "$_found" ] && fls_kill_add_pids $_found
+        fi
+    }
+
+    fls_kill_by_name() {
+        _name="$1"
+
+        [ -n "$_name" ] || return 0
+
+        fls_kill_say "按名称/命令关键字查找: $_name"
+
+        if command -v pgrep >/dev/null 2>&1; then
+            _found="$(pgrep -f "$_name" 2>/dev/null | sort -u)"
+            [ -n "$_found" ] && fls_kill_add_pids $_found
+        else
+            _found="$(
+                ps -ef 2>/dev/null \
+                | grep "$_name" \
+                | grep -v grep \
+                | awk '{print $2}' \
+                | sort -u
+            )"
+            [ -n "$_found" ] && fls_kill_add_pids $_found
+        fi
+    }
+
+    fls_kill_by_pid() {
+        _pid="$1"
+        fls_kill_say "按 PID 添加: $_pid"
+        fls_kill_add_pid "$_pid"
+    }
+
+    fls_kill_do_kill() {
+        _final_pids="$(fls_kill_uniq_pids)"
+
+        if [ -z "$_final_pids" ]; then
+            fls_kill_say "未找到需要清理的进程"
+            return 0
+        fi
+
+        fls_kill_say "准备清理进程: $_final_pids"
+
+        for _pid in $_final_pids; do
+            if kill -0 "$_pid" >/dev/null 2>&1; then
+                fls_kill_say "TERM $_pid"
+                kill "$_pid" >/dev/null 2>&1 || true
+            fi
+        done
+
+        sleep 1
+
+        for _pid in $_final_pids; do
+            if kill -0 "$_pid" >/dev/null 2>&1; then
+                fls_kill_say "KILL $_pid"
+                kill -9 "$_pid" >/dev/null 2>&1 || true
+            fi
+        done
+
+        fls_kill_say "清理完成"
+    }
+
+    if [ "$#" -eq 0 ]; then
+        cat <<'EOF'
+fls_kill - FLS 内置进程清理命令
+
+用法：
+  fls_kill -p 端口
+  fls_kill -f 文件或路径
+  fls_kill -n 名称或命令关键字
+  fls_kill -d PID
+
+示例：
+  fls_kill -p 3000
+  fls_kill -n apiService
+  fls_kill -f kgcheckin/api/app.js
+  fls_kill -d 12345
+  fls_kill -p 3000 -n apiService
+EOF
+        return 0
+    fi
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -p|--port)
+                shift
+                [ "$#" -gt 0 ] || { echo "[fls_kill] 缺少端口"; return 1; }
+                fls_kill_by_port "$1"
+                ;;
+            -f|--file)
+                shift
+                [ "$#" -gt 0 ] || { echo "[fls_kill] 缺少文件"; return 1; }
+                fls_kill_by_file "$1"
+                ;;
+            -n|--name)
+                shift
+                [ "$#" -gt 0 ] || { echo "[fls_kill] 缺少名称"; return 1; }
+                fls_kill_by_name "$1"
+                ;;
+            -d|--pid)
+                shift
+                [ "$#" -gt 0 ] || { echo "[fls_kill] 缺少 PID"; return 1; }
+                fls_kill_by_pid "$1"
+                ;;
+            -h|--help)
+                fls_kill
+                return 0
+                ;;
+            *)
+                echo "[fls_kill] 未知参数: $1"
+                return 1
+                ;;
+        esac
+
+        shift
+    done
+
+    fls_kill_do_kill
+}
+'''
+
+
+def has_fls_kill_command(raw):
+    """
+    判断任务命令中是否使用了 fls_kill。
+    只要有一行使用 fls_kill，就注入内置函数。
+
+    支持：
+      fls_kill -p 3000
+      trap 'fls_kill -p 3000' EXIT
+      cleanup(){ fls_kill -p 3000; }
+    """
+    lines = str(raw or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+    for line in lines:
+        stripped = line.strip()
+
+        if not stripped:
+            continue
+
+        if stripped.startswith("#"):
+            continue
+
+        if stripped == "fls_kill" or stripped.startswith("fls_kill "):
+            return True
+
+        if "fls_kill " in stripped:
+            return True
+
+    return False
+
+
 def expand_mixed_command(raw):
     """
     展开混合命令。
@@ -248,6 +546,10 @@ def expand_mixed_command(raw):
         cd kgcheckin
         npm install
         node /root/fls/scripts/demo.mjs
+
+    另外：
+        fls_kill -p 3000
+    会作为 shell 函数调用，不会被转换。
     """
     lines = str(raw or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
 
@@ -270,6 +572,11 @@ def expand_mixed_command(raw):
         if is_task_line(stripped):
             cmd = parse_task_line_to_cmd(stripped)
             expanded.append(command_list_to_shell(cmd))
+            continue
+
+        # fls_kill 是内置 shell 函数，原样保留。
+        if stripped == "fls_kill" or stripped.startswith("fls_kill "):
+            expanded.append(line)
             continue
 
         # 普通系统命令原样保留。
@@ -331,10 +638,15 @@ def build_command(task):
     #   npm install
     #   task ../demo.py
     #   task ../test.mjs
+    #   fls_kill -p 3000
     #
     # 默认工作目录使用 scripts 目录，方便相对路径操作。
     # ============================================================
     expanded_raw = expand_mixed_command(raw)
+
+    # 如果任务命令使用了 fls_kill，则在 shell 开头注入内置函数。
+    if has_fls_kill_command(raw):
+        expanded_raw = fls_kill_shell_function() + "\n\n" + expanded_raw
 
     return {
         "cmd": expanded_raw,

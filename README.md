@@ -572,6 +572,46 @@ node /root/demo.js
 
 可在面板 **配置页** 中启用或禁用。
 
+
+可以，下面这段可以直接加到你的 **FLS README.md** 里，建议放在「任务命令规则」后面。
+
+---
+
+## FLS 内置命令：fls_kill
+
+FLS 支持在任务命令中直接使用内置命令 `fls_kill`，用于清理残留进程、端口或后台服务。
+
+支持参数：
+
+```bash
+fls_kill -p 3000                 # 按端口清理
+fls_kill -n apiService           # 按进程名 / 命令关键字清理
+fls_kill -f kgcheckin/api/app.js # 按文件或路径清理
+fls_kill -d 12345                # 按 PID 清理
+```
+
+常见用法：
+
+```bash
+cd kgcheckin || exit 1
+
+cleanup() {
+  fls_kill -p 3000
+}
+
+trap cleanup EXIT INT TERM HUP
+
+fls_kill -p 3000
+
+npm run main
+```
+
+说明：
+
+- `fls_kill` 是 FLS 内置命令，只能在 FLS 任务命令中使用。
+- 推荐优先使用 `-p` 按端口清理，最安全。
+- `-n` 是按命令关键字匹配，请避免写过于宽泛的名称，例如 `fls_kill -n node`，防止误杀其他进程。
+
 ---
 
 ## Web 面板功能
