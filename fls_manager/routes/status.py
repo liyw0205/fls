@@ -36,7 +36,7 @@ def runtime_items():
         {
             "key": "python",
             "name": "Python",
-            "suffix": ".py",
+            "suffix": ".py / .pyw",
             "command": Path(sys.executable).name or "python",
             "version": sys.version.split()[0],
             "install_url": "/install/runtime/python",
@@ -44,7 +44,7 @@ def runtime_items():
         {
             "key": "bash",
             "name": "Bash",
-            "suffix": ".sh",
+            "suffix": ".sh / .bash",
             "command": "bash",
             "version": cmd_output(["bash", "--version"]),
             "install_url": "/install/runtime/bash",
@@ -52,7 +52,7 @@ def runtime_items():
         {
             "key": "node",
             "name": "Node.js",
-            "suffix": ".js",
+            "suffix": ".js / .mjs / .cjs",
             "command": "node",
             "version": cmd_output(["node", "--version"]),
             "install_url": "/install/runtime/node",
@@ -60,7 +60,7 @@ def runtime_items():
         {
             "key": "typescript",
             "name": "TypeScript",
-            "suffix": ".ts",
+            "suffix": ".ts / .mts / .cts",
             "command": ts_cmd,
             "version": cmd_output([ts_runner, "--version"]) if ts_runner else "",
             "install_url": "/install/runtime/typescript",

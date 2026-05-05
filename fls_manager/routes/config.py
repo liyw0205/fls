@@ -47,15 +47,15 @@ def config_page():
     rows = ""
 
     for k, name in [
-        ("py", "Python .py"),
-        ("sh", "Shell .sh"),
-        ("js", "Node .js"),
-        ("ts", "TypeScript .ts"),
+        ("py", "Python .py / .pyw"),
+        ("sh", "Shell .sh / .bash"),
+        ("js", "Node .js / .mjs / .cjs"),
+        ("ts", "TypeScript .ts / .mts / .cts"),
         ("ps1", "PowerShell .ps1"),
-        ("bat", "Windows Batch .bat"),
+        ("bat", "Windows Batch .bat / .cmd"),
         ("php", "PHP .php"),
         ("rb", "Ruby .rb"),
-        ("pl", "Perl .pl"),
+        ("pl", "Perl .pl / .pm"),
         ("lua", "Lua .lua"),
         ("jar", "Java Jar .jar"),
     ]:
