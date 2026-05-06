@@ -467,6 +467,20 @@ def dashboard():
 </div>
 
 <div class="card">
+    <div class="card-title">常用入口</div>
+    <div class="action-row">
+        <a class="btn btn-primary" href="/tasks">任务管理</a>
+        <a class="btn btn-blue" href="/pull">脚本管理</a>
+        <a class="btn btn-orange" href="/logs">日志管理</a>
+        <a class="btn btn-primary" href="/online-scripts">在线脚本</a>
+        <a class="btn btn-primary" href="/notify">通知管理</a>
+        <a class="btn btn-gray" href="/panel/status">环境状态</a>
+        <a class="btn btn-gray" href="/config">配置</a>
+        <a class="btn btn-gray" href="/about">关于</a>
+    </div>
+</div>
+
+<div class="card">
     <div class="card-title">环境状态</div>
     <div class="help">
         面板峰值 CPU 每天 00:00 和 12:00 自动重置。<br>
