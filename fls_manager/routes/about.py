@@ -1,17 +1,23 @@
 import os
 import re
 import time
+import uuid
 import shutil
+import threading
 import subprocess
 
-from flask import Blueprint, request
+from flask import Blueprint, request, redirect, url_for, jsonify
 
 from ..ui.layout import layout
-from ..utils import h
+from ..ui.log_controls import log_controls
+from ..utils import h, get_back_url, now_str, safe_name
+from ..logs import tail_file
 from ..paths import BASE_DIR, DATA_DIR, LOG_DIR, SCRIPT_DIR
 from ..constants import MAIN_PROCESS_NAME, TASK_PROCESS_PREFIX
 
 bp = Blueprint("about", __name__)
+
+ABOUT_JOBS = {}
 
 
 def git_available():
@@ -57,24 +63,17 @@ def git_text(args, default="-", timeout=15):
     return out.strip()
 
 
-def git_fetch_remote():
-    ok, out = run_git(["fetch", "--all", "--prune"], timeout=60)
-
-    if ok:
-        return True, "更新日志刷新成功"
-
-    return False, "更新日志刷新失败：" + out
-
-
-def get_version_info(fetch=False):
+def get_version_info():
     """
     获取当前版本和更新日志。
+
+    注意：
+    这里不再主动 fetch。
+    刷新远程更新日志改为后台任务 /about/refresh-log。
     """
     info = {
         "git_available": git_available(),
         "is_repo": False,
-        "fetch_ok": None,
-        "fetch_msg": "",
         "current_full": "-",
         "current_short": "-",
         "current_subject": "-",
@@ -93,11 +92,6 @@ def get_version_info(fetch=False):
         return info
 
     info["is_repo"] = True
-
-    if fetch:
-        ok, msg = git_fetch_remote()
-        info["fetch_ok"] = ok
-        info["fetch_msg"] = msg
 
     info["current_full"] = git_text(["rev-parse", "HEAD"])
     info["current_short"] = git_text(["rev-parse", "--short", "HEAD"])
@@ -146,7 +140,7 @@ def get_version_info(fetch=False):
 
 def render_update_log_rows(logs):
     if not logs:
-        return '<tr><td colspan="4">暂无更新日志</td></tr>'
+        return '<tr><td colspan="4">暂无更新日志，请点击“刷新更新日志”</td></tr>'
 
     rows = ""
 
@@ -159,7 +153,7 @@ def render_update_log_rows(logs):
             action = f"""
 <form method="post" action="/about/update-version" style="display:inline;">
     <input type="hidden" name="version" value="{h(item.get("full"))}">
-    <button class="btn btn-orange" type="submit" onclick="return confirm('确定更新到该版本吗？更新成功后面板会自动重启。')">
+    <button class="btn btn-orange" type="submit" onclick="return confirm('确定更新到该版本吗？更新任务将在后台执行。')">
         更新到此版本
     </button>
 </form>
@@ -181,6 +175,14 @@ def render_update_log_rows(logs):
 """
 
     return rows
+
+
+def sh_quote(value):
+    """
+    简单 shell quote。
+    """
+    s = str(value)
+    return "'" + s.replace("'", "'\"'\"'") + "'"
 
 
 def schedule_restart():
@@ -218,18 +220,283 @@ def schedule_restart():
         return False, str(e)
 
 
-def sh_quote(value):
+def about_job_log_file(job_id, action):
+    safe_action = safe_name(action or "about-job")
+    return LOG_DIR / f"about-{safe_action}-{job_id}.log"
+
+
+def append_job_log(log_file, text=""):
+    try:
+        with open(log_file, "ab") as f:
+            f.write(str(text).encode("utf-8", errors="replace"))
+
+            if not str(text).endswith("\n"):
+                f.write(b"\n")
+
+    except Exception:
+        pass
+
+
+def about_job_running(job_id):
+    info = ABOUT_JOBS.get(job_id)
+
+    if not info:
+        return False
+
+    return bool(info.get("running"))
+
+
+def run_git_logged(job_id, log_file, args, timeout=120):
     """
-    简单 shell quote。
+    执行 git 命令并写入日志。
     """
-    s = str(value)
-    return "'" + s.replace("'", "'\"'\"'") + "'"
+    cmd = ["git"] + list(args)
+
+    append_job_log(log_file, "")
+    append_job_log(log_file, "$ " + " ".join(cmd))
+    append_job_log(log_file, f"cwd: {BASE_DIR}")
+    append_job_log(log_file, "------------------------------------------------------------")
+
+    try:
+        r = subprocess.run(
+            cmd,
+            cwd=str(BASE_DIR),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=timeout,
+        )
+
+        output = r.stdout or ""
+
+        if output:
+            append_job_log(log_file, output.rstrip())
+        else:
+            append_job_log(log_file, "无输出")
+
+        append_job_log(log_file, "------------------------------------------------------------")
+        append_job_log(log_file, f"命令结束，退出码：{r.returncode}")
+
+        return r.returncode == 0, output.strip()
+
+    except subprocess.TimeoutExpired as e:
+        msg = f"命令超时：{e}"
+        append_job_log(log_file, msg)
+        return False, msg
+
+    except Exception as e:
+        msg = f"命令异常：{e}"
+        append_job_log(log_file, msg)
+        return False, msg
+
+
+def refresh_log_worker(job_id):
+    info = ABOUT_JOBS.get(job_id)
+
+    if not info:
+        return
+
+    log_file = info.get("log_file")
+
+    info["running"] = True
+    info["status"] = "正在刷新更新日志"
+    info["error"] = ""
+    info["updated_at"] = now_str()
+
+    append_job_log(log_file, "===== FLS 更新日志后台刷新 =====")
+    append_job_log(log_file, f"时间: {now_str()}")
+    append_job_log(log_file, f"工作目录: {BASE_DIR}")
+    append_job_log(log_file, "============================================================")
+
+    try:
+        if not git_available():
+            raise RuntimeError("系统未安装 git")
+
+        if not is_git_repo():
+            raise RuntimeError(f"当前目录不是 Git 仓库：{BASE_DIR}")
+
+        ok, out = run_git_logged(
+            job_id,
+            log_file,
+            ["fetch", "--all", "--prune"],
+            timeout=120,
+        )
+
+        if not ok:
+            raise RuntimeError(out or "git fetch 失败")
+
+        info["running"] = False
+        info["status"] = "刷新完成"
+        info["returncode"] = 0
+        info["updated_at"] = now_str()
+
+        append_job_log(log_file, "")
+        append_job_log(log_file, f"===== 刷新完成: {now_str()} =====")
+        append_job_log(log_file, "返回关于页即可看到最新更新日志。")
+
+    except Exception as e:
+        info["running"] = False
+        info["status"] = "刷新失败"
+        info["returncode"] = 1
+        info["error"] = str(e)
+        info["updated_at"] = now_str()
+
+        append_job_log(log_file, "")
+        append_job_log(log_file, f"===== 刷新失败: {now_str()} =====")
+        append_job_log(log_file, f"错误: {e}")
+
+
+def update_version_worker(job_id, version):
+    info = ABOUT_JOBS.get(job_id)
+
+    if not info:
+        return
+
+    log_file = info.get("log_file")
+
+    info["running"] = True
+    info["status"] = "正在更新"
+    info["error"] = ""
+    info["updated_at"] = now_str()
+
+    append_job_log(log_file, "===== FLS 版本后台更新 =====")
+    append_job_log(log_file, f"时间: {now_str()}")
+    append_job_log(log_file, f"目标版本: {version}")
+    append_job_log(log_file, f"工作目录: {BASE_DIR}")
+    append_job_log(log_file, "============================================================")
+
+    before_version = "-"
+    after_version = "-"
+
+    try:
+        if not git_available():
+            raise RuntimeError("系统未安装 git")
+
+        if not is_git_repo():
+            raise RuntimeError(f"当前目录不是 Git 仓库：{BASE_DIR}")
+
+        before_version = git_text(["rev-parse", "--short", "HEAD"], default="-")
+        append_job_log(log_file, f"更新前版本: {before_version}")
+
+        fetch_ok, fetch_out = run_git_logged(
+            job_id,
+            log_file,
+            ["fetch", "--all", "--prune"],
+            timeout=120,
+        )
+
+        if not fetch_ok:
+            raise RuntimeError(fetch_out or "git fetch 失败")
+
+        reset_ok, reset_out = run_git_logged(
+            job_id,
+            log_file,
+            ["reset", "--hard", "HEAD"],
+            timeout=120,
+        )
+
+        if not reset_ok:
+            raise RuntimeError(reset_out or "git reset --hard 失败")
+
+        clean_ok, clean_out = run_git_logged(
+            job_id,
+            log_file,
+            [
+                "clean",
+                "-fd",
+                "-e", "data/",
+                "-e", "scripts/",
+                "-e", "log/",
+                "-e", ".venv/",
+            ],
+            timeout=120,
+        )
+
+        if not clean_ok:
+            raise RuntimeError(clean_out or "git clean -fd 失败")
+
+        checkout_ok, checkout_out = run_git_logged(
+            job_id,
+            log_file,
+            ["checkout", version],
+            timeout=120,
+        )
+
+        if not checkout_ok:
+            raise RuntimeError(checkout_out or "git checkout 失败")
+
+        after_version = git_text(["rev-parse", "--short", "HEAD"], default="-")
+        append_job_log(log_file, "")
+        append_job_log(log_file, f"更新后版本: {after_version}")
+
+        restart_ok, restart_msg = schedule_restart()
+
+        append_job_log(log_file, "")
+        append_job_log(log_file, "===== 自动重启 =====")
+        append_job_log(log_file, f"结果: {'成功提交' if restart_ok else '失败'}")
+        append_job_log(log_file, f"消息: {restart_msg or '-'}")
+
+        if not restart_ok:
+            raise RuntimeError(f"代码已更新，但自动重启失败：{restart_msg or '未知错误'}")
+
+        info["running"] = False
+        info["status"] = "更新完成，已提交自动重启"
+        info["returncode"] = 0
+        info["updated_at"] = now_str()
+
+        append_job_log(log_file, "")
+        append_job_log(log_file, f"===== 更新完成: {now_str()} =====")
+        append_job_log(log_file, f"版本变化: {before_version} -> {after_version}")
+        append_job_log(log_file, "面板会在几秒后自动重启，请稍后刷新页面。")
+
+    except Exception as e:
+        after_version = git_text(["rev-parse", "--short", "HEAD"], default="-")
+
+        info["running"] = False
+        info["status"] = "更新失败"
+        info["returncode"] = 1
+        info["error"] = str(e)
+        info["updated_at"] = now_str()
+
+        append_job_log(log_file, "")
+        append_job_log(log_file, f"===== 更新失败: {now_str()} =====")
+        append_job_log(log_file, f"目标版本: {version}")
+        append_job_log(log_file, f"更新前版本: {before_version}")
+        append_job_log(log_file, f"当前版本: {after_version}")
+        append_job_log(log_file, f"错误: {e}")
+
+
+def start_about_job(action, title, target, args=()):
+    job_id = uuid.uuid4().hex
+    log_file = about_job_log_file(job_id, action)
+
+    ABOUT_JOBS[job_id] = {
+        "id": job_id,
+        "action": action,
+        "title": title,
+        "log_file": str(log_file),
+        "running": True,
+        "status": "准备中",
+        "returncode": None,
+        "error": "",
+        "start_time": time.time(),
+        "updated_at": now_str(),
+    }
+
+    th = threading.Thread(
+        target=target,
+        args=(job_id,) + tuple(args),
+        daemon=True,
+        name=f"fls-about-{action}-{job_id[:8]}",
+    )
+    th.start()
+
+    return job_id
 
 
 @bp.route("/about")
 def about():
-    fetch = request.args.get("fetch") == "1"
-    version = get_version_info(fetch=fetch)
+    version = get_version_info()
 
     daemon_log = LOG_DIR / "fls-manager-daemon.log"
 
@@ -246,31 +513,31 @@ def about():
     if not version["git_available"] or not version["is_repo"]:
         version_card = f"""
 <style>
-.fls-update-log-fold {
+.fls-update-log-fold {{
     overflow:hidden;
-}
+}}
 
-.fls-update-log-fold summary {
+.fls-update-log-fold summary {{
     cursor:pointer;
     list-style:none;
-}
+}}
 
-.fls-update-log-fold summary::-webkit-details-marker {
+.fls-update-log-fold summary::-webkit-details-marker {{
     display:none;
-}
+}}
 
-.fls-update-log-fold summary::after {
+.fls-update-log-fold summary::after {{
     content:"点击展开";
     display:block;
     margin-top:8px;
     color:#6b7280;
     font-size:12px;
     font-weight:800;
-}
+}}
 
-.fls-update-log-fold[open] summary::after {
+.fls-update-log-fold[open] summary::after {{
     content:"点击收起";
-}
+}}
 </style>
 <div class="card">
     <div class="card-title">当前版本 / 更新日志</div>
@@ -285,19 +552,6 @@ def about():
 </div>
 """
     else:
-        fetch_msg_html = ""
-
-        if version.get("fetch_msg"):
-            color = "#18a058" if version.get("fetch_ok") else "#dc2626"
-
-            fetch_msg_html = f"""
-<div class="card">
-    <div class="help" style="color:{color};font-weight:800;">
-        {h(version.get("fetch_msg"))}
-    </div>
-</div>
-"""
-
         rows = render_update_log_rows(version.get("logs") or [])
 
         version_card = f"""
@@ -314,20 +568,23 @@ def about():
         </div>
 
         <div class="action-row">
-            <a class="btn btn-primary" href="/about?fetch=1">刷新更新日志</a>
+            <form method="post" action="/about/refresh-log" style="display:inline;">
+                <button class="btn btn-primary" type="submit">
+                    后台刷新更新日志
+                </button>
+            </form>
             {daemon_log_btn}
         </div>
     </div>
 </div>
-
-{fetch_msg_html}
 
 <details class="card fls-update-log-fold">
     <summary>
         <div>
             <div class="card-title">更新日志，最近 20 条</div>
             <div class="help">
-                默认折叠，点击展开查看版本更新内容并选择更新版本。
+                默认折叠，点击展开查看版本更新内容并选择更新版本。<br>
+                “后台刷新更新日志”会进入实时日志页，不会卡住当前页面。
             </div>
         </div>
     </summary>
@@ -336,7 +593,7 @@ def about():
 
     <div class="help">
         这里显示项目 Git 提交时填写的更新内容。<br>
-        可以选择某个版本进行更新，更新成功后面板会自动重启。
+        可以选择某个版本进行后台更新，更新成功后面板会自动重启。
     </div>
     <br>
 
@@ -357,6 +614,34 @@ def about():
 """
 
     body = f"""
+<style>
+.fls-update-log-fold {{
+    overflow:hidden;
+}}
+
+.fls-update-log-fold summary {{
+    cursor:pointer;
+    list-style:none;
+}}
+
+.fls-update-log-fold summary::-webkit-details-marker {{
+    display:none;
+}}
+
+.fls-update-log-fold summary::after {{
+    content:"点击展开";
+    display:block;
+    margin-top:8px;
+    color:#6b7280;
+    font-size:12px;
+    font-weight:800;
+}}
+
+.fls-update-log-fold[open] summary::after {{
+    content:"点击收起";
+}}
+</style>
+
 <div class="card">
     <div class="card-title">关于 FLS 面板</div>
     <div class="help">
@@ -464,8 +749,59 @@ ps -eo pid,ppid,comm,args | grep fls
     return layout("关于", "about", body)
 
 
+@bp.route("/about/refresh-log", methods=["POST"])
+def about_refresh_log():
+    """
+    后台刷新更新日志。
+    """
+    if not git_available():
+        body = """
+<div class="card">
+    <div class="card-title">刷新失败</div>
+    <div class="help" style="color:#dc2626;">
+        系统未安装 git。
+    </div>
+    <br>
+    <a class="btn btn-gray" href="/about">返回关于页</a>
+</div>
+"""
+        return layout("刷新失败", "about", body)
+
+    if not is_git_repo():
+        body = f"""
+<div class="card">
+    <div class="card-title">刷新失败</div>
+    <div class="help" style="color:#dc2626;">
+        当前目录不是 Git 仓库：{h(BASE_DIR)}
+    </div>
+    <br>
+    <a class="btn btn-gray" href="/about">返回关于页</a>
+</div>
+"""
+        return layout("刷新失败", "about", body)
+
+    job_id = start_about_job(
+        action="refresh-log",
+        title="刷新更新日志",
+        target=refresh_log_worker,
+    )
+
+    return redirect(
+        url_for(
+            "about.about_job_log",
+            job_id=job_id,
+            back="/about",
+        )
+    )
+
+
 @bp.route("/about/update-version", methods=["POST"])
 def about_update_version():
+    """
+    后台更新版本。
+
+    点击更新后立即跳转日志页，避免页面卡住。
+    """
     version = request.form.get("version", "").strip()
 
     if not re.fullmatch(r"[0-9a-fA-F]{7,40}", version):
@@ -479,7 +815,7 @@ def about_update_version():
     <a class="btn btn-gray" href="/about">返回关于页</a>
 </div>
 """
-        return layout("更新失败", "about", body), 400
+        return layout("更新失败", "about", body)
 
     if not git_available():
         body = """
@@ -492,7 +828,7 @@ def about_update_version():
     <a class="btn btn-gray" href="/about">返回关于页</a>
 </div>
 """
-        return layout("更新失败", "about", body), 400
+        return layout("更新失败", "about", body)
 
     if not is_git_repo():
         body = f"""
@@ -505,78 +841,151 @@ def about_update_version():
     <a class="btn btn-gray" href="/about">返回关于页</a>
 </div>
 """
-        return layout("更新失败", "about", body), 400
+        return layout("更新失败", "about", body)
 
-    before_version = git_text(["rev-parse", "--short", "HEAD"], default="-")
+    job_id = start_about_job(
+        action="update-version",
+        title=f"更新版本 {version[:12]}",
+        target=update_version_worker,
+        args=(version,),
+    )
 
-    fetch_ok, fetch_out = run_git(["fetch", "--all", "--prune"], timeout=60)
-    checkout_ok, checkout_out = run_git(["checkout", version], timeout=60)
+    return redirect(
+        url_for(
+            "about.about_job_log",
+            job_id=job_id,
+            back="/about",
+        )
+    )
 
-    after_version = git_text(["rev-parse", "--short", "HEAD"], default="-")
 
-    restart_ok = False
-    restart_msg = ""
+@bp.route("/about/job-log/<job_id>")
+def about_job_log(job_id):
+    back_url = get_back_url("/about")
+    info = ABOUT_JOBS.get(job_id)
 
-    if checkout_ok:
-        restart_ok, restart_msg = schedule_restart()
-
-    ok = checkout_ok and restart_ok
-
-    if checkout_ok:
-        next_html = f"""
+    if not info:
+        body = f"""
 <div class="card">
-    <div class="card-title">更新成功，正在自动重启</div>
-    <div class="help" style="color:#18a058;font-weight:800;">
-        版本已更新：{h(before_version)} → {h(after_version)}<br>
-        {h(restart_msg)}<br>
-        面板会在几秒后自动重启，请稍后刷新页面。
+    <div class="card-title">后台任务日志</div>
+    <div class="help">
+        任务记录不存在或面板已重启。<br>
+        可以到日志管理中查找 about-*.log。
     </div>
     <br>
-    <a class="btn btn-primary" href="/about">稍后刷新</a>
-    <a class="btn btn-blue" href="/logfile/fls-manager-daemon.log?back=/about">查看面板日志</a>
-</div>
-
-<script>
-setTimeout(function(){{
-    location.href = "/about";
-}}, 8000);
-</script>
-"""
-    else:
-        next_html = f"""
-<div class="card">
-    <div class="card-title">更新失败</div>
-    <div class="help" style="color:#dc2626;font-weight:800;">
-        更新失败，请查看下方输出。
-    </div>
-    <br>
-    <a class="btn btn-gray" href="/about">返回关于页</a>
+    <a class="btn btn-gray" href="{h(back_url)}">返回</a>
+    <a class="btn btn-blue" href="/logs?back={h(back_url)}">查看日志管理</a>
 </div>
 """
+        return layout("后台任务日志", "about", body)
 
     body = f"""
 <div class="card">
-    <div class="card-title">版本更新结果</div>
+    <div class="card-title">后台任务日志：{h(info.get("title") or job_id)}</div>
     <div class="help">
-        目标版本：<code>{h(version)}</code><br>
-        更新前：<code>{h(before_version)}</code><br>
-        更新后：<code>{h(after_version)}</code><br>
-        代码更新：<b style="color:{'#18a058' if checkout_ok else '#dc2626'};">{"成功" if checkout_ok else "失败"}</b><br>
-        自动重启：<b style="color:{'#18a058' if restart_ok else '#dc2626'};">{"已提交" if restart_ok else (h(restart_msg or "未执行"))}</b>
+        状态：<b id="aboutJobStatus">{h(info.get("status") or "-")}</b><br>
+        日志文件：{h(info.get("log_file") or "-")}<br>
+        更新时间：<span id="aboutJobUpdatedAt">{h(info.get("updated_at") or "-")}</span>
     </div>
+    <br>
+    <a class="btn btn-gray" href="{h(back_url)}">返回关于页</a>
+    <a class="btn btn-blue" href="/logs?back={h(back_url)}">日志管理</a>
+    <a class="btn btn-orange" href="/logfile/fls-manager-daemon.log?back={h(back_url)}">面板日志</a>
 </div>
 
-{next_html}
+<pre class="log" id="log">加载中...</pre>
+{log_controls()}
 
-<div class="card">
-    <div class="card-title">刷新更新日志输出</div>
-    <pre class="log" style="min-height:180px;">{h(fetch_out or "无输出")}</pre>
-</div>
+<script>
+window.__FLS_LOG_LAST_TEXT__ = "";
+window.__FLS_LOG_NEAR_BOTTOM__ = true;
 
-<div class="card">
-    <div class="card-title">更新输出</div>
-    <pre class="log" style="min-height:220px;">{h(checkout_out or "无输出")}</pre>
-</div>
+function nearBottom(){{
+    return document.documentElement.scrollHeight - window.innerHeight - window.scrollY < 90;
+}}
+
+window.addEventListener("scroll", function(){{
+    window.__FLS_LOG_NEAR_BOTTOM__ = nearBottom();
+}}, {{passive:true}});
+
+async function loadAboutJobLog(){{
+    try {{
+        const beforeScroll = window.scrollY;
+        const beforeHeight = document.documentElement.scrollHeight;
+        const wasNearBottom = nearBottom();
+
+        const res = await fetch("/api/about/job-log/{h(job_id)}?lines=1600", {{cache:"no-store"}});
+        const json = await res.json();
+
+        document.getElementById("aboutJobStatus").textContent = json.status || "-";
+        document.getElementById("aboutJobUpdatedAt").textContent = json.updated_at || "-";
+
+        const text = json.log || "暂无日志";
+        const old = window.__FLS_LOG_LAST_TEXT__ || "";
+        const changed = text !== old;
+
+        var logEl = document.getElementById("log");
+
+        if(typeof flsRenderLogText === "function"){{
+            flsRenderLogText(logEl, text);
+        }}else{{
+            logEl.textContent = text;
+        }}
+
+        window.__FLS_LOG_LAST_TEXT__ = text;
+
+        if(changed){{
+            if(wasNearBottom || window.__FLS_LOG_NEAR_BOTTOM__){{
+                const tip = document.getElementById("flsLogNewTip");
+                if(tip) tip.style.display = "none";
+                window.scrollTo(0, document.documentElement.scrollHeight);
+            }}else{{
+                const afterHeight = document.documentElement.scrollHeight;
+                window.scrollTo(0, beforeScroll + Math.max(afterHeight - beforeHeight, 0));
+                const tip = document.getElementById("flsLogNewTip");
+                if(tip) tip.style.display = "block";
+            }}
+        }}
+
+        if(!json.running){{
+            clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
+            window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
+        }}
+    }} catch(e) {{
+        document.getElementById("log").textContent = "日志读取失败: " + e;
+    }}
+}}
+
+if(window.__FLS_ACTIVE_LOG_INTERVAL__) clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
+loadAboutJobLog();
+window.__FLS_ACTIVE_LOG_INTERVAL__ = setInterval(loadAboutJobLog, 2000);
+</script>
 """
 
-    return layout("版本更新结果", "about", body), 200 if ok else 500
+    return layout("后台任务日志", "about", body)
+
+
+@bp.route("/api/about/job-log/<job_id>")
+def api_about_job_log(job_id):
+    info = ABOUT_JOBS.get(job_id)
+
+    if not info:
+        return jsonify({
+            "running": False,
+            "status": "记录不存在或面板已重启",
+            "updated_at": "-",
+            "log": "任务记录不存在或面板已重启。请到日志管理中查找 about-*.log。",
+        })
+
+    log_file = info.get("log_file", "")
+    lines = int(request.args.get("lines", "1200") or 1200)
+
+    return jsonify({
+        "running": bool(info.get("running")),
+        "status": info.get("status") or "-",
+        "returncode": info.get("returncode"),
+        "error": info.get("error", ""),
+        "updated_at": info.get("updated_at", ""),
+        "log_file": log_file,
+        "log": tail_file(log_file, lines),
+    })
