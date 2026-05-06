@@ -3,25 +3,17 @@
 # fls-a.sh
 # KernelSU / Magisk / adb shell root 环境调用 Termux 中的 FLS
 #
-# 特点：
-# - 手动无参数只显示帮助
-# - service.d 无参数默认 start
-# - 如果 Termux 内没有 fls.sh，会自动 git clone 完整仓库
-# - start / stop / restart / status / update 有超时保护
-# - 不 exec fls.sh，避免控制脚本异常残留
-#
 # 用法：
 #   sh fls-a.sh start
-#   sh fls-a.sh start -p 5701 -t 123456
 #   sh fls-a.sh restart
 #   sh fls-a.sh stop
 #   sh fls-a.sh status
 #   sh fls-a.sh log
+#   sh fls-a.sh update
+#   sh fls-a.sh clone
+#   sh fls-a.sh bstart
+#   sh fls-a.sh rstart
 #
-
-# ============================================================
-# 默认配置
-# ============================================================
 
 TERMUX_PACKAGE="${TERMUX_PACKAGE:-com.termux}"
 
@@ -44,9 +36,8 @@ LOCK_DIR="${LOCK_DIR:-/data/adb/fls-a.lock}"
 BOOT_DEFAULT_CMD="${BOOT_DEFAULT_CMD:-start}"
 QUIET="${QUIET:-0}"
 
-# ============================================================
-# 基础函数
-# ============================================================
+SERVICE_D_DIR="${SERVICE_D_DIR:-/data/adb/service.d}"
+SERVICE_D_FILE="${SERVICE_D_FILE:-$SERVICE_D_DIR/fls-a.sh}"
 
 now_time() {
     date "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "unknown-time"
@@ -218,10 +209,6 @@ kill_child() {
     fi
 }
 
-# ============================================================
-# Termux 内执行命令辅助
-# ============================================================
-
 run_termux_cmd() {
     cmd_text="$1"
     shell_bin="$(termux_shell)"
@@ -325,10 +312,6 @@ ensure_fls_files() {
     chmod 755 "$FLS_SH" 2>/dev/null
 }
 
-# ============================================================
-# 执行 fls.sh
-# ============================================================
-
 run_fls_no_timeout() {
     cmd="$1"
     shift
@@ -393,6 +376,53 @@ run_fls_with_timeout() {
     exit "$code"
 }
 
+bstart_fls_a() {
+    if ! is_root; then
+        err "bstart 需要 root 权限"
+        err "请执行：su -c 'sh fls-a.sh bstart'"
+        exit 1
+    fi
+
+    mkdir -p "$SERVICE_D_DIR" 2>/dev/null || {
+        err "无法创建目录：$SERVICE_D_DIR"
+        exit 1
+    }
+
+    src="$0"
+
+    if [ -f "$src" ]; then
+        cp "$src" "$SERVICE_D_FILE" 2>/dev/null || {
+            err "复制自启脚本失败：$src -> $SERVICE_D_FILE"
+            exit 1
+        }
+    else
+        err "无法找到当前脚本文件：$src"
+        err "请把 fls-a.sh 保存为文件后再执行 bstart"
+        exit 1
+    fi
+
+    chmod 755 "$SERVICE_D_FILE" 2>/dev/null || true
+
+    say "已生成 KernelSU / Magisk 自启脚本：$SERVICE_D_FILE"
+    say "无参数开机默认执行：$BOOT_DEFAULT_CMD"
+
+    run_fls_with_timeout restart "$@"
+}
+
+rstart_fls_a() {
+    if ! is_root; then
+        err "rstart 需要 root 权限"
+        err "请执行：su -c 'sh fls-a.sh rstart'"
+        exit 1
+    fi
+
+    rm -f "$SERVICE_D_FILE" 2>/dev/null || true
+
+    say "已移除 KernelSU / Magisk 自启脚本：$SERVICE_D_FILE"
+
+    run_fls_with_timeout restart "$@"
+}
+
 usage() {
     cat <<EOF
 FLS-A
@@ -403,18 +433,19 @@ FLS-A
   restart [-p 端口] [-t Token] 重启
   status                       状态
   log                          日志
-  update                       更新
+  update                       git pull 更新
+  clone                        强制重新 clone
+  bstart                       生成 service.d 自启并重启
+  rstart                       移除 service.d 自启并重启
   ensure-repo                  检查/拉取程序
 
 示例：
   sh fls-a.sh start
   sh fls-a.sh restart -p 5701 -t 123456
+  su -c 'sh fls-a.sh bstart'
+  su -c 'sh /data/adb/service.d/fls-a.sh rstart'
 EOF
 }
-
-# ============================================================
-# 主流程
-# ============================================================
 
 if is_boot_script_path; then
     QUIET="${QUIET:-1}"
@@ -464,14 +495,19 @@ say "Termux HOME: $TERMUX_HOME"
 say "FLS 工作目录: $FLS_BASE_DIR"
 say "FLS 启动脚本: $FLS_SH"
 
-# 关键：这里会自动 git clone
 ensure_fls_files
 
 case "$cmd" in
     log|logs)
         run_fls_no_timeout "$cmd" "$@"
         ;;
-    start|stop|restart|status|update|upgrade|pull|ensure-repo|install)
+    bstart|boot-start|enable-autostart)
+        bstart_fls_a "$@"
+        ;;
+    rstart|remove-start|disable-autostart)
+        rstart_fls_a "$@"
+        ;;
+    start|stop|restart|status|update|upgrade|pull|clone|ensure-repo|install)
         run_fls_with_timeout "$cmd" "$@"
         ;;
     *)

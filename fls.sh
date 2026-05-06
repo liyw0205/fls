@@ -1,6 +1,6 @@
 #!/bin/sh
 # ============================================================
-# FLS Manager 启停脚本 - 模块化新版
+# FLS Manager 启停脚本
 #
 # 兼容：
 #   Termux / Linux
@@ -13,10 +13,10 @@
 #   sh fls.sh status
 #   sh fls.sh log
 #   sh fls.sh update
+#   sh fls.sh clone
+#   sh fls.sh bstart
+#   sh fls.sh rstart
 #   sh fls.sh ensure-repo
-#
-# 无参数：
-#   只显示帮助
 # ============================================================
 
 set -u
@@ -270,6 +270,47 @@ ensure_repo() {
   fi
 
   say "FLS 仓库已就绪：$BASE_DIR"
+}
+
+force_clone_repo() {
+  ensure_git
+
+  say "准备强制重新 clone FLS 仓库"
+  say "仓库地址：$REPO_URL"
+  say "分支：$REPO_BRANCH"
+  say "工作目录：$BASE_DIR"
+
+  tmp="${BASE_DIR}.reclone.$$"
+  rm -rf "$tmp" 2>/dev/null || true
+
+  git clone --depth 1 -b "$REPO_BRANCH" "$REPO_URL" "$tmp" || {
+    rm -rf "$tmp" 2>/dev/null || true
+    err "git clone 失败"
+    exit 1
+  }
+
+  mkdir -p "$BASE_DIR" 2>/dev/null || true
+
+  if command -v tar >/dev/null 2>&1; then
+    (
+      cd "$tmp" || exit 1
+      tar cf - .
+    ) | (
+      cd "$BASE_DIR" || exit 1
+      tar xf -
+    )
+  else
+    cp -R "$tmp"/. "$BASE_DIR"/
+  fi
+
+  rm -rf "$tmp" 2>/dev/null || true
+
+  if ! repo_ready; then
+    err "重新 clone 后程序仍不完整"
+    exit 1
+  fi
+
+  say "强制重新 clone 完成"
 }
 
 validate_python_files() {
@@ -630,6 +671,95 @@ update_repo() {
   say "如果面板正在运行，请执行：sh fls.sh restart"
 }
 
+bstart_fls() {
+  ensure_repo
+
+  if is_termux; then
+    boot_dir="$HOME/.termux/boot"
+    boot_file="$boot_dir/fls-start.sh"
+
+    mkdir -p "$boot_dir" 2>/dev/null || true
+
+    cat > "$boot_file" <<EOF
+#!/data/data/com.termux/files/usr/bin/sh
+cd "$BASE_DIR" || exit 1
+sh "$BASE_DIR/fls.sh" start
+EOF
+
+    chmod 755 "$boot_file" 2>/dev/null || true
+
+    say "已生成 Termux:Boot 自启脚本：$boot_file"
+    say "请确认已安装 Termux:Boot，并允许后台启动"
+
+    restart_fls "$@"
+    return 0
+  fi
+
+  if command -v systemctl >/dev/null 2>&1 && [ "$(id -u 2>/dev/null || echo 1)" = "0" ]; then
+    service_file="/etc/systemd/system/fls.service"
+
+    cat > "$service_file" <<EOF
+[Unit]
+Description=FLS Manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+WorkingDirectory=$BASE_DIR
+PIDFile=$PID_FILE
+ExecStart=/bin/sh $BASE_DIR/fls.sh start
+ExecStop=/bin/sh $BASE_DIR/fls.sh stop
+ExecReload=/bin/sh $BASE_DIR/fls.sh restart
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    chmod 644 "$service_file" 2>/dev/null || true
+    systemctl daemon-reload
+    systemctl enable fls.service
+    systemctl restart fls.service
+
+    say "已生成并启用 systemd 自启：$service_file"
+    say "已重启 FLS 服务"
+    return 0
+  fi
+
+  err "当前环境不支持自动生成 systemd 自启"
+  err "如果是 Linux，请使用 root 执行：sudo sh fls.sh bstart"
+  err "如果是 Termux，请安装 Termux:Boot"
+  exit 1
+}
+
+rstart_fls() {
+  if is_termux; then
+    boot_file="$HOME/.termux/boot/fls-start.sh"
+    rm -f "$boot_file" 2>/dev/null || true
+    say "已移除 Termux:Boot 自启脚本：$boot_file"
+
+    restart_fls "$@"
+    return 0
+  fi
+
+  if command -v systemctl >/dev/null 2>&1 && [ "$(id -u 2>/dev/null || echo 1)" = "0" ]; then
+    systemctl disable fls.service >/dev/null 2>&1 || true
+    systemctl stop fls.service >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/fls.service 2>/dev/null || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+
+    say "已移除 systemd 自启：fls.service"
+
+    restart_fls "$@"
+    return 0
+  fi
+
+  say "未检测到可移除的自启配置，直接重启 FLS"
+  restart_fls "$@"
+}
+
 usage() {
   cat <<EOF
 FLS Manager
@@ -640,12 +770,19 @@ FLS Manager
   restart [-p 端口] [-t Token] 重启
   status                       状态
   log                          日志
-  update                       更新
+  update                       git pull 更新
+  clone                        强制重新 clone 覆盖程序文件
+  bstart                       生成自启并重启
+  rstart                       移除自启并重启
   ensure-repo                  检查/拉取程序
 
 示例：
   sh fls.sh start
   sh fls.sh restart -p 5701 -t 123456
+  sh fls.sh update
+  sh fls.sh clone
+  sh fls.sh bstart
+  sh fls.sh rstart
 EOF
 }
 
@@ -670,6 +807,15 @@ case "$cmd" in
     ;;
   update|upgrade|pull)
     update_repo
+    ;;
+  clone)
+    force_clone_repo
+    ;;
+  bstart|boot-start|enable-autostart)
+    bstart_fls "$@"
+    ;;
+  rstart|remove-start|disable-autostart)
+    rstart_fls "$@"
     ;;
   ensure-repo|install)
     ensure_repo

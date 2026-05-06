@@ -123,7 +123,11 @@ function Clone-Repo-ToDir($Target) {
     }
 
     New-Item -ItemType Directory -Force -Path $Target | Out-Null
-    Copy-Item -Path (Join-Path $Tmp "*") -Destination $Target -Recurse -Force
+
+    Get-ChildItem -LiteralPath $Tmp -Force | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination $Target -Recurse -Force
+    }
+
     Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
 }
 
@@ -135,8 +139,19 @@ function Ensure-Repo {
     }
 
     Say "未检测到完整模块化 FLS 程序"
-    "Branch        {
-   not (Repo-Ready)) {
+    Say "仓库地址：$RepoUrl"
+    Say "分支：$RepoBranch"
+    Say "工作目录：$BaseDir"
+
+    try {
+        Clone-Repo-ToDir $BaseDir
+    } catch {
+        ErrMsg $_.Exception.Message
+        ErrMsg "请检查网络，或手动执行：git clone -b $RepoBranch $RepoUrl $BaseDir"
+        exit 1
+    }
+
+    if (-not (Repo-Ready)) {
         ErrMsg "仓库拉取完成，但未找到 fls-manager.py 或 fls_manager 目录"
         exit 1
     }
@@ -550,6 +565,93 @@ function Update-Repo {
     }
 }
 
+function Force-CloneRepo {
+    Ensure-Git
+
+    Say "准备强制重新 clone FLS 仓库"
+    Say "仓库地址：$RepoUrl"
+    Say "分支：$RepoBranch"
+    Say "工作目录：$BaseDir"
+
+    $Tmp = "$BaseDir.reclone.$PID"
+
+    if (Test-Path $Tmp) {
+        Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
+    }
+
+    git clone --depth 1 -b $RepoBranch $RepoUrl $Tmp
+    if ($LASTEXITCODE -ne 0) {
+        Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
+        ErrMsg "git clone 失败"
+        exit 1
+    }
+
+    New-Item -ItemType Directory -Force -Path $BaseDir | Out-Null
+
+    Get-ChildItem -LiteralPath $Tmp -Force | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination $BaseDir -Recurse -Force
+    }
+
+    Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
+
+    if (-not (Repo-Ready)) {
+        ErrMsg "重新 clone 后程序仍不完整"
+        exit 1
+    }
+
+    Say "强制重新 clone 完成"
+}
+
+function Enable-Autostart {
+    Ensure-Repo
+
+    $TaskName = "FLS Manager"
+    $PsFile = $ScriptPath
+
+    Say "准备创建 Windows 开机自启计划任务：$TaskName"
+
+    try {
+        $Action = New-ScheduledTaskAction `
+            -Execute "powershell.exe" `
+            -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$PsFile`" start"
+
+        $Trigger = New-ScheduledTaskTrigger -AtStartup
+
+        $Principal = New-ScheduledTaskPrincipal `
+            -UserId "$env:USERNAME" `
+            -LogonType Interactive `
+            -RunLevel Highest
+
+        Register-ScheduledTask `
+            -TaskName $TaskName `
+            -Action $Action `
+            -Trigger $Trigger `
+            -Principal $Principal `
+            -Force | Out-Null
+
+        Say "已创建 Windows 开机自启计划任务：$TaskName"
+    } catch {
+        ErrMsg "创建计划任务失败：$($_.Exception.Message)"
+        ErrMsg "请尝试用管理员权限运行 PowerShell"
+        exit 1
+    }
+
+    Restart-Fls @()
+}
+
+function Disable-AutostartAndRestart {
+    $TaskName = "FLS Manager"
+
+    try {
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+        Say "已移除 Windows 开机自启计划任务：$TaskName"
+    } catch {
+        Say "未找到或无法移除计划任务：$TaskName"
+    }
+
+    Restart-Fls @()
+}
+
 function Ensure-RepoCommand {
     Ensure-Repo
     Say "FLS 仓库已就绪：$BaseDir"
@@ -565,13 +667,20 @@ FLS Manager
   restart [-p 端口] [-t Token] 重启
   status                       状态
   log                          日志
-  update                       更新
+  update                       git pull 更新
+  clone                        强制重新 clone
+  bstart                       生成自启并重启
+  rstart                       移除自启并重启
   ensure-repo                  检查/拉取程序
   menu                         主页菜单
 
 示例：
   .\fls.ps1 start
   .\fls.ps1 restart -p 5701 -t 123456
+  .\fls.ps1 update
+  .\fls.ps1 clone
+  .\fls.ps1 bstart
+  .\fls.ps1 rstart
 "@ | Write-Host
 }
 
@@ -588,6 +697,9 @@ function Show-Menu {
         Write-Host "5. 查看实时日志"
         Write-Host "6. 更新程序"
         Write-Host "7. 检查/拉取程序"
+        Write-Host "8. 强制重新 clone"
+        Write-Host "9. 生成自启并重启"
+        Write-Host "10. 移除自启并重启"
         Write-Host "0. 退出"
         Write-Host "===================================================="
 
@@ -601,6 +713,9 @@ function Show-Menu {
             "5" { Tail-Log }
             "6" { Update-Repo }
             "7" { Ensure-RepoCommand }
+            "8" { Force-CloneRepo }
+            "9" { Enable-Autostart }
+            "10" { Disable-AutostartAndRestart }
             "0" { break }
             default { Write-Host "无效选择" }
         }
@@ -634,6 +749,27 @@ switch ($Cmd.ToLower()) {
     }
     "pull" {
         Update-Repo
+    }
+    "clone" {
+        Force-CloneRepo
+    }
+    "bstart" {
+        Enable-Autostart
+    }
+    "boot-start" {
+        Enable-Autostart
+    }
+    "enable-autostart" {
+        Enable-Autostart
+    }
+    "rstart" {
+        Disable-AutostartAndRestart
+    }
+    "remove-start" {
+        Disable-AutostartAndRestart
+    }
+    "disable-autostart" {
+        Disable-AutostartAndRestart
     }
     "ensure-repo" {
         Ensure-RepoCommand
