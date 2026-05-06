@@ -3,7 +3,7 @@ import re
 import json
 import uuid
 import time
-import html
+import signal
 import shutil
 import threading
 import subprocess
@@ -34,6 +34,7 @@ DEFAULT_ONLINE_SCRIPT_SOURCE = "https://cdn.jsdelivr.net/gh/liyw0205/fls-scripts
 ONLINE_SCRIPT_CACHE_FILE = DATA_DIR / "online_scripts_cache.json"
 
 ONLINE_INSTALL_RUNNING = {}
+ONLINE_INSTALL_STOPPING = set()
 
 ONLINE_REFRESH_STATE = {
     "running": False,
@@ -59,6 +60,55 @@ def online_script_task_crons(item):
         return [x for x in task_cron if isinstance(x, dict)]
 
     return []
+
+
+def online_task_cron_vars(task_cron):
+    raw = None
+
+    if isinstance(task_cron, dict):
+        if "var" in task_cron:
+            raw = task_cron.get("var")
+        elif "vars" in task_cron:
+            raw = task_cron.get("vars")
+        elif "env" in task_cron:
+            raw = task_cron.get("env")
+
+    env = {}
+
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            key = str(k or "").strip()
+            if key:
+                env[key] = "" if v is None else str(v)
+        return env
+
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, dict):
+                for k, v in item.items():
+                    key = str(k or "").strip()
+                    if key:
+                        env[key] = "" if v is None else str(v)
+                continue
+
+            text = str(item or "").strip()
+            if not text:
+                continue
+
+            if ":" in text:
+                key, value = text.split(":", 1)
+            elif "=" in text:
+                key, value = text.split("=", 1)
+            else:
+                continue
+
+            key = key.strip()
+            value = value.strip()
+
+            if key:
+                env[key] = value
+
+    return env
 
 
 def normalize_online_scripts(data):
@@ -197,6 +247,89 @@ def append_log(log_file, text):
         pass
 
 
+def get_running_install_by_script_id(script_id):
+    script_id = str(script_id or "")
+
+    for install_id, info in ONLINE_INSTALL_RUNNING.items():
+        if info.get("script_id") == script_id and info.get("running"):
+            return install_id, info
+
+    return "", None
+
+
+def online_install_should_stop(install_id):
+    return install_id in ONLINE_INSTALL_STOPPING
+
+
+def terminate_install_process(proc):
+    if not proc:
+        return
+
+    try:
+        if proc.poll() is not None:
+            return
+
+        if os.name == "nt":
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+
+            time.sleep(1)
+
+            if proc.poll() is None:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        else:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except Exception:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+
+            time.sleep(1)
+
+            if proc.poll() is None:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+
+def request_stop_online_install(install_id):
+    info = ONLINE_INSTALL_RUNNING.get(install_id)
+
+    if not info:
+        return False, "安装记录不存在或面板已重启"
+
+    if not info.get("running"):
+        return False, "安装任务已结束"
+
+    ONLINE_INSTALL_STOPPING.add(install_id)
+    info["status"] = "停止中"
+    info["error"] = "用户请求停止安装"
+
+    proc = info.get("process")
+    if proc:
+        terminate_install_process(proc)
+
+    log_file = info.get("log_file")
+    if log_file:
+        append_log(log_file, "")
+        append_log(log_file, f"===== 用户请求停止安装: {now_str()} =====")
+
+    return True, "已请求停止安装"
+
+
 def refresh_worker(proxy_id=""):
     refresh_id = uuid.uuid4().hex
     log_file = online_refresh_log_file(refresh_id)
@@ -283,7 +416,7 @@ def guess_task_command(item):
     return ""
 
 
-def import_task_if_needed(item, log_file=None):
+def import_task_if_needed(item, log_file=None, enable_task=False):
     task_crons = online_script_task_crons(item)
 
     if not task_crons:
@@ -303,6 +436,7 @@ def import_task_if_needed(item, log_file=None):
         name = str(task_cron.get("name") or item.get("name") or "").strip()
         cron_expr = str(task_cron.get("cron") or "").strip()
         command = str(task_cron.get("command") or "").strip() or guess_task_command(item)
+        task_env = online_task_cron_vars(task_cron)
 
         if not name:
             msg = f"第 {idx} 个任务 task_cron.name 为空，跳过"
@@ -357,8 +491,8 @@ def import_task_if_needed(item, log_file=None):
             "remark": f"从在线脚本导入：{item.get('name')}",
             "command": command,
             "cron": cron_expr,
-            "enabled": False,
-            "env": {},
+            "enabled": bool(enable_task),
+            "env": task_env,
             "proxy_id": "",
             "notify": {"mode": "default", "ids": []},
             "random_delay": {"mode": "none", "seconds": 0},
@@ -372,8 +506,11 @@ def import_task_if_needed(item, log_file=None):
         tasks.append(task)
         imported += 1
 
-        msg = f"任务已导入：{name} / {cron_expr or '手动'} / {command}"
+        env_msg = f" / 变量 {len(task_env)} 个" if task_env else ""
+        status_msg = "启用" if enable_task else "禁用"
+        msg = f"任务已导入：{name} / {cron_expr or '手动'} / {command} / {status_msg}{env_msg}"
         messages.append(msg)
+
         if log_file:
             append_log(log_file, msg)
 
@@ -393,22 +530,49 @@ def command_list_to_text(cmd):
     return " ".join(str(x) for x in cmd)
 
 
-def run_logged_command(cmd, cwd, log_file, env=None, shell=False):
+def run_logged_command(cmd, cwd, log_file, env=None, shell=False, install_id=""):
     append_log(log_file, "")
     append_log(log_file, f"$ {cmd if isinstance(cmd, str) else command_list_to_text(cmd)}")
     append_log(log_file, f"cwd: {cwd}")
     append_log(log_file, "------------------------------------------------------------")
 
     with open(log_file, "ab", buffering=0) as log_fp:
+        popen_kwargs = {
+            "stdout": log_fp,
+            "stderr": subprocess.STDOUT,
+            "cwd": str(cwd),
+            "env": env or os.environ.copy(),
+            "shell": shell,
+        }
+
+        if os.name != "nt":
+            popen_kwargs["preexec_fn"] = os.setsid
+
         proc = subprocess.Popen(
             cmd,
-            stdout=log_fp,
-            stderr=subprocess.STDOUT,
-            cwd=str(cwd),
-            env=env or os.environ.copy(),
-            shell=shell,
+            **popen_kwargs,
         )
-        return_code = proc.wait()
+
+        if install_id and install_id in ONLINE_INSTALL_RUNNING:
+            ONLINE_INSTALL_RUNNING[install_id]["process"] = proc
+
+        while proc.poll() is None:
+            if install_id and online_install_should_stop(install_id):
+                append_log(log_file, "")
+                append_log(log_file, "===== 检测到停止请求，正在结束当前安装命令 =====")
+                terminate_install_process(proc)
+
+                if install_id in ONLINE_INSTALL_RUNNING:
+                    ONLINE_INSTALL_RUNNING[install_id]["process"] = None
+
+                raise RuntimeError("安装已停止")
+
+            time.sleep(0.5)
+
+        return_code = proc.returncode
+
+        if install_id and install_id in ONLINE_INSTALL_RUNNING:
+            ONLINE_INSTALL_RUNNING[install_id]["process"] = None
 
     append_log(log_file, "------------------------------------------------------------")
     append_log(log_file, f"命令结束，退出码：{return_code}")
@@ -417,7 +581,7 @@ def run_logged_command(cmd, cwd, log_file, env=None, shell=False):
         raise RuntimeError(f"命令执行失败，退出码：{return_code}")
 
 
-def download_online_script_logged(item, proxy_id, log_file, force=False):
+def download_online_script_logged(item, proxy_id, log_file, force=False, install_id=""):
     SCRIPT_DIR.mkdir(parents=True, exist_ok=True)
 
     script_type = item.get("type")
@@ -432,6 +596,9 @@ def download_online_script_logged(item, proxy_id, log_file, force=False):
     append_log(log_file, f"代理ID: {proxy_id or '不使用代理'}")
     append_log(log_file, f"允许覆盖/更新: {'是' if force else '否'}")
     append_log(log_file, "============================================================")
+
+    if install_id and online_install_should_stop(install_id):
+        raise RuntimeError("安装已停止")
 
     if target.exists() and not force:
         raise FileExistsError(f"目标已存在，为避免意外覆盖已停止：{target}")
@@ -462,6 +629,11 @@ def download_online_script_logged(item, proxy_id, log_file, force=False):
 
         with open(target, "wb") as f:
             for chunk in r.iter_content(chunk_size=1024 * 128):
+                if install_id and online_install_should_stop(install_id):
+                    append_log(log_file, "")
+                    append_log(log_file, "===== 检测到停止请求，已中断文件下载 =====")
+                    raise RuntimeError("安装已停止")
+
                 if chunk:
                     f.write(chunk)
 
@@ -508,6 +680,7 @@ def download_online_script_logged(item, proxy_id, log_file, force=False):
                 log_file=log_file,
                 env=env,
                 shell=False,
+                install_id=install_id,
             )
         else:
             append_log(log_file, "目标目录不存在，执行 git clone")
@@ -530,6 +703,7 @@ def download_online_script_logged(item, proxy_id, log_file, force=False):
                 log_file=log_file,
                 env=env,
                 shell=False,
+                install_id=install_id,
             )
 
         append_log(log_file, f"仓库拉取/更新完成：{target}")
@@ -538,7 +712,7 @@ def download_online_script_logged(item, proxy_id, log_file, force=False):
     raise RuntimeError("未知脚本类型")
 
 
-def install_worker(install_id, item, proxy_id="", import_task=False, force=False):
+def install_worker(install_id, item, proxy_id="", import_task=False, force=False, enable_task=False):
     log_file = ONLINE_INSTALL_RUNNING[install_id]["log_file"]
 
     ONLINE_INSTALL_RUNNING[install_id]["running"] = True
@@ -555,6 +729,7 @@ def install_worker(install_id, item, proxy_id="", import_task=False, force=False
     append_log(log_file, f"脚本目录: {SCRIPT_DIR}")
     append_log(log_file, f"代理ID: {proxy_id or '不使用代理'}")
     append_log(log_file, f"导入任务: {'是' if import_task else '否'}")
+    append_log(log_file, f"导入后启用任务: {'是' if enable_task else '否'}")
     append_log(log_file, f"允许覆盖/更新: {'是' if force else '否'}")
     append_log(log_file, "============================================================")
 
@@ -564,12 +739,19 @@ def install_worker(install_id, item, proxy_id="", import_task=False, force=False
             proxy_id=proxy_id,
             log_file=log_file,
             force=force,
+            install_id=install_id,
         )
+
+        if online_install_should_stop(install_id):
+            raise RuntimeError("安装已停止")
 
         if import_task:
             append_log(log_file, "")
             append_log(log_file, "===== 导入任务 =====")
-            import_task_if_needed(item, log_file=log_file)
+            import_task_if_needed(item, log_file=log_file, enable_task=enable_task)
+
+        if online_install_should_stop(install_id):
+            raise RuntimeError("安装已停止")
 
         install_cmd = str(item.get("install") or "").strip()
 
@@ -588,6 +770,7 @@ def install_worker(install_id, item, proxy_id="", import_task=False, force=False
                 log_file=log_file,
                 env=env,
                 shell=False,
+                install_id=install_id,
             )
         else:
             append_log(log_file, "")
@@ -596,19 +779,33 @@ def install_worker(install_id, item, proxy_id="", import_task=False, force=False
         ONLINE_INSTALL_RUNNING[install_id]["running"] = False
         ONLINE_INSTALL_RUNNING[install_id]["status"] = "已完成"
         ONLINE_INSTALL_RUNNING[install_id]["returncode"] = 0
+        ONLINE_INSTALL_RUNNING[install_id]["process"] = None
 
         append_log(log_file, "")
         append_log(log_file, f"===== 全部完成: {now_str()} =====")
 
     except Exception as e:
+        stopped = online_install_should_stop(install_id) or str(e) == "安装已停止"
+
         ONLINE_INSTALL_RUNNING[install_id]["running"] = False
-        ONLINE_INSTALL_RUNNING[install_id]["status"] = "失败"
-        ONLINE_INSTALL_RUNNING[install_id]["returncode"] = 1
+        ONLINE_INSTALL_RUNNING[install_id]["status"] = "已停止" if stopped else "失败"
+        ONLINE_INSTALL_RUNNING[install_id]["returncode"] = -1 if stopped else 1
         ONLINE_INSTALL_RUNNING[install_id]["error"] = str(e)
+        ONLINE_INSTALL_RUNNING[install_id]["process"] = None
 
         append_log(log_file, "")
-        append_log(log_file, f"===== 失败: {now_str()} =====")
-        append_log(log_file, f"错误: {e}")
+
+        if stopped:
+            append_log(log_file, f"===== 已停止: {now_str()} =====")
+        else:
+            append_log(log_file, f"===== 失败: {now_str()} =====")
+            append_log(log_file, f"错误: {e}")
+
+    finally:
+        ONLINE_INSTALL_STOPPING.discard(install_id)
+
+        if install_id in ONLINE_INSTALL_RUNNING:
+            ONLINE_INSTALL_RUNNING[install_id]["process"] = None
 
 
 def script_has_task(item):
@@ -621,6 +818,15 @@ def script_has_install(item):
 
 def script_has_doc(item):
     return bool(str(item.get("doc_link") or "").strip())
+
+
+def task_vars_summary(task_crons):
+    total = 0
+
+    for tc in task_crons:
+        total += len(online_task_cron_vars(tc))
+
+    return total
 
 
 def render_online_script_rows(items):
@@ -638,10 +844,12 @@ def render_online_script_rows(items):
     cards = ""
 
     for item in items:
+        item_id = item.get("id")
         task_crons = online_script_task_crons(item)
         has_task = script_has_task(item)
         has_install = script_has_install(item)
         has_doc = script_has_doc(item)
+        vars_count = task_vars_summary(task_crons)
 
         target = "-"
         exists = False
@@ -658,30 +866,97 @@ def render_online_script_rows(items):
         task_badge = f'<span class="badge blue">可导入 {len(task_crons)} 个任务</span>' if has_task else '<span class="badge gray">无任务</span>'
         install_badge = '<span class="badge orange">有安装命令</span>' if has_install else '<span class="badge gray">无安装命令</span>'
         doc_badge = '<span class="badge blue">有文档</span>' if has_doc else '<span class="badge gray">无文档</span>'
+        var_badge = f'<span class="badge orange">预设变量 {vars_count} 个</span>' if vars_count else '<span class="badge gray">无预设变量</span>'
 
         cron_text = "-"
         command_text = "-"
+        vars_text = "-"
 
         if task_crons:
             cron_parts = []
             command_parts = []
+            var_parts = []
 
             for idx, tc in enumerate(task_crons, 1):
                 tname = str(tc.get("name") or f"任务{idx}").strip()
                 tcron = str(tc.get("cron") or "手动").strip()
                 tcmd = str(tc.get("command") or guess_task_command(item) or "-").strip()
+                tenv = online_task_cron_vars(tc)
 
                 cron_parts.append(f"{tname}：{tcron}")
                 command_parts.append(f"{tname}：{tcmd}")
 
+                if tenv:
+                    kv = "，".join([f"{k}={v}" for k, v in tenv.items()])
+                    var_parts.append(f"{tname}：{kv}")
+
             cron_text = "\n".join(cron_parts)
             command_text = "\n".join(command_parts)
+            vars_text = "\n".join(var_parts) if var_parts else "-"
 
         proxy_options = proxy_select_options("")
 
         doc_btn = ""
         if has_doc:
-            doc_btn = f'<a class="btn btn-orange" href="/online-scripts/doc/{h(item.get("id"))}">查看文档</a>'
+            doc_btn = f'<a class="btn btn-orange" href="/online-scripts/doc/{h(item_id)}">查看文档</a>'
+
+        running_install_id, running_install_info = get_running_install_by_script_id(item_id)
+
+        if running_install_id:
+            install_action_html = f"""
+<form method="post" action="/online-scripts/install-stop/{h(running_install_id)}">
+    <div class="help" style="margin-bottom:10px;color:#f59e0b;font-weight:800;">
+        当前脚本正在安装，状态：{h((running_install_info or {}).get("status") or "运行中")}
+    </div>
+
+    <div class="fls-btn-line">
+        <a class="btn btn-blue" href="{h(item.get("link"))}" target="_blank">查看源</a>
+        {doc_btn}
+        <a class="btn btn-orange" href="/online-scripts/log/{h(running_install_id)}">查看日志</a>
+        <button class="btn btn-red" type="submit" onclick="return confirm('确定停止该安装任务吗？')">停止安装</button>
+    </div>
+</form>
+"""
+        else:
+            install_action_html = f"""
+<form method="post" action="/online-scripts/install/{h(item_id)}">
+    <div class="fls-action-line">
+        <select name="proxy_id">{proxy_options}</select>
+
+        <div class="fls-check-group">
+            <label class="fls-inline-check">
+                <input type="checkbox" name="import_task" value="1" {"checked" if has_task else ""} {"disabled" if not has_task else ""} style="width:auto;">
+                导入任务
+            </label>
+
+            <label class="fls-inline-check">
+                <input type="checkbox" name="enable_task" value="1" {"disabled" if not has_task else ""} style="width:auto;">
+                启用任务
+            </label>
+        </div>
+    </div>
+
+    <div class="help" style="margin:6px 0 10px;">
+        提示：不勾选“启用任务”时，导入后的任务默认为禁用，需要到任务管理中手动启用。
+    </div>
+
+    <div class="fls-btn-line">
+        <a class="btn btn-blue" href="{h(item.get("link"))}" target="_blank">查看源</a>
+        {doc_btn}
+        <button class="btn btn-primary" type="submit">下载安装</button>
+    </div>
+</form>
+"""
+
+        doc_section = ""
+        if has_doc:
+            doc_section = (
+                "<div class='fls-card-section'>"
+                "<div class='fls-info-label'>文档地址</div>"
+                "<div class='fls-info-value'>"
+                f"<a href='{h(item.get('doc_link'))}' target='_blank'>{h(item.get('doc_link'))}</a>"
+                "</div></div>"
+            )
 
         cards += f"""
 <details class="fls-fold-card">
@@ -690,7 +965,7 @@ def render_online_script_rows(items):
             <div class="fls-card-main">
                 <div class="fls-card-title-main">{h(item.get("name"))}</div>
                 <div class="fls-card-sub">
-                    ID：{h(item.get("id"))}<br>
+                    ID：{h(item_id)}<br>
                     保存名：{h(item.get("link_name"))}
                 </div>
             </div>
@@ -727,18 +1002,24 @@ def render_online_script_rows(items):
             </div>
 
             <div class="fls-info-item">
+                <div class="fls-info-label">预设任务变量</div>
+                <div class="fls-info-value">
+                    {var_badge}
+                    <pre style="margin:6px 0 0;white-space:pre-wrap;word-break:break-word;background:transparent;padding:0;font-family:inherit;font-size:12px;color:#6b7280;">{h(vars_text)}</pre>
+                </div>
+            </div>
+
+            <div class="fls-info-item">
                 <div class="fls-info-label">任务命令</div>
                 <pre class="fls-info-value code-like" style="margin:0;white-space:pre-wrap;">{h(command_text)}</pre>
             </div>
 
             <div class="fls-info-item">
-                <div class="fls-info-label">创建时间</div>
-                <div class="fls-info-value">{h(item.get("created_at", "-"))}</div>
-            </div>
-
-            <div class="fls-info-item">
-                <div class="fls-info-label">更新时间</div>
-                <div class="fls-info-value">{h(item.get("updated_at", "-"))}</div>
+                <div class="fls-info-label">创建 / 更新</div>
+                <div class="fls-info-value">
+                    {h(item.get("created_at", "-"))}<br>
+                    {h(item.get("updated_at", "-"))}
+                </div>
             </div>
         </div>
 
@@ -749,25 +1030,10 @@ def render_online_script_rows(items):
             </div>
         </div>
 
-        {"<div class='fls-card-section'><div class='fls-info-label'>文档地址</div><div class='fls-info-value'><a href='" + h(item.get("doc_link")) + "' target='_blank'>" + h(item.get("doc_link")) + "</a></div></div>" if has_doc else ""}
+        {doc_section}
 
         <div class="fls-card-actions">
-            <form method="post" action="/online-scripts/install/{h(item.get("id"))}">
-                <div class="fls-action-line">
-                    <select name="proxy_id">{proxy_options}</select>
-
-                    <label class="fls-inline-check">
-                        <input type="checkbox" name="import_task" value="1" {"checked" if has_task else ""} {"disabled" if not has_task else ""} style="width:auto;">
-                        导入任务
-                    </label>
-                </div>
-
-                <div class="fls-btn-line">
-                    <a class="btn btn-blue" href="{h(item.get("link"))}" target="_blank">查看源</a>
-                    {doc_btn}
-                    <button class="btn btn-primary" type="submit">下载安装</button>
-                </div>
-            </form>
+            {install_action_html}
         </div>
     </div>
 </details>
@@ -778,14 +1044,12 @@ def render_online_script_rows(items):
 
 def markdown_inline(text):
     text = h(text)
-
     text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
     text = re.sub(r"!\[([^\]]*)\]\((https?://[^)]+)\)", r'<img alt="\1" src="\2" style="max-width:100%;border-radius:10px;margin:8px 0;">', text)
     text = re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", r'<a href="\2" target="_blank">\1</a>', text)
     text = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", text)
     text = re.sub(r"__([^_]+)__", r"<strong>\1</strong>", text)
     text = re.sub(r"\*([^*]+)\*", r"<em>\1</em>", text)
-
     return text
 
 
@@ -801,9 +1065,11 @@ def render_markdown_to_html(text):
 
     def close_lists():
         nonlocal in_ul, in_ol
+
         if in_ul:
             out.append("</ul>")
             in_ul = False
+
         if in_ol:
             out.append("</ol>")
             in_ol = False
@@ -894,6 +1160,7 @@ def doc_url_looks_markdown(url):
 def doc_content_looks_markdown(text):
     text = str(text or "")
     sample = text[:4000]
+
     patterns = [
         r"^#\s+",
         r"^##\s+",
@@ -902,25 +1169,31 @@ def doc_content_looks_markdown(text):
         r"^\s*\d+\.\s+",
         r"\[[^\]]+\]\(https?://",
     ]
+
     for p in patterns:
         if re.search(p, sample, re.M):
             return True
+
     return False
 
 
 def doc_response_is_html(resp, text):
     ctype = str(resp.headers.get("Content-Type", "") or "").lower()
+
     if "text/html" in ctype:
         return True
 
     s = str(text or "").lstrip().lower()
+
     return s.startswith("<!doctype html") or s.startswith("<html") or "<body" in s[:1000]
 
 
 def doc_response_is_text(resp):
     ctype = str(resp.headers.get("Content-Type", "") or "").lower()
+
     if not ctype:
         return True
+
     return (
         "text/" in ctype
         or "json" in ctype
@@ -965,7 +1238,8 @@ def online_scripts_page():
             <div class="help">
                 默认读取本地缓存，不会因为脚本源网络问题卡住。<br>
                 点击“刷新远程脚本源”后会后台拉取，页面不会变白，也不影响其它操作。<br>
-                脚本源支持 <code>doc_link</code> 字段，可在面板内查看 Markdown 文档或网页文档。
+                脚本源支持 <code>doc_link</code> 字段，可在面板内查看 Markdown 文档或网页文档。<br>
+                <code>task_cron.var</code> 可预设任务变量，导入任务时会自动写入任务变量。
             </div>
             <div class="fls-source-code">{h(source)}</div>
         </div>
@@ -1107,7 +1381,7 @@ def online_script_doc(script_id):
     doc_link = str(item.get("doc_link") or "").strip()
 
     if not doc_link:
-        body = f"""
+        body = """
 <div class="card">
     <div class="card-title">脚本文档</div>
     <div class="help">该脚本未提供 doc_link。</div>
@@ -1473,7 +1747,8 @@ def online_scripts_source():
         这里显示当前本地缓存的脚本源 JSON。<br>
         如果服务器无法访问远程源，可以手动复制远程 index.json 内容，粘贴到这里保存。<br>
         保存后“在线脚本”列表会直接使用这份缓存。<br>
-        支持字段：<code>doc_link</code>，可用于在线脚本页面查看文档。
+        支持字段：<code>doc_link</code>，可用于在线脚本页面查看文档。<br>
+        支持字段：<code>task_cron.var</code>，可预设任务变量。
     </div>
     <br>
     <a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>
@@ -1504,9 +1779,22 @@ def online_scripts_install(script_id):
     if not item:
         abort(404)
 
+    running_install_id, _ = get_running_install_by_script_id(script_id)
+    if running_install_id:
+        return redirect(
+            url_for(
+                "online_scripts.online_scripts_page",
+                msg="该脚本正在安装中",
+            )
+        )
+
     proxy_id = request.form.get("proxy_id", "").strip()
     import_task = request.form.get("import_task") == "1"
+    enable_task = request.form.get("enable_task") == "1"
     force = request.form.get("force") == "1"
+
+    if not import_task:
+        enable_task = False
 
     try:
         target = online_script_target(item)
@@ -1550,12 +1838,23 @@ def online_scripts_install(script_id):
 
         <br>
 
-        <label>
-            <input type="checkbox" name="import_task" value="1" {"checked" if import_task and has_task else ""} {"disabled" if not has_task else ""} style="width:auto;">
-            导入任务
-        </label>
+        <div class="fls-check-group">
+            <label class="fls-inline-check">
+                <input type="checkbox" name="import_task" value="1" {"checked" if import_task and has_task else ""} {"disabled" if not has_task else ""} style="width:auto;">
+                导入任务
+            </label>
 
-        <br><br>
+            <label class="fls-inline-check">
+                <input type="checkbox" name="enable_task" value="1" {"checked" if enable_task and has_task else ""} {"disabled" if not has_task else ""} style="width:auto;">
+                启用任务
+            </label>
+        </div>
+
+        <div class="help" style="margin-top:8px;">
+            提示：不勾选“启用任务”时，导入后的任务默认为禁用。
+        </div>
+
+        <br>
 
         <button class="btn btn-orange" type="submit" onclick="return confirm('确定继续吗？可能会覆盖文件或更新仓库。')">确认继续</button>
         <a class="btn btn-gray" href="/online-scripts">取消</a>
@@ -1577,17 +1876,31 @@ def online_scripts_install(script_id):
         "start_time": time.time(),
         "returncode": None,
         "error": "",
+        "process": None,
     }
 
     th = threading.Thread(
         target=install_worker,
-        args=(install_id, dict(item), proxy_id, import_task, force),
+        args=(install_id, dict(item), proxy_id, import_task, force, enable_task),
         daemon=True,
         name=f"fls-online-install-{install_id[:8]}",
     )
     th.start()
 
     return redirect(url_for("online_scripts.online_install_log", install_id=install_id))
+
+
+@bp.route("/online-scripts/install-stop/<install_id>", methods=["POST"])
+def online_scripts_install_stop(install_id):
+    ok, msg = request_stop_online_install(install_id)
+
+    return redirect(
+        url_for(
+            "online_scripts.online_scripts_page",
+            msg=msg if ok else "",
+            err="" if ok else msg,
+        )
+    )
 
 
 @bp.route("/online-scripts/log/<install_id>")
@@ -1609,6 +1922,15 @@ def online_install_log(install_id):
 """
         return layout("在线脚本日志", "online_scripts", body)
 
+    stop_install_button = ""
+
+    if info.get("running"):
+        stop_install_button = f"""
+<form method="post" action="/online-scripts/install-stop/{h(install_id)}" style="display:inline;">
+    <button class="btn btn-red" type="submit" onclick="return confirm('确定停止该安装任务吗？')">停止安装</button>
+</form>
+"""
+
     body = f"""
 <div class="card">
     <div class="card-title">在线脚本下载安装日志：{h(info.get("script_name") or install_id)}</div>
@@ -1620,6 +1942,7 @@ def online_install_log(install_id):
     <a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>
     <a class="btn btn-blue" href="/pull">脚本管理</a>
     <a class="btn btn-orange" href="/tasks">任务管理</a>
+    {stop_install_button}
 </div>
 
 <pre class="log" id="log">加载中...</pre>

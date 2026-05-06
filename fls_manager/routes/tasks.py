@@ -35,8 +35,8 @@ def task_env_rows(env):
     env = env or {}
     rows = ""
 
-    for key in sorted(env.keys()):
-        value = str(env.get(key, ""))
+    for key, value in env.items():
+        value = str(value)
 
         rows += f"""
 <tr>
