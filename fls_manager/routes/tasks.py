@@ -1,8 +1,10 @@
+import os
 import uuid
+from pathlib import Path
 from flask import Blueprint, request, redirect, url_for, abort, Response
 
 from ..models import load_tasks, save_tasks, get_task
-from ..utils import h, now_str
+from ..utils import h, now_str, get_back_url
 from ..ui.layout import layout
 from ..ui.log_controls import log_controls
 from ..ui.tables import tasks_table
@@ -12,10 +14,35 @@ from ..logs import latest_log_for_task, tail_file
 from ..state import RUNNING
 from ..proxy import proxy_select_options
 from ..notify import notify_select_options
+from ..paths import SCRIPT_DIR
 
 bp = Blueprint("tasks", __name__)
 
+def task_config_safe_path(rel_path):
+    """
+    任务配置文件安全路径。
 
+    只允许编辑 scripts 目录下的文件，例如：
+      checkbox/config.yml
+      kgcheckin/config.json
+
+    不允许：
+      /etc/passwd
+      ../../xxx
+    """
+    rel_path = str(rel_path or "").strip().lstrip("/")
+
+    if not rel_path:
+        raise ValueError("配置文件路径为空")
+
+    target = (SCRIPT_DIR / rel_path).resolve()
+    base = SCRIPT_DIR.resolve()
+
+    if target != base and not str(target).startswith(str(base) + os.sep):
+        raise ValueError("配置文件路径非法")
+
+    return target
+    
 def parse_task_env_from_form():
     keys = request.form.getlist("env_key")
     values = request.form.getlist("env_value")
@@ -146,6 +173,7 @@ def task_form(task=None):
             "remark": "",
             "command": "task ",
             "cron": "",
+            "config_path": "",
             "enabled": True,
             "env": {},
             "proxy_id": "",
@@ -209,6 +237,17 @@ def task_form(task=None):
         <div class="help">
             单行运行脚本可以写：<code>task 1.py</code><br>
             如果要写多行命令，请不要以 <code>task</code> 开头，直接写 Shell 命令即可。
+        </div>
+    </div>
+
+    <br>
+
+    <div class="form-item">
+        <label>配置文件路径，可空</label>
+        <input name="config_path" value="{h(task.get('config_path', ''))}" placeholder="例如：checkbox/config.yml">
+        <div class="help">
+            相对于 scripts 目录。填写后任务列表会显示“配置”按钮。<br>
+            例如：<code>checkbox/config.yml</code> 对应 <code>{h(str(SCRIPT_DIR / 'checkbox/config.yml'))}</code>
         </div>
     </div>
 
@@ -429,6 +468,7 @@ def task_new():
             "remark": request.form.get("remark", "").strip(),
             "command": command,
             "cron": cron_expr,
+            "config_path": request.form.get("config_path", "").strip(),
             "enabled": request.form.get("enabled") == "1",
             "env": parse_task_env_from_form(),
             "proxy_id": request.form.get("proxy_id", "").strip(),
@@ -479,6 +519,7 @@ def task_edit(task_id):
         task["remark"] = request.form.get("remark", "").strip()
         task["command"] = command
         task["cron"] = cron_expr
+        task["config_path"] = request.form.get("config_path", "").strip()
         task["enabled"] = request.form.get("enabled") == "1"
         task["env"] = parse_task_env_from_form()
         task["proxy_id"] = request.form.get("proxy_id", "").strip()
@@ -521,19 +562,111 @@ def task_toggle(task_id):
 @bp.route("/run/<task_id>")
 def run_task_route(task_id):
     ok, msg = run_task_now(task_id, source="manual")
+    back_url = get_back_url("/tasks")
 
     if not ok:
-        return f"{h(msg)}<br><a href='/tasks'>返回</a>", 400
+        return f"{h(msg)}<br><a href='{h(back_url)}'>返回</a>", 400
 
-    return redirect(url_for("tasks.log_view", task_id=task_id))
+    return redirect(url_for("tasks.log_view", task_id=task_id, back=back_url))
 
 
 @bp.route("/stop/<task_id>")
 def stop_task_route(task_id):
     stop_task_now(task_id)
-    return redirect(url_for("tasks.tasks_page"))
+    return redirect(get_back_url("/tasks"))
 
+@bp.route("/task/config/<task_id>", methods=["GET", "POST"])
+def task_config_edit(task_id):
+    task = get_task(task_id)
 
+    if not task:
+        abort(404)
+
+    back_url = get_back_url("/tasks")
+    config_path = str(task.get("config_path") or "").strip()
+
+    if not config_path:
+        body = f"""
+<div class="card">
+    <div class="card-title">任务配置文件</div>
+    <div class="help">该任务没有配置 config_path。</div>
+    <br>
+    <a class="btn btn-gray" href="{h(back_url)}">返回</a>
+    <a class="btn btn-blue" href="/task/edit/{h(task_id)}">编辑任务</a>
+</div>
+"""
+        return layout("任务配置文件", "tasks", body)
+
+    try:
+        target = task_config_safe_path(config_path)
+    except Exception as e:
+        body = f"""
+<div class="card">
+    <div class="card-title">配置文件路径非法</div>
+    <div class="help" style="color:#dc2626;">{h(e)}</div>
+    <br>
+    <a class="btn btn-gray" href="{h(back_url)}">返回</a>
+    <a class="btn btn-blue" href="/task/edit/{h(task_id)}">编辑任务</a>
+</div>
+"""
+        return layout("配置文件路径非法", "tasks", body), 400
+
+    msg = ""
+
+    if request.method == "POST":
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(request.form.get("content", ""), encoding="utf-8")
+            msg = "保存成功"
+        except Exception as e:
+            msg = f"保存失败：{e}"
+
+    if target.exists():
+        try:
+            content = target.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            content = f"# 读取失败：{e}\n"
+    else:
+        content = None
+
+        if not content:
+            content = (
+                "# 配置文件不存在，可在这里新建。\n"
+                "# 示例：\n"
+                "# key: value\n"
+            )
+
+    body = f"""
+<form method="post">
+<div class="card">
+    <div class="card-title">编辑任务配置：{h(task.get('name') or task_id)}</div>
+    <div class="help">
+        配置路径：<code>{h(config_path)}</code><br>
+        实际路径：<code>{h(target)}</code><br>
+        状态：{"已存在" if target.exists() else "文件不存在，保存后会自动创建"}
+    </div>
+    <br>
+    <button class="btn btn-primary" type="submit">保存配置</button>
+    <a class="btn btn-blue" href="/run/{h(task_id)}?back={h(back_url)}">运行任务</a>
+    <a class="btn btn-orange" href="/task/edit/{h(task_id)}">编辑任务</a>
+    <a class="btn btn-gray" href="{h(back_url)}">返回</a>
+</div>
+
+{"<div class='card'><div class='help' style='color:#18a058;font-weight:800;'>" + h(msg) + "</div></div>" if msg and msg.startswith("保存成功") else ""}
+{"<div class='card'><div class='help' style='color:#dc2626;font-weight:800;'>" + h(msg) + "</div></div>" if msg and not msg.startswith("保存成功") else ""}
+
+<div class="card">
+    <div class="card-title">配置内容</div>
+    <textarea name="content" style="min-height:680px;">{h(content)}</textarea>
+</div>
+
+<div class="card">
+    <button class="btn btn-primary" type="submit">保存配置</button>
+    <a class="btn btn-gray" href="{h(back_url)}">返回</a>
+</div>
+</form>
+"""
+    return layout("编辑任务配置", "tasks", body)
 
 @bp.route("/log/<task_id>")
 def log_view(task_id):
@@ -541,6 +674,8 @@ def log_view(task_id):
 
     if not task:
         abort(404)
+
+    back_url = get_back_url("/tasks")
 
     running = is_running(task_id)
 
@@ -551,6 +686,10 @@ def log_view(task_id):
         log_file = latest_log_for_task(task)
         pid = ""
 
+    config_btn = ""
+    if str(task.get("config_path") or "").strip():
+        config_btn = f'<a class="btn btn-blue" href="/task/config/{h(task_id)}?back={h(back_url)}">配置</a>'
+
     body = f"""
 <div class="card">
     <div class="card-title">日志：{h(task.get('name') or task.get('command'))}</div>
@@ -560,9 +699,10 @@ def log_view(task_id):
         日志文件：{h(log_file or "暂无")}
     </div>
     <br>
-    <a class="btn btn-primary" href="/run/{h(task_id)}">运行</a>
-    <a class="btn btn-red" href="/stop/{h(task_id)}" onclick="return confirm('确定结束该任务吗？')">结束</a>
-    <a class="btn btn-gray" href="/tasks">返回</a>
+    <a class="btn btn-primary" href="/run/{h(task_id)}?back={h(back_url)}">运行</a>
+    <a class="btn btn-red" href="/stop/{h(task_id)}?back={h(back_url)}" onclick="return confirm('确定结束该任务吗？')">结束</a>
+    {config_btn}
+    <a class="btn btn-gray" href="{h(back_url)}">返回</a>
 </div>
 
 <pre class="log" id="log">加载中...</pre>

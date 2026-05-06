@@ -16,7 +16,7 @@ from ..paths import DATA_DIR, SCRIPT_DIR, LOG_DIR
 from ..config import load_config
 from ..models import load_tasks, save_tasks
 from ..scheduler import reload_scheduler, cron_to_trigger
-from ..utils import h, now_str, safe_name
+from ..utils import h, now_str, safe_name, get_back_url
 from ..ui.layout import layout
 from ..ui.log_controls import log_controls
 from ..logs import tail_file
@@ -49,19 +49,70 @@ def get_online_script_source():
     cfg = load_config()
     return str(cfg.get("online_script_source") or DEFAULT_ONLINE_SCRIPT_SOURCE).strip()
 
+def normalize_online_task_crons(data):
+    """
+    标准化 task_cron / task_link 返回的任务列表。
+
+    支持：
+    1. 单个 dict
+    2. list[dict]
+    3. {"tasks": list[dict]}
+    4. {"task_cron": list[dict] 或 dict}
+    """
+    raw = data
+
+    if isinstance(data, dict):
+        if isinstance(data.get("tasks"), list):
+            raw = data.get("tasks")
+        elif "task_cron" in data:
+            raw = data.get("task_cron")
+
+    if isinstance(raw, dict):
+        raw = [raw]
+
+    if not isinstance(raw, list):
+        return []
+
+    result = []
+
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+
+        name = str(item.get("name") or "").strip()
+        cron = str(item.get("cron") or "").strip()
+        command = str(item.get("command") or "").strip()
+
+        if not name or not command:
+            continue
+
+        task = {
+            "name": name,
+            "cron": cron,
+            "command": command,
+        }
+
+        for key in ("var", "vars", "env"):
+            if key in item:
+                task["var"] = item.get(key)
+                break
+
+        if "remark" in item:
+            task["remark"] = str(item.get("remark") or "").strip()
+        
+        if "config_path" in item:
+            task["config_path"] = str(item.get("config_path") or "").strip()
+
+        if "enabled" in item:
+            task["enabled"] = bool(item.get("enabled"))
+
+        result.append(task)
+
+    return result
 
 def online_script_task_crons(item):
-    task_cron = item.get("task_cron")
-
-    if isinstance(task_cron, dict):
-        return [task_cron]
-
-    if isinstance(task_cron, list):
-        return [x for x in task_cron if isinstance(x, dict)]
-
-    return []
-
-
+    return normalize_online_task_crons(item.get("task_cron"))
+    
 def online_task_cron_vars(task_cron):
     raw = None
 
@@ -143,15 +194,14 @@ def normalize_online_scripts(data):
         item["link_name"] = link_name.strip().strip("/")
         item["install"] = str(item.get("install", "") or "").strip()
         item["doc_link"] = str(item.get("doc_link", "") or "").strip()
+        item["task_link"] = str(item.get("task_link", "") or "").strip()
 
-        task_cron = item.get("task_cron")
-        if isinstance(task_cron, dict):
-            item["task_cron"] = task_cron
-        elif isinstance(task_cron, list):
-            item["task_cron"] = [x for x in task_cron if isinstance(x, dict)]
+        task_crons = normalize_online_task_crons(item.get("task_cron"))
+        if task_crons:
+            item["task_cron"] = task_crons
         else:
             item.pop("task_cron", None)
-
+            
         result.append(item)
 
     return result
@@ -185,6 +235,57 @@ def read_cache_text():
 
     return ""
 
+def fetch_task_link_tasks(item, proxy_id="", timeout=12):
+    """
+    拉取 item.task_link 指向的任务 JSON。
+
+    支持 task_link 返回：
+    1. [...]
+    2. {"tasks": [...]}
+    3. {"task_cron": [...]}
+    4. 单个任务 dict
+    """
+    task_link = str((item or {}).get("task_link") or "").strip()
+
+    if not task_link:
+        return []
+
+    real_url = github_proxy_url(task_link, proxy_id)
+
+    r = requests.get(
+        real_url,
+        timeout=timeout,
+        headers={"User-Agent": "Mozilla/5.0 FLS-Manager"},
+        proxies=requests_proxy_dict(proxy_id),
+    )
+
+    status_code = getattr(r, "status_code", 0)
+    text = r.text or ""
+
+    if status_code < 200 or status_code >= 300:
+        preview = text[:500].replace("\n", "\\n")
+        raise RuntimeError(
+            f"任务源请求失败，HTTP {status_code}。"
+            f"请求地址：{real_url}。"
+            f"返回内容预览：{preview}"
+        )
+
+    if not text.strip():
+        raise RuntimeError(f"任务源返回空内容。请求地址：{real_url}")
+
+    try:
+        data = json.loads(text)
+    except Exception as e:
+        preview = text[:800].replace("\n", "\\n")
+        ctype = r.headers.get("Content-Type", "")
+        raise RuntimeError(
+            f"任务源不是合法 JSON：{e}。"
+            f"请求地址：{real_url}。"
+            f"Content-Type：{ctype or '-'}。"
+            f"返回内容预览：{preview}"
+        )
+
+    return normalize_online_task_crons(data)
 
 def fetch_online_scripts(proxy_id="", timeout=12):
     url = get_online_script_source()
@@ -224,6 +325,43 @@ def fetch_online_scripts(proxy_id="", timeout=12):
         )
 
     items = normalize_online_scripts(data)
+
+    for item in items:
+        task_link = str(item.get("task_link") or "").strip()
+
+        if not task_link:
+            continue
+
+        try:
+            linked_tasks = fetch_task_link_tasks(
+                item,
+                proxy_id=proxy_id,
+                timeout=timeout,
+            )
+
+            if not linked_tasks:
+                print(
+                    f"[OnlineScripts] 任务源为空: "
+                    f"{item.get('name')} task_link={task_link}"
+                )
+                continue
+
+            old_tasks = normalize_online_task_crons(item.get("task_cron"))
+
+            # 合并内置 task_cron 和外部 task_link 任务
+            item["task_cron"] = old_tasks + linked_tasks
+
+            print(
+                f"[OnlineScripts] 已加载任务源: "
+                f"{item.get('name')} task_link={task_link} tasks={len(linked_tasks)}"
+            )
+
+        except Exception as e:
+            print(
+                f"[OnlineScripts] 任务源加载失败: "
+                f"{item.get('name')} task_link={task_link} error={e}"
+            )
+
     save_online_script_cache(items)
     return items
 
@@ -420,7 +558,7 @@ def import_task_if_needed(item, log_file=None, enable_task=False):
     task_crons = online_script_task_crons(item)
 
     if not task_crons:
-        msg = "脚本源未提供 task_cron，跳过任务导入"
+        msg = "脚本源未提供 task_cron / task_link 任务，跳过任务导入"
         if log_file:
             append_log(log_file, msg)
         return False, msg
@@ -437,6 +575,13 @@ def import_task_if_needed(item, log_file=None, enable_task=False):
         cron_expr = str(task_cron.get("cron") or "").strip()
         command = str(task_cron.get("command") or "").strip() or guess_task_command(item)
         task_env = online_task_cron_vars(task_cron)
+
+        config_path = str(task_cron.get("config_path") or "").strip().strip("/")
+
+        remark = str(
+            task_cron.get("remark")
+            or f"从在线脚本导入：{item.get('name')}"
+        ).strip()
 
         if not name:
             msg = f"第 {idx} 个任务 task_cron.name 为空，跳过"
@@ -468,6 +613,7 @@ def import_task_if_needed(item, log_file=None, enable_task=False):
         online_task_key = f"{online_id}:{idx}:{name}"
 
         exists = False
+
         for task in tasks:
             if task.get("online_script_task_key") == online_task_key:
                 exists = True
@@ -488,7 +634,7 @@ def import_task_if_needed(item, log_file=None, enable_task=False):
         task = {
             "id": uuid.uuid4().hex,
             "name": name,
-            "remark": f"从在线脚本导入：{item.get('name')}",
+            "remark": remark,
             "command": command,
             "cron": cron_expr,
             "enabled": bool(enable_task),
@@ -503,12 +649,25 @@ def import_task_if_needed(item, log_file=None, enable_task=False):
             "updated_at": now_str(),
         }
 
+        if config_path:
+            task["config_path"] = config_path
+
         tasks.append(task)
         imported += 1
 
         env_msg = f" / 变量 {len(task_env)} 个" if task_env else ""
+        config_msg = f" / 配置 {config_path}" if config_path else ""
         status_msg = "启用" if enable_task else "禁用"
-        msg = f"任务已导入：{name} / {cron_expr or '手动'} / {command} / {status_msg}{env_msg}"
+
+        msg = (
+            f"任务已导入：{name} / "
+            f"{cron_expr or '手动'} / "
+            f"{command} / "
+            f"{status_msg}"
+            f"{env_msg}"
+            f"{config_msg}"
+        )
+
         messages.append(msg)
 
         if log_file:
@@ -524,7 +683,6 @@ def import_task_if_needed(item, log_file=None, enable_task=False):
         append_log(log_file, summary)
 
     return imported > 0, summary + "\n" + "\n".join(messages)
-
 
 def command_list_to_text(cmd):
     return " ".join(str(x) for x in cmd)
@@ -912,7 +1070,7 @@ def render_online_script_rows(items):
     <div class="fls-btn-line">
         <a class="btn btn-blue" href="{h(item.get("link"))}" target="_blank">查看源</a>
         {doc_btn}
-        <a class="btn btn-orange" href="/online-scripts/log/{h(running_install_id)}">查看日志</a>
+        <a class="btn btn-orange" href="/online-scripts/log/{h(running_install_id)}?back=/online-scripts">查看日志</a>
         <button class="btn btn-red" type="submit" onclick="return confirm('确定停止该安装任务吗？')">停止安装</button>
     </div>
 </form>
@@ -1887,7 +2045,13 @@ def online_scripts_install(script_id):
     )
     th.start()
 
-    return redirect(url_for("online_scripts.online_install_log", install_id=install_id))
+    return redirect(
+        url_for(
+            "online_scripts.online_install_log",
+            install_id=install_id,
+            back="/online-scripts",
+        )
+    )
 
 
 @bp.route("/online-scripts/install-stop/<install_id>", methods=["POST"])
@@ -1905,6 +2069,7 @@ def online_scripts_install_stop(install_id):
 
 @bp.route("/online-scripts/log/<install_id>")
 def online_install_log(install_id):
+    back_url = get_back_url("/online-scripts")
     info = ONLINE_INSTALL_RUNNING.get(install_id)
 
     if not info:
@@ -1916,8 +2081,8 @@ def online_install_log(install_id):
         可以到日志管理中查找 online-script-install-*.log。
     </div>
     <br>
-    <a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>
-    <a class="btn btn-blue" href="/logs">查看日志管理</a>
+    <a class="btn btn-gray" href="{h(back_url)}">返回</a>
+    <a class="btn btn-blue" href="/logs?back={h(back_url)}">查看日志管理</a>
 </div>
 """
         return layout("在线脚本日志", "online_scripts", body)
@@ -1939,7 +2104,7 @@ def online_install_log(install_id):
         日志文件：{h(info.get("log_file") or "-")}
     </div>
     <br>
-    <a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>
+    <a class="btn btn-gray" href="{h(back_url)}">返回</a>
     <a class="btn btn-blue" href="/pull">脚本管理</a>
     <a class="btn btn-orange" href="/tasks">任务管理</a>
     {stop_install_button}

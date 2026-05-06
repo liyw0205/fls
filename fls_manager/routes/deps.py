@@ -9,7 +9,7 @@ from flask import Blueprint, request, redirect, url_for, jsonify
 
 from ..paths import BASE_DIR, LOG_DIR
 from ..state import DEPS_RUNNING
-from ..utils import h, now_str, safe_name
+from ..utils import h, now_str, safe_name, get_back_url
 from ..logs import tail_file
 from ..ui.layout import layout
 
@@ -220,11 +220,12 @@ def deps_install():
         "returncode": None,
     }
 
-    return redirect(url_for("deps.deps_install_log", install_id=install_id))
+    return redirect(url_for("deps.deps_install_log", install_id=install_id, back="/deps"))
 
 
 @bp.route("/deps/install-log/<install_id>")
 def deps_install_log(install_id):
+    back_url = get_back_url("/deps")
     info = DEPS_RUNNING.get(install_id)
     package = info.get("package") if info else "未知"
     log_file = info.get("log_file") if info else ""
@@ -238,7 +239,7 @@ def deps_install_log(install_id):
         日志文件：{h(log_file or "当前进程已结束，无法定位日志")}
     </div>
     <br>
-    <a class="btn btn-gray" href="/deps">返回依赖管理</a>
+    <a class="btn btn-gray" href="{h(back_url)}">返回</a>
     <a class="btn btn-blue" href="/deps/refresh">刷新依赖</a>
 </div>
 

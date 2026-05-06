@@ -4,15 +4,20 @@ from ..state import RUNNING
 from ..scheduler import get_task_next_run_time_text
 
 
-def _task_action_buttons(task_id, enabled):
+def _task_action_buttons(task_id, enabled, config_path=""):
     toggle_text = "禁用" if enabled else "启用"
     toggle_class = "btn-gray" if enabled else "btn-primary"
+
+    config_btn = ""
+    if str(config_path or "").strip():
+        config_btn = f'<a class="btn btn-blue" href="/task/config/{h(task_id)}?back=/tasks">配置</a>'
 
     return f"""
 <div class="task-actions">
     <button class="btn btn-primary" type="button" onclick="taskAjaxAction('run','{h(task_id)}')">运行</button>
     <button class="btn btn-red" type="button" onclick="taskAjaxAction('stop','{h(task_id)}')">结束</button>
-    <a class="btn btn-orange" href="/log/{h(task_id)}">日志</a>
+    <a class="btn btn-orange" href="/log/{h(task_id)}?back=/tasks">日志</a>
+    {config_btn}
     <a class="btn btn-blue" href="/task/edit/{h(task_id)}">编辑</a>
     <button class="btn {toggle_class}" type="button" onclick="taskAjaxAction('toggle','{h(task_id)}')">{h(toggle_text)}</button>
     <button class="btn btn-gray" type="button" onclick="taskAjaxAction('delete','{h(task_id)}')">删除</button>
@@ -53,7 +58,8 @@ def tasks_table(tasks):
             enabled_badge = '<span class="badge green">启用</span>' if enabled else '<span class="badge gray">禁用</span>'
             status_badge = '<span class="badge blue">运行中</span>' if running else '<span class="badge red">已停止</span>'
 
-            actions = _task_action_buttons(task_id, enabled)
+            config_path = str(task.get("config_path", "") or "").strip()
+            actions = _task_action_buttons(task_id, enabled, config_path)
 
             remark_html = ""
             if remark:

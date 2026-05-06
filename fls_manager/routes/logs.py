@@ -6,7 +6,7 @@ from flask import Blueprint, abort, redirect, url_for, request, Response
 
 from ..paths import LOG_DIR
 from ..logs import parse_task_name_from_log, tail_file
-from ..utils import h
+from ..utils import h, get_back_url
 from ..ui.layout import layout
 from ..ui.log_controls import log_controls
 
@@ -154,7 +154,7 @@ def logs_page():
     <td>{h(size_text)}</td>
     <td>{h(mtime)}</td>
     <td>
-        <a class="btn btn-orange" href="/logfile/{h(f.name)}">查看</a>
+        <a class="btn btn-orange" href="/logfile/{h(f.name)}?back=/logs">查看</a>
         <a class="btn btn-red" href="/logfile/delete/{h(f.name)}" onclick="return confirm('确定删除日志 {h(f.name)} 吗？')">删除</a>
     </td>
 </tr>
@@ -210,6 +210,7 @@ def logs_page():
 
 @bp.route("/logfile/<filename>")
 def logfile_view(filename):
+    back_url = get_back_url("/logs")
     filename = filename.split("/")[-1]
     file_path = LOG_DIR / filename
 
@@ -219,8 +220,8 @@ def logfile_view(filename):
     body = f"""
 <div class="card">
     <div class="card-title">日志文件：{h(filename)}</div>
-    <a class="btn btn-gray" href="/logs">返回</a>
-    <a class="btn btn-red" href="/logfile/delete/{h(filename)}" onclick="return confirm('确定删除日志吗？')">删除</a>
+    <a class="btn btn-gray" href="{h(back_url)}">返回</a>
+    <a class="btn btn-red" href="/logfile/delete/{h(filename)}?back={h(back_url)}" onclick="return confirm('确定删除日志吗？')">删除</a>
 </div>
 
 <pre class="log" id="log">加载中...</pre>
@@ -300,10 +301,11 @@ def api_logfile(filename):
 
 @bp.route("/logfile/delete/<filename>")
 def logfile_delete(filename):
+    back_url = get_back_url("/logs")
     filename = filename.split("/")[-1]
     file_path = LOG_DIR / filename
 
     if file_path.exists():
         file_path.unlink()
 
-    return redirect(url_for("logs.logs_page"))
+    return redirect(back_url)

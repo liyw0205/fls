@@ -185,7 +185,7 @@ def install_runtime(runtime):
             "start_time": time.time(),
         }
 
-        return redirect(url_for("deps.deps_install_log", install_id=install_id))
+        return redirect(url_for("deps.deps_install_log", install_id=install_id, back="/panel/status"))
 
     header = (
         f"===== 安装运行环境: {runtime} =====\n"
@@ -217,7 +217,7 @@ def install_runtime(runtime):
         log_fp.write(f"启动安装失败: {e}\n".encode("utf-8"))
         log_fp.close()
 
-    return redirect(url_for("deps.deps_install_log", install_id=install_id))
+    return redirect(url_for("deps.deps_install_log", install_id=install_id, back="/panel/status"))
 
 
 @bp.route("/install/node")
