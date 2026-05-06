@@ -1,6 +1,8 @@
 import json
 import uuid
 import time
+from math import ceil
+from urllib.parse import quote
 
 import requests
 from flask import Blueprint, request, redirect, url_for, abort, jsonify
@@ -60,6 +62,109 @@ from ..online_scripts.render import render_online_script_rows
 
 bp = Blueprint("online_scripts", __name__)
 
+def online_scripts_page_links(q, page, pages):
+    if pages <= 1:
+        return ""
+
+    def build_url(p):
+        url = f"/online-scripts?page={int(p)}"
+        if q:
+            url += "&q=" + quote(q)
+        return url
+
+    def page_btn(p, text=None, active=False, disabled=False):
+        text = text if text is not None else str(p)
+
+        if disabled:
+            return f'<span class="btn btn-gray" style="opacity:.45;cursor:not-allowed;">{h(text)}</span>'
+
+        cls = "btn-primary" if active else "btn-gray"
+        return f'<a class="btn {cls}" href="{h(build_url(p))}">{h(text)}</a>'
+
+    page = max(1, min(int(page), int(pages)))
+
+    items = []
+
+    # 上一页
+    items.append(
+        page_btn(page - 1, "上一页", disabled=(page <= 1))
+    )
+
+    # 始终显示 1、最后一页、当前页前后 2 页
+    show = {1, pages}
+
+    for p in range(page - 2, page + 3):
+        if 1 <= p <= pages:
+            show.add(p)
+
+    show = sorted(show)
+
+    last = 0
+
+    for p in show:
+        if last and p - last > 1:
+            items.append('<span class="btn btn-gray" style="opacity:.75;cursor:default;">...</span>')
+
+        items.append(
+            page_btn(p, active=(p == page))
+        )
+
+        last = p
+
+    # 下一页
+    items.append(
+        page_btn(page + 1, "下一页", disabled=(page >= pages))
+    )
+
+    return f"""
+<div class="card">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <div class="help">
+            第 <b>{page}</b> / <b>{pages}</b> 页
+        </div>
+        <div class="action-row">
+            {''.join(items)}
+        </div>
+    </div>
+</div>
+"""
+
+
+def filter_online_scripts_for_page(items, q):
+    q = str(q or "").strip().lower()
+
+    if not q:
+        return items
+
+    result = []
+
+    for item in items:
+        task_names = []
+        task_commands = []
+
+        for task in online_script_task_crons(item):
+            task_names.append(str(task.get("name") or ""))
+            task_commands.append(str(task.get("command") or ""))
+
+        fields = [
+            item.get("id", ""),
+            item.get("name", ""),
+            item.get("type", ""),
+            item.get("link", ""),
+            item.get("link_name", ""),
+            item.get("install", ""),
+            item.get("doc_link", ""),
+            item.get("task_link", ""),
+            "\n".join(task_names),
+            "\n".join(task_commands),
+        ]
+
+        text = "\n".join(str(x or "") for x in fields).lower()
+
+        if q in text:
+            result.append(item)
+
+    return result
 
 def get_online_script(script_id):
     for item in load_online_script_cache():
@@ -72,7 +177,23 @@ def get_online_script(script_id):
 @bp.route("/online-scripts")
 def online_scripts_page():
     source = get_online_script_source()
-    items = load_online_script_cache()
+    all_items = load_online_script_cache()
+
+    q = request.args.get("q", "").strip()
+    page = max(1, int(request.args.get("page", "1") or 1))
+    per_page = 12
+
+    filtered_items = filter_online_scripts_for_page(all_items, q)
+
+    total = len(filtered_items)
+    pages = max(1, ceil(total / per_page))
+    page = min(page, pages)
+
+    start = (page - 1) * per_page
+    end = page * per_page
+
+    items = filtered_items[start:end]
+    page_links_html = online_scripts_page_links(q, page, pages)
 
     msg = request.args.get("msg", "").strip()
     err = request.args.get("err", "").strip()
@@ -91,8 +212,8 @@ def online_scripts_page():
         else "display:none;"
     )
 
-    task_total = sum(len(online_script_task_crons(x)) for x in items)
-    install_total = sum(1 for x in items if script_has_install(x))
+    task_total = sum(len(online_script_task_crons(x)) for x in filtered_items)
+    install_total = sum(1 for x in filtered_items if script_has_install(x))
 
     refresh_status_text = (
         "正在后台拉取中，请稍候..."
@@ -126,6 +247,27 @@ def online_scripts_page():
         </div>
     </div>
 </div>
+
+<form method="get">
+<div class="card">
+    <div class="form-grid">
+        <div class="form-item">
+            <label>搜索在线脚本</label>
+            <input name="q" value="{h(q)}" placeholder="脚本名 / ID / 保存名 / 链接 / 任务名 / 命令">
+        </div>
+
+        <div class="form-item">
+            <label>&nbsp;</label>
+            <button class="btn btn-primary" type="submit">搜索</button>
+            <a class="btn btn-gray" href="/online-scripts">重置</a>
+        </div>
+    </div>
+
+    <div class="help" style="margin-top:10px;">
+        共 {len(all_items)} 个脚本，当前匹配 {total} 个，每页 {per_page} 个。
+    </div>
+</div>
+</form>
 
 <div class="fls-summary-grid">
     <div class="fls-summary-item">
@@ -167,6 +309,7 @@ def online_scripts_page():
         {render_online_script_rows(items)}
     </div>
 </div>
+{page_links_html}
 
 <script>
 window.__FLS_ONLINE_REFRESH_WAS_RUNNING__ = false;
@@ -742,6 +885,64 @@ body.fls-mobile .fls-doc-raw {{
     return layout("脚本文档", "online_scripts", body)
 
 
+def install_task_page_links(script_id, task_page, task_pages, excluded=""):
+    if task_pages <= 1:
+        return ""
+
+    def build_url(p):
+        url = f"/online-scripts/install-select/{quote(str(script_id))}?task_page={int(p)}"
+
+        if excluded:
+            url += "&excluded=" + quote(str(excluded))
+
+        return url
+
+    def page_btn(p, text=None, active=False, disabled=False):
+        text = text if text is not None else str(p)
+
+        if disabled:
+            return f'<span class="btn btn-gray" style="opacity:.45;cursor:not-allowed;">{h(text)}</span>'
+
+        cls = "btn-primary" if active else "btn-gray"
+        return f'<a class="btn {cls} fls-install-task-page-link" href="{h(build_url(p))}">{h(text)}</a>'
+
+    task_page = max(1, min(int(task_page), int(task_pages)))
+
+    items = []
+
+    items.append(page_btn(task_page - 1, "上一页", disabled=(task_page <= 1)))
+
+    show = {1, task_pages}
+
+    for p in range(task_page - 2, task_page + 3):
+        if 1 <= p <= task_pages:
+            show.add(p)
+
+    show = sorted(show)
+    last = 0
+
+    for p in show:
+        if last and p - last > 1:
+            items.append('<span class="btn btn-gray" style="opacity:.75;cursor:default;">...</span>')
+
+        items.append(page_btn(p, active=(p == task_page)))
+        last = p
+
+    items.append(page_btn(task_page + 1, "下一页", disabled=(task_page >= task_pages)))
+
+    return f"""
+<div class="card">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <div class="help">
+            任务第 <b>{task_page}</b> / <b>{task_pages}</b> 页
+        </div>
+        <div class="action-row">
+            {''.join(items)}
+        </div>
+    </div>
+</div>
+"""
+
 @bp.route("/online-scripts/install-select/<script_id>")
 def online_scripts_install_select(script_id):
     item = get_online_script(script_id)
@@ -761,9 +962,39 @@ def online_scripts_install_select(script_id):
         )
 
     proxy_options = proxy_select_options("")
+
+    task_page = max(1, int(request.args.get("task_page", "1") or 1))
+    task_per_page = 10
+
+    excluded_raw = request.args.get("excluded", "").strip()
+    excluded_set = set()
+
+    for x in excluded_raw.replace("，", ",").split(","):
+        x = x.strip()
+        if not x:
+            continue
+
+        try:
+            n = int(x)
+            if n > 0:
+                excluded_set.add(n)
+        except Exception:
+            pass
+
+    total_tasks = len(task_crons)
+    task_pages = max(1, ceil(total_tasks / task_per_page))
+    task_page = min(task_page, task_pages)
+
+    start = (task_page - 1) * task_per_page
+    end = task_page * task_per_page
+
+    show_task_crons = task_crons[start:end]
+
     task_rows = ""
 
-    for idx, task_cron in enumerate(task_crons, 1):
+    for offset, task_cron in enumerate(show_task_crons):
+        idx = start + offset + 1
+
         name = str(task_cron.get("name") or f"任务{idx}").strip()
         cron = str(task_cron.get("cron") or "手动").strip()
         command = str(task_cron.get("command") or guess_task_command(item) or "-").strip()
@@ -775,6 +1006,8 @@ def online_scripts_install_select(script_id):
 
         if env:
             env_text = "\n".join([f"{k}={v}" for k, v in env.items()])
+
+        checked = "" if idx in excluded_set else "checked"
 
         remark_html = ""
         if remark:
@@ -795,7 +1028,15 @@ def online_scripts_install_select(script_id):
         task_rows += f"""
 <label class="fls-install-task-row">
     <div class="fls-install-task-check">
-        <input type="checkbox" name="task_indexes" value="{idx}" checked style="width:auto;">
+        <input
+            type="checkbox"
+            class="fls-install-task-checkbox"
+            data-index="{idx}"
+            name="visible_task_indexes"
+            value="{idx}"
+            {checked}
+            style="width:auto;"
+        >
     </div>
 
     <div class="fls-install-task-main">
@@ -823,6 +1064,19 @@ def online_scripts_install_select(script_id):
     </div>
 </label>
 """
+
+    excluded_text = ",".join(str(x) for x in sorted(excluded_set))
+
+    page_links_html = install_task_page_links(
+        script_id=script_id,
+        task_page=task_page,
+        task_pages=task_pages,
+        excluded=excluded_text,
+    )
+
+    selected_count = total_tasks - len(excluded_set)
+    if selected_count < 0:
+        selected_count = 0
 
     body = f"""
 <style>
@@ -913,6 +1167,9 @@ body.fls-mobile .fls-install-task-list {{
 </style>
 
 <form method="post" action="/online-scripts/install/{h(script_id)}" id="onlineInstallSelectForm">
+<input type="hidden" name="select_mode" value="all">
+<input type="hidden" name="excluded_task_indexes" id="excludedTaskIndexes" value="{h(excluded_text)}">
+
 <div class="card">
     <div class="fls-install-select-head">
         <div>
@@ -921,7 +1178,8 @@ body.fls-mobile .fls-install-task-list {{
                 脚本 ID：{h(item.get("id"))}<br>
                 脚本类型：{h(item.get("type"))}<br>
                 保存名：{h(item.get("link_name"))}<br>
-                共检测到 <b>{len(task_crons)}</b> 个可导入任务。默认全选，你可以取消不需要的任务。
+                共检测到 <b>{total_tasks}</b> 个可导入任务。默认全选全部任务。<br>
+                当前已选择约 <b id="selectedTaskCount">{selected_count}</b> 个任务。
             </div>
         </div>
 
@@ -964,12 +1222,16 @@ body.fls-mobile .fls-install-task-list {{
     <div class="fls-install-select-head">
         <div>
             <div class="card-title">选择要导入的任务</div>
-            <div class="help">默认全选。取消勾选后，该任务不会导入。</div>
+            <div class="help">
+                当前页显示 {start + 1} - {min(end, total_tasks)} / {total_tasks} 个任务，每页 10 个。<br>
+                默认全选全部任务，可以取消不需要导入的任务。
+            </div>
         </div>
 
         <div class="fls-install-task-tools">
-            <button class="btn btn-blue" type="button" onclick="flsInstallSelectAll(true)">全选</button>
-            <button class="btn btn-gray" type="button" onclick="flsInstallSelectAll(false)">取消全选</button>
+            <button class="btn btn-blue" type="button" onclick="flsInstallSelectCurrentPage(true)">当前页全选</button>
+            <button class="btn btn-gray" type="button" onclick="flsInstallSelectCurrentPage(false)">当前页取消</button>
+            <button class="btn btn-primary" type="button" onclick="flsInstallSelectAllGlobal()">全部任务全选</button>
         </div>
     </div>
 
@@ -980,6 +1242,8 @@ body.fls-mobile .fls-install-task-list {{
     </div>
 </div>
 
+{page_links_html}
+
 <div class="card">
     <button class="btn btn-primary" type="submit">开始下载安装</button>
     <a class="btn btn-gray" href="/online-scripts">取消</a>
@@ -987,22 +1251,118 @@ body.fls-mobile .fls-install-task-list {{
 </form>
 
 <script>
-function flsInstallSelectAll(checked){{
-    document.querySelectorAll('#onlineInstallSelectForm input[name="task_indexes"]').forEach(function(input){{
-        input.checked = !!checked;
+const FLS_TOTAL_TASKS = {total_tasks};
+
+function flsParseExcluded(){{
+    const el = document.getElementById("excludedTaskIndexes");
+    if(!el) return new Set();
+
+    const text = el.value || "";
+    const set = new Set();
+
+    text.split(",").forEach(function(x){{
+        x = String(x || "").trim();
+        if(!x) return;
+
+        const n = parseInt(x, 10);
+        if(n > 0) set.add(n);
     }});
+
+    return set;
 }}
 
-document.getElementById("onlineInstallSelectForm").addEventListener("submit", function(e){{
-    var importTask = document.querySelector('#onlineInstallSelectForm input[name="import_task"]');
-    var checkedTasks = document.querySelectorAll('#onlineInstallSelectForm input[name="task_indexes"]:checked');
+function flsSaveExcluded(set){{
+    const el = document.getElementById("excludedTaskIndexes");
+    if(!el) return;
 
-    if(importTask && importTask.checked && checkedTasks.length <= 0){{
+    const arr = Array.from(set)
+        .filter(function(n){{ return n > 0; }})
+        .sort(function(a,b){{ return a-b; }});
+
+    el.value = arr.join(",");
+
+    const countEl = document.getElementById("selectedTaskCount");
+    if(countEl){{
+        countEl.textContent = Math.max(0, FLS_TOTAL_TASKS - arr.length);
+    }}
+}}
+
+function flsSyncVisibleCheckboxesToExcluded(){{
+    const set = flsParseExcluded();
+
+    document.querySelectorAll(".fls-install-task-checkbox").forEach(function(input){{
+        const idx = parseInt(input.getAttribute("data-index") || "0", 10);
+        if(idx <= 0) return;
+
+        if(input.checked){{
+            set.delete(idx);
+        }}else{{
+            set.add(idx);
+        }}
+    }});
+
+    flsSaveExcluded(set);
+}}
+
+function flsApplyExcludedToVisible(){{
+    const set = flsParseExcluded();
+
+    document.querySelectorAll(".fls-install-task-checkbox").forEach(function(input){{
+        const idx = parseInt(input.getAttribute("data-index") || "0", 10);
+        input.checked = !set.has(idx);
+    }});
+
+    flsSaveExcluded(set);
+}}
+
+function flsInstallSelectCurrentPage(checked){{
+    document.querySelectorAll(".fls-install-task-checkbox").forEach(function(input){{
+        input.checked = !!checked;
+    }});
+
+    flsSyncVisibleCheckboxesToExcluded();
+}}
+
+function flsInstallSelectAllGlobal(){{
+    flsSaveExcluded(new Set());
+    flsApplyExcludedToVisible();
+}}
+
+document.querySelectorAll(".fls-install-task-checkbox").forEach(function(input){{
+    input.addEventListener("change", flsSyncVisibleCheckboxesToExcluded);
+}});
+
+document.querySelectorAll(".fls-install-task-page-link").forEach(function(a){{
+    a.addEventListener("click", function(e){{
+        flsSyncVisibleCheckboxesToExcluded();
+
+        const excluded = document.getElementById("excludedTaskIndexes").value || "";
+        const url = new URL(a.href, window.location.href);
+
+        if(excluded){{
+            url.searchParams.set("excluded", excluded);
+        }}else{{
+            url.searchParams.delete("excluded");
+        }}
+
+        a.href = url.toString();
+    }}, true);
+}});
+
+document.getElementById("onlineInstallSelectForm").addEventListener("submit", function(e){{
+    flsSyncVisibleCheckboxesToExcluded();
+
+    var importTask = document.querySelector('#onlineInstallSelectForm input[name="import_task"]');
+    var excluded = flsParseExcluded();
+
+    if(importTask && importTask.checked && excluded.size >= FLS_TOTAL_TASKS){{
         e.preventDefault();
         alert("已勾选导入任务，但没有选择任何任务");
         return false;
     }}
 }});
+
+flsApplyExcludedToVisible();
 </script>
 """
 
@@ -1029,7 +1389,34 @@ def online_scripts_install(script_id):
     import_task = request.form.get("import_task") == "1"
     enable_task = request.form.get("enable_task") == "1"
     force = request.form.get("force") == "1"
+
     selected_task_indexes = request.form.getlist("task_indexes")
+
+    select_mode = request.form.get("select_mode", "").strip()
+    excluded_task_indexes = request.form.get("excluded_task_indexes", "").strip()
+
+    if select_mode == "all":
+        all_count = len(online_script_task_crons(item))
+        excluded_set = set()
+
+        for x in excluded_task_indexes.replace("，", ",").split(","):
+            x = x.strip()
+
+            if not x:
+                continue
+
+            try:
+                n = int(x)
+                if n > 0:
+                    excluded_set.add(n)
+            except Exception:
+                pass
+
+        selected_task_indexes = [
+            str(i)
+            for i in range(1, all_count + 1)
+            if i not in excluded_set
+        ]
 
     if not import_task:
         enable_task = False
@@ -1073,6 +1460,14 @@ def online_scripts_install(script_id):
     if enable_task:
         install_option_hidden += '<input type="hidden" name="enable_task" value="1">'
 
+    select_mode_hidden = ""
+
+    if select_mode:
+        select_mode_hidden += f'<input type="hidden" name="select_mode" value="{h(select_mode)}">'
+
+    if excluded_task_indexes:
+        select_mode_hidden += f'<input type="hidden" name="excluded_task_indexes" value="{h(excluded_task_indexes)}">'
+
     if target.exists() and not force:
         proxy_options = proxy_select_options(proxy_id)
         has_task = script_has_task(item)
@@ -1096,6 +1491,7 @@ def online_scripts_install(script_id):
     <form method="post" action="/online-scripts/install/{h(script_id)}">
         <input type="hidden" name="force" value="1">
         {install_option_hidden}
+        {select_mode_hidden}
         {selected_task_hidden}
 
         <div class="form-item">

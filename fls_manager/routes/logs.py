@@ -17,18 +17,70 @@ def page_links(base, q, page, pages):
     if pages <= 1:
         return ""
 
-    links = ""
-
-    for i in range(1, pages + 1):
-        cls = "btn-primary" if i == page else "btn-gray"
-        url = f"{base}?page={i}"
+    def build_url(p):
+        url = f"{base}?page={int(p)}"
 
         if q:
             url += "&q=" + quote(q)
 
-        links += f'<a class="btn {cls}" href="{h(url)}">{i}</a>'
+        return url
 
-    return f'<div class="card"><div class="action-row">{links}</div></div>'
+    def page_btn(p, text=None, active=False, disabled=False):
+        text = text if text is not None else str(p)
+
+        if disabled:
+            return f'<span class="btn btn-gray" style="opacity:.45;cursor:not-allowed;">{h(text)}</span>'
+
+        cls = "btn-primary" if active else "btn-gray"
+        return f'<a class="btn {cls}" href="{h(build_url(p))}">{h(text)}</a>'
+
+    page = max(1, min(int(page), int(pages)))
+
+    items = []
+
+    # 上一页
+    items.append(
+        page_btn(page - 1, "上一页", disabled=(page <= 1))
+    )
+
+    # 始终显示 1、最后一页、当前页前后 2 页
+    show = {1, pages}
+
+    for p in range(page - 2, page + 3):
+        if 1 <= p <= pages:
+            show.add(p)
+
+    show = sorted(show)
+
+    last = 0
+
+    for p in show:
+        if last and p - last > 1:
+            items.append('<span class="btn btn-gray" style="opacity:.75;cursor:default;">...</span>')
+
+        items.append(
+            page_btn(p, active=(p == page))
+        )
+
+        last = p
+
+    # 下一页
+    items.append(
+        page_btn(page + 1, "下一页", disabled=(page >= pages))
+    )
+
+    return f"""
+<div class="card">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <div class="help">
+            第 <b>{page}</b> / <b>{pages}</b> 页
+        </div>
+        <div class="action-row">
+            {''.join(items)}
+        </div>
+    </div>
+</div>
+"""
 
 
 def log_group_title(task_name, count):

@@ -1,6 +1,8 @@
 import os
 import uuid
 from pathlib import Path
+from math import ceil
+from urllib.parse import quote
 from flask import Blueprint, request, redirect, url_for, abort, Response
 
 from ..models import load_tasks, save_tasks, get_task
@@ -421,25 +423,156 @@ refreshEmptyRow();
 """
     return body
 
+def tasks_page_links(q, page, pages):
+    if pages <= 1:
+        return ""
+
+    def build_url(p):
+        url = f"/tasks?page={int(p)}"
+        if q:
+            url += "&q=" + quote(q)
+        return url
+
+    def page_btn(p, text=None, active=False, disabled=False):
+        text = text if text is not None else str(p)
+
+        if disabled:
+            return f'<span class="btn btn-gray" style="opacity:.45;cursor:not-allowed;">{h(text)}</span>'
+
+        cls = "btn-primary" if active else "btn-gray"
+        return f'<a class="btn {cls}" href="{h(build_url(p))}">{h(text)}</a>'
+
+    page = max(1, min(int(page), int(pages)))
+
+    items = []
+
+    # 上一页
+    items.append(
+        page_btn(page - 1, "上一页", disabled=(page <= 1))
+    )
+
+    # 页码窗口：
+    # 始终显示：1、最后一页、当前页附近 2 页
+    show = {1, pages}
+
+    for p in range(page - 2, page + 3):
+        if 1 <= p <= pages:
+            show.add(p)
+
+    show = sorted(show)
+
+    last = 0
+
+    for p in show:
+        if last and p - last > 1:
+            items.append('<span class="btn btn-gray" style="opacity:.75;cursor:default;">...</span>')
+
+        items.append(
+            page_btn(p, active=(p == page))
+        )
+
+        last = p
+
+    # 下一页
+    items.append(
+        page_btn(page + 1, "下一页", disabled=(page >= pages))
+    )
+
+    return f"""
+<div class="card">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <div class="help">
+            第 <b>{page}</b> / <b>{pages}</b> 页
+        </div>
+        <div class="action-row">
+            {''.join(items)}
+        </div>
+    </div>
+</div>
+"""
+
+
+def filter_tasks_for_page(tasks, q):
+    q = str(q or "").strip().lower()
+
+    if not q:
+        return tasks
+
+    result = []
+
+    for task in tasks:
+        fields = [
+            task.get("name", ""),
+            task.get("remark", ""),
+            task.get("command", ""),
+            task.get("cron", ""),
+            task.get("config_path", ""),
+            task.get("id", ""),
+        ]
+
+        text = "\n".join(str(x or "") for x in fields).lower()
+
+        if q in text:
+            result.append(task)
+
+    return result
 
 @bp.route("/tasks")
 def tasks_page():
-    tasks = load_tasks()
+    all_tasks = load_tasks()
+
+    q = request.args.get("q", "").strip()
+    page = max(1, int(request.args.get("page", "1") or 1))
+    per_page = 20
+
+    filtered_tasks = filter_tasks_for_page(all_tasks, q)
+
+    total = len(filtered_tasks)
+    pages = max(1, ceil(total / per_page))
+    page = min(page, pages)
+
+    start = (page - 1) * per_page
+    end = page * per_page
+    show_tasks = filtered_tasks[start:end]
+
+    page_links_html = tasks_page_links(q, page, pages)
+
     body = f"""
 <div class="card">
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;">
         <div>
             <div class="card-title">任务管理</div>
-            <div class="help">Cron 留空表示手动任务。</div>
+            <div class="help">
+                Cron 留空表示手动任务。<br>
+                共 {len(all_tasks)} 个任务，当前匹配 {total} 个，每页 {per_page} 个。
+            </div>
         </div>
         <a class="btn btn-primary" href="/task/new">新建任务</a>
     </div>
 </div>
+
+<form method="get">
 <div class="card">
-    <div class="card">
-    {tasks_table(tasks)}
+    <div class="form-grid">
+        <div class="form-item">
+            <label>搜索任务</label>
+            <input name="q" value="{h(q)}" placeholder="任务名 / 备注 / 命令 / Cron / 配置路径">
+        </div>
+
+        <div class="form-item">
+            <label>&nbsp;</label>
+            <button class="btn btn-primary" type="submit">搜索</button>
+            <a class="btn btn-gray" href="/tasks">重置</a>
+        </div>
     </div>
 </div>
+</form>
+
+<div class="card">
+    {tasks_table(show_tasks)}
+</div>
+
+{page_links_html}
 """
     return layout("任务管理", "tasks", body)
 
