@@ -74,11 +74,7 @@ def get_version_info():
     info = {
         "git_available": git_available(),
         "is_repo": False,
-        "current_full": "-",
-        "current_short": "-",
-        "current_subject": "-",
-        "current_time": "-",
-        "remote": "-",
+        "current "current":",
         "logs": [],
         "error": "",
     }
@@ -153,7 +149,7 @@ def render_update_log_rows(logs):
             action = f"""
 <form method="post" action="/about/update-version" style="display:inline;">
     <input type="hidden" name="version" value="{h(item.get("full"))}">
-    <button class="btn btn-orange" type="submit" onclick="return confirm('确定更新到该版本吗？更新任务将在后台执行。')">
+    <button class="btn btn-orange" type="submit" onclick="return confirm('确定更新到该版本吗？更新任务将在后台执行。更新完成后需要手动重启面板。')">
         更新到此版本
     </button>
 </form>
@@ -175,49 +171,6 @@ def render_update_log_rows(logs):
 """
 
     return rows
-
-
-def sh_quote(value):
-    """
-    简单 shell quote。
-    """
-    s = str(value)
-    return "'" + s.replace("'", "'\"'\"'") + "'"
-
-
-def schedule_restart():
-    """
-    更新成功后后台自动重启。
-
-    使用独立 session 启动，避免被当前 Flask 进程退出影响。
-    """
-    script = BASE_DIR / "fls.sh"
-
-    if not script.exists():
-        return False, f"未找到重启脚本：{script}"
-
-    cmd = f"sleep 1; cd {sh_quote(str(BASE_DIR))} && sh fls.sh restart"
-
-    try:
-        kwargs = {
-            "cwd": str(BASE_DIR),
-            "stdout": subprocess.DEVNULL,
-            "stderr": subprocess.DEVNULL,
-            "stdin": subprocess.DEVNULL,
-        }
-
-        if os.name != "nt":
-            kwargs["preexec_fn"] = os.setsid
-
-        subprocess.Popen(
-            ["sh", "-lc", cmd],
-            **kwargs,
-        )
-
-        return True, "已提交自动重启"
-
-    except Exception as e:
-        return False, str(e)
 
 
 def about_job_log_file(job_id, action):
@@ -426,28 +379,19 @@ def update_version_worker(job_id, version):
             raise RuntimeError(checkout_out or "git checkout 失败")
 
         after_version = git_text(["rev-parse", "--short", "HEAD"], default="-")
+
         append_job_log(log_file, "")
         append_job_log(log_file, f"更新后版本: {after_version}")
 
-        restart_ok, restart_msg = schedule_restart()
-
-        append_job_log(log_file, "")
-        append_job_log(log_file, "===== 自动重启 =====")
-        append_job_log(log_file, f"结果: {'成功提交' if restart_ok else '失败'}")
-        append_job_log(log_file, f"消息: {restart_msg or '-'}")
-
-        if not restart_ok:
-            raise RuntimeError(f"代码已更新，但自动重启失败：{restart_msg or '未知错误'}")
-
         info["running"] = False
-        info["status"] = "更新完成，已提交自动重启"
+        info["status"] = "更新完成"
         info["returncode"] = 0
         info["updated_at"] = now_str()
 
         append_job_log(log_file, "")
         append_job_log(log_file, f"===== 更新完成: {now_str()} =====")
         append_job_log(log_file, f"版本变化: {before_version} -> {after_version}")
-        append_job_log(log_file, "面板会在几秒后自动重启，请稍后刷新页面。")
+        append_job_log(log_file, "已完成更新，请手动重启面板以生效。")
 
     except Exception as e:
         after_version = git_text(["rev-parse", "--short", "HEAD"], default="-")
@@ -593,7 +537,7 @@ def about():
 
     <div class="help">
         这里显示项目 Git 提交时填写的更新内容。<br>
-        可以选择某个版本进行后台更新，更新成功后面板会自动重启。
+        可以选择某个版本进行后台更新。更新完成后需要手动重启面板。
     </div>
     <br>
 
@@ -801,6 +745,7 @@ def about_update_version():
     后台更新版本。
 
     点击更新后立即跳转日志页，避免页面卡住。
+    更新完成后不会自动重启，需要用户手动重启。
     """
     version = request.form.get("version", "").strip()
 
