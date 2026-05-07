@@ -74,7 +74,11 @@ def get_version_info():
     info = {
         "git_available": git_available(),
         "is_repo": False,
-        "current "current":",
+        "current_full": "-",
+        "current_short": "-",
+        "current_subject": "-",
+        "current_time": "-",
+        "remote": "-",
         "logs": [],
         "error": "",
     }
