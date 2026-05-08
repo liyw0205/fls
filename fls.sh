@@ -395,7 +395,7 @@ PY
 
 get_pid() {
   if [ -f "$PID_FILE" ]; then
-    cat "$PID_FILE" 2>/dev/null | tr -dc '0-9'
+    head -n 1 "$PID_FILE" 2>/dev/null | tr -dc '0-9'
     return 0
   fi
 
@@ -418,11 +418,15 @@ is_running_pid() {
 
 find_running_pids() {
   if command -v pgrep >/dev/null 2>&1; then
-    pgrep -f "fls-manager.py" 2>/dev/null || true
+    {
+      pgrep -f "fls-manager.py" 2>/dev/null || true
+      pgrep -f "fls-manager" 2>/dev/null || true
+      pgrep -x "fls-manager" 2>/dev/null || true
+    } | sort -u
     return 0
   fi
 
-  ps -ef 2>/dev/null | grep "fls-manager.py" | grep -v grep | awk '{print $2}' || true
+  ps -ef 2>/dev/null | grep -E "fls-manager.py|fls-manager" | grep -v grep | awk '{print $2}' | sort -u || true
 }
 
 parse_start_opts() {

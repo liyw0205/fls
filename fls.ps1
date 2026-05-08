@@ -392,6 +392,62 @@ function Is-RunningPid($PidValue) {
     }
 }
 
+function Find-FlsProcesses {
+    $result = @()
+
+    try {
+        $currentPid = $PID
+
+        $procs = Get-CimInstance Win32_Process | Where-Object {
+            $cmdLine = $_.CommandLine
+            $name = $_.Name
+            $pidValue = $_.ProcessId
+
+            if (-not $cmdLine) {
+                $cmdLine = ""
+            }
+
+            if (-not $name) {
+                $name = ""
+            }
+
+            if ($pidValue -eq $currentPid) {
+                return $false
+            }
+
+            if ($cmdLine -like "*fls.ps1*") {
+                return $false
+            }
+
+            if ($cmdLine -like "*fls.bat*") {
+                return $false
+            }
+
+            if ($cmdLine -like "*fls-manager.py*") {
+                return $true
+            }
+
+            if ($cmdLine -like "*fls-manager*") {
+                return $true
+            }
+
+            if ($name -like "fls-manager*") {
+                return $true
+            }
+
+            return $false
+        }
+
+        foreach ($p in $procs) {
+            if ($p.ProcessId) {
+                $result += [int]$p.ProcessId
+            }
+        }
+    } catch {}
+
+    return @($result | Sort-Object -Unique)
+}
+
 function Start-Fls([string[]]$ArgsList) {
     try {
         $opts = Parse-StartOpts $ArgsList
@@ -406,6 +462,18 @@ function Start-Fls([string[]]$ArgsList) {
     if (Is-RunningPid $oldPid) {
         Say "FLS Manager 已在运行，PID: $oldPid"
         Say "如需应用新的临时端口/Token，请执行：.\fls.ps1 restart -p 端口 -t Token"
+        return
+    }
+
+    $found = @(Find-FlsProcesses)
+    if ($found.Count -gt 0) {
+        Say "FLS Manager 已在运行，PID: $($found -join ', ')"
+        Say "如需应用新的临时端口/Token，请执行：.\fls.ps1 restart -p 端口 -t Token"
+
+        try {
+            Set-Content -Path $PidFile -Value $found[0]
+        } catch {}
+
         return
     }
 
@@ -454,6 +522,20 @@ function Start-Fls([string[]]$ArgsList) {
         return
     }
 
+    $foundAfter = @(Find-FlsProcesses)
+    if ($foundAfter.Count -gt 0) {
+        $portShow = if ($opts.Port) { $opts.Port } else { Read-ConfigValue "port" $DefaultPort }
+
+        try {
+            Set-Content -Path $PidFile -Value $foundAfter[0]
+        } catch {}
+
+        Say "启动成功，PID: $($foundAfter -join ', ')"
+        Say "访问地址：http://服务器IP:$portShow"
+        Say "如首次使用，请访问面板完成 Token 设置"
+        return
+    }
+
     ErrMsg "启动失败，请查看日志：$DaemonLog"
 
     if (Test-Path $DaemonLog) {
@@ -464,23 +546,44 @@ function Start-Fls([string[]]$ArgsList) {
 }
 
 function Stop-Fls {
+    $pids = @()
+
     $pidValue = Get-PidFromFile
 
-    if ($pidValue) {
-        try {
-            taskkill /PID $pidValue /T /F | Out-Null
-        } catch {}
+    if (Is-RunningPid $pidValue) {
+        $pids += [int]$pidValue
+    }
 
+    $found = @(Find-FlsProcesses)
+    if ($found.Count -gt 0) {
+        $pids += $found
+    }
+
+    $pids = @($pids | Sort-Object -Unique)
+
+    if ($pids.Count -eq 0) {
         Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
-        Say "已停止"
+        Say "FLS Manager 未运行"
         return
     }
 
-    Say "FLS Manager 未运行"
+    Say "准备停止 FLS Manager：$($pids -join ', ')"
+
+    foreach ($p in $pids) {
+        try {
+            taskkill /PID $p /T /F | Out-Null
+        } catch {}
+    }
+
+    Start-Sleep -Seconds 1
+
+    Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
+    Say "已停止"
 }
 
 function Restart-Fls([string[]]$ArgsList) {
     Stop-Fls
+    Start-Sleep -Seconds 1
     Start-Fls $ArgsList
 }
 
@@ -488,6 +591,7 @@ function Status-Fls {
     $cfgPort = Read-ConfigValue "port" $DefaultPort
     $cfgToken = Read-ConfigValue "admin_token" ""
     $pidValue = Get-PidFromFile
+    $found = @(Find-FlsProcesses)
 
     Write-Host "===================================================="
     Write-Host "FLS Manager 状态"
@@ -514,6 +618,17 @@ function Status-Fls {
     if (Is-RunningPid $pidValue) {
         Write-Host "运行状态：运行中"
         Write-Host "PID：$pidValue"
+
+        if ($found.Count -gt 0) {
+            Write-Host "识别进程：$($found -join ', ')"
+        }
+    } elseif ($found.Count -gt 0) {
+        Write-Host "运行状态：运行中"
+        Write-Host "PID：$($found -join ', ')"
+
+        try {
+            Set-Content -Path $PidFile -Value $found[0]
+        } catch {}
     } else {
         Write-Host "运行状态：未运行"
     }
