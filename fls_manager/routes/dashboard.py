@@ -13,7 +13,7 @@ from ..ui.layout import layout
 from ..utils import h
 from ..paths import BASE_DIR, DATA_DIR, LOG_DIR, SCRIPT_DIR
 from ..config import get_host, get_port, fls_get_admin_token
-from ..constants import MAIN_PROCESS_NAME, TASK_PROCESS_PREFIX
+from ..state import PANEL_START_TIME, PANEL_START_STR
 
 bp = Blueprint("dashboard", __name__)
 
@@ -43,6 +43,40 @@ def fmt_bytes(n):
 
     return f"{n:.1f} {units[i]}"
 
+
+def fmt_duration(seconds):
+    try:
+        seconds = int(seconds)
+    except Exception:
+        return "-"
+
+    if seconds < 0:
+        seconds = 0
+
+    days = seconds // 86400
+    seconds %= 86400
+
+    hours = seconds // 3600
+    seconds %= 3600
+
+    minutes = seconds // 60
+    seconds %= 60
+
+    parts = []
+
+    if days:
+        parts.append(f"{days} 天")
+
+    if hours:
+        parts.append(f"{hours} 小时")
+
+    if minutes:
+        parts.append(f"{minutes} 分钟")
+
+    if not parts:
+        parts.append(f"{seconds} 秒")
+
+    return " ".join(parts)
 
 def panel_cpu_peak_slot():
     """
@@ -354,6 +388,7 @@ def dashboard():
     process_rss = get_process_rss()
     panel_cpu_current, panel_cpu_peak = get_panel_cpu_status()
     panel_cpu_peak_period = panel_cpu_peak_slot_text()
+    panel_uptime = fmt_duration(time.time() - PANEL_START_TIME)
 
     try:
         disk = shutil.disk_usage(str(BASE_DIR))
@@ -375,6 +410,9 @@ def dashboard():
         ("任务进程名前缀", TASK_PROCESS_PREFIX),
         ("Host / Port", f"{get_host()}:{get_port()}"),
         ("鉴权", "已开启" if fls_get_admin_token() else "未开启"),
+        ("Host / Port", f"{get_host()}:{get_port()}"),
+        ("面板启动时间", PANEL_START_STR),
+        ("面板已运行", panel_uptime),
 
         ("CPU 使用率", cpu_percent),
         ("CPU 负载 1/5/15 分钟", load_avg),
@@ -463,6 +501,11 @@ def dashboard():
     <div class="stat">
         <div class="label">面板峰值 CPU</div>
         <div class="num" style="color:#dc2626;font-size:22px;">{h(panel_cpu_peak)}</div>
+    </div>
+    
+    <div class="stat">
+        <div class="label">面板已运行</div>
+        <div class="num" style="color:#18a058;font-size:22px;">{h(panel_uptime)}</div>
     </div>
 </div>
 

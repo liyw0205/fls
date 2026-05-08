@@ -1367,7 +1367,40 @@ body.fls-mobile:not(.page-pull):not(.page-proxy):not(.page-deps):not(.page-statu
         grid-template-columns:1fr!important;
     }
 }
+
+.CodeMirror {
+    border:1px solid var(--border);
+    border-radius:12px;
+    min-height:680px;
+    font-family:Consolas,Menlo,monospace;
+    font-size:14px;
+    line-height:1.55;
+}
+
+body.fls-mobile .CodeMirror {
+    min-height:520px;
+    font-size:13px;
+    border-radius:10px;
+}
 </style>
+
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/lib/codemirror.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/theme/material-darker.min.css">
+
+<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/lib/codemirror.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/python/python.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/shell/shell.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/javascript/javascript.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/yaml/yaml.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/xml/xml.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/css/css.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/htmlmixed/htmlmixed.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/php/php.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/ruby/ruby.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/perl/perl.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/lua/lua.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/clike/clike.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/markdown/markdown.min.js"></script>
 
 </head>
 
@@ -1492,6 +1525,91 @@ if (document.readyState === "loading") {
     flsEnhanceMobileTables(document);
 }
 
+/* ============================================================
+   脚本编辑器语法高亮：CodeMirror
+   ============================================================ */
+window.__FLS_CODE_MIRRORS__ = window.__FLS_CODE_MIRRORS__ || [];
+
+function flsCodeModeFromFilename(name){
+    name = String(name || "").toLowerCase();
+
+    if(name.endsWith(".py") || name.endsWith(".pyw")) return "python";
+    if(name.endsWith(".sh") || name.endsWith(".bash")) return "shell";
+    if(name.endsWith(".js") || name.endsWith(".mjs") || name.endsWith(".cjs")) return "javascript";
+    if(name.endsWith(".ts") || name.endsWith(".mts") || name.endsWith(".cts")) return "text/typescript";
+    if(name.endsWith(".json")) return {name:"javascript", json:true};
+    if(name.endsWith(".yml") || name.endsWith(".yaml")) return "yaml";
+    if(name.endsWith(".html") || name.endsWith(".htm")) return "htmlmixed";
+    if(name.endsWith(".css")) return "css";
+    if(name.endsWith(".php")) return "application/x-httpd-php";
+    if(name.endsWith(".rb")) return "ruby";
+    if(name.endsWith(".pl") || name.endsWith(".pm")) return "perl";
+    if(name.endsWith(".lua")) return "lua";
+    if(name.endsWith(".java")) return "text/x-java";
+    if(name.endsWith(".md") || name.endsWith(".markdown")) return "markdown";
+
+    return "text/plain";
+}
+
+function flsInitCodeEditors(root){
+    root = root || document;
+
+    if(typeof CodeMirror === "undefined") {
+        return;
+    }
+
+    root.querySelectorAll("textarea.fls-code-editor").forEach(function(textarea){
+        if(textarea.dataset.cmInited === "1") return;
+
+        textarea.dataset.cmInited = "1";
+
+        var filename = textarea.getAttribute("data-filename") || "";
+        var mode = flsCodeModeFromFilename(filename);
+
+        var cm = CodeMirror.fromTextArea(textarea, {
+            lineNumbers: true,
+            mode: mode,
+            theme: "material-darker",
+            lineWrapping: true,
+            indentUnit: 4,
+            tabSize: 4,
+            indentWithTabs: false,
+            viewportMargin: 80
+        });
+
+        cm.setSize("100%", "680px");
+
+        textarea.__flsCodeMirror = cm;
+        window.__FLS_CODE_MIRRORS__.push(cm);
+
+        setTimeout(function(){
+            try {
+                cm.refresh();
+            } catch(e) {}
+        }, 80);
+    });
+}
+
+function flsSaveCodeMirrors(root){
+    root = root || document;
+
+    root.querySelectorAll("textarea.fls-code-editor").forEach(function(textarea){
+        if(textarea.__flsCodeMirror){
+            try {
+                textarea.__flsCodeMirror.save();
+            } catch(e) {}
+        }
+    });
+}
+
+if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", function(){
+        flsInitCodeEditors(document);
+    });
+} else {
+    flsInitCodeEditors(document);
+}
+
 /* AJAX 页面切换 */
 (function(){
     if (window.__FLS_AJAX_LAYOUT__) return;
@@ -1608,6 +1726,10 @@ if (document.readyState === "loading") {
         if (typeof flsEnhanceMobileTables === "function") {
             flsEnhanceMobileTables(oldContent);
         }
+        
+        if (typeof flsInitCodeEditors === "function") {
+            flsInitCodeEditors(oldContent);
+        }
 
         if (push) {
             history.pushState({url: res.url || location.href}, "", res.url || location.href);
@@ -1677,6 +1799,10 @@ if (document.readyState === "loading") {
                 headers: {"X-Requested-With":"FLS-Ajax"},
                 credentials: "same-origin"
             };
+            
+            if (typeof flsSaveCodeMirrors === "function") {
+                flsSaveCodeMirrors(form);
+            }
 
             if (method === "GET") {
                 const fd = new FormData(form);
