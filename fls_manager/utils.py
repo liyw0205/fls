@@ -70,7 +70,11 @@ def h(v):
     return html.escape(str(v if v is not None else ""), quote=True)
 
 def now_str():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        from .config import panel_now
+        return panel_now().strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 def safe_name(name):
     name = str(name or "").strip()

@@ -5,14 +5,14 @@ import shutil
 import platform
 from datetime import datetime
 
-from flask import Blueprint
+from flask import Blueprint, jsonify
 
 from ..models import load_tasks
 from ..task_runner import is_running
 from ..ui.layout import layout
 from ..utils import h
 from ..paths import BASE_DIR, DATA_DIR, LOG_DIR, SCRIPT_DIR
-from ..config import get_host, get_port, fls_get_admin_token
+from ..config import get_host, get_port, fls_get_admin_token, panel_now, get_panel_timezone_text
 from ..state import PANEL_START_TIME, PANEL_START_STR
 from ..constants import MAIN_PROCESS_NAME, TASK_PROCESS_PREFIX
 
@@ -373,6 +373,29 @@ def get_panel_cpu_status():
     return f"{current:.1f}%", f"{_PANEL_CPU_PEAK:.1f}%"
 
 
+@bp.route("/api/dashboard/runtime")
+def api_dashboard_runtime():
+    """
+    仪表盘动态数据。
+
+    用于前端定时刷新：
+    - 当前时间
+    - 面板已运行时间
+    - 面板当前 CPU
+    - 面板峰值 CPU
+    """
+    panel_cpu_current, panel_cpu_peak = get_panel_cpu_status()
+
+    return jsonify({
+        "ok": True,
+        "current_time": panel_now().strftime("%Y %m-%d %H:%M:%S"),
+        "timezone": get_panel_timezone_text(),
+        "panel_uptime": fmt_duration(time.time() - PANEL_START_TIME),
+        "panel_cpu_current": panel_cpu_current,
+        "panel_cpu_peak": panel_cpu_peak,
+    })
+
+
 @bp.route("/")
 def dashboard():
     tasks = load_tasks()
@@ -382,6 +405,9 @@ def dashboard():
     running = sum(1 for t in tasks if is_running(t["id"]))
     cron_count = sum(1 for t in tasks if str(t.get("cron", "")).strip())
     run_total = sum(int(t.get("run_count", 0)) for t in tasks)
+
+    current_time_text = panel_now().strftime("%Y %m-%d %H:%M:%S")
+    timezone_text = get_panel_timezone_text()
 
     ram = get_ram_status()
     cpu_percent = get_cpu_percent()
@@ -400,6 +426,7 @@ def dashboard():
         disk_total = disk_used = disk_free = "-"
 
     env_data = [
+        ("面板时区", timezone_text),
         ("系统", platform.platform()),
         ("Python", sys.version.split()[0]),
         ("工作目录", str(BASE_DIR)),
@@ -411,7 +438,6 @@ def dashboard():
         ("任务进程名前缀", TASK_PROCESS_PREFIX),
         ("Host / Port", f"{get_host()}:{get_port()}"),
         ("鉴权", "已开启" if fls_get_admin_token() else "未开启"),
-        ("Host / Port", f"{get_host()}:{get_port()}"),
         ("面板启动时间", PANEL_START_STR),
         ("面板已运行", panel_uptime),
 
@@ -444,6 +470,16 @@ def dashboard():
 
     body = f"""
 <div class="grid">
+    <div class="stat">
+        <div class="label">当前时间</div>
+        <div class="num" id="flsDashboardNow" style="color:#2563eb;font-size:22px;">{h(current_time_text)}</div>
+    </div>
+
+    <div class="stat">
+        <div class="label">面板已运行</div>
+        <div class="num" id="flsDashboardUptime" style="color:#18a058;font-size:22px;">{h(panel_uptime)}</div>
+    </div>
+
     <div class="stat">
         <div class="label">任务总数</div>
         <div class="num">{total}</div>
@@ -496,17 +532,12 @@ def dashboard():
 
     <div class="stat">
         <div class="label">面板当前 CPU</div>
-        <div class="num" style="color:#f59e0b;font-size:22px;">{h(panel_cpu_current)}</div>
+        <div class="num" id="flsDashboardPanelCpuCurrent" style="color:#f59e0b;font-size:22px;">{h(panel_cpu_current)}</div>
     </div>
 
     <div class="stat">
         <div class="label">面板峰值 CPU</div>
-        <div class="num" style="color:#dc2626;font-size:22px;">{h(panel_cpu_peak)}</div>
-    </div>
-    
-    <div class="stat">
-        <div class="label">面板已运行</div>
-        <div class="num" style="color:#18a058;font-size:22px;">{h(panel_uptime)}</div>
+        <div class="num" id="flsDashboardPanelCpuPeak" style="color:#dc2626;font-size:22px;">{h(panel_cpu_peak)}</div>
     </div>
 </div>
 
@@ -537,5 +568,42 @@ def dashboard():
         </table>
     </div>
 </div>
+
+<script>
+async function flsDashboardRefreshRuntime(){{
+    try {{
+        const nowEl = document.getElementById("flsDashboardNow");
+        const uptimeEl = document.getElementById("flsDashboardUptime");
+        const cpuEl = document.getElementById("flsDashboardPanelCpuCurrent");
+        const peakEl = document.getElementById("flsDashboardPanelCpuPeak");
+
+        if(!nowEl && !uptimeEl && !cpuEl && !peakEl){{
+            if(window.__FLS_DASHBOARD_RUNTIME_INTERVAL__){{
+                clearInterval(window.__FLS_DASHBOARD_RUNTIME_INTERVAL__);
+                window.__FLS_DASHBOARD_RUNTIME_INTERVAL__ = null;
+            }}
+            return;
+        }}
+
+        const res = await fetch("/api/dashboard/runtime", {{cache:"no-store"}});
+        const json = await res.json();
+
+        if(!json.ok) return;
+
+        if(nowEl) nowEl.textContent = json.current_time || "-";
+        if(uptimeEl) uptimeEl.textContent = json.panel_uptime || "-";
+        if(cpuEl) cpuEl.textContent = json.panel_cpu_current || "-";
+        if(peakEl) peakEl.textContent = json.panel_cpu_peak || "-";
+    }} catch(e) {{}}
+}}
+
+if(window.__FLS_DASHBOARD_RUNTIME_INTERVAL__){{
+    clearInterval(window.__FLS_DASHBOARD_RUNTIME_INTERVAL__);
+    window.__FLS_DASHBOARD_RUNTIME_INTERVAL__ = null;
+}}
+
+flsDashboardRefreshRuntime();
+window.__FLS_DASHBOARD_RUNTIME_INTERVAL__ = setInterval(flsDashboardRefreshRuntime, 500);
+</script>
 """
     return layout("仪表盘", "dashboard", body)

@@ -1,11 +1,15 @@
 import os
 import re
+import sys
 import time
 import uuid
 import shutil
 import threading
 import subprocess
+from datetime import datetime, timezone, timedelta
+from email.utils import parsedate_to_datetime
 
+import requests
 from flask import Blueprint, request, redirect, url_for, jsonify
 
 from ..ui.layout import layout
@@ -14,11 +18,23 @@ from ..utils import h, get_back_url, now_str, safe_name
 from ..logs import tail_file
 from ..paths import BASE_DIR, DATA_DIR, LOG_DIR, SCRIPT_DIR
 from ..constants import MAIN_PROCESS_NAME, TASK_PROCESS_PREFIX
+from ..scheduler import reload_scheduler
+from ..config import (
+    panel_now,
+    get_panel_timezone_text,
+    get_timezone_offset_hours,
+    set_panel_time_calibration,
+    reset_panel_time_calibration,
+)
 
 bp = Blueprint("about", __name__)
 
 ABOUT_JOBS = {}
 
+
+# ============================================================
+# Git / 版本信息
+# ============================================================
 
 def git_available():
     return bool(shutil.which("git"))
@@ -27,6 +43,7 @@ def git_available():
 def run_git(args, timeout=30):
     """
     在 BASE_DIR 下执行 git 命令。
+
     返回：
         ok, output
     """
@@ -68,7 +85,7 @@ def get_version_info():
     获取当前版本和更新日志。
 
     注意：
-    这里不再主动 fetch。
+    这里不主动 fetch。
     刷新远程更新日志改为后台任务 /about/refresh-log。
     """
     info = {
@@ -176,6 +193,10 @@ def render_update_log_rows(logs):
 
     return rows
 
+
+# ============================================================
+# 后台任务日志
+# ============================================================
 
 def about_job_log_file(job_id, action):
     safe_action = safe_name(action or "about-job")
@@ -442,6 +463,414 @@ def start_about_job(action, title, target, args=()):
     return job_id
 
 
+# ============================================================
+# 面板控制：重启 / 停止
+# ============================================================
+
+def delayed_restart_panel():
+    """
+    延迟重启面板。
+
+    使用 os.execv 原地重启当前 Python 进程。
+    """
+    time.sleep(1.2)
+
+    try:
+        python = sys.executable
+        args = [python] + sys.argv
+        os.execv(python, args)
+    except Exception as e:
+        print(f"[About] 面板重启失败: {e}")
+
+        try:
+            os._exit(1)
+        except Exception:
+            pass
+
+
+def delayed_stop_panel():
+    """
+    延迟停止面板。
+    """
+    time.sleep(1.2)
+
+    try:
+        os._exit(0)
+    except Exception:
+        pass
+
+
+@bp.route("/about/restart-panel", methods=["POST"])
+def about_restart_panel():
+    """
+    重启面板。
+
+    先返回页面，再后台延迟执行重启，避免请求还没响应就断开。
+    """
+    th = threading.Thread(
+        target=delayed_restart_panel,
+        daemon=True,
+        name="fls-panel-restart",
+    )
+    th.start()
+
+    body = """
+<div class="card">
+    <div class="card-title">正在重启面板</div>
+    <div class="help">
+        面板将在 1 秒后重启。<br>
+        如果页面短暂无法访问，请等待几秒后刷新。
+    </div>
+    <br>
+    <a class="btn btn-gray" href="/about">返回关于页</a>
+    <a class="btn btn-primary" href="/">返回仪表盘</a>
+</div>
+
+<script>
+setTimeout(function(){
+    location.href = "/";
+}, 5000);
+</script>
+"""
+    return layout("正在重启面板", "about", body)
+
+
+@bp.route("/about/stop-panel", methods=["POST"])
+def about_stop_panel():
+    """
+    停止面板。
+
+    停止后需要用户通过命令行、systemd、pm2、supervisor 或守护脚本重新启动。
+    """
+    th = threading.Thread(
+        target=delayed_stop_panel,
+        daemon=True,
+        name="fls-panel-stop",
+    )
+    th.start()
+
+    body = """
+<div class="card">
+    <div class="card-title">正在停止面板</div>
+    <div class="help">
+        面板将在 1 秒后停止。<br>
+        停止后需要你手动重新启动面板。
+    </div>
+</div>
+"""
+    return layout("正在停止面板", "about", body)
+
+
+# ============================================================
+# 面板时间校准
+# ============================================================
+
+def about_panel_time_text():
+    """
+    关于页显示用的面板当前时间。
+
+    格式：
+        2026 05-08 00:00:00
+    """
+    return panel_now().strftime("%Y %m-%d %H:%M:%S")
+
+
+def utc_offset_options(selected=8):
+    """
+    生成 UTC 偏移选择项。
+
+    范围：
+        UTC-24 到 UTC+24
+    """
+    try:
+        selected = int(selected)
+    except Exception:
+        selected = 8
+
+    selected = max(-24, min(24, selected))
+
+    options = ""
+
+    for offset in range(-24, 25):
+        text = f"UTC{offset:+d}"
+        s = "selected" if offset == selected else ""
+        options += f'<option value="{offset}" {s}>{h(text)}</option>'
+
+    return options
+
+
+def timezone_from_offset(offset):
+    """
+    根据 UTC 偏移小时数生成 timezone 对象。
+
+    支持：
+        -24 到 +24
+    """
+    try:
+        offset = int(offset)
+    except Exception:
+        offset = 8
+
+    offset = max(-24, min(24, offset))
+
+    return timezone(
+        timedelta(hours=offset),
+        name=f"UTC{offset:+d}",
+    )
+
+
+def fetch_network_utc_time():
+    """
+    从网络 HTTP Date 头获取当前 UTC 时间。
+
+    HTTP Date 标准是 GMT/UTC。
+    """
+    urls = [
+        "https://www.baidu.com",
+        "https://www.qq.com",
+        "https://www.aliyun.com",
+        "https://www.cloudflare.com",
+    ]
+
+    last_error = ""
+
+    for url in urls:
+        try:
+            r = requests.head(
+                url,
+                timeout=8,
+                allow_redirects=True,
+                headers={"User-Agent": "Mozilla/5.0 FLS-Manager"},
+            )
+
+            date_header = r.headers.get("Date", "")
+
+            if not date_header:
+                r = requests.get(
+                    url,
+                    timeout=8,
+                    stream=True,
+                    headers={"User-Agent": "Mozilla/5.0 FLS-Manager"},
+                )
+                date_header = r.headers.get("Date", "")
+
+            if not date_header:
+                raise RuntimeError("响应头中没有 Date")
+
+            dt = parsedate_to_datetime(date_header)
+
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+
+            return dt.astimezone(timezone.utc)
+
+        except Exception as e:
+            last_error = f"{url}: {e}"
+
+    raise RuntimeError(f"无法从网络获取时间：{last_error}")
+
+
+def parse_custom_time_with_offset(value, offset):
+    """
+    解析自定义当前时间。
+
+    格式必须是：
+        yyyyMMddHHmmss
+
+    示例：
+        20260508121200
+
+    该时间会按照用户选择的 UTC 偏移解释：
+        UTC+8  => 20260508121200 表示 UTC+8 的 2026-05-08 12:12:00
+        UTC+0  => 表示 UTC 的 2026-05-08 12:12:00
+        UTC-5  => 表示 UTC-5 的 2026-05-08 12:12:00
+    """
+    value = str(value or "").strip()
+
+    if not re.fullmatch(r"\d{14}", value):
+        raise ValueError("自定义时间格式错误，正确格式例如：20260508121200")
+
+    try:
+        dt = datetime.strptime(value, "%Y%m%d%H%M%S")
+    except Exception:
+        raise ValueError("自定义时间无法解析，正确格式例如：20260508121200")
+
+    tz = timezone_from_offset(offset)
+
+    return dt.replace(tzinfo=tz)
+
+
+def render_time_sync_result(title, ok, message, detail=""):
+    color = "#18a058" if ok else "#dc2626"
+
+    body = f"""
+<div class="card">
+    <div class="card-title">{h(title)}</div>
+    <div class="help" style="color:{color};font-weight:800;">
+        {h(message)}
+    </div>
+    <br>
+    <div class="help">
+        当前面板时间：<b>{h(about_panel_time_text())}</b><br>
+        当前面板时区：<b>{h(get_panel_timezone_text())}</b><br>
+        {h(detail or "")}
+    </div>
+    <br>
+    <a class="btn btn-primary" href="/about">返回关于页</a>
+    <a class="btn btn-gray" href="/">返回仪表盘</a>
+</div>
+"""
+    return layout(title, "about", body)
+
+
+@bp.route("/about/time-sync", methods=["POST"])
+def about_time_sync():
+    """
+    面板时间校准
+
+    支持：
+    1. 自动校准北京时间
+       - 网络标准时间 + UTC+8
+       - 不修改系统时间
+       - 写入 FLS 面板虚拟时间偏移
+
+    2. 选择 UTC 偏移自动校准
+       - 例如 UTC+7
+       - 面板当前时间会变成 UTC+7 对应时间
+       - Cron 也按 UTC+7 的面板虚拟时间计算
+
+    3. 自定义当前时间
+       - 格式 yyyyMMddHHmmss，例如 20260508121200
+       - 按选择的 UTC 偏移解释
+       - 不修改系统时间
+
+    4. 重置时间偏移
+       - 清除虚拟时间偏移，仅保留当前 UTC 时区设置
+
+    校准成功后会 reload_scheduler()，让 Cron 下次执行时间重新计算。
+    """
+    mode = request.form.get("mode", "").strip()
+    custom_time = request.form.get("custom_time", "").strip()
+    utc_offset = request.form.get("utc_offset", "8").strip()
+
+    try:
+        if mode == "beijing":
+            offset = 8
+            tz = timezone_from_offset(offset)
+            network_utc = fetch_network_utc_time()
+            virtual_now = network_utc.astimezone(tz)
+
+            result = set_panel_time_calibration(
+                offset_hours=offset,
+                virtual_now=virtual_now,
+            )
+
+            reload_scheduler()
+
+            return render_time_sync_result(
+                "北京时间校准完成",
+                True,
+                "已自动校准为北京时间，未修改系统时间",
+                (
+                    f"网络 UTC：{network_utc.strftime('%Y-%m-%d %H:%M:%S')}；"
+                    f"北京时间：{virtual_now.strftime('%Y-%m-%d %H:%M:%S')}；"
+                    f"面板时区：{result.get('timezone_text')}；"
+                    f"面板时间偏移秒数：{result.get('panel_time_offset_seconds')}"
+                ),
+            )
+
+        if mode == "utc_offset":
+            offset = int(utc_offset)
+            offset = max(-24, min(24, offset))
+            tz = timezone_from_offset(offset)
+
+            network_utc = fetch_network_utc_time()
+            virtual_now = network_utc.astimezone(tz)
+
+            result = set_panel_time_calibration(
+                offset_hours=offset,
+                virtual_now=virtual_now,
+            )
+
+            reload_scheduler()
+
+            return render_time_sync_result(
+                f"UTC{offset:+d} 时间校准完成",
+                True,
+                f"已按 UTC{offset:+d} 校准面板虚拟时间，未修改系统时间",
+                (
+                    f"网络 UTC：{network_utc.strftime('%Y-%m-%d %H:%M:%S')}；"
+                    f"UTC{offset:+d}：{virtual_now.strftime('%Y-%m-%d %H:%M:%S')}；"
+                    f"面板时区：{result.get('timezone_text')}；"
+                    f"面板时间偏移秒数：{result.get('panel_time_offset_seconds')}"
+                ),
+            )
+
+        if mode == "custom":
+            offset = int(utc_offset)
+            offset = max(-24, min(24, offset))
+
+            virtual_now = parse_custom_time_with_offset(
+                custom_time,
+                offset,
+            )
+
+            result = set_panel_time_calibration(
+                offset_hours=offset,
+                virtual_now=virtual_now,
+            )
+
+            reload_scheduler()
+
+            return render_time_sync_result(
+                "自定义时间校准完成",
+                True,
+                f"已按 UTC{offset:+d} 应用自定义面板时间，未修改系统时间",
+                (
+                    f"输入时间：{custom_time}；"
+                    f"UTC{offset:+d}：{virtual_now.strftime('%Y-%m-%d %H:%M:%S')}；"
+                    f"换算 UTC：{virtual_now.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}；"
+                    f"面板时区：{result.get('timezone_text')}；"
+                    f"面板时间偏移秒数：{result.get('panel_time_offset_seconds')}"
+                ),
+            )
+
+        if mode == "reset":
+            offset = get_timezone_offset_hours()
+
+            result = reset_panel_time_calibration(offset)
+
+            reload_scheduler()
+
+            return render_time_sync_result(
+                "面板时间偏移已重置",
+                True,
+                "已清除面板虚拟时间偏移，仅保留当前 UTC 时区设置",
+                (
+                    f"面板时区：{result.get('timezone_text')}；"
+                    f"面板时间偏移秒数：{result.get('panel_time_offset_seconds')}"
+                ),
+            )
+
+        return render_time_sync_result(
+            "时间校准失败",
+            False,
+            "未知的时间校准方式",
+        ), 400
+
+    except Exception as e:
+        return render_time_sync_result(
+            "时间校准失败",
+            False,
+            str(e),
+            "提示：当前方案不修改系统时间。请检查网络或输入格式。",
+        ), 400
+
+
+# ============================================================
+# 关于页
+# ============================================================
+
 @bp.route("/about")
 def about():
     version = get_version_info()
@@ -460,33 +889,6 @@ def about():
 
     if not version["git_available"] or not version["is_repo"]:
         version_card = f"""
-<style>
-.fls-update-log-fold {{
-    overflow:hidden;
-}}
-
-.fls-update-log-fold summary {{
-    cursor:pointer;
-    list-style:none;
-}}
-
-.fls-update-log-fold summary::-webkit-details-marker {{
-    display:none;
-}}
-
-.fls-update-log-fold summary::after {{
-    content:"点击展开";
-    display:block;
-    margin-top:8px;
-    color:#6b7280;
-    font-size:12px;
-    font-weight:800;
-}}
-
-.fls-update-log-fold[open] summary::after {{
-    content:"点击收起";
-}}
-</style>
 <div class="card">
     <div class="card-title">当前版本 / 更新日志</div>
     <div class="help" style="color:#dc2626;">
@@ -561,6 +963,8 @@ def about():
 </details>
 """
 
+    current_offset = get_timezone_offset_hours()
+
     body = f"""
 <style>
 .fls-update-log-fold {{
@@ -588,6 +992,15 @@ def about():
 .fls-update-log-fold[open] summary::after {{
     content:"点击收起";
 }}
+
+.fls-time-mode-box {{
+    display:none;
+    margin-top:14px;
+}}
+
+.fls-time-mode-box.active {{
+    display:block;
+}}
 </style>
 
 <div class="card">
@@ -596,7 +1009,187 @@ def about():
         <p><b>FLS 面板</b> 是一个轻量级脚本任务管理面板，可用于管理 Python、Shell、Node.js 等脚本任务。</p>
         <p>支持任务管理、Cron 定时、脚本导入/拉取、日志查看、依赖管理、代理配置、通知管理、备份恢复和面板配置。</p>
     </div>
+
+    <br>
+
+    <div class="action-row">
+        <form method="post" action="/about/restart-panel" style="display:inline;">
+            <button class="btn btn-orange" type="submit" onclick="return confirm('确定重启面板吗？重启期间页面会短暂无法访问。')">
+                重启面板
+            </button>
+        </form>
+
+        <form method="post" action="/about/stop-panel" style="display:inline;">
+            <button class="btn btn-red" type="submit" onclick="return confirm('确定停止面板吗？停止后需要手动重新启动。')">
+                停止面板
+            </button>
+        </form>
+    </div>
 </div>
+
+<div class="card">
+    <div class="card-title">面板时间校准</div>
+    <div class="help">
+        当前面板时间：<b>{h(about_panel_time_text())}</b><br>
+        当前面板时区：<b>{h(get_panel_timezone_text())}</b><br>
+        时间校准主要用于修正系统时间或时区错误导致的 Cron 定时任务触发不准。<br>
+        本功能不会修改系统时间。<br>
+        自定义当前时间格式必须为：<code>yyyyMMddHHmmss</code>，例如：<code>20260508121200</code>。
+    </div>
+
+    <br>
+
+    <div class="form-item">
+        <label>选择校准方式</label>
+        <select id="flsTimeSyncMode" onchange="flsToggleTimeSyncMode()">
+            <option value="beijing">自动校准北京时间</option>
+            <option value="utc_offset">选择 UTC 偏移自动校准</option>
+            <option value="custom">自定义当前时间</option>
+            <option value="reset">重置时间偏移</option>
+        </select>
+    </div>
+
+    <div id="flsTimeBoxBeijing" class="fls-time-mode-box active">
+        <form method="post" action="/about/time-sync">
+            <input type="hidden" name="mode" value="beijing">
+
+            <div class="card" style="box-shadow:none;border:1px solid #e5e7eb;margin-top:14px;">
+                <div class="card-title">自动校准北京时间</div>
+                <div class="help">
+                    会从网络 HTTP Date 头获取标准 UTC 时间，并设置 FLS 面板虚拟时间为北京时间。<br>
+                    不修改系统时间。<br>
+                    Cron 会按北京时间重新计算。
+                </div>
+                <br>
+                <button class="btn btn-primary" type="submit" onclick="return confirm('确定自动校准为北京时间吗？不会修改系统时间。')">
+                    自动校准北京时间
+                </button>
+            </div>
+        </form>
+    </div>
+
+    <div id="flsTimeBoxUtcOffset" class="fls-time-mode-box">
+        <form method="post" action="/about/time-sync">
+            <input type="hidden" name="mode" value="utc_offset">
+
+            <div class="card" style="box-shadow:none;border:1px solid #e5e7eb;margin-top:14px;">
+                <div class="card-title">选择 UTC 偏移自动校准</div>
+                <div class="help">
+                    可选择 <code>UTC-24</code> 到 <code>UTC+24</code>。<br>
+                    例如选择 <code>UTC+7</code>，面板当前时间和 Cron 都会按 UTC+7 计算。<br>
+                    不修改系统时间。
+                </div>
+
+                <br>
+
+                <div class="form-item">
+                    <label>UTC 偏移</label>
+                    <select name="utc_offset">
+                        {utc_offset_options(current_offset)}
+                    </select>
+                </div>
+
+                <br>
+
+                <button class="btn btn-blue" type="submit" onclick="return confirm('确定按选择的 UTC 偏移校准面板时间吗？不会修改系统时间。')">
+                    按选择 UTC 校准
+                </button>
+            </div>
+        </form>
+    </div>
+
+    <div id="flsTimeBoxCustom" class="fls-time-mode-box">
+        <form method="post" action="/about/time-sync">
+            <input type="hidden" name="mode" value="custom">
+
+            <div class="card" style="box-shadow:none;border:1px solid #e5e7eb;margin-top:14px;">
+                <div class="card-title">自定义当前时间</div>
+                <div class="help">
+                    输入格式必须是：<code>yyyyMMddHHmmss</code>。<br>
+                    例如：<code>20260508121200</code>。<br>
+                    下方选择 <code>UTC+8</code> 时，表示该时间是 <code>UTC+8</code> 的当前时间。<br>
+                    下方选择 <code>UTC+7</code> 时，表示该时间是 <code>UTC+7</code> 的当前时间。<br>
+                    不修改系统时间。
+                </div>
+
+                <br>
+
+                <div class="form-grid">
+                    <div class="form-item">
+                        <label>自定义当前时间</label>
+                        <input name="custom_time" placeholder="例如：20260508121200">
+                    </div>
+
+                    <div class="form-item">
+                        <label>该时间属于哪个 UTC 偏移</label>
+                        <select name="utc_offset">
+                            {utc_offset_options(current_offset)}
+                        </select>
+                    </div>
+                </div>
+
+                <br>
+
+                <button class="btn btn-orange" type="submit" onclick="return confirm('确定应用自定义面板时间吗？不会修改系统时间。')">
+                    应用自定义时间
+                </button>
+            </div>
+        </form>
+    </div>
+
+    <div id="flsTimeBoxReset" class="fls-time-mode-box">
+        <form method="post" action="/about/time-sync">
+            <input type="hidden" name="mode" value="reset">
+
+            <div class="card" style="box-shadow:none;border:1px solid #e5e7eb;margin-top:14px;">
+                <div class="card-title">重置时间偏移</div>
+                <div class="help">
+                    会清除面板虚拟时间偏移，仅保留当前 UTC 时区设置。<br>
+                    如果你的系统时间本身已经正确，可以使用此项。
+                </div>
+
+                <br>
+
+                <button class="btn btn-gray" type="submit" onclick="return confirm('确定重置面板时间偏移吗？')">
+                    重置时间偏移
+                </button>
+            </div>
+        </form>
+    </div>
+
+    <br>
+
+    <div class="help" style="color:#18a058;">
+        校准成功后会自动重载调度器，让 Cron 任务的下次执行时间重新计算。
+    </div>
+</div>
+
+<script>
+function flsToggleTimeSyncMode(){{
+    var modeEl = document.getElementById("flsTimeSyncMode");
+    if(!modeEl) return;
+
+    var mode = modeEl.value || "beijing";
+
+    var boxes = {{
+        "beijing": document.getElementById("flsTimeBoxBeijing"),
+        "utc_offset": document.getElementById("flsTimeBoxUtcOffset"),
+        "custom": document.getElementById("flsTimeBoxCustom"),
+        "reset": document.getElementById("flsTimeBoxReset")
+    }};
+
+    Object.keys(boxes).forEach(function(key){{
+        if(!boxes[key]) return;
+        if(key === mode){{
+            boxes[key].classList.add("active");
+        }}else{{
+            boxes[key].classList.remove("active");
+        }}
+    }});
+}}
+
+flsToggleTimeSyncMode();
+</script>
 
 {version_card}
 
@@ -696,6 +1289,10 @@ ps -eo pid,ppid,comm,args | grep fls
 
     return layout("关于", "about", body)
 
+
+# ============================================================
+# 版本刷新 / 更新
+# ============================================================
 
 @bp.route("/about/refresh-log", methods=["POST"])
 def about_refresh_log():

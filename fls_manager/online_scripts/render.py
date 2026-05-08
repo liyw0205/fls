@@ -136,16 +136,30 @@ def render_online_script_rows(items):
         if has_doc:
             doc_btn = f'<a class="btn btn-orange" href="/online-scripts/doc/{h(item_id)}">查看文档</a>'
 
-        task_link_form_html = ""
+        task_link_hidden_form = ""
         task_link_btn_html = ""
 
         if task_link_unloaded:
-            task_link_form_html = f"""
-<form method="post" action="/online-scripts/task-link/{h(item_id)}" style="display:inline;">
-    <button class="btn btn-orange" type="submit">手动拉取任务源</button>
-</form>
+            task_link_form_id = f"onlineTaskLinkForm-{item_id}"
+
+            task_link_hidden_form = f"""
+<form
+    id="{h(task_link_form_id)}"
+    method="post"
+    action="/online-scripts/task-link/{h(item_id)}"
+    style="display:none;"
+></form>
 """
-            task_link_btn_html = task_link_form_html
+
+            task_link_btn_html = f"""
+<button
+    class="btn btn-orange"
+    type="submit"
+    form="{h(task_link_form_id)}"
+>
+    手动拉取任务源
+</button>
+"""
 
         running_install_id, running_install_info = get_running_install_by_script_id(item_id)
 
@@ -167,6 +181,8 @@ def render_online_script_rows(items):
         else:
             if has_task:
                 install_action_html = f"""
+{task_link_hidden_form}
+
 <div class="help" style="margin:0 0 10px;">
     该脚本包含 <b>{len(task_crons)}</b> 个任务。点击“选择任务并安装”后，可选择要导入的任务，默认全选。
 </div>
@@ -180,21 +196,11 @@ def render_online_script_rows(items):
 """
             else:
                 install_action_html = f"""
+{task_link_hidden_form}
+
 <form method="post" action="/online-scripts/install/{h(item_id)}">
     <div class="fls-action-line">
         <select name="proxy_id">{proxy_options}</select>
-
-        <div class="fls-check-group">
-            <label class="fls-inline-check">
-                <input type="checkbox" name="import_task" value="1" disabled style="width:auto;">
-                导入任务
-            </label>
-
-            <label class="fls-inline-check">
-                <input type="checkbox" name="enable_task" value="1" disabled style="width:auto;">
-                启用任务
-            </label>
-        </div>
     </div>
 
     <div class="help" style="margin:6px 0 10px;">
