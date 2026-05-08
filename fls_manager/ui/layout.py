@@ -707,6 +707,90 @@ body.fls-mobile .fls-float-menu-btn:active {
 }
 
 /* ============================================================
+   表单悬浮提交按钮
+   - 层级低于侧边栏遮罩和侧边栏
+   - 手机端按钮更短
+   - 原按钮进入视口时由 JS 自动隐藏
+   ============================================================ */
+.fls-form-float-actions {
+    position:fixed;
+    right:16px;
+    bottom:18px;
+
+    /*
+       重要：
+       mask z-index=20
+       sidebar z-index=30
+       所以这里必须小于 20，避免打开侧边栏还能看到悬浮按钮
+    */
+    z-index:18;
+
+    display:none;
+    flex-wrap:nowrap;
+    gap:6px;
+    align-items:center;
+    justify-content:flex-end;
+
+    max-width:min(420px, calc(100vw - 32px));
+    padding:8px;
+    border:1px solid rgba(255,255,255,.45);
+    border-radius:999px;
+    background:rgba(255,255,255,.76);
+    box-shadow:0 8px 24px rgba(0,0,0,.16);
+    backdrop-filter:blur(16px) saturate(180%);
+    -webkit-backdrop-filter:blur(16px) saturate(180%);
+}
+
+.fls-form-float-actions.show {
+    display:flex;
+}
+
+.fls-form-float-actions.hide-near-original {
+    display:none!important;
+}
+
+.fls-form-float-actions .btn {
+    margin:0;
+    min-height:34px;
+    max-width:132px;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+    box-shadow:0 4px 14px rgba(0,0,0,.12);
+}
+
+.fls-form-float-title {
+    color:#374151;
+    font-size:12px;
+    font-weight:900;
+    padding:0 4px 0 6px;
+    white-space:nowrap;
+}
+
+/* 手机端：更小、更短，不占太多宽度 */
+body.fls-mobile .fls-form-float-actions {
+    left:auto;
+    right:10px;
+    bottom:calc(env(safe-area-inset-bottom, 0px) + 12px);
+    max-width:calc(100vw - 20px);
+    padding:7px;
+    border-radius:999px;
+}
+
+body.fls-mobile .fls-form-float-actions .btn {
+    flex:0 0 auto;
+    min-width:54px;
+    max-width:82px;
+    min-height:36px;
+    padding:7px 10px;
+    font-size:12px;
+}
+
+body.fls-mobile .fls-form-float-title {
+    display:none;
+}
+
+/* ============================================================
    手机端布局
    ============================================================ */
 body.fls-mobile .sidebar {
@@ -1474,6 +1558,10 @@ function toggleMenu(show){
         mask.classList.remove("show");
         if (btn) btn.classList.remove("menu-open");
     }
+
+    if (typeof flsUpdateFloatingFormVisibility === "function") {
+        flsUpdateFloatingFormVisibility();
+    }
 }
 
 if (document.readyState === "loading") {
@@ -1524,6 +1612,273 @@ if (document.readyState === "loading") {
 } else {
     flsEnhanceMobileTables(document);
 }
+
+/* ============================================================
+   长表单悬浮提交按钮
+   - 自动扫描 .content 内较长 POST 表单
+   - 克隆 submit 按钮为悬浮按钮
+   - 点击悬浮按钮时触发原按钮 click，兼容 formaction/name/value/AJAX
+   - 打开侧边栏时自动隐藏
+   - 原始按钮进入视口时自动隐藏，避免到底部遮挡原按钮
+   ============================================================ */
+window.__FLS_FLOAT_FORM_ORIGINAL_BUTTONS__ = [];
+
+function flsIsElementVisible(el){
+    if(!el) return false;
+
+    const style = window.getComputedStyle(el);
+    if(style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+        return false;
+    }
+
+    if(el.offsetParent === null && style.position !== "fixed") {
+        return false;
+    }
+
+    return true;
+}
+
+function flsGetSubmitButtons(form){
+    if(!form) return [];
+
+    const buttons = Array.from(
+        form.querySelectorAll('button[type="submit"], input[type="submit"]')
+    );
+
+    return buttons.filter(function(btn){
+        if(btn.disabled) return false;
+        if(!flsIsElementVisible(btn)) return false;
+
+        const text = (btn.innerText || btn.value || "").trim();
+
+        // 避免危险按钮悬浮，防误触
+        if(/删除|停止|结束|退出|重启|清空|卸载/.test(text)) return false;
+
+        return true;
+    });
+}
+
+function flsFormLooksLong(form){
+    if(!form) return false;
+
+    const rect = form.getBoundingClientRect();
+    const height = Math.max(form.offsetHeight || 0, rect.height || 0);
+    const pageLong = document.documentElement.scrollHeight > window.innerHeight * 1.25;
+
+    return pageLong && height > window.innerHeight * 0.7;
+}
+
+function flsPickFloatingForm(root){
+    root = root || document;
+
+    const forms = Array.from(root.querySelectorAll(".content form"));
+
+    let best = null;
+    let bestScore = 0;
+
+    forms.forEach(function(form){
+        const method = (form.getAttribute("method") || "GET").toUpperCase();
+
+        // 搜索表单不需要悬浮
+        if(method === "GET") return;
+
+        if(form.dataset.noFloatActions === "1") return;
+        if(!flsIsElementVisible(form)) return;
+
+        const buttons = flsGetSubmitButtons(form);
+        if(!buttons.length) return;
+
+        if(!flsFormLooksLong(form)) return;
+
+        const score = form.offsetHeight || form.getBoundingClientRect().height || 0;
+
+        if(score > bestScore){
+            bestScore = score;
+            best = form;
+        }
+    });
+
+    return best;
+}
+
+function flsEnsureFloatActionBox(){
+    let box = document.getElementById("flsFormFloatActions");
+
+    if(!box){
+        box = document.createElement("div");
+        box.id = "flsFormFloatActions";
+        box.className = "fls-form-float-actions";
+        document.body.appendChild(box);
+    }
+
+    return box;
+}
+
+function flsShortFloatButtonText(text){
+    text = String(text || "提交").trim();
+
+    const map = [
+        [/保存配置/, "保存"],
+        [/保存文件/, "保存"],
+        [/保存全部/, "保存"],
+        [/保存新建/, "保存"],
+        [/保存改名/, "保存"],
+        [/保存代理/, "保存"],
+        [/保存.*通知/, "保存"],
+        [/保存/, "保存"],
+
+        [/开始下载安装/, "安装"],
+        [/下载安装/, "安装"],
+
+        [/立即导入所选任务/, "导入"],
+        [/导入所选变量/, "导入"],
+        [/开始导入/, "导入"],
+
+        [/开始拉取/, "拉取"],
+        [/安装并查看日志/, "安装"],
+        [/提交/, "提交"],
+    ];
+
+    for(const item of map){
+        if(item[0].test(text)) return item[1];
+    }
+
+    if(text.length > 4){
+        return text.slice(0, 4);
+    }
+
+    return text || "提交";
+}
+
+function flsOriginalButtonsInViewport(){
+    const buttons = window.__FLS_FLOAT_FORM_ORIGINAL_BUTTONS__ || [];
+
+    for(const btn of buttons){
+        if(!btn || !document.body.contains(btn)) continue;
+        if(!flsIsElementVisible(btn)) continue;
+
+        const rect = btn.getBoundingClientRect();
+
+        // 原按钮只要进入视口下半部分附近，就隐藏悬浮按钮
+        if(
+            rect.top < window.innerHeight - 20 &&
+            rect.bottom > 0
+        ){
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function flsSidebarIsOpen(){
+    const sidebar = document.getElementById("sidebar");
+    const mask = document.getElementById("mask");
+
+    return (
+        sidebar && sidebar.classList.contains("open")
+    ) || (
+        mask && mask.classList.contains("show")
+    );
+}
+
+function flsUpdateFloatingFormVisibility(){
+    const box = document.getElementById("flsFormFloatActions");
+    if(!box) return;
+
+    if(!box.classList.contains("show")) return;
+
+    if(flsSidebarIsOpen() || flsOriginalButtonsInViewport()){
+        box.classList.add("hide-near-original");
+    }else{
+        box.classList.remove("hide-near-original");
+    }
+}
+
+function flsInitFloatingFormActions(root){
+    root = root || document;
+
+    const box = flsEnsureFloatActionBox();
+
+    box.innerHTML = "";
+    box.classList.remove("show");
+    box.classList.remove("hide-near-original");
+
+    window.__FLS_FLOAT_FORM_ORIGINAL_BUTTONS__ = [];
+
+    const form = flsPickFloatingForm(root);
+
+    if(!form){
+        return;
+    }
+
+    // 最多悬浮 2 个，避免太长
+    const buttons = flsGetSubmitButtons(form).slice(0, 2);
+
+    if(!buttons.length){
+        return;
+    }
+
+    window.__FLS_FLOAT_FORM_ORIGINAL_BUTTONS__ = buttons;
+
+    const title = document.createElement("span");
+    title.className = "fls-form-float-title";
+    title.textContent = "快捷";
+    box.appendChild(title);
+
+    buttons.forEach(function(originalBtn){
+        const rawText = (originalBtn.innerText || originalBtn.value || "提交").trim();
+
+        const clone = document.createElement("button");
+        clone.type = "button";
+        clone.className = originalBtn.className || "btn btn-primary";
+        clone.textContent = flsShortFloatButtonText(rawText);
+        clone.title = rawText;
+
+        clone.addEventListener("click", function(){
+            try {
+                originalBtn.click();
+            } catch(e) {
+                try {
+                    form.requestSubmit(originalBtn);
+                } catch(err) {
+                    form.submit();
+                }
+            }
+        });
+
+        box.appendChild(clone);
+    });
+
+    box.classList.add("show");
+    flsUpdateFloatingFormVisibility();
+}
+
+function flsRefreshFloatingFormActionsSoon(root){
+    setTimeout(function(){
+        flsInitFloatingFormActions(root || document);
+    }, 80);
+}
+
+if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", function(){
+        flsInitFloatingFormActions(document);
+    });
+} else {
+    flsInitFloatingFormActions(document);
+}
+
+window.addEventListener("resize", function(){
+    flsRefreshFloatingFormActionsSoon(document);
+});
+
+window.addEventListener("orientationchange", function(){
+    flsRefreshFloatingFormActionsSoon(document);
+});
+
+window.addEventListener("scroll", function(){
+    flsUpdateFloatingFormVisibility();
+}, {passive:true});
 
 /* ============================================================
    脚本编辑器语法高亮：CodeMirror
@@ -1729,6 +2084,10 @@ if (document.readyState === "loading") {
         
         if (typeof flsInitCodeEditors === "function") {
             flsInitCodeEditors(oldContent);
+        }
+        
+        if (typeof flsInitFloatingFormActions === "function") {
+            flsInitFloatingFormActions(oldContent);
         }
 
         if (push) {
