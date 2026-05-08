@@ -467,46 +467,319 @@ def start_about_job(action, title, target, args=()):
 # 面板控制：重启 / 停止
 # ============================================================
 
-def delayed_restart_panel():
+def fls_control_script():
     """
-    延迟重启面板。
+    获取当前系统可用的 FLS 控制脚本。
 
-    使用 os.execv 原地重启当前 Python 进程。
+    Windows：
+        优先 BASE_DIR/fls.bat
+        其次 BASE_DIR/fls.ps1
+
+    Linux / Termux：
+        优先 BASE_DIR/fls.sh
+    """
+    if os.name == "nt":
+        candidates = [
+            BASE_DIR / "fls.bat",
+            BASE_DIR / "fls.ps1",
+        ]
+    else:
+        candidates = [
+            BASE_DIR / "fls.sh",
+        ]
+
+    for item in candidates:
+        try:
+            if item.exists() and item.is_file():
+                return item
+        except Exception:
+            pass
+
+    if os.name == "nt":
+        return BASE_DIR / "fls.bat"
+
+    return BASE_DIR / "fls.sh"
+
+
+def build_fls_control_command(action):
+    """
+    构造面板控制命令。
+
+    重点：
+    - restart 不再依赖 fls.sh restart
+    - 因为 fls.sh stop 可能识别不到当前面板进程
+    - 这里会直接杀掉当前 Flask 进程 PID，再调用控制脚本 start
+    - 这样可以保证端口释放
+
+    action:
+        restart / stop
+    """
+    action = str(action or "").strip().lower()
+
+    if action not in ("restart", "stop"):
+        raise ValueError(f"不支持的控制动作：{action}")
+
+    script = fls_control_script()
+
+    if not script.exists():
+        raise FileNotFoundError(f"控制脚本不存在：{script}")
+
+    current_pid = os.getpid()
+    script_text = str(script)
+    base_text = str(BASE_DIR)
+
+    # ============================================================
+    # Windows
+    # ============================================================
+    if os.name == "nt":
+        suffix = script.suffix.lower()
+        lower_name = script.name.lower()
+
+        if suffix == ".bat":
+            start_cmd = (
+                f'Start-Process -FilePath "cmd.exe" '
+                f'-ArgumentList "/c","\\"{script_text}\\" start" '
+                f'-WorkingDirectory "{base_text}" '
+                f'-WindowStyle Hidden'
+            )
+        elif suffix == ".ps1":
+            start_cmd = (
+                f'Start-Process -FilePath "powershell.exe" '
+                f'-ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-File","\\"{script_text}\\"","start" '
+                f'-WorkingDirectory "{base_text}" '
+                f'-WindowStyle Hidden'
+            )
+        else:
+            raise RuntimeError(f"Windows 不支持的控制脚本类型：{script}")
+
+        if action == "restart":
+            ps_cmd = f"""
+Start-Sleep -Seconds 1
+try {{
+    Stop-Process -Id {current_pid} -Force -ErrorAction SilentlyContinue
+}} catch {{}}
+Start-Sleep -Seconds 4
+{start_cmd}
+"""
+        else:
+            ps_cmd = f"""
+Start-Sleep -Seconds 1
+try {{
+    Stop-Process -Id {current_pid} -Force -ErrorAction SilentlyContinue
+}} catch {{}}
+"""
+
+        return [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            ps_cmd,
+        ]
+
+    # ============================================================
+    # Linux / Termux / macOS
+    # ============================================================
+    if action == "restart":
+        shell_cmd = f"""
+(
+    echo ""
+    echo "===== FLS 面板自重启开始: $(date '+%Y-%m-%d %H:%M:%S') ====="
+    echo "当前面板 PID: {current_pid}"
+    echo "控制脚本: {script_text}"
+
+    echo "[FLS] 尝试优雅结束当前面板进程..."
+    kill -TERM {current_pid} 2>/dev/null || true
+
+    i=0
+    while kill -0 {current_pid} 2>/dev/null; do
+        i=$((i + 1))
+        if [ "$i" -ge 20 ]; then
+            echo "[FLS] 当前面板进程仍未退出，执行 kill -9"
+            kill -KILL {current_pid} 2>/dev/null || true
+            break
+        fi
+        sleep 0.5
+    done
+
+    echo "[FLS] 等待端口释放..."
+    sleep 3
+
+    echo "[FLS] 调用控制脚本启动面板..."
+    sh "{script_text}" start
+
+    echo "===== FLS 面板自重启结束: $(date '+%Y-%m-%d %H:%M:%S') ====="
+) >> "{LOG_DIR / 'fls-manager-daemon.log'}" 2>&1
+"""
+    else:
+        shell_cmd = f"""
+(
+    echo ""
+    echo "===== FLS 面板停止开始: $(date '+%Y-%m-%d %H:%M:%S') ====="
+    echo "当前面板 PID: {current_pid}"
+    echo "控制脚本: {script_text}"
+
+    echo "[FLS] 尝试调用控制脚本 stop..."
+    sh "{script_text}" stop || true
+
+    echo "[FLS] 兜底结束当前面板进程..."
+    kill -TERM {current_pid} 2>/dev/null || true
+
+    sleep 1
+
+    if kill -0 {current_pid} 2>/dev/null; then
+        echo "[FLS] 当前面板进程仍未退出，执行 kill -9"
+        kill -KILL {current_pid} 2>/dev/null || true
+    fi
+
+    echo "===== FLS 面板停止结束: $(date '+%Y-%m-%d %H:%M:%S') ====="
+) >> "{LOG_DIR / 'fls-manager-daemon.log'}" 2>&1
+"""
+
+    return [
+        "sh",
+        "-c",
+        shell_cmd,
+    ]
+
+
+def run_fls_control_later(action):
+    """
+    延迟执行面板控制命令。
+
+    action:
+        restart / stop
+
+    restart 逻辑：
+        1. 当前请求先返回页面
+        2. 后台启动一个独立 shell
+        3. shell 杀掉当前 Flask 进程
+        4. 等待端口释放
+        5. 调用 fls.sh start / fls.bat start / fls.ps1 start
+
+    这样不会再出现 fls.sh stop 识别不到当前进程导致端口占用的问题。
     """
     time.sleep(1.2)
 
-    try:
-        python = sys.executable
-        args = [python] + sys.argv
-        os.execv(python, args)
-    except Exception as e:
-        print(f"[About] 面板重启失败: {e}")
+    log_file = LOG_DIR / "fls-manager-daemon.log"
 
+    try:
+        script = fls_control_script()
+        cmd = build_fls_control_command(action)
+
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+        with open(log_file, "ab", buffering=0) as log_fp:
+            log_fp.write(
+                (
+                    f"\n===== 调用 FLS 面板控制 {action}: {now_str()} =====\n"
+                    f"系统类型: {os.name}\n"
+                    f"当前面板 PID: {os.getpid()}\n"
+                    f"脚本路径: {script}\n"
+                    f"工作目录: {BASE_DIR}\n"
+                    f"命令: {' '.join(str(x) for x in cmd)}\n"
+                    f"说明: restart 会直接结束当前 Flask 进程，再调用控制脚本 start，避免端口未释放\n"
+                    f"============================================================\n"
+                ).encode("utf-8", errors="replace")
+            )
+
+            popen_kwargs = {
+                "cwd": str(BASE_DIR),
+                "stdout": log_fp,
+                "stderr": subprocess.STDOUT,
+                "stdin": subprocess.DEVNULL,
+            }
+
+            if os.name == "nt":
+                creationflags = 0
+
+                try:
+                    creationflags |= subprocess.CREATE_NEW_PROCESS_GROUP
+                except Exception:
+                    pass
+
+                try:
+                    creationflags |= subprocess.DETACHED_PROCESS
+                except Exception:
+                    pass
+
+                if creationflags:
+                    popen_kwargs["creationflags"] = creationflags
+            else:
+                popen_kwargs["start_new_session"] = True
+
+            subprocess.Popen(
+                cmd,
+                **popen_kwargs,
+            )
+
+    except Exception as e:
         try:
-            os._exit(1)
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+            with open(log_file, "ab", buffering=0) as log_fp:
+                log_fp.write(
+                    (
+                        f"\n===== 调用 FLS 面板控制 {action} 失败: {now_str()} =====\n"
+                        f"错误: {e}\n"
+                        f"============================================================\n"
+                    ).encode("utf-8", errors="replace")
+                )
         except Exception:
             pass
+
+        print(f"[About] 调用 FLS 面板控制 {action} 失败: {e}")
+
+
+def delayed_restart_panel():
+    """
+    延迟重启面板。
+    """
+    run_fls_control_later("restart")
 
 
 def delayed_stop_panel():
     """
     延迟停止面板。
     """
-    time.sleep(1.2)
-
-    try:
-        os._exit(0)
-    except Exception:
-        pass
+    run_fls_control_later("stop")
 
 
-@bp.route("/about/restart-panel", methods=["POST"])
+@bp.route("/about/restart-panel", methods=["GET", "POST"])
 def about_restart_panel():
     """
     重启面板。
 
-    先返回页面，再后台延迟执行重启，避免请求还没响应就断开。
+    GET：
+        防止刷新 POST 地址出现 Method Not Allowed，直接返回关于页。
+
+    POST：
+        执行重启。
     """
+    if request.method == "GET":
+        return redirect(url_for("about.about"))
+
+    script = fls_control_script()
+
+    if not script.exists():
+        body = f"""
+<div class="card">
+    <div class="card-title">重启失败</div>
+    <div class="help" style="color:#dc2626;font-weight:800;">
+        未找到 FLS 控制脚本：{h(script)}
+    </div>
+    <br>
+    <div class="help">
+        Windows 请确认存在：<code>{h(BASE_DIR / "fls.bat")}</code> 或 <code>{h(BASE_DIR / "fls.ps1")}</code><br>
+        Linux / Termux 请确认存在：<code>{h(BASE_DIR / "fls.sh")}</code>
+    </div>
+    <br>
+    <a class="btn btn-gray" href="/about">返回关于页</a>
+</div>
+"""
+        return layout("重启失败", "about", body), 400
+
     th = threading.Thread(
         target=delayed_restart_panel,
         daemon=True,
@@ -514,34 +787,64 @@ def about_restart_panel():
     )
     th.start()
 
-    body = """
+    body = f"""
 <div class="card">
     <div class="card-title">正在重启面板</div>
     <div class="help">
-        面板将在 1 秒后重启。<br>
-        如果页面短暂无法访问，请等待几秒后刷新。
+        面板将在 1 秒后执行自重启。<br>
+        系统类型：<code>{h(os.name)}</code><br>
+        当前面板 PID：<code>{h(os.getpid())}</code><br>
+        控制脚本：<code>{h(script)}</code>
     </div>
     <br>
     <a class="btn btn-gray" href="/about">返回关于页</a>
     <a class="btn btn-primary" href="/">返回仪表盘</a>
+    <a class="btn btn-blue" href="/logfile/fls-manager-daemon.log?back=/about">查看面板日志</a>
 </div>
 
 <script>
-setTimeout(function(){
+setTimeout(function(){{
     location.href = "/";
-}, 5000);
+}}, 10000);
 </script>
 """
     return layout("正在重启面板", "about", body)
 
 
-@bp.route("/about/stop-panel", methods=["POST"])
+@bp.route("/about/stop-panel", methods=["GET", "POST"])
 def about_stop_panel():
     """
     停止面板。
 
-    停止后需要用户通过命令行、systemd、pm2、supervisor 或守护脚本重新启动。
+    GET：
+        防止刷新 POST 地址出现 Method Not Allowed，直接返回关于页。
+
+    POST：
+        执行停止。
     """
+    if request.method == "GET":
+        return redirect(url_for("about.about"))
+
+    script = fls_control_script()
+
+    if not script.exists():
+        body = f"""
+<div class="card">
+    <div class="card-title">停止失败</div>
+    <div class="help" style="color:#dc2626;font-weight:800;">
+        未找到 FLS 控制脚本：{h(script)}
+    </div>
+    <br>
+    <div class="help">
+        Windows 请确认存在：<code>{h(BASE_DIR / "fls.bat")}</code> 或 <code>{h(BASE_DIR / "fls.ps1")}</code><br>
+        Linux / Termux 请确认存在：<code>{h(BASE_DIR / "fls.sh")}</code>
+    </div>
+    <br>
+    <a class="btn btn-gray" href="/about">返回关于页</a>
+</div>
+"""
+        return layout("停止失败", "about", body), 400
+
     th = threading.Thread(
         target=delayed_stop_panel,
         daemon=True,
@@ -549,13 +852,18 @@ def about_stop_panel():
     )
     th.start()
 
-    body = """
+    body = f"""
 <div class="card">
     <div class="card-title">正在停止面板</div>
     <div class="help">
         面板将在 1 秒后停止。<br>
-        停止后需要你手动重新启动面板。
+        系统类型：<code>{h(os.name)}</code><br>
+        当前面板 PID：<code>{h(os.getpid())}</code><br>
+        控制脚本：<code>{h(script)}</code><br>
+        停止后需要你手动重新启动面板，或等待系统自启服务拉起。
     </div>
+    <br>
+    <a class="btn btn-blue" href="/logfile/fls-manager-daemon.log?back=/about">查看面板日志</a>
 </div>
 """
     return layout("正在停止面板", "about", body)

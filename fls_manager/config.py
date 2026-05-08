@@ -7,6 +7,13 @@ from .constants import DEFAULT_HOST, DEFAULT_PORT, LOG_CLEANUP_INTERVAL_MINUTES,
 
 DEFAULT_CONFIG = {
     "admin_token": "",
+    # 登录后安全验证
+    # security_verify_type:
+    #   code = 随机验证码
+    #   totp = 2FA / TOTP
+    "security_verify_enabled": False,
+    "security_verify_type": "code",
+    "totp_secret": "",
     "port": DEFAULT_PORT,
     "log_cleanup_minutes": LOG_CLEANUP_INTERVAL_MINUTES,
     "log_max_size_mb": LOG_MAX_SIZE_MB,
