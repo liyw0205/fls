@@ -1,5 +1,3 @@
-
-
 /* ============================================================
    FLS layout extracted scripts
    ============================================================ */
@@ -255,7 +253,7 @@ function flsOriginalButtonsInViewport(){
 
         const rect = btn.getBoundingClientRect();
 
-        // 原按钮只要进入视口下半部分附近，就隐藏悬浮按钮
+        // 原按钮只要进入视口附近，就隐藏悬浮按钮
         if(
             rect.top < window.innerHeight - 20 &&
             rect.bottom > 0
@@ -525,6 +523,11 @@ if (document.readyState === "loading") {
     if (window.__FLS_AJAX_LAYOUT__) return;
     window.__FLS_AJAX_LAYOUT__ = true;
 
+    const FLS_PAGE_CACHE_TTL = 5 * 60 * 1000;
+    const FLS_PAGE_CACHE_MAX = 40;
+
+    window.__FLS_PAGE_CACHE__ = window.__FLS_PAGE_CACHE__ || new Map();
+
     function sameOrigin(url){
         try {
             return new URL(url, location.href).origin === location.origin;
@@ -544,6 +547,104 @@ if (document.readyState === "loading") {
 
         if (path.indexOf("/api/") === 0) return true;
         return false;
+    }
+
+    function flsPageCacheKey(url){
+        const u = new URL(url, location.href);
+        u.hash = "";
+        return u.href;
+    }
+
+    function flsClearPageCache(prefix){
+        const cache = window.__FLS_PAGE_CACHE__;
+        if(!cache) return;
+
+        if(!prefix){
+            cache.clear();
+            return;
+        }
+
+        for(const key of Array.from(cache.keys())){
+            if(key.indexOf(prefix) >= 0){
+                cache.delete(key);
+            }
+        }
+    }
+
+    window.flsClearPageCache = flsClearPageCache;
+
+    function flsIsCacheablePage(url){
+        try {
+            const u = new URL(url, location.href);
+            const path = u.pathname;
+
+            if(!sameOrigin(u.href)) return false;
+
+            // API / 下载类不缓存
+            if(skipPath(path)) return false;
+
+            // 登录 / 验证 / 退出 / 设置不缓存
+            if(path === "/login") return false;
+            if(path === "/logout") return false;
+            if(path === "/setup") return false;
+            if(path === "/verify") return false;
+            if(path === "/verify/resend") return false;
+
+            // 实时日志页不缓存
+            if(path.indexOf("/log/") === 0) return false;
+            if(path.indexOf("/online-scripts/log/") === 0) return false;
+            if(path.indexOf("/deps/install-log/") === 0) return false;
+
+            // 日志管理变化较频繁，不缓存
+            if(path === "/logs") return false;
+
+            // 带登录 token 的 URL 不缓存
+            if(u.searchParams.has("token")) return false;
+
+            // 消息提示页不缓存，避免旧提示重复出现
+            if(u.searchParams.has("msg")) return false;
+            if(u.searchParams.has("err")) return false;
+
+            return true;
+        } catch(e) {
+            return false;
+        }
+    }
+
+    function flsGetCachedPage(url){
+        const cache = window.__FLS_PAGE_CACHE__;
+        if(!cache) return "";
+
+        const key = flsPageCacheKey(url);
+        const item = cache.get(key);
+
+        if(!item) return "";
+
+        if(Date.now() - item.time > FLS_PAGE_CACHE_TTL){
+            cache.delete(key);
+            return "";
+        }
+
+        return item.html || "";
+    }
+
+    function flsPutCachedPage(url, html){
+        if(!flsIsCacheablePage(url)) return;
+
+        const cache = window.__FLS_PAGE_CACHE__;
+        if(!cache) return;
+
+        const key = flsPageCacheKey(url);
+
+        cache.set(key, {
+            time: Date.now(),
+            html: String(html || "")
+        });
+
+        while(cache.size > FLS_PAGE_CACHE_MAX){
+            const firstKey = cache.keys().next().value;
+            cache.delete(firstKey);
+        }
     }
 
     function shouldAjaxLink(a){
@@ -578,6 +679,25 @@ if (document.readyState === "loading") {
         return window.confirm(msg);
     }
 
+    function linkMayChangeData(url){
+        try {
+            const u = new URL(url, location.href);
+            const path = u.pathname;
+
+            return (
+                path.indexOf("/deps/uninstall") === 0 ||
+                path.indexOf("/install/") === 0 ||
+                path.indexOf("/backup/import") === 0 ||
+                path.indexOf("/backup/restore") === 0 ||
+                path.indexOf("/backup/delete") === 0 ||
+                path.indexOf("/logout") === 0 ||
+                path.indexOf("/verify/resend") === 0
+            );
+        } catch(e) {
+            return false;
+        }
+    }
+
     function setLoading(on){
         const content = document.querySelector(".content");
         if (!content) return;
@@ -602,8 +722,7 @@ if (document.readyState === "loading") {
         });
     }
 
-    async function replaceHtml(res, push){
-        const text = await res.text();
+    async function replaceHtmlText(text, finalUrl, push){
         const doc = new DOMParser().parseFromString(text, "text/html");
 
         const newContent = doc.querySelector(".content");
@@ -616,7 +735,7 @@ if (document.readyState === "loading") {
         const oldNav = document.querySelector(".nav");
 
         if (!newContent || !oldContent) {
-            location.href = res.url || location.href;
+            location.href = finalUrl || location.href;
             return;
         }
 
@@ -642,24 +761,49 @@ if (document.readyState === "loading") {
         if (typeof flsEnhanceMobileTables === "function") {
             flsEnhanceMobileTables(oldContent);
         }
-        
+
         if (typeof flsInitCodeEditors === "function") {
             flsInitCodeEditors(oldContent);
         }
-        
+
         if (typeof flsInitFloatingFormActions === "function") {
             flsInitFloatingFormActions(oldContent);
         }
 
         if (push) {
-            history.pushState({url: res.url || location.href}, "", res.url || location.href);
+            history.pushState({url: finalUrl || location.href}, "", finalUrl || location.href);
         }
 
         window.scrollTo(0, 0);
         toggleMenu(false);
     }
 
+    async function replaceHtml(res, push){
+        const text = await res.text();
+        await replaceHtmlText(text, res.url || location.href, push);
+    }
+
     async function ajaxLoad(url, push){
+        const canCache = flsIsCacheablePage(url);
+
+        if(canCache){
+            const cached = flsGetCachedPage(url);
+
+            if(cached){
+                setLoading(true);
+
+                try {
+                    await replaceHtmlText(cached, url, push);
+                    setLoading(false);
+                    return;
+                } catch(e) {
+                    try {
+                        window.__FLS_PAGE_CACHE__.delete(flsPageCacheKey(url));
+                    } catch(err) {}
+                }
+            }
+        }
+
         setLoading(true);
 
         try {
@@ -673,7 +817,13 @@ if (document.readyState === "loading") {
                 return;
             }
 
-            await replaceHtml(res, push);
+            const text = await res.text();
+
+            if(canCache){
+                flsPutCachedPage(res.url || url, text);
+            }
+
+            await replaceHtmlText(text, res.url || url, push);
             setLoading(false);
         } catch(e) {
             location.href = url;
@@ -692,6 +842,10 @@ if (document.readyState === "loading") {
 
         if (!confirmIfNeeded(a)) return;
 
+        if(linkMayChangeData(a.href)){
+            flsClearPageCache();
+        }
+
         ajaxLoad(a.href, true);
     }, true);
 
@@ -701,13 +855,21 @@ if (document.readyState === "loading") {
         if (!form || !form.closest(".content")) return;
 
         const method = (form.getAttribute("method") || "GET").toUpperCase();
-        const action = form.getAttribute("action") || location.href;
+        const submitter = e.submitter || null;
+        const action = (
+            submitter && submitter.getAttribute("formaction")
+        ) || form.getAttribute("action") || location.href;
+
         const url = new URL(action, location.href);
 
         if (!sameOrigin(url.href)) return;
 
         e.preventDefault();
         e.stopImmediatePropagation();
+
+        if(method !== "GET"){
+            flsClearPageCache();
+        }
 
         setLoading(true);
 
@@ -719,7 +881,7 @@ if (document.readyState === "loading") {
                 headers: {"X-Requested-With":"FLS-Ajax"},
                 credentials: "same-origin"
             };
-            
+
             if (typeof flsSaveCodeMirrors === "function") {
                 flsSaveCodeMirrors(form);
             }
@@ -733,8 +895,8 @@ if (document.readyState === "loading") {
             } else {
                 const fd = new FormData(form);
 
-                if (e.submitter && e.submitter.name && !fd.has(e.submitter.name)) {
-                    fd.append(e.submitter.name, e.submitter.value || "");
+                if (submitter && submitter.name && !fd.has(submitter.name)) {
+                    fd.append(submitter.name, submitter.value || "");
                 }
 
                 opts.body = fd;

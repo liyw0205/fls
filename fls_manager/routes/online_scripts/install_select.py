@@ -401,7 +401,8 @@ body.fls-mobile .fls-install-task-list {{
 </form>
 
 <script>
-const FLS_TOTAL_TASKS = {total_tasks};
+window.FLS_TOTAL_TASKS = {total_tasks};
+window.FLS_INSTALL_SCRIPT_ID = "{h(script_id)}";
 
 function flsParseExcluded(){{
     const el = document.getElementById("excludedTaskIndexes");
@@ -433,7 +434,7 @@ function flsSaveExcluded(set){{
 
     const countEl = document.getElementById("selectedTaskCount");
     if(countEl){{
-        countEl.textContent = Math.max(0, FLS_TOTAL_TASKS - arr.length);
+        countEl.textContent = Math.max(0, window.FLS_TOTAL_TASKS - arr.length);
     }}
 }}
 
@@ -481,7 +482,7 @@ function flsInstallSelectAllGlobal(){{
 function flsInstallCancelAllGlobal(){{
     const set = new Set();
 
-    for(let i = 1; i <= FLS_TOTAL_TASKS; i++){{
+    for(let i = 1; i <= window.FLS_TOTAL_TASKS; i++){{
         set.add(i);
     }}
 
@@ -496,7 +497,10 @@ function flsInstallBuildUrl(page){{
     const qEl = document.getElementById("installTaskSearchInput");
     const taskQ = qEl ? qEl.value.trim() : "";
 
-    const url = new URL("/online-scripts/install-select/{h(script_id)}", window.location.origin);
+    const url = new URL(
+        "/online-scripts/install-select/" + encodeURIComponent(window.FLS_INSTALL_SCRIPT_ID),
+        window.location.origin
+    );
     url.searchParams.set("task_page", page || "1");
 
     if(taskQ){{
@@ -518,7 +522,10 @@ function flsInstallClearSearch(){{
     flsSyncVisibleCheckboxesToExcluded();
 
     const excluded = document.getElementById("excludedTaskIndexes").value || "";
-    const url = new URL("/online-scripts/install-select/{h(script_id)}", window.location.origin);
+    const url = new URL(
+        "/online-scripts/install-select/" + encodeURIComponent(window.FLS_INSTALL_SCRIPT_ID),
+        window.location.origin
+    );
     url.searchParams.set("task_page", "1");
 
     if(excluded){{
@@ -542,7 +549,7 @@ document.getElementById("onlineInstallSelectForm").addEventListener("submit", fu
     var importTask = document.querySelector('#onlineInstallSelectForm input[name="import_task"]');
     var excluded = flsParseExcluded();
 
-    if(importTask && importTask.checked && excluded.size >= FLS_TOTAL_TASKS){{
+    if(importTask && importTask.checked && excluded.size >= window.FLS_TOTAL_TASKS){{
         e.preventDefault();
         alert("已勾选导入任务，但没有选择任何任务");
         return false;
