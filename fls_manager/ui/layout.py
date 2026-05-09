@@ -33,7 +33,7 @@ def layout(title, active, body):
 <title>__TITLE__</title>
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 
-<link rel="stylesheet" href="/static/fls.css?v=20260509-2">
+<link rel="stylesheet" href="/static/fls.css?v=20260509-3">
 
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/lib/codemirror.min.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/theme/material-darker.min.css">
@@ -74,7 +74,7 @@ def layout(title, active, body):
     </main>
 </div>
 
-<script src="/static/fls.js?v=20260509-2"></script>
+<script src="/static/fls.js?v=20260509-3"></script>
 </body>
 </html>
 '''

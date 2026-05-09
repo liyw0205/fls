@@ -699,11 +699,27 @@ if (document.readyState === "loading") {
     }
 
     function setLoading(on){
-        const content = document.querySelector(".content");
-        if (!content) return;
+        let bar = document.getElementById("flsPageLoadingBar");
 
-        content.style.opacity = on ? "0.55" : "1";
-        content.style.transition = "opacity .12s ease";
+        if(!bar){
+            bar = document.createElement("div");
+            bar.id = "flsPageLoadingBar";
+            bar.className = "fls-page-loading-bar";
+            document.body.appendChild(bar);
+        }
+
+        if(on){
+            bar.classList.remove("done");
+            bar.classList.add("show");
+        }else{
+            bar.classList.remove("show");
+            bar.classList.add("done");
+
+            setTimeout(function(){
+                bar.classList.remove("done");
+                bar.style.width = "";
+            }, 220);
+        }
     }
 
     function runInlineScripts(container){
@@ -786,15 +802,18 @@ if (document.readyState === "loading") {
     async function ajaxLoad(url, push){
         const canCache = flsIsCacheablePage(url);
 
+        /*
+           缓存命中：
+           - 不显示 loading
+           - 不让页面变灰
+           - 直接渲染缓存页面
+        */
         if(canCache){
             const cached = flsGetCachedPage(url);
 
             if(cached){
-                setLoading(true);
-
                 try {
                     await replaceHtmlText(cached, url, push);
-                    setLoading(false);
                     return;
                 } catch(e) {
                     try {
@@ -804,6 +823,11 @@ if (document.readyState === "loading") {
             }
         }
 
+        /*
+           未命中缓存：
+           - 走网络请求
+           - 显示顶部加载条
+        */
         setLoading(true);
 
         try {
@@ -813,6 +837,7 @@ if (document.readyState === "loading") {
             });
 
             if (!res.ok) {
+                setLoading(false);
                 location.href = url;
                 return;
             }
@@ -826,6 +851,7 @@ if (document.readyState === "loading") {
             await replaceHtmlText(text, res.url || url, push);
             setLoading(false);
         } catch(e) {
+            setLoading(false);
             location.href = url;
         }
     }
