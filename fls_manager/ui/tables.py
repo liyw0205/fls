@@ -4,9 +4,12 @@ from ..state import RUNNING
 from ..scheduler import get_task_next_run_time_text
 
 
-def _task_action_buttons(task_id, enabled, config_path=""):
+def _task_action_buttons(task_id, enabled, config_path="", pinned=False):
     toggle_text = "禁用" if enabled else "启用"
     toggle_class = "btn-gray" if enabled else "btn-primary"
+
+    pin_text = "取消置顶" if pinned else "置顶"
+    pin_class = "btn-gray" if pinned else "btn-blue"
 
     config_btn = ""
     if str(config_path or "").strip():
@@ -18,6 +21,7 @@ def _task_action_buttons(task_id, enabled, config_path=""):
     <button class="btn btn-red" type="button" onclick="taskAjaxAction('stop','{h(task_id)}')">结束</button>
     <a class="btn btn-orange" href="/log/{h(task_id)}?back=/tasks">日志</a>
     {config_btn}
+    <a class="btn {pin_class}" href="/task/pin/{h(task_id)}?back=/tasks">{pin_text}</a>
     <a class="btn btn-blue" href="/task/edit/{h(task_id)}">编辑</a>
     <button class="btn {toggle_class}" type="button" onclick="taskAjaxAction('toggle','{h(task_id)}')">{h(toggle_text)}</button>
     <button class="btn btn-gray" type="button" onclick="taskAjaxAction('delete','{h(task_id)}')">删除</button>
@@ -45,6 +49,7 @@ def tasks_table(tasks):
             cron = task.get("cron", "") or "手动"
             next_run_text = get_task_next_run_time_text(task)
             enabled = task.get("enabled", True)
+            pinned = bool(task.get("pinned", False))
             run_count = int(task.get("run_count", 0))
 
             running = is_running(task_id)
@@ -57,9 +62,10 @@ def tasks_table(tasks):
 
             enabled_badge = '<span class="badge green">启用</span>' if enabled else '<span class="badge gray">禁用</span>'
             status_badge = '<span class="badge blue">运行中</span>' if running else '<span class="badge red">已停止</span>'
+            pinned_badge = '<span class="badge orange">置顶</span>' if pinned else ""
 
             config_path = str(task.get("config_path", "") or "").strip()
-            actions = _task_action_buttons(task_id, enabled, config_path)
+            actions = _task_action_buttons(task_id, enabled, config_path, pinned)
 
             remark_html = ""
             if remark:
@@ -76,7 +82,7 @@ def tasks_table(tasks):
 
             desktop_rows += f"""
 <tr data-task-id="{h(task_id)}">
-    <td><b>{h(name)}</b>{remark_html}</td>
+    <td><b>{h(name)}</b> {pinned_badge}{remark_html}</td>
     <td>{h(command)}</td>
     <td>{h(cron)}</td>
     <td>{h(next_run_text)}</td>
@@ -94,12 +100,13 @@ def tasks_table(tasks):
     <summary>
         <div class="task-mobile-head">
             <div>
-                <div class="task-mobile-title">{h(name)}</div>
+                <div class="task-mobile-title">{h(name)} {pinned_badge}</div>
                 {f'<div class="help" style="margin-top:4px;">备注：{h(remark)}</div>' if remark else ''}
             </div>
             <div class="task-mobile-badges">
                 {enabled_badge}
                 {status_badge}
+                {pinned_badge}
             </div>
         </div>
     </summary>

@@ -38,6 +38,7 @@ CONFIG_FILE = DATA_DIR / "config.json"
 TASK_FILE = DATA_DIR / "tasks.json"
 GLOBAL_ENV_FILE = DATA_DIR / "global_env.json"
 PROXY_FILE = DATA_DIR / "proxies.json"
+COLLECTION_FILE = DATA_DIR / "collections.json"
 PID_FILE = DATA_DIR / "fls-manager.pid"
 
 for d in (BASE_DIR, DATA_DIR, LOG_DIR, SCRIPT_DIR):

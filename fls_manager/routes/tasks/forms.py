@@ -4,6 +4,7 @@ from ...utils import h
 from ...paths import SCRIPT_DIR
 from ...proxy import proxy_select_options
 from ...notify import notify_select_options
+from .helpers import collection_select_options
 
 
 def task_env_rows(env):
@@ -153,6 +154,7 @@ def task_form(task=None):
             "command": "task ",
             "cron": "",
             "config_path": "",
+            "collection_id": "",
             "enabled": True,
             "env": {},
             "proxy_id": "",
@@ -227,6 +229,16 @@ def task_form(task=None):
         <div class="help">
             相对于 scripts 目录。填写后任务列表会显示“配置”按钮。<br>
             例如：<code>checkbox/config.yml</code> 对应 <code>{h(str(SCRIPT_DIR / 'checkbox/config.yml'))}</code>
+        </div>
+    </div>
+
+    <br>
+
+    <div class="form-item">
+        <label>所属合集</label>
+        <select name="collection_id">{collection_select_options(task.get("collection_id", ""))}</select>
+        <div class="help">
+            放入合集的任务不会在普通任务列表显示，但仍会正常运行。
         </div>
     </div>
 

@@ -1,4 +1,4 @@
-from flask import redirect, url_for
+from flask import redirect, url_for, abort
 
 from . import bp
 
@@ -37,6 +37,52 @@ def task_toggle(task_id):
     reload_scheduler()
 
     return redirect(url_for("tasks.tasks_page"))
+
+
+@bp.route("/task/pin/<task_id>")
+def task_pin(task_id):
+    tasks = load_tasks()
+    target = None
+
+    for task in tasks:
+        if task.get("id") == task_id:
+            target = task
+            break
+
+    if not target:
+        abort(404)
+
+    pinned_count = sum(1 for t in tasks if t.get("pinned"))
+
+    if not target.get("pinned") and pinned_count >= 5:
+        return "最多只能置顶 5 个任务，请先取消一个置顶任务", 400
+
+    target["pinned"] = not target.get("pinned", False)
+    target["updated_at"] = now_str()
+
+    save_tasks(tasks)
+
+    return redirect(get_back_url("/tasks"))
+
+
+@bp.route("/task/collection/clear/<task_id>")
+def task_collection_clear(task_id):
+    tasks = load_tasks()
+    found = False
+
+    for task in tasks:
+        if task.get("id") == task_id:
+            task["collection_id"] = ""
+            task["updated_at"] = now_str()
+            found = True
+            break
+
+    if not found:
+        abort(404)
+
+    save_tasks(tasks)
+
+    return redirect(get_back_url("/collections"))
 
 
 @bp.route("/run/<task_id>")

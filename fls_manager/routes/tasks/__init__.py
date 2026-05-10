@@ -7,3 +7,4 @@ from . import pages
 from . import actions
 from . import config_file
 from . import logs
+from . import collections
