@@ -1,4 +1,4 @@
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 
 from ..models import load_tasks, save_tasks
 from ..task_runner import run_task_now, stop_task_now, is_running, safe_process_name
@@ -7,6 +7,25 @@ from ..state import RUNNING
 from ..utils import now_str
 
 bp = Blueprint("api", __name__)
+
+
+def _unique_task_ids(values):
+    if isinstance(values, str):
+        values = [values]
+
+    result = []
+    seen = set()
+
+    for value in values or []:
+        task_id = str(value or "").strip()
+
+        if not task_id or task_id in seen:
+            continue
+
+        seen.add(task_id)
+        result.append(task_id)
+
+    return result
 
 
 @bp.route("/api/status")
@@ -101,6 +120,135 @@ def api_task_action(action, task_id):
             return jsonify({"ok": True, "msg": "已删除"})
 
         return jsonify({"ok": False, "msg": "未知操作"}), 400
+
+    except Exception as e:
+        return jsonify({"ok": False, "msg": str(e)}), 500
+
+
+@bp.route("/api/task/bulk-action", methods=["POST"])
+def api_task_bulk_action():
+    try:
+        data = request.get_json(silent=True) or {}
+        action = str(data.get("action") or request.form.get("action") or "").strip()
+
+        raw_task_ids = data.get("task_ids")
+        if raw_task_ids is None:
+            raw_task_ids = request.form.getlist("task_ids")
+
+        task_ids = _unique_task_ids(raw_task_ids)
+
+        if action not in ("enable", "disable", "run", "stop", "delete", "clear_collection"):
+            return jsonify({"ok": False, "msg": "未知批量操作"}), 400
+
+        if not task_ids:
+            return jsonify({"ok": False, "msg": "请选择任务"}), 400
+
+        tasks = load_tasks()
+        task_map = {str(task.get("id") or ""): task for task in tasks}
+        missing = [task_id for task_id in task_ids if task_id not in task_map]
+
+        if missing:
+            return jsonify({
+                "ok": False,
+                "msg": f"有 {len(missing)} 个任务不存在，请刷新后重试",
+            }), 404
+
+        selected = set(task_ids)
+
+        if action in ("enable", "disable"):
+            enabled = action == "enable"
+
+            for task in tasks:
+                if task.get("id") in selected:
+                    task["enabled"] = enabled
+                    task["updated_at"] = now_str()
+
+            save_tasks(tasks)
+            reload_scheduler()
+
+            return jsonify({
+                "ok": True,
+                "msg": f"已{'启用' if enabled else '禁用'} {len(task_ids)} 个任务",
+            })
+
+        if action == "run":
+            ok_count = 0
+            failed = []
+
+            for task_id in task_ids:
+                ok, msg = run_task_now(task_id, source="manual")
+                if ok:
+                    ok_count += 1
+                else:
+                    task = task_map.get(task_id) or {}
+                    name = task.get("name") or task.get("command") or task_id
+                    failed.append(f"{name}: {msg}")
+
+            parts = [f"已提交运行 {ok_count} 个任务"]
+            if failed:
+                parts.append(f"{len(failed)} 个未运行：{'；'.join(failed[:3])}")
+                if len(failed) > 3:
+                    parts.append(f"等 {len(failed)} 个")
+
+            return jsonify({"ok": True, "msg": "；".join(parts)})
+
+        if action == "stop":
+            ok_count = 0
+            skipped = 0
+            failed = []
+
+            for task_id in task_ids:
+                ok, msg = stop_task_now(task_id)
+                if ok:
+                    ok_count += 1
+                elif msg == "任务未运行":
+                    skipped += 1
+                else:
+                    task = task_map.get(task_id) or {}
+                    name = task.get("name") or task.get("command") or task_id
+                    failed.append(f"{name}: {msg}")
+
+            parts = [f"已结束 {ok_count} 个任务"]
+            if skipped:
+                parts.append(f"跳过 {skipped} 个未运行任务")
+            if failed:
+                parts.append(f"{len(failed)} 个结束失败：{'；'.join(failed[:3])}")
+                if len(failed) > 3:
+                    parts.append(f"等 {len(failed)} 个")
+
+            return jsonify({"ok": True, "msg": "；".join(parts)})
+
+        if action == "delete":
+            for task_id in task_ids:
+                stop_task_now(task_id)
+
+            tasks = [
+                task for task in tasks
+                if task.get("id") not in selected
+            ]
+
+            save_tasks(tasks)
+            reload_scheduler()
+
+            return jsonify({
+                "ok": True,
+                "msg": f"已删除 {len(task_ids)} 个任务",
+            })
+
+        if action == "clear_collection":
+            for task in tasks:
+                if task.get("id") in selected:
+                    task["collection_id"] = ""
+                    task["updated_at"] = now_str()
+
+            save_tasks(tasks)
+
+            return jsonify({
+                "ok": True,
+                "msg": f"已取出 {len(task_ids)} 个任务",
+            })
+
+        return jsonify({"ok": False, "msg": "未知批量操作"}), 400
 
     except Exception as e:
         return jsonify({"ok": False, "msg": str(e)}), 500

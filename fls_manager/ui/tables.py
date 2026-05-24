@@ -38,7 +38,7 @@ def tasks_table(tasks):
     mobile_cards = ""
 
     if not tasks:
-        desktop_rows = '<tr><td colspan="10">暂无任务，请点击新建任务</td></tr>'
+        desktop_rows = '<tr><td colspan="11">暂无任务，请点击新建任务</td></tr>'
         mobile_cards = '<div class="task-mobile-empty">暂无任务，请点击新建任务</div>'
     else:
         for task in tasks:
@@ -82,6 +82,9 @@ def tasks_table(tasks):
 
             desktop_rows += f"""
 <tr data-task-id="{h(task_id)}">
+    <td class="task-select-cell">
+        <input class="task-select-checkbox" type="checkbox" data-task-id="{h(task_id)}" onchange="taskSyncSelection(this)" aria-label="选择任务 {h(name)}">
+    </td>
     <td><b>{h(name)}</b> {pinned_badge}{remark_html}</td>
     <td>{h(command)}</td>
     <td>{h(cron)}</td>
@@ -99,7 +102,10 @@ def tasks_table(tasks):
 <details class="task-mobile-card" data-task-id="{h(task_id)}">
     <summary>
         <div class="task-mobile-head">
-            <div>
+            <div class="task-mobile-select">
+                <input class="task-select-checkbox" type="checkbox" data-task-id="{h(task_id)}" onchange="taskSyncSelection(this)" onclick="event.stopPropagation()" aria-label="选择任务 {h(name)}">
+            </div>
+            <div class="task-mobile-main">
                 <div class="task-mobile-title">{h(name)} {pinned_badge}</div>
                 {f'<div class="help" style="margin-top:4px;">备注：{h(remark)}</div>' if remark else ''}
             </div>
@@ -158,6 +164,71 @@ def tasks_table(tasks):
     display:none;
 }}
 
+.task-bulk-toolbar {{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    gap:12px;
+    flex-wrap:wrap;
+    padding:12px;
+    margin-bottom:12px;
+    border:1px solid #e5e7eb;
+    border-radius:12px;
+    background:#f9fafb;
+}}
+
+.task-bulk-left,
+.task-bulk-actions {{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    flex-wrap:wrap;
+}}
+
+.task-bulk-select-all {{
+    display:inline-flex;
+    align-items:center;
+    gap:6px;
+    color:#374151;
+    font-size:13px;
+    font-weight:700;
+    white-space:nowrap;
+}}
+
+.task-selected-count {{
+    color:#6b7280;
+    font-size:13px;
+    font-weight:700;
+}}
+
+.task-bulk-actions .btn:disabled {{
+    opacity:.45;
+    cursor:not-allowed;
+}}
+
+.task-select-cell {{
+    width:44px;
+    text-align:center;
+}}
+
+.task-select-checkbox,
+.task-select-all {{
+    width:16px!important;
+    height:16px!important;
+    min-height:16px;
+    margin:0;
+    padding:0;
+    cursor:pointer;
+}}
+
+tr.task-selected td {{
+    background:#f0fdf4;
+}}
+
+.task-mobile-card.task-selected {{
+    border-color:#86efac;
+}}
+
 .task-actions {{
     display:flex;
     gap:6px;
@@ -214,6 +285,16 @@ def tasks_table(tasks):
     justify-content:space-between;
     align-items:flex-start;
     gap:10px;
+}}
+
+.task-mobile-select {{
+    padding-top:3px;
+    flex:0 0 auto;
+}}
+
+.task-mobile-main {{
+    flex:1 1 auto;
+    min-width:0;
 }}
 
 .task-mobile-title {{
@@ -299,6 +380,21 @@ body.fls-mobile #tasksMobileCards {{
 }}
 
 @media(max-width:520px) {{
+    .task-bulk-toolbar {{
+        align-items:stretch;
+    }}
+
+    .task-bulk-left,
+    .task-bulk-actions {{
+        width:100%;
+    }}
+
+    .task-bulk-actions .btn {{
+        flex:1 1 calc(33.333% - 8px);
+        min-width:72px;
+        margin:0;
+    }}
+
     .task-mobile-info {{
         grid-template-columns:1fr 1fr;
         gap:8px;
@@ -348,10 +444,30 @@ body.fls-mobile #tasksMobileCards {{
 </style>
 
 <div id="tasksBlock">
+    <div class="task-bulk-toolbar">
+        <div class="task-bulk-left">
+            <label class="task-bulk-select-all">
+                <input class="task-select-all" type="checkbox" onchange="taskToggleAll(this.checked)">
+                全选
+            </label>
+            <span class="task-selected-count" id="taskSelectedCount">已选择 0 个</span>
+        </div>
+        <div class="task-bulk-actions">
+            <button class="btn btn-primary task-bulk-btn" type="button" onclick="taskBulkAction('enable')" disabled>启用</button>
+            <button class="btn btn-gray task-bulk-btn" type="button" onclick="taskBulkAction('disable')" disabled>禁用</button>
+            <button class="btn btn-blue task-bulk-btn" type="button" onclick="taskBulkAction('run')" disabled>运行</button>
+            <button class="btn btn-red task-bulk-btn" type="button" onclick="taskBulkAction('stop')" disabled>停止</button>
+            <button class="btn btn-gray task-bulk-btn" type="button" onclick="taskBulkAction('delete')" disabled>删除</button>
+        </div>
+    </div>
+
     <div class="table-wrap" id="tasksTableDesktop">
         <table id="tasksTable">
             <thead>
                 <tr>
+                    <th class="task-select-cell">
+                        <input class="task-select-all" type="checkbox" onchange="taskToggleAll(this.checked)" aria-label="全选任务">
+                    </th>
                     <th>任务名</th>
                     <th>命令</th>
                     <th>Cron</th>
@@ -374,6 +490,166 @@ body.fls-mobile #tasksMobileCards {{
 </div>
 
 <script>
+function taskCssValue(value){{
+    if(window.CSS && typeof CSS.escape === "function"){{
+        return CSS.escape(value);
+    }}
+
+    return String(value || "").replace(/["\\\\]/g, "\\\\$&");
+}}
+
+function taskUniqueIds(){{
+    const ids = [];
+    const seen = new Set();
+
+    document.querySelectorAll("#tasksBlock .task-select-checkbox").forEach(function(box){{
+        const id = box.getAttribute("data-task-id") || "";
+        if(!id || seen.has(id)) return;
+        seen.add(id);
+        ids.push(id);
+    }});
+
+    return ids;
+}}
+
+function taskSelectedIds(){{
+    const ids = [];
+    const seen = new Set();
+
+    document.querySelectorAll("#tasksBlock .task-select-checkbox:checked").forEach(function(box){{
+        const id = box.getAttribute("data-task-id") || "";
+        if(!id || seen.has(id)) return;
+        seen.add(id);
+        ids.push(id);
+    }});
+
+    return ids;
+}}
+
+function taskUpdateBulkState(){{
+    const allIds = taskUniqueIds();
+    const selected = taskSelectedIds();
+    const selectedSet = new Set(selected);
+    const total = allIds.length;
+    const count = selected.length;
+
+    document.querySelectorAll("#tasksBlock .task-select-all").forEach(function(box){{
+        box.disabled = total === 0;
+        box.checked = total > 0 && count === total;
+        box.indeterminate = count > 0 && count < total;
+    }});
+
+    document.querySelectorAll("#tasksBlock .task-bulk-btn").forEach(function(btn){{
+        btn.disabled = count === 0;
+    }});
+
+    const countEl = document.getElementById("taskSelectedCount");
+    if(countEl){{
+        countEl.textContent = "已选择 " + count + " 个";
+    }}
+
+    document.querySelectorAll("#tasksBlock [data-task-id]").forEach(function(row){{
+        const id = row.getAttribute("data-task-id") || "";
+        row.classList.toggle("task-selected", selectedSet.has(id));
+    }});
+}}
+
+function taskSyncSelection(source){{
+    const id = source.getAttribute("data-task-id") || "";
+    const checked = source.checked;
+
+    if(id){{
+        document.querySelectorAll('#tasksBlock .task-select-checkbox[data-task-id="' + taskCssValue(id) + '"]').forEach(function(box){{
+            box.checked = checked;
+        }});
+    }}
+
+    taskUpdateBulkState();
+}}
+
+function taskToggleAll(checked){{
+    document.querySelectorAll("#tasksBlock .task-select-checkbox").forEach(function(box){{
+        box.checked = checked;
+    }});
+
+    taskUpdateBulkState();
+}}
+
+async function taskBulkAction(action){{
+    const ids = taskSelectedIds();
+
+    if(!ids.length){{
+        alert("请选择任务");
+        return;
+    }}
+
+    const labels = {{
+        enable: "启用",
+        disable: "禁用",
+        run: "运行",
+        stop: "停止",
+        delete: "删除"
+    }};
+
+    const label = labels[action] || "操作";
+
+    if(action === "delete"){{
+        if(!confirm("确定删除选中的 " + ids.length + " 个任务吗？")) return;
+    }}
+
+    if(action === "stop"){{
+        if(!confirm("确定停止选中的 " + ids.length + " 个任务吗？")) return;
+    }}
+
+    ids.forEach(function(id){{
+        document.querySelectorAll('[data-task-id="' + taskCssValue(id) + '"]').forEach(function(row){{
+            row.style.opacity = "0.55";
+        }});
+    }});
+
+    try{{
+        const res = await fetch("/api/task/bulk-action", {{
+            method: "POST",
+            headers: {{
+                "Content-Type": "application/json",
+                "X-Requested-With": "XMLHttpRequest"
+            }},
+            credentials: "same-origin",
+            body: JSON.stringify({{action: action, task_ids: ids}})
+        }});
+
+        const json = await res.json();
+
+        if(!json.ok){{
+            alert(json.msg || (label + "失败"));
+            ids.forEach(function(id){{
+                document.querySelectorAll('[data-task-id="' + taskCssValue(id) + '"]').forEach(function(row){{
+                    row.style.opacity = "1";
+                }});
+            }});
+            return;
+        }}
+
+        if(json.msg){{
+            alert(json.msg);
+        }}
+
+        if(typeof flsClearPageCache === "function"){{
+            flsClearPageCache();
+        }}
+
+        await refreshTasksBlockPartial();
+
+    }}catch(e){{
+        alert("请求失败：" + e);
+        ids.forEach(function(id){{
+            document.querySelectorAll('[data-task-id="' + taskCssValue(id) + '"]').forEach(function(row){{
+                row.style.opacity = "1";
+            }});
+        }});
+    }}
+}}
+
 async function taskAjaxAction(action, taskId){{
     if(action === "delete"){{
         if(!confirm("确定删除该任务吗？")) return;
@@ -383,7 +659,7 @@ async function taskAjaxAction(action, taskId){{
         if(!confirm("确定结束该任务吗？")) return;
     }}
 
-    const rows = document.querySelectorAll('[data-task-id="' + CSS.escape(taskId) + '"]');
+    const rows = document.querySelectorAll('[data-task-id="' + taskCssValue(taskId) + '"]');
     rows.forEach(function(row){{
         row.style.opacity = "0.55";
     }});
@@ -403,6 +679,10 @@ async function taskAjaxAction(action, taskId){{
                 row.style.opacity = "1";
             }});
             return;
+        }}
+
+        if(typeof flsClearPageCache === "function"){{
+            flsClearPageCache();
         }}
 
         await refreshTasksBlockPartial();
@@ -450,6 +730,8 @@ async function refreshTasksBlockPartial(){{
         location.reload();
     }}
 }}
+
+taskUpdateBulkState();
 </script>
 """
 

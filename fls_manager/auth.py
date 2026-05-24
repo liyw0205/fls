@@ -70,6 +70,9 @@ def auth_security_verified():
 def auth_before_request():
     endpoint = request.endpoint or ""
 
+    if endpoint == "static" or request.path.startswith("/static/"):
+        return None
+
     if endpoint in (
         "auth.login",
         "auth.logout",
