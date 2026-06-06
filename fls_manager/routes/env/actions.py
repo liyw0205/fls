@@ -1,7 +1,7 @@
 from ._common import *
 
 
-@bp.route("/env/delete/<key>")
+@bp.route("/env/delete/<key>", methods=["POST"])
 def env_delete(key):
     env = load_global_env()
 
@@ -87,4 +87,3 @@ def env_import_from_tasks():
 </form>
 """
     return layout("导入全局变量", "env", body)
-

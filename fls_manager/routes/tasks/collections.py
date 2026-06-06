@@ -16,6 +16,7 @@ from ...models import (
 )
 from ...utils import h, now_str, get_back_url
 from ...ui.layout import layout
+from ...ui.tables import collapsible_code
 from ...task_runner import is_running
 from ...state import RUNNING
 
@@ -30,6 +31,10 @@ def _current_back_url(default="/collections"):
         return request.path
     except Exception:
         return default
+
+
+def _back_param(back_url):
+    return h(quote(str(back_url or ""), safe="/"))
 
 
 def _collections_page_links(q, task_q, page, pages):
@@ -99,6 +104,7 @@ def _task_card(task, back_url, collection_id=""):
     name = task.get("name") or task.get("command") or "未命名任务"
     remark = str(task.get("remark", "") or "").strip()
     command = str(task.get("command", "") or "").strip()
+    command_html = collapsible_code(command, limit=90, max_lines=2)
     enabled = task.get("enabled", True)
     pinned = bool(task.get("pinned", False))
     config_path = str(task.get("config_path", "") or "").strip()
@@ -115,7 +121,7 @@ def _task_card(task, back_url, collection_id=""):
 
     config_btn = ""
     if config_path:
-        config_btn = f'<a class="btn btn-blue" href="/task/config/{h(task_id)}?back={h(back_url)}">配置</a>'
+        config_btn = f'<a class="btn btn-blue" href="/task/config/{h(task_id)}?back={_back_param(back_url)}">配置</a>'
 
     return f"""
 <div class="fls-fold-card collection-task-card" data-collection-id="{h(collection_id)}" data-task-id="{h(task_id)}">
@@ -142,18 +148,24 @@ def _task_card(task, back_url, collection_id=""):
         </div>
 
         <div class="fls-card-section">
-            <div class="fls-source-code">{h(command)}</div>
+            <div class="fls-source-code">{command_html}</div>
         </div>
 
         <div class="fls-card-actions">
             <div class="fls-btn-line">
-                <a class="btn btn-primary" href="/run/{h(task_id)}?back={h(back_url)}">运行</a>
-                <a class="btn btn-red" href="/stop/{h(task_id)}?back={h(back_url)}" onclick="return confirm('确定结束该任务吗？')">结束</a>
-                <a class="btn btn-orange" href="/log/{h(task_id)}?back={h(back_url)}">日志</a>
+                <a class="btn btn-primary" href="/run/{h(task_id)}?back={_back_param(back_url)}">运行</a>
+                <form class="inline-form" method="post" action="/stop/{h(task_id)}?back={_back_param(back_url)}">
+                    <button class="btn btn-red" type="submit" onclick="return confirm('确定结束该任务吗？')">结束</button>
+                </form>
+                <a class="btn btn-orange" href="/log/{h(task_id)}?back={_back_param(back_url)}">日志</a>
                 {config_btn}
-                <a class="btn btn-blue" href="/task/edit/{h(task_id)}">编辑</a>
-                <a class="btn {pin_class}" href="/task/pin/{h(task_id)}?back={h(back_url)}">{pin_text}</a>
-                <a class="btn btn-gray" href="/task/collection/clear/{h(task_id)}?back={h(back_url)}">取出</a>
+                <a class="btn btn-blue" href="/task/edit/{h(task_id)}?back={_back_param(back_url)}">编辑</a>
+                <form class="inline-form" method="post" action="/task/pin/{h(task_id)}?back={_back_param(back_url)}">
+                    <button class="btn {pin_class}" type="submit">{pin_text}</button>
+                </form>
+                <form class="inline-form" method="post" action="/task/collection/clear/{h(task_id)}?back={_back_param(back_url)}">
+                    <button class="btn btn-gray" type="submit">取出</button>
+                </form>
             </div>
         </div>
     </div>
@@ -624,10 +636,11 @@ def collections_page():
             task_options = '<option value="" disabled>暂无可加入任务</option>'
 
         task_items = ""
+        collection_back = current_back + "#collection-" + cid
 
         if show_tasks:
             for task in show_tasks:
-                task_items += _task_card(task, current_back, collection_id=cid)
+                task_items += _task_card(task, collection_back, collection_id=cid)
         else:
             task_items = '<div class="help">该合集暂无任务。</div>'
 
@@ -647,12 +660,14 @@ def collections_page():
 
     <div class="action-row" style="margin-top:12px;">
         <a class="btn btn-orange" href="/collection/edit/{h(cid)}">编辑合集</a>
-        <a class="btn btn-red" href="/collection/delete/{h(cid)}?back={h(current_back)}" onclick="return confirm('确定删除该合集吗？合集内任务会自动取出。')">删除合集</a>
+        <form class="inline-form" method="post" action="/collection/delete/{h(cid)}?back={_back_param(current_back)}">
+            <button class="btn btn-red" type="submit" onclick="return confirm('确定删除该合集吗？合集内任务会自动取出。')">删除合集</button>
+        </form>
     </div>
 
     <hr style="border:0;border-top:1px solid #eef2f7;margin:14px 0;">
 
-    <form method="post" action="/collection/add-task/{h(cid)}?back={h(current_back)}">
+    <form method="post" action="/collection/add-task/{h(cid)}?back={_back_param(current_back + '#collection-' + cid)}">
         <div class="form-item">
             <label>搜索并加入任务</label>
             <select name="task_ids" size="8" multiple>{task_options}</select>
@@ -784,7 +799,7 @@ def collection_edit(collection_id):
     return layout("编辑合集", "tasks", _collection_form(item))
 
 
-@bp.route("/collection/delete/<collection_id>")
+@bp.route("/collection/delete/<collection_id>", methods=["POST"])
 def collection_delete(collection_id):
     collections = load_collections()
     exists = any(c.get("id") == collection_id for c in collections)

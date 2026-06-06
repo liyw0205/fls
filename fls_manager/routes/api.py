@@ -1,3 +1,6 @@
+import copy
+import uuid
+
 from flask import Blueprint, jsonify, request
 
 from ..models import load_tasks, save_tasks
@@ -26,6 +29,30 @@ def _unique_task_ids(values):
         result.append(task_id)
 
     return result
+
+
+def _copy_task(tasks, task_id):
+    for task in tasks:
+        if task.get("id") != task_id:
+            continue
+
+        now = now_str()
+        base_name = str(task.get("name") or "未命名任务").strip() or "未命名任务"
+        new_task = copy.deepcopy(task)
+
+        new_task["id"] = uuid.uuid4().hex
+        new_task["name"] = f"{base_name}-copy"
+        new_task["run_count"] = 0
+        new_task["pinned"] = False
+        new_task["created_at"] = now
+        new_task["updated_at"] = now
+        new_task.pop("last_run_at", None)
+
+        tasks.append(new_task)
+
+        return new_task
+
+    return None
 
 
 @bp.route("/api/status")
@@ -105,6 +132,48 @@ def api_task_action(action, task_id):
             reload_scheduler()
 
             return jsonify({"ok": True, "msg": "已切换"})
+
+        if action == "copy":
+            tasks = load_tasks()
+            new_task = _copy_task(tasks, task_id)
+
+            if not new_task:
+                return jsonify({"ok": False, "msg": "任务不存在"}), 404
+
+            save_tasks(tasks)
+            reload_scheduler()
+
+            return jsonify({
+                "ok": True,
+                "msg": f"已复制为 {new_task.get('name')}",
+            })
+
+        if action == "pin":
+            tasks = load_tasks()
+            target = None
+
+            for task in tasks:
+                if task.get("id") == task_id:
+                    target = task
+                    break
+
+            if not target:
+                return jsonify({"ok": False, "msg": "任务不存在"}), 404
+
+            pinned_count = sum(1 for task in tasks if task.get("pinned"))
+
+            if not target.get("pinned") and pinned_count >= 5:
+                return jsonify({"ok": False, "msg": "最多只能置顶 5 个任务，请先取消一个置顶任务"}), 400
+
+            target["pinned"] = not target.get("pinned", False)
+            target["updated_at"] = now_str()
+
+            save_tasks(tasks)
+
+            return jsonify({
+                "ok": True,
+                "msg": "已置顶" if target.get("pinned") else "已取消置顶",
+            })
 
         if action == "delete":
             stop_task_now(task_id)

@@ -1,13 +1,15 @@
 import uuid
 from math import ceil
+from urllib.parse import urlparse
 
-from flask import request, redirect, url_for, abort
+from flask import request, redirect, abort
 
 from . import bp
 from .forms import (
     task_form,
     parse_notify_from_form,
     parse_random_delay_from_form,
+    parse_retry_from_form,
 )
 from .helpers import (
     parse_task_env_from_form,
@@ -36,6 +38,40 @@ SORT_OPTIONS = [
 ]
 
 TASK_PAGE_COLLECTION_LIMIT = 3
+
+
+def _clean_task_back_url(value, default="/tasks"):
+    value = str(value or "").strip()
+
+    if not value or value.startswith("//"):
+        return default
+
+    parsed = urlparse(value)
+
+    if parsed.scheme or parsed.netloc:
+        return default
+
+    if not value.startswith("/"):
+        return default
+
+    return value
+
+
+def _default_task_back_url(task=None):
+    collection_id = str((task or {}).get("collection_id") or "").strip()
+
+    if collection_id:
+        return f"/collections#collection-{collection_id}"
+
+    return "/tasks"
+
+
+def _task_form_back_url(task=None):
+    default = _default_task_back_url(task)
+    raw = request.form.get("back") if request.method == "POST" else request.args.get("back")
+
+    return _clean_task_back_url(raw, default)
+
 
 def _render_collection_cards(collections, all_tasks):
     cards = ""
@@ -194,6 +230,8 @@ def tasks_page():
 
 @bp.route("/task/new", methods=["GET", "POST"])
 def task_new():
+    back_url = _task_form_back_url()
+
     if request.method == "POST":
         name = request.form.get("name", "").strip()
         command = request.form.get("command", "").strip()
@@ -230,6 +268,7 @@ def task_new():
             "proxy_id": request.form.get("proxy_id", "").strip(),
             "notify": parse_notify_from_form(),
             "random_delay": parse_random_delay_from_form(),
+            "retry": parse_retry_from_form(),
             "run_count": 0,
             "pinned": False,
             "created_at": now_str(),
@@ -240,9 +279,9 @@ def task_new():
         save_tasks(tasks)
         reload_scheduler()
 
-        return redirect(url_for("tasks.tasks_page"))
+        return redirect(back_url)
 
-    return layout("新建任务", "tasks", task_form())
+    return layout("新建任务", "tasks", task_form(back_url=back_url))
 
 
 @bp.route("/task/edit/<task_id>", methods=["GET", "POST"])
@@ -257,6 +296,8 @@ def task_edit(task_id):
 
     if not task:
         abort(404)
+
+    back_url = _task_form_back_url(task)
 
     if request.method == "POST":
         name = request.form.get("name", "").strip()
@@ -290,6 +331,7 @@ def task_edit(task_id):
         task["proxy_id"] = request.form.get("proxy_id", "").strip()
         task["notify"] = parse_notify_from_form()
         task["random_delay"] = parse_random_delay_from_form()
+        task["retry"] = parse_retry_from_form()
         task["updated_at"] = now_str()
         task.setdefault("run_count", 0)
         task.setdefault("pinned", False)
@@ -297,6 +339,6 @@ def task_edit(task_id):
         save_tasks(tasks)
         reload_scheduler()
 
-        return redirect(url_for("tasks.tasks_page"))
+        return redirect(back_url)
 
-    return layout("编辑任务", "tasks", task_form(task))
+    return layout("编辑任务", "tasks", task_form(task, back_url=back_url))

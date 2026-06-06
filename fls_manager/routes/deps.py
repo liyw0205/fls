@@ -135,7 +135,10 @@ def deps_page():
     <td>{h(name)}</td>
     <td>{h(version)}</td>
     <td>
-        <a class="btn btn-red" href="/deps/uninstall?name={h(name)}" onclick="return confirm('确定卸载 {h(name)} 吗？')">卸载</a>
+        <form class="inline-form" method="post" action="/deps/uninstall">
+            <input type="hidden" name="name" value="{h(name)}">
+            <button class="btn btn-red" type="submit" onclick="return confirm('确定卸载 {h(name)} 吗？')">卸载</button>
+        </form>
     </td>
 </tr>
 """
@@ -347,9 +350,9 @@ def deps_refresh():
     return layout("刷新依赖", "deps", body)
 
 
-@bp.route("/deps/uninstall")
+@bp.route("/deps/uninstall", methods=["POST"])
 def deps_uninstall():
-    name = request.args.get("name", "").strip()
+    name = request.form.get("name", "").strip()
 
     if not name:
         return "依赖名不能为空", 400

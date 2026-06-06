@@ -28,4 +28,3 @@ def notify_test(item_id):
 </div>
 """
     return layout("通知测试", "notify", body)
-

@@ -333,8 +333,63 @@ pre.log {
     align-items:center;
 }
 
+.inline-form {
+    display:inline-flex;
+    margin:0;
+}
+
+.inline-form .btn {
+    margin:2px;
+}
+
 .mask {
     display:none;
+}
+
+.fls-toast-box {
+    position:fixed;
+    right:18px;
+    top:18px;
+    z-index:20000;
+    display:flex;
+    flex-direction:column;
+    gap:10px;
+    max-width:min(360px, calc(100vw - 28px));
+    pointer-events:none;
+}
+
+.fls-toast {
+    padding:11px 13px;
+    border:1px solid rgba(17,24,39,.08);
+    border-left:4px solid var(--blue);
+    border-radius:10px;
+    background:rgba(255,255,255,.95);
+    color:#111827;
+    box-shadow:0 10px 28px rgba(0,0,0,.14);
+    font-size:13px;
+    line-height:1.5;
+    font-weight:700;
+    word-break:break-word;
+    pointer-events:auto;
+}
+
+.fls-toast.success {
+    border-left-color:var(--primary);
+}
+
+.fls-toast.error {
+    border-left-color:var(--red);
+}
+
+.fls-toast.warn {
+    border-left-color:var(--orange);
+}
+
+body.fls-mobile .fls-toast-box {
+    left:10px;
+    right:10px;
+    top:calc(env(safe-area-inset-top, 0px) + 10px);
+    max-width:none;
 }
 
 /* ============================================================
@@ -503,6 +558,15 @@ pre.log {
 
 .fls-btn-line .btn {
     flex:1 1 120px;
+    margin:0;
+}
+
+.fls-btn-line .inline-form {
+    flex:1 1 120px;
+}
+
+.fls-btn-line .inline-form .btn {
+    width:100%;
     margin:0;
 }
 
@@ -1261,6 +1325,16 @@ body.fls-mobile:not(.page-pull):not(.page-proxy):not(.page-deps):not(.page-statu
 
 .fls-collapsible-value summary::-webkit-details-marker {
     display:none;
+}
+
+.fls-collapsible-code summary .fls-value-preview {
+    white-space:normal;
+    word-break:break-all;
+}
+
+.fls-collapsible-code > code:not(.fls-value-preview) {
+    display:block;
+    margin-top:6px;
 }
 
 /* 日志悬浮按钮 */

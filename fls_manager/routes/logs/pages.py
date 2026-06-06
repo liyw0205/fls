@@ -109,7 +109,9 @@ def logs_page():
     <td>{h(mtime)}</td>
     <td>
         <a class="btn btn-orange" href="/logfile/{h(f.name)}?back=/logs">查看</a>
-        <a class="btn btn-red" href="/logfile/delete/{h(f.name)}" onclick="return confirm('确定删除日志 {h(f.name)} 吗？')">删除</a>
+        <form class="inline-form" method="post" action="/logfile/delete/{h(f.name)}?back=/logs">
+            <button class="btn btn-red" type="submit" onclick="return confirm('确定删除日志 {h(f.name)} 吗？')">删除</button>
+        </form>
     </td>
 </tr>
 """

@@ -197,7 +197,7 @@ def login():
         <br>
         <label>
             <input type="checkbox" name="remember" value="1" style="width:auto;">
-            保持登录 7 天
+            保持登录 14 天
         </label>
         <div class="help">不勾选则登录有效期为 1 小时。</div>
         <br>

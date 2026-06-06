@@ -22,10 +22,9 @@ def notify_toggle(item_id):
     return redirect(url_for("notify.notify_page"))
 
 
-@bp.route("/notify/delete/<item_id>")
+@bp.route("/notify/delete/<item_id>", methods=["POST"])
 def notify_delete(item_id):
     items = [x for x in notify_items() if x.get("id") != item_id]
     save_notify_items(items)
     save_default_notify_ids(default_notify_ids())
     return redirect(url_for("notify.notify_page"))
-

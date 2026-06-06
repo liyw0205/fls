@@ -137,7 +137,9 @@ def render_rows(current_rel=""):
             buttons = f"""
 <a class="btn btn-primary" href="{h(script_url(rel))}">打开</a>
 <a class="btn btn-orange" href="{h(rename_url(rel))}">改名</a>
-<a class="btn btn-red" href="{h(delete_url(rel))}" onclick="return confirm('确定删除 {h(rel)} 吗？')">删除</a>
+<form class="inline-form" method="post" action="{h(delete_url(rel))}">
+    <button class="btn btn-red" type="submit" onclick="return confirm('确定删除 {h(rel)} 吗？')">删除</button>
+</form>
 """
         else:
             size_text = f"{item.stat().st_size / 1024:.1f} KB"
@@ -147,7 +149,9 @@ def render_rows(current_rel=""):
 <a class="btn btn-primary" href="{h(script_debug_url(rel))}">调试</a>
 <a class="btn btn-primary" href="{h(download_url(rel))}">下载</a>
 <a class="btn btn-orange" href="{h(rename_url(rel))}">改名</a>
-<a class="btn btn-red" href="{h(delete_url(rel))}" onclick="return confirm('确定删除 {h(rel)} 吗？')">删除</a>
+<form class="inline-form" method="post" action="{h(delete_url(rel))}">
+    <button class="btn btn-red" type="submit" onclick="return confirm('确定删除 {h(rel)} 吗？')">删除</button>
+</form>
 """
 
         rows += f"""

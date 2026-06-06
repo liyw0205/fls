@@ -1,3 +1,5 @@
+from urllib.parse import quote
+
 from flask import request, abort
 
 from . import bp
@@ -16,6 +18,7 @@ def task_config_edit(task_id):
         abort(404)
 
     back_url = get_back_url("/tasks")
+    back_param = h(quote(back_url, safe="/"))
     config_path = str(task.get("config_path") or "").strip()
 
     if not config_path:
@@ -25,7 +28,7 @@ def task_config_edit(task_id):
     <div class="help">该任务没有配置 config_path。</div>
     <br>
     <a class="btn btn-gray" href="{h(back_url)}">返回</a>
-    <a class="btn btn-blue" href="/task/edit/{h(task_id)}">编辑任务</a>
+    <a class="btn btn-blue" href="/task/edit/{h(task_id)}?back={back_param}">编辑任务</a>
 </div>
 """
         return layout("任务配置文件", "tasks", body)
@@ -39,7 +42,7 @@ def task_config_edit(task_id):
     <div class="help" style="color:#dc2626;">{h(e)}</div>
     <br>
     <a class="btn btn-gray" href="{h(back_url)}">返回</a>
-    <a class="btn btn-blue" href="/task/edit/{h(task_id)}">编辑任务</a>
+    <a class="btn btn-blue" href="/task/edit/{h(task_id)}?back={back_param}">编辑任务</a>
 </div>
 """
         return layout("配置文件路径非法", "tasks", body), 400
@@ -83,8 +86,8 @@ def task_config_edit(task_id):
     </div>
     <br>
     <button class="btn btn-primary" type="submit">保存配置</button>
-    <a class="btn btn-blue" href="/run/{h(task_id)}?back={h(back_url)}">运行任务</a>
-    <a class="btn btn-orange" href="/task/edit/{h(task_id)}">编辑任务</a>
+    <a class="btn btn-blue" href="/run/{h(task_id)}?back={back_param}">运行任务</a>
+    <a class="btn btn-orange" href="/task/edit/{h(task_id)}?back={back_param}">编辑任务</a>
     <a class="btn btn-gray" href="{h(back_url)}">返回</a>
 </div>
 

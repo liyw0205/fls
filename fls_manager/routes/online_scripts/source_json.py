@@ -53,4 +53,3 @@ def online_scripts_source():
 """
 
     return layout("脚本源 JSON", "online_scripts", body)
-

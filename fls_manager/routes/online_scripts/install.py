@@ -173,4 +173,3 @@ def online_scripts_install_stop(install_id):
             err="" if ok else msg,
         )
     )
-

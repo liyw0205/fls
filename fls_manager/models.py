@@ -1,5 +1,8 @@
-from .paths import TASK_FILE, GLOBAL_ENV_FILE, PROXY_FILE, COLLECTION_FILE
+from .paths import TASK_FILE, TASK_HISTORY_FILE, GLOBAL_ENV_FILE, PROXY_FILE, COLLECTION_FILE
 from .storage import read_json, write_json
+
+
+TASK_HISTORY_LIMIT = 500
 
 
 def load_tasks():
@@ -15,6 +18,51 @@ def get_task(task_id):
         if t.get("id") == task_id:
             return t
     return None
+
+
+def load_task_history():
+    data = read_json(TASK_HISTORY_FILE, [])
+    if not isinstance(data, list):
+        return []
+    return [item for item in data if isinstance(item, dict)]
+
+
+def save_task_history(items):
+    write_json(TASK_HISTORY_FILE, list(items or [])[:TASK_HISTORY_LIMIT])
+
+
+def add_task_history(record):
+    history = load_task_history()
+    history.insert(0, dict(record or {}))
+    save_task_history(history)
+
+
+def update_task_history(record_id, updates):
+    if not record_id:
+        return False
+
+    history = load_task_history()
+    changed = False
+
+    for item in history:
+        if item.get("id") == record_id:
+            item.update(updates or {})
+            changed = True
+            break
+
+    if changed:
+        save_task_history(history)
+
+    return changed
+
+
+def task_history_for_task(task_id, limit=20):
+    result = [
+        item for item in load_task_history()
+        if str(item.get("task_id") or "") == str(task_id or "")
+    ]
+
+    return result[:max(1, int(limit or 20))]
 
 
 def load_global_env():

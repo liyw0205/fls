@@ -31,4 +31,3 @@ def api_online_refresh_status():
         "updated_at": ONLINE_REFRESH_STATE.get("updated_at", ""),
         "log_file": ONLINE_REFRESH_STATE.get("log_file", ""),
     })
-

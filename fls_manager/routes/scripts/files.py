@@ -208,7 +208,7 @@ def scripts_download(rel_path):
     )
 
 
-@bp.route("/scripts/delete/<path:rel_path>")
+@bp.route("/scripts/delete/<path:rel_path>", methods=["POST"])
 def scripts_delete(rel_path):
     target = script_safe_path(rel_path)
 

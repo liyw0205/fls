@@ -683,7 +683,7 @@ def delayed_stop_panel():
 # ============================================================
 
 def about_panel_time_text():
-    return panel_now().strftime("%Y %m-%d %H:%M:%S")
+    return panel_now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def utc_offset_options(selected=8):

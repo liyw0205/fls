@@ -4,6 +4,35 @@ from ..state import RUNNING
 from ..scheduler import get_task_next_run_time_text
 
 
+def collapsible_code(value, limit=80, max_lines=2):
+    raw = str(value if value is not None else "")
+    lines = raw.splitlines()
+    needs_collapse = len(raw) > int(limit) or len(lines) > int(max_lines)
+
+    code_style = ' style="white-space:pre-wrap;word-break:break-all;"'
+
+    if not needs_collapse:
+        return f"<code{code_style}>{h(raw)}</code>"
+
+    preview = " ".join(raw.split())
+
+    if not preview:
+        preview = raw.replace("\r", " ").replace("\n", " ").strip()
+
+    if len(preview) > int(limit):
+        preview = preview[:int(limit)] + "..."
+    elif len(preview) < len(raw):
+        preview += "..."
+
+    return (
+        '<details class="fls-collapsible-value fls-collapsible-code" '
+        'style="display:inline-block;max-width:100%;">'
+        f'<summary><code class="fls-value-preview">{h(preview)}</code></summary>'
+        f"<code{code_style}>{h(raw)}</code>"
+        "</details>"
+    )
+
+
 def _task_action_buttons(task_id, enabled, config_path="", pinned=False):
     toggle_text = "禁用" if enabled else "启用"
     toggle_class = "btn-gray" if enabled else "btn-primary"
@@ -18,13 +47,19 @@ def _task_action_buttons(task_id, enabled, config_path="", pinned=False):
     return f"""
 <div class="task-actions">
     <button class="btn btn-primary" type="button" onclick="taskAjaxAction('run','{h(task_id)}')">运行</button>
-    <button class="btn btn-red" type="button" onclick="taskAjaxAction('stop','{h(task_id)}')">结束</button>
     <a class="btn btn-orange" href="/log/{h(task_id)}?back=/tasks">日志</a>
+    <a class="btn btn-blue" href="/task/edit/{h(task_id)}?back=/tasks">编辑</a>
     {config_btn}
-    <a class="btn {pin_class}" href="/task/pin/{h(task_id)}?back=/tasks">{pin_text}</a>
-    <a class="btn btn-blue" href="/task/edit/{h(task_id)}">编辑</a>
-    <button class="btn {toggle_class}" type="button" onclick="taskAjaxAction('toggle','{h(task_id)}')">{h(toggle_text)}</button>
-    <button class="btn btn-gray" type="button" onclick="taskAjaxAction('delete','{h(task_id)}')">删除</button>
+    <details class="task-action-more">
+        <summary class="btn btn-gray">更多</summary>
+        <div class="task-action-more-menu">
+            <button class="btn btn-red" type="button" onclick="taskAjaxAction('stop','{h(task_id)}')">结束</button>
+            <button class="btn {pin_class}" type="button" onclick="taskAjaxAction('pin','{h(task_id)}')">{pin_text}</button>
+            <button class="btn btn-blue" type="button" onclick="taskAjaxAction('copy','{h(task_id)}')">复制</button>
+            <button class="btn {toggle_class}" type="button" onclick="taskAjaxAction('toggle','{h(task_id)}')">{h(toggle_text)}</button>
+            <button class="btn btn-gray" type="button" onclick="taskAjaxAction('delete','{h(task_id)}')">删除</button>
+        </div>
+    </details>
 </div>
 """
 
@@ -71,6 +106,8 @@ def tasks_table(tasks):
             if remark:
                 remark_html = f'<div class="help" style="margin-top:4px;">备注：{h(remark)}</div>'
 
+            command_html = collapsible_code(command, limit=90, max_lines=2)
+
             remark_mobile = ""
             if remark:
                 remark_mobile = f"""
@@ -86,7 +123,7 @@ def tasks_table(tasks):
         <input class="task-select-checkbox" type="checkbox" data-task-id="{h(task_id)}" onchange="taskSyncSelection(this)" aria-label="选择任务 {h(name)}">
     </td>
     <td><b>{h(name)}</b> {pinned_badge}{remark_html}</td>
-    <td>{h(command)}</td>
+    <td>{command_html}</td>
     <td>{h(cron)}</td>
     <td>{h(next_run_text)}</td>
     <td>{enabled_badge}</td>
@@ -123,7 +160,7 @@ def tasks_table(tasks):
 
             <div class="task-mobile-item">
                 <div class="task-mobile-label">命令</div>
-                <div class="task-mobile-value code-like">{h(command)}</div>
+                <div class="task-mobile-value code-like">{command_html}</div>
             </div>
 
             <div class="task-mobile-item">
@@ -238,6 +275,38 @@ tr.task-selected td {{
 
 .task-actions .btn {{
     margin:2px;
+}}
+
+.task-action-more {{
+    display:inline-block;
+    margin:2px;
+}}
+
+.task-action-more summary {{
+    list-style:none;
+}}
+
+.task-action-more summary::-webkit-details-marker {{
+    display:none;
+}}
+
+.task-action-more summary.btn {{
+    margin:0;
+}}
+
+.task-action-more-menu {{
+    display:flex;
+    gap:6px;
+    flex-wrap:wrap;
+    padding:8px;
+    margin-top:6px;
+    border:1px solid #e5e7eb;
+    border-radius:10px;
+    background:#f9fafb;
+}}
+
+.task-action-more-menu .btn {{
+    margin:0;
 }}
 
 /* ============================================================
@@ -424,6 +493,16 @@ body.fls-mobile #tasksMobileCards {{
         gap:5px;
     }}
 
+    .task-action-more {{
+        flex:1 1 calc(33.333% - 8px);
+        min-width:72px;
+        margin:2px 0;
+    }}
+
+    .task-action-more summary.btn {{
+        width:100%;
+    }}
+
     .task-actions .btn {{
         flex:1 1 calc(33.333% - 8px);
         min-width:72px;
@@ -438,6 +517,10 @@ body.fls-mobile #tasksMobileCards {{
     }}
 
     .task-actions .btn {{
+        flex:1 1 calc(50% - 8px);
+    }}
+
+    .task-action-more {{
         flex:1 1 calc(50% - 8px);
     }}
 }}
@@ -679,6 +762,10 @@ async function taskAjaxAction(action, taskId){{
                 row.style.opacity = "1";
             }});
             return;
+        }}
+
+        if(action === "copy" && json.msg){{
+            alert(json.msg);
         }}
 
         if(typeof flsClearPageCache === "function"){{

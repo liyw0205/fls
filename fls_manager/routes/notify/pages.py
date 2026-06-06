@@ -30,7 +30,9 @@ def notify_page():
         <a class="btn btn-orange" href="/notify/test/{h(item_id)}">测试</a>
         <a class="btn btn-blue" href="/notify/edit/{h(item_id)}">编辑</a>
         <a class="btn {toggle_class}" href="/notify/toggle/{h(item_id)}">{toggle_text}</a>
-        <a class="btn btn-red" href="/notify/delete/{h(item_id)}" onclick="return confirm('确定删除该通知吗？')">删除</a>
+        <form class="inline-form" method="post" action="/notify/delete/{h(item_id)}">
+            <button class="btn btn-red" type="submit" onclick="return confirm('确定删除该通知吗？')">删除</button>
+        </form>
     </td>
 </tr>
 """
@@ -132,4 +134,3 @@ def notify_edit(item_id):
         item["channel"] = url_channel
 
     return notify_form(item)
-

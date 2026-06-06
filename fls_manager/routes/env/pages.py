@@ -152,4 +152,3 @@ def env_edit(key):
 </form>
 """
     return layout("编辑全局变量", "env", body)
-

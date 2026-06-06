@@ -216,7 +216,7 @@ def scripts_debug_run(rel_path):
     return redirect(f"/scripts/debug-log/{debug_id}?back={quote(back_url)}")
 
 
-@bp.route("/scripts/debug-stop/<debug_id>")
+@bp.route("/scripts/debug-stop/<debug_id>", methods=["POST"])
 def scripts_debug_stop(debug_id):
     info = SCRIPT_DEBUG_RUNNING.get(debug_id)
 
@@ -268,9 +268,11 @@ def scripts_debug_log(debug_id):
 
     if info.get("running"):
         stop_btn = f"""
-<a class="btn btn-red" href="/scripts/debug-stop/{h(debug_id)}?back={h(back_url)}" onclick="return confirm('确定停止该调试运行吗？')">
-    停止调试
-</a>
+<form class="inline-form" method="post" action="/scripts/debug-stop/{h(debug_id)}?back={h(back_url)}">
+    <button class="btn btn-red" type="submit" onclick="return confirm('确定停止该调试运行吗？')">
+        停止调试
+    </button>
+</form>
 """
 
     body = f"""

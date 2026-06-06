@@ -137,4 +137,3 @@ window.__FLS_ACTIVE_LOG_INTERVAL__ = setInterval(loadLog, 2000);
 """
 
     return layout("在线脚本日志", "online_scripts", body)
-

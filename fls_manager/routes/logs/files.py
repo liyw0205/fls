@@ -14,7 +14,9 @@ def logfile_view(filename):
 <div class="card">
     <div class="card-title">日志文件：{h(filename)}</div>
     <a class="btn btn-gray" href="{h(back_url)}">返回</a>
-    <a class="btn btn-red" href="/logfile/delete/{h(filename)}?back={h(back_url)}" onclick="return confirm('确定删除日志吗？')">删除</a>
+    <form class="inline-form" method="post" action="/logfile/delete/{h(filename)}?back={h(back_url)}">
+        <button class="btn btn-red" type="submit" onclick="return confirm('确定删除日志吗？')">删除</button>
+    </form>
 </div>
 
 <pre class="log" id="log">加载中...</pre>
@@ -92,7 +94,7 @@ def api_logfile(filename):
     )
 
 
-@bp.route("/logfile/delete/<filename>")
+@bp.route("/logfile/delete/<filename>", methods=["POST"])
 def logfile_delete(filename):
     back_url = get_back_url("/logs")
     filename = filename.split("/")[-1]

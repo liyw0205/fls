@@ -1,10 +1,31 @@
+import re
+
+from ..csrf import csrf_token
 from ..utils import h
 
 
+def inject_csrf_inputs(body, token):
+    hidden = f'<input type="hidden" name="csrf_token" value="{h(token)}">'
+
+    def repl(match):
+        return match.group(1) + hidden
+
+    return re.sub(
+        r'(<form\b(?=[^>]*\bmethod=["\']?post["\']?)[^>]*>)',
+        repl,
+        str(body or ""),
+        flags=re.IGNORECASE,
+    )
+
+
 def layout(title, active, body):
+    token = csrf_token()
+    body = inject_csrf_inputs(body, token)
+
     nav = [
         ("dashboard", "/", "📊 仪表盘"),
         ("tasks", "/tasks", "📜 任务管理"),
+        ("history", "/history", "🧾 运行历史"),
         ("env", "/env", "🌐 全局变量"),
         ("proxy", "/proxy", "🧩 代理管理"),
         ("pull", "/pull", "📂 脚本管理"),
@@ -32,26 +53,9 @@ def layout(title, active, body):
 <meta charset="utf-8">
 <title>__TITLE__</title>
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta name="csrf-token" content="__CSRF_TOKEN__">
 
 <link rel="stylesheet" href="/static/fls.css?v=20260509-3">
-
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/lib/codemirror.min.css">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/theme/material-darker.min.css">
-
-<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/lib/codemirror.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/python/python.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/shell/shell.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/javascript/javascript.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/yaml/yaml.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/xml/xml.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/css/css.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/htmlmixed/htmlmixed.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/php/php.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/ruby/ruby.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/perl/perl.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/lua/lua.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/clike/clike.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/codemirror@5.65.16/mode/markdown/markdown.min.js"></script>
 
 </head>
 
@@ -85,4 +89,5 @@ def layout(title, active, body):
         .replace("__NAV__", nav_html)
         .replace("__BODY__", body)
         .replace("__ACTIVE__", h(active))
+        .replace("__CSRF_TOKEN__", h(token))
     )

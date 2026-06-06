@@ -93,4 +93,3 @@ def api_proxy_quality_saved(proxy_id):
             "name": proxy.get("name", ""),
             "error": str(e),
         })
-

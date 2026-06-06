@@ -5,6 +5,7 @@ from flask import request, redirect, url_for, abort
 
 from ...ui.layout import layout
 from ...utils import h, now_str
+from ...sensitive import is_sensitive_key
 from ...notify import (
     NOTIFY_CHANNELS,
     notify_items,
@@ -106,10 +107,12 @@ def notify_form(item=None):
 </div>
 """
         else:
+            input_type = "password" if is_sensitive_key(field) else "text"
+            autocomplete = ' autocomplete="new-password"' if input_type == "password" else ""
             fields_html += f"""
 <div class="form-item">
     <label>{h(label)}</label>
-    <input name="{h(field)}" value="{h(value)}" placeholder="{h(placeholder)}">
+    <input name="{h(field)}" type="{input_type}" value="{h(value)}" placeholder="{h(placeholder)}"{autocomplete}>
 </div>
 """
 
