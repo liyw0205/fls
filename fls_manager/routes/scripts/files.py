@@ -15,6 +15,7 @@ from .helpers import (
 
 from ...paths import SCRIPT_DIR
 from ...utils import h
+from ...ui.components import message_card
 from ...ui.layout import layout
 
 
@@ -83,7 +84,7 @@ def scripts_new():
     <button class="btn btn-primary" type="submit">保存新建</button>
     <a class="btn btn-gray" href="{h(script_url(current_rel))}">返回</a>
 </div>
-<div class="card"><div class="help">{h(msg or '暂无操作')}</div></div>
+{message_card(msg or "暂无操作")}
 </form>
 """
     return layout("新建脚本", "pull", body)
@@ -128,7 +129,7 @@ def scripts_view():
         style="min-height:680px;"
     >{h(content)}</textarea>
 </div>
-<div class="card"><div class="help">{h(msg or '暂无保存操作')}</div></div>
+{message_card(msg or "暂无保存操作")}
 </form>
 """
     return layout("查看 / 编辑文件", "pull", body)
@@ -180,7 +181,7 @@ def scripts_rename():
     <button class="btn btn-primary" type="submit">保存改名</button>
     <a class="btn btn-gray" href="/pull">返回</a>
 </div>
-<div class="card"><div class="help">{h(msg or '暂无操作')}</div></div>
+{message_card(msg or "暂无操作")}
 </form>
 """
     return layout("改名", "pull", body)

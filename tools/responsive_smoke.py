@@ -25,6 +25,7 @@ PAGES = (
     ("/task/new", "page-tasks"),
     ("/logs", "page-logs"),
     ("/pull", "page-pull"),
+    ("/pull/new", "page-pull"),
     ("/online-scripts", "page-online_scripts"),
     ("/env", "page-env"),
     ("/notify", "page-notify"),
