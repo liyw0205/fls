@@ -345,6 +345,7 @@ Blueprint 约定：
 轻量检查：
 
 ```sh
+python -B -m unittest discover -s tests
 python -B tools/responsive_smoke.py
 python -m compileall fls-manager.py fls_manager
 ```
@@ -364,13 +365,20 @@ python -m compileall fls-manager.py fls_manager
 - 日志查看、实时刷新、删除符合预期。
 - 备份导出和导入不会越权写出目标目录。
 
-当前没有独立测试目录或 CI 配置。后续如果引入自动化测试，优先覆盖：
+当前已有 `tests/` 轻量自动化测试目录。新增测试优先使用标准库 `unittest`，并通过临时 `FLS_BASE_DIR` 隔离真实运行数据。
+
+已覆盖：
 
 - `command.py` 的命令解析。
 - `scheduler.py` 的 Cron 和虚拟时间换算。
-- `storage.py` / `models.py` 的 JSON 兼容迁移。
 - `auth.py` 的 API 与页面鉴权分支。
 - `backup/_common.py` 的安全解压。
+
+后续优先补充：
+
+- `storage.py` / `models.py` 的 JSON 兼容迁移。
+- 任务运行、停止、超时和失败重试的可控单元测试。
+- 日志清理、代理环境注入、通知发送的 mock 测试。
 
 ## 11. 已知约束
 
@@ -386,7 +394,7 @@ python -m compileall fls-manager.py fls_manager
 
 优先级高：
 
-- 增加基础自动化测试，先覆盖命令解析、Cron 虚拟时间、鉴权和安全解压。
+- 扩展基础自动化测试，继续覆盖 storage/models 兼容迁移、任务运行状态和日志清理。
 - 给 `data/*.json` 增加更明确的 schema 文档和读取时迁移函数。
 - 把过长路由里的业务流程逐步下沉到 service/helper 模块。
 
@@ -420,3 +428,6 @@ python -m compileall fls-manager.py fls_manager
 - 阶段 2 新增轻量响应式烟测工具 `tools/responsive_smoke.py`，用于在没有真实浏览器环境时检查核心页面结构、静态资源版本和响应式关键 token。
 - 阶段 2 新增 `docs/PANEL_REFERENCE.md`，整理青龙面板、呆呆面板、白虎面板参考边界和 FLS 候选需求池。
 - 阶段 2 开始低风险 UI 组件抽取：新增 `fls_manager/ui/components.py`，并在全局变量、通知、代理、脚本管理页面接入 `page_header_card()` 和 `table_card()`。
+- 阶段 3 新增 `tests/test_auth_backup.py`，覆盖 Token 初始化、页面/API 鉴权分支、Query Token 清理跳转，以及备份文件名归一和 zip/tar 路径穿越拒绝。
+- 阶段 3 新增 `tests/test_command_scheduler.py`，覆盖脚本类型归一、命令参数引用、`task` 命令构建、混合命令展开、5/6 位 Cron 和虚拟时间互逆换算。
+- 阶段 3 将 `python -B -m unittest discover -s tests` 纳入常规验证清单，并继续保留 `tools/responsive_smoke.py` 作为无浏览器环境下的响应式结构烟测。
