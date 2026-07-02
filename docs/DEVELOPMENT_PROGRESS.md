@@ -371,6 +371,55 @@
 
 ## 下一阶段候选
 
-- 阶段 9：处理备份 tar 解压 Python 3.14 `filter` 参数兼容和补充特殊 tar 成员安全测试。
+## 阶段 9：备份 tar 解压兼容与安全边界
+
+状态：已完成
+
+目标：
+
+- 处理 `safe_extract_tar()` 在 Python 3.14 下的 `tarfile.extractall()` DeprecationWarning。
+- 显式控制 tar 解压 filter 行为，保持旧 Python 兼容。
+- 补充 tar 特殊成员和 zip 跨平台路径边界测试。
+
+已完成：
+
+- 更新 `fls_manager/routes/backup/_common.py`：
+  - 新增 `_archive_member_target()`，统一校验 tar/zip 成员路径。
+  - 拒绝 `/absolute`、`C:/drive`、`..\\backslash` 等跨平台绝对或穿越路径。
+  - `safe_extract_tar()` 解压前继续校验成员路径 containment。
+  - `safe_extract_tar()` 拒绝 symlink、hardlink。
+  - `safe_extract_tar()` 只允许普通文件和目录，拒绝 FIFO、字符设备、块设备等特殊成员。
+  - `safe_extract_tar()` 优先调用 `tar.extractall(path, filter="data")`。
+  - 对不支持 `filter` 参数的旧 Python fallback 到已完成手动校验后的 `extractall(path)`。
+- 扩展 `tests/test_auth_backup.py`：
+  - 新增 tar 特殊成员 helper。
+  - 覆盖 zip 绝对路径、Windows drive path、反斜杠穿越路径拒绝。
+  - 覆盖 tar 正常文件解压且不产生 `DeprecationWarning`。
+  - 覆盖 tar `../` 路径穿越继续拒绝。
+  - 覆盖 tar 绝对路径和 Windows drive path 拒绝。
+  - 覆盖 tar symlink、hardlink 拒绝。
+  - 覆盖 tar FIFO、字符设备、块设备拒绝。
+- 子代理 A 完成备份安全实现审查；子代理 B 完成 tar 特殊成员测试构造审查。
+
+验证记录：
+
+- `python -B -m unittest tests.test_auth_backup`：通过，15 tests OK。
+- `python -B -m unittest discover -s tests`：通过，78 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有跑真实备份恢复 UI 流程，只覆盖安全解压核心函数。
+
+安全策略结论：
+
+- tar 成员类型采用白名单：只允许普通文件和目录。
+- 路径校验在调用 `extractall()` 前完成，避免旧 Python fallback 重新暴露特殊成员风险。
+- zip 解压仍使用 `zipfile.extractall()`，但先做统一路径校验，补齐跨平台路径边界。
+
+## 下一阶段候选
+
 - 阶段 10：继续低风险 UI 组件抽取，优先分页组件、消息结果卡、摘要网格。
 - 有浏览器环境时补真实响应式截图验收。

@@ -5,6 +5,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+import warnings
 import zipfile
 from pathlib import Path
 
@@ -73,6 +74,14 @@ def add_tar_file(tar, name, content=b"data"):
     tar.addfile(info, io.BytesIO(content))
 
 
+def add_tar_member(tar, name, member_type, linkname=""):
+    info = tarfile.TarInfo(name)
+    info.type = member_type
+    info.linkname = linkname
+    info.size = 0
+    tar.addfile(info)
+
+
 class AuthFlowTests(unittest.TestCase):
     def test_api_requires_setup_when_token_missing(self):
         with isolated_fls_env(token=None):
@@ -118,6 +127,20 @@ class AuthFlowTests(unittest.TestCase):
 
 
 class BackupSafetyTests(unittest.TestCase):
+    def assert_tar_rejected(self, member_builder):
+        with isolated_fls_env(token="unit-token"):
+            from fls_manager.routes.backup._common import safe_extract_tar
+
+            with tempfile.TemporaryDirectory(prefix="fls-tar-bad-") as dest:
+                data = io.BytesIO()
+                with tarfile.open(fileobj=data, mode="w") as tar:
+                    member_builder(tar)
+
+                data.seek(0)
+                with tarfile.open(fileobj=data, mode="r:") as tar:
+                    with self.assertRaises(RuntimeError):
+                        safe_extract_tar(tar, dest)
+
     def test_backup_safe_file_stays_inside_backup_dir(self):
         with isolated_fls_env(token="unit-token"):
             from fls_manager.routes.backup._common import backup_safe_file
@@ -155,6 +178,28 @@ class BackupSafetyTests(unittest.TestCase):
                     with self.assertRaises(RuntimeError):
                         safe_extract_zip(zf, dest)
 
+    def test_safe_extract_zip_rejects_absolute_and_backslash_paths(self):
+        cases = [
+            "/tmp/evil.txt",
+            "C:/evil.txt",
+            "..\\evil.txt",
+        ]
+
+        for name in cases:
+            with self.subTest(name=name):
+                with isolated_fls_env(token="unit-token"):
+                    from fls_manager.routes.backup._common import safe_extract_zip
+
+                    with tempfile.TemporaryDirectory(prefix="fls-zip-bad-") as dest:
+                        data = io.BytesIO()
+                        with zipfile.ZipFile(data, "w") as zf:
+                            zf.writestr(name, "bad")
+
+                        data.seek(0)
+                        with zipfile.ZipFile(data, "r") as zf:
+                            with self.assertRaises(RuntimeError):
+                                safe_extract_zip(zf, dest)
+
     def test_safe_extract_tar_accepts_regular_paths(self):
         with isolated_fls_env(token="unit-token"):
             from fls_manager.routes.backup._common import safe_extract_tar
@@ -170,6 +215,29 @@ class BackupSafetyTests(unittest.TestCase):
 
                 self.assertTrue((Path(dest) / "scripts" / "demo.py").exists())
 
+    def test_safe_extract_tar_does_not_emit_deprecation_warning(self):
+        with isolated_fls_env(token="unit-token"):
+            from fls_manager.routes.backup._common import safe_extract_tar
+
+            with tempfile.TemporaryDirectory(prefix="fls-tar-warn-") as dest:
+                data = io.BytesIO()
+                with tarfile.open(fileobj=data, mode="w") as tar:
+                    add_tar_file(tar, "scripts/demo.py", b"print('ok')")
+
+                data.seek(0)
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always", DeprecationWarning)
+
+                    with tarfile.open(fileobj=data, mode="r:") as tar:
+                        safe_extract_tar(tar, dest)
+
+                deprecations = [
+                    item
+                    for item in caught
+                    if issubclass(item.category, DeprecationWarning)
+                ]
+                self.assertEqual(deprecations, [])
+
     def test_safe_extract_tar_rejects_traversal(self):
         with isolated_fls_env(token="unit-token"):
             from fls_manager.routes.backup._common import safe_extract_tar
@@ -183,6 +251,50 @@ class BackupSafetyTests(unittest.TestCase):
                 with tarfile.open(fileobj=data, mode="r:") as tar:
                     with self.assertRaises(RuntimeError):
                         safe_extract_tar(tar, dest)
+
+    def test_safe_extract_tar_rejects_absolute_paths(self):
+        cases = [
+            "/tmp/evil.txt",
+            "C:/evil.txt",
+        ]
+
+        for name in cases:
+            with self.subTest(name=name):
+                self.assert_tar_rejected(
+                    lambda tar, member_name=name: add_tar_file(tar, member_name, b"bad")
+                )
+
+    def test_safe_extract_tar_rejects_symlink_and_hardlink_members(self):
+        cases = [
+            ("data/link", tarfile.SYMTYPE, "/tmp/evil.txt"),
+            ("data/link", tarfile.SYMTYPE, "../../evil.txt"),
+            ("data/hard", tarfile.LNKTYPE, "/tmp/evil.txt"),
+            ("data/hard", tarfile.LNKTYPE, "../../evil.txt"),
+        ]
+
+        for name, member_type, linkname in cases:
+            with self.subTest(name=name, member_type=member_type, linkname=linkname):
+                self.assert_tar_rejected(
+                    lambda tar, n=name, t=member_type, l=linkname: add_tar_member(
+                        tar,
+                        n,
+                        t,
+                        l,
+                    )
+                )
+
+    def test_safe_extract_tar_rejects_special_members(self):
+        cases = [
+            ("data/pipe", tarfile.FIFOTYPE),
+            ("data/chardev", tarfile.CHRTYPE),
+            ("data/blockdev", tarfile.BLKTYPE),
+        ]
+
+        for name, member_type in cases:
+            with self.subTest(name=name, member_type=member_type):
+                self.assert_tar_rejected(
+                    lambda tar, n=name, t=member_type: add_tar_member(tar, n, t)
+                )
 
 
 if __name__ == "__main__":
