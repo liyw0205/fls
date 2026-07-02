@@ -392,11 +392,12 @@ python -B -m compileall fls-manager.py fls_manager tests
 - `logs.py` 的 `latest_log_for_task()`、`cleanup_logs()` keep=0、非法配置、无启动头分组和 unlink 异常吞掉边界。
 - `auth.py` 的 API 与页面鉴权分支。
 - `backup/_common.py` 的备份文件名归一、zip/tar 路径穿越拒绝、安全 tar 解压 filter 兼容、tar 特殊成员拒绝和 DeprecationWarning 回归测试。
+- `ui.components.pagination_card()` 的链接分页、按钮分页、禁用态、省略号和 HTML 转义。
 
 后续优先补充：
 
 - 响应式真实浏览器截图验收，重点检查手机、平板、桌面下任务、日志、配置和在线脚本页面。
-- 低风险 UI 组件抽取，优先分页组件、消息结果卡、摘要网格。
+- 继续低风险 UI 组件抽取，优先消息结果卡、摘要网格；分页组件后续可逐步接入任务/日志页。
 
 ## 11. 已知约束
 
@@ -459,3 +460,4 @@ python -B -m compileall fls-manager.py fls_manager tests
 - 阶段 7 新增 `tests/test_storage_notify_proxy.py`，覆盖 storage 异常读写、更多通知渠道出口 mock、GitHub URL/Git 配置参数、普通代理质量检测并发聚合，以及日志 tail/任务名解析边界。
 - 阶段 8 扩展 `tests/test_storage_notify_proxy.py`，覆盖通知配置清理、默认通知保存过滤、内容分片、WxPusher、多分片发送顺序、GitHub 代理质量检测细分分支、Git 命令代理 helper，以及最新日志和日志清理更多边界。
 - 阶段 9 加固 `safe_extract_tar()`，显式使用 tarfile `filter="data"` 并兼容旧 Python；解压前拒绝 tar 特殊成员、链接和跨平台绝对/穿越路径，同时补充 zip 绝对/反斜杠路径测试。
+- 阶段 10 新增通用分页组件 `pagination_card()`，保留 `.card`、`.help`、`.action-row`、`.btn` 响应式结构；先替换在线脚本页和安装选择页两处分页函数，并新增组件单元测试。

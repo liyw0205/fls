@@ -369,8 +369,6 @@
 - `quality_github_proxy_object()` concat 成功条件是 `HTTP 200` 且正文长度大于 10。
 - `cleanup_logs()` 当前没有保护非法配置的 `int()` 转换，测试按当前行为断言抛出。
 
-## 下一阶段候选
-
 ## 阶段 9：备份 tar 解压兼容与安全边界
 
 状态：已完成
@@ -421,5 +419,53 @@
 
 ## 下一阶段候选
 
-- 阶段 10：继续低风险 UI 组件抽取，优先分页组件、消息结果卡、摘要网格。
+## 阶段 10：低风险分页组件抽取
+
+状态：已完成
+
+目标：
+
+- 在不引入 npm/构建链的前提下抽取一个纯 HTML 分页组件。
+- 保留现有响应式结构和按钮样式。
+- 避开当前工作区已有未提交改动的任务、日志相关文件。
+
+已完成：
+
+- 在 `fls_manager/ui/components.py` 新增 `pagination_card()`：
+  - 保留 `.card`、`.help`、`.action-row`、`.btn` 结构。
+  - 支持链接分页 `href_for`。
+  - 支持按钮分页 `onclick_for`。
+  - 支持禁用上一页/下一页、当前页高亮、首页/尾页和省略号。
+  - 对 URL、onclick、按钮文案和 label 做 HTML escape。
+- 替换 `fls_manager/routes/online_scripts/_common.py` 两处分页：
+  - `online_scripts_page_links()` 使用链接分页。
+  - `install_task_page_links()` 使用按钮分页，并保留 `flsInstallGoTaskPage(...)` 行为。
+- 新增 `tests/test_ui_components.py`：
+  - 覆盖单页返回空。
+  - 覆盖链接分页、禁用态、省略号、active 样式和 href 转义。
+  - 覆盖按钮分页和自定义 label。
+- 子代理 A 完成分页候选审查，建议避开当前脏的 logs/tasks 页面，本阶段已只替换在线脚本相关分页。
+- 子代理 B 完成响应式结构审查，确认组件需保留 `.card`、`.help`、`.action-row`、`.btn`，本阶段已按此约束实现。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_components`：通过，4 tests OK。
+- `python -B -m unittest discover -s tests`：通过，82 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段未替换任务/日志分页，因为相关文件存在阶段外未提交业务修改。
+
+组件策略结论：
+
+- 分页组件只负责稳定外壳和通用页码算法，具体 URL 或 onclick 仍由调用方提供。
+- 在线脚本页是较低风险切片；任务、日志分页后续应在相关业务改动收束后再接入。
+
+## 下一阶段候选
+
+- 阶段 11：继续低风险 UI 组件抽取，优先消息结果卡或摘要网格。
+- 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
 - 有浏览器环境时补真实响应式截图验收。

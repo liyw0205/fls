@@ -9,6 +9,7 @@ import requests
 from flask import Blueprint, request, redirect, url_for, abort, jsonify
 
 from ...utils import h, get_back_url
+from ...ui.components import pagination_card
 from ...ui.layout import layout
 from ...ui.log_controls import log_controls
 from ...logs import tail_file
@@ -72,62 +73,7 @@ def online_scripts_page_links(q, page, pages):
             url += "&q=" + quote(q)
         return url
 
-    def page_btn(p, text=None, active=False, disabled=False):
-        text = text if text is not None else str(p)
-
-        if disabled:
-            return f'<span class="btn btn-gray" style="opacity:.45;cursor:not-allowed;">{h(text)}</span>'
-
-        cls = "btn-primary" if active else "btn-gray"
-        return f'<a class="btn {cls}" href="{h(build_url(p))}">{h(text)}</a>'
-
-    page = max(1, min(int(page), int(pages)))
-
-    items = []
-
-    # 上一页
-    items.append(
-        page_btn(page - 1, "上一页", disabled=(page <= 1))
-    )
-
-    # 始终显示 1、最后一页、当前页前后 2 页
-    show = {1, pages}
-
-    for p in range(page - 2, page + 3):
-        if 1 <= p <= pages:
-            show.add(p)
-
-    show = sorted(show)
-
-    last = 0
-
-    for p in show:
-        if last and p - last > 1:
-            items.append('<span class="btn btn-gray" style="opacity:.75;cursor:default;">...</span>')
-
-        items.append(
-            page_btn(p, active=(p == page))
-        )
-
-        last = p
-
-    # 下一页
-    items.append(
-        page_btn(page + 1, "下一页", disabled=(page >= pages))
-    )
-
-    return f"""
-<div class="card">
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
-        <div class="help">
-            第 <b>{page}</b> / <b>{pages}</b> 页
-        </div>
-        <div class="action-row">
-            {''.join(items)}
-        </div>
-    </div>
-</div>
-"""
+    return pagination_card(page, pages, href_for=build_url)
 
 
 def filter_online_scripts_for_page(items, q):
@@ -226,63 +172,9 @@ def install_task_page_links(script_id, task_page, task_pages, excluded="", task_
     if task_pages <= 1:
         return ""
 
-    def page_btn(p, text=None, active=False, disabled=False):
-        text = text if text is not None else str(p)
-
-        if disabled:
-            return f'<span class="btn btn-gray" style="opacity:.45;cursor:not-allowed;">{h(text)}</span>'
-
-        cls = "btn-primary" if active else "btn-gray"
-        return (
-            f'<button class="btn {cls}" type="button" '
-            f'onclick="flsInstallGoTaskPage({int(p)})">{h(text)}</button>'
-        )
-
-    task_page = max(1, min(int(task_page), int(task_pages)))
-
-    items = []
-
-    # 上一页
-    items.append(
-        page_btn(task_page - 1, "上一页", disabled=(task_page <= 1))
+    return pagination_card(
+        task_page,
+        task_pages,
+        onclick_for=lambda p: f"flsInstallGoTaskPage({int(p)})",
+        page_label="任务第",
     )
-
-    # 始终显示 1、最后一页、当前页前后 2 页
-    show = {1, task_pages}
-
-    for p in range(task_page - 2, task_page + 3):
-        if 1 <= p <= task_pages:
-            show.add(p)
-
-    show = sorted(show)
-    last = 0
-
-    for p in show:
-        if last and p - last > 1:
-            items.append(
-                '<span class="btn btn-gray" style="opacity:.75;cursor:default;">...</span>'
-            )
-
-        items.append(
-            page_btn(p, active=(p == task_page))
-        )
-
-        last = p
-
-    # 下一页
-    items.append(
-        page_btn(task_page + 1, "下一页", disabled=(task_page >= task_pages))
-    )
-
-    return f"""
-<div class="card">
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
-        <div class="help">
-            任务第 <b>{task_page}</b> / <b>{task_pages}</b> 页
-        </div>
-        <div class="action-row">
-            {''.join(items)}
-        </div>
-    </div>
-</div>
-"""
