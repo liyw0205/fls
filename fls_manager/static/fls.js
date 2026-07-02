@@ -95,19 +95,60 @@ if(!window.__FLS_ALERT_PATCHED__){
     window.__FLS_ALERT_PATCHED__ = true;
 }
 
-function detectFlsMobile(){
+function flsViewportWidth(){
     var w = window.innerWidth || document.documentElement.clientWidth || 0;
     var sw = window.screen ? window.screen.width : 0;
+
+    if (w && sw) return Math.min(w, sw);
+    return w || sw || 0;
+}
+
+function detectFlsPhone(){
+    var w = flsViewportWidth();
     var ua = navigator.userAgent || "";
 
-    if (/Android|iPhone|iPad|Mobile/i.test(ua)) return true;
-    if (sw && sw <= 900) return true;
+    if (/iPhone|iPod|Mobile/i.test(ua) && w <= 760) return true;
+    if (w && w <= 640) return true;
+
+    return false;
+}
+
+function detectFlsTablet(){
+    var w = flsViewportWidth();
+    var ua = navigator.userAgent || "";
+
+    if (/iPad|Tablet/i.test(ua)) return true;
+    if (/Android/i.test(ua) && !/Mobile/i.test(ua)) return true;
+    if (w && w > 640 && w <= 1180) return true;
+
+    return false;
+}
+
+function detectFlsMobile(){
+    var w = flsViewportWidth();
+    var ua = navigator.userAgent || "";
+
     if (w && w <= 900) return true;
+    if (/iPhone|iPod|Mobile/i.test(ua) && w <= 900) return true;
+    if (/Android/i.test(ua) && /Mobile/i.test(ua) && w <= 900) return true;
+    if (/iPad|Tablet/i.test(ua) && w <= 900) return true;
 
     return false;
 }
 
 function applyFlsMobileClass(){
+    document.body.classList.remove("fls-phone");
+    document.body.classList.remove("fls-tablet");
+    document.body.classList.remove("fls-desktop");
+
+    if (detectFlsPhone()) {
+        document.body.classList.add("fls-phone");
+    } else if (detectFlsTablet()) {
+        document.body.classList.add("fls-tablet");
+    } else {
+        document.body.classList.add("fls-desktop");
+    }
+
     if (detectFlsMobile()) {
         document.body.classList.add("fls-mobile");
     } else {

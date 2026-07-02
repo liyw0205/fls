@@ -1,19 +1,29 @@
 __pycache__/
 *.py[cod]
 *.pyo
+*$py.class
 
 /.venv/
 /venv/
 /env/
+.venv/
+venv/
+env/
 
 /data/
 /log/
 /logs/
 /scripts/
+data/
+log/
 
 *.bak
 *.tmp
 *.pid
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
 
 split_backup_routes.py
 split_backup_routes.py.bak
