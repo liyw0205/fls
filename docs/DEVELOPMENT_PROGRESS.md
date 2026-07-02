@@ -298,5 +298,79 @@
 
 ## 下一阶段候选
 
-- 阶段 8：继续通知配置工具、WxPusher、GitHub 质量检测 concat/Git insteadOf 细分分支和日志更多边界测试。
-- 阶段 9：继续低风险 UI 组件抽取，优先分页组件、消息结果卡、摘要网格。
+## 阶段 8：通知配置、GitHub 代理质量检测和日志清理边界补测
+
+状态：已完成
+
+目标：
+
+- 继续补齐 `notify.py` 配置工具、内容分片、WxPusher 和多分片发送顺序测试。
+- 覆盖 `proxy.py` GitHub 质量检测 concat/Git insteadOf 细分分支和 Git 命令代理 helper。
+- 覆盖 `logs.py` 最新日志选择和日志清理更多边界。
+
+已完成：
+
+- 扩展 `tests/test_storage_notify_proxy.py`，该文件从 16 个测试增加到 32 个测试。
+- 覆盖 `notify.notify_items()`：
+  - 移除非 dict 和未知 channel。
+  - 为缺失字段补 `id`、`enabled`、`config`、`name`。
+  - 清理结果持久化写回配置。
+- 覆盖 `notify.default_notify_ids()` 和 `save_default_notify_ids()`：
+  - 过滤禁用项和不存在项。
+  - 去重并保持输入顺序。
+  - 非 list 配置返回空列表。
+- 覆盖 `notify.split_content()`：
+  - 空内容、`None`、刚好 limit、无分隔符超长、有分隔符裁切和首尾空白清理。
+- 覆盖 `notify.send_one()` 的 WxPusher 分支：
+  - Topic ID 转整数。
+  - UID 列表解析。
+  - HTML 内容转义。
+  - 无 topic/uid 时不发请求并返回失败。
+- 覆盖 `notify.send_by_ids()` 多 chunk、多通知 item 顺序：
+  - 外层按 chunk，内层按通知 item。
+  - 标题追加 `[1/2]`、`[2/2]`。
+  - 返回结果顺序与发送顺序一致。
+- 覆盖 `proxy.quality_github_proxy_object()`：
+  - GitHub 代理地址为空。
+  - concat 成功但未安装 git。
+  - concat 请求异常。
+  - Git insteadOf 成功。
+  - Git insteadOf 返回失败码。
+  - Git insteadOf 超时异常。
+- 覆盖 `proxy.build_git_command_with_github_proxy()` 和 `github_git_proxy_used()`：
+  - 启用 GitHub 代理插入 `-c url...insteadOf`。
+  - HTTP、禁用、缺失代理不插入 GitHub 临时配置。
+- 覆盖 `logs.latest_log_for_task()`：
+  - 按 mtime 返回匹配任务的最新日志。
+  - 无匹配时返回空字符串。
+- 覆盖 `logs.cleanup_logs()`：
+  - `log_keep_per_task=0` 时当前实现会删除该任务全部日志。
+  - 非法数值配置当前实现会抛 `ValueError`。
+  - 无启动头日志归入“其他日志”分组并按保留数清理。
+  - `unlink()` 异常会被吞掉，不中断清理流程。
+- 子代理 A 完成通知侧只读审查；子代理 B 完成代理/日志侧只读审查。主代理根据审查结论补测试并修正文档里的配置异常预期。
+
+验证记录：
+
+- `python -B -m unittest tests.test_storage_notify_proxy`：通过，32 tests OK。
+- `python -B -m unittest discover -s tests`：通过，73 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段不真实发网络请求，不真实执行 git，不真实连接 SMTP。
+- `tarfile.extractall()` 在 Python 3.14 输出 DeprecationWarning，后续安全测试阶段仍需处理。
+
+测试策略结论：
+
+- `notify_items()` 会原地补齐 item 字段，测试不要复用原始 dict 做后续期望。
+- `quality_github_proxy_object()` concat 成功条件是 `HTTP 200` 且正文长度大于 10。
+- `cleanup_logs()` 当前没有保护非法配置的 `int()` 转换，测试按当前行为断言抛出。
+
+## 下一阶段候选
+
+- 阶段 9：处理备份 tar 解压 Python 3.14 `filter` 参数兼容和补充特殊 tar 成员安全测试。
+- 阶段 10：继续低风险 UI 组件抽取，优先分页组件、消息结果卡、摘要网格。
+- 有浏览器环境时补真实响应式截图验收。
