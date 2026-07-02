@@ -1,40 +1,30 @@
 from ._common import *
+from ...ui.components import page_header_card, table_card
 
 
 @bp.route("/env")
 def env_page():
-    body = f"""
-<div class="card">
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
-        <div>
-            <div class="card-title">全局变量列表</div>
-            <div class="help">
+    header = page_header_card(
+        "全局变量列表",
+        """
                 全局变量对所有任务生效；任务变量中同名变量会覆盖全局变量。
-            </div>
-        </div>
-        <div class="action-row">
+            """,
+        """
             <a class="btn btn-blue" href="/env/view">查看全部</a>
             <a class="btn btn-orange" href="/env/import">从任务导入</a>
             <a class="btn btn-primary" href="/env/new">新增变量</a>
-        </div>
-    </div>
-</div>
+        """,
+    )
 
-<div class="card">
-    <div class="card-title">变量列表</div>
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>变量名</th>
-                    <th>值</th>
-                    <th>操作</th>
-                </tr>
-            </thead>
-            <tbody>{env_rows()}</tbody>
-        </table>
-    </div>
-</div>
+    table = table_card(
+        "变量列表",
+        ("变量名", "值", "操作"),
+        env_rows(),
+    )
+
+    body = f"""
+{header}
+{table}
 """
     return layout("全局变量", "env", body)
 

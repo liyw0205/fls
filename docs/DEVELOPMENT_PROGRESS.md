@@ -49,8 +49,43 @@
 - 响应式风险审查指出原实现会把 1024px iPad/Android 平板按 UA 强制归为 `fls-mobile`，与横屏平板压缩桌面布局目标冲突；本阶段已修复。
 - 仍需人工重点检查 667px、720px、768px 表单页，以及 1024px `/tasks`、`/pull`、`/proxy`、`/config` 表格换行情况。
 
+## 阶段 2：响应式验收、同类面板对标与组件抽取准备
+
+状态：已完成，准备提交
+
+目标：
+
+- 弥补缺少浏览器截图环境时的页面结构验证能力。
+- 对标青龙面板、呆呆面板、白虎面板，形成 FLS 自身的功能需求池。
+- 找出后续可低风险抽取到 `fls_manager/ui/` 的重复组件。
+
+已完成：
+
+- 新增 `docs/PANEL_REFERENCE.md`，记录同类面板参考边界、可借鉴项和候选需求池。
+- 核验青龙面板、呆呆面板公开仓库链接；白虎面板主仓库来源仍需后续继续核验。
+- 新增 `tools/responsive_smoke.py`，在没有真实浏览器环境时检查核心页面结构、静态资源版本和响应式关键 token。
+- 新增 `fls_manager/ui/components.py`，提供低风险纯 HTML 组件 `page_header_card()` 和 `table_card()`。
+- 在全局变量、通知、代理、脚本管理页面接入上述组件，保留原有业务行渲染和 JS 行为。
+- 子代理 A 完成组件抽取候选审查，确认阶段 2 优先抽取 header、pagination、table、message 等纯 HTML 外壳。
+- 子代理 B 完成 `tools/responsive_smoke.py` 并通过验证。
+
+验证记录：
+
+- `python -B tools/responsive_smoke.py`：通过。
+- Python AST 检查 `components.py`、4 个接入页面和烟测工具：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查留到后续有浏览器环境时执行。
+
+组件抽取结论：
+
+- 已落地：`page_header_card()`、`table_card()`。
+- 后续优先：分页组件、消息结果卡、摘要网格。
+- 暂缓：批量工具栏、实时日志页、复杂配置表单和鉴权页面。
+
 ## 下一阶段候选
 
-- 阶段 2：响应式细节验收、同类面板对标与页面组件抽取准备。
-- 阶段 3：基础自动化测试，优先覆盖命令解析、Cron 虚拟时间、鉴权和安全解压。
+- 阶段 3：基础自动化测试，优先覆盖命令解析、Cron 虚拟时间、鉴权、安全解压和响应式 smoke。
 - 阶段 4：数据 schema 文档和读取时迁移函数。
