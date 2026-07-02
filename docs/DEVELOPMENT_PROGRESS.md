@@ -6,7 +6,7 @@
 
 ## 阶段 1：开发制度与响应式基础
 
-状态：进行中，准备收束提交
+状态：已完成
 
 目标：
 
@@ -51,7 +51,7 @@
 
 ## 阶段 2：响应式验收、同类面板对标与组件抽取准备
 
-状态：已完成，准备提交
+状态：已完成
 
 目标：
 
@@ -85,7 +85,48 @@
 - 后续优先：分页组件、消息结果卡、摘要网格。
 - 暂缓：批量工具栏、实时日志页、复杂配置表单和鉴权页面。
 
+## 阶段 3：基础自动化测试
+
+状态：已完成，准备提交
+
+目标：
+
+- 新增轻量自动化测试目录，不引入 pytest 或 npm/浏览器依赖。
+- 优先覆盖命令解析、Cron 虚拟时间、页面/API 鉴权和备份安全解压。
+- 将单元测试和响应式 smoke 固化为阶段验证入口。
+
+已完成：
+
+- 新增 `tests/test_auth_backup.py`，使用标准库 `unittest` 和临时 `FLS_BASE_DIR` 隔离真实数据。
+- 覆盖未设置 Token 时 API 返回 JSON 403、页面跳转 `/setup`。
+- 覆盖 `X-Token` API 放行、错误 Query Token 拒绝、正确 Query Token 写入 session 并重定向到清理后的 URL。
+- 覆盖 `backup_safe_file()` 文件名收敛到备份目录。
+- 覆盖 `safe_extract_zip()` / `safe_extract_tar()` 正常路径解压和 `../` 路径穿越拒绝。
+- 新增 `tests/test_command_scheduler.py`，覆盖脚本类型归一、命令参数引用、`.py` 任务命令构建、混合命令展开。
+- 覆盖 5 位和 6 位 Cron 解析，以及虚拟时间与真实时间在 offset 下互逆。
+- 子代理 A 负责命令/调度测试补充；子代理 B 负责鉴权/备份测试风险审查；主代理负责鉴权/备份测试、集成验证、文档和提交。
+
+验证记录：
+
+- `python -B -m unittest tests.test_auth_backup`：通过，10 tests OK。
+- `python -B -m unittest tests.test_command_scheduler`：通过，6 tests OK。
+- `python -B -m unittest discover -s tests`：通过，16 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `git diff --check -- tests/test_auth_backup.py tests/test_command_scheduler.py`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- `tarfile.extractall()` 在 Python 3.14 输出 DeprecationWarning，当前测试通过；后续可以显式使用 `filter` 参数并补充链接/特殊文件成员测试。
+- 本阶段只覆盖核心纯函数和轻量 Flask test client 分支，尚未覆盖真实任务子进程、失败重试、通知发送和日志轮转。
+
+测试策略结论：
+
+- 阶段 3 不引入 pytest，保持标准库可运行，符合 Termux/Windows/Linux 开箱即用目标。
+- 测试导入 `fls_manager.*` 前必须先设置临时 `FLS_BASE_DIR`，避免读取真实 `data/`、`scripts/`、`log/`。
+- 涉及 app 创建和 scheduler 的测试结束后要关闭 scheduler，并清理 `sys.modules` 中的 `fls_manager.*`。
+
 ## 下一阶段候选
 
-- 阶段 3：基础自动化测试，优先覆盖命令解析、Cron 虚拟时间、鉴权、安全解压和响应式 smoke。
-- 阶段 4：数据 schema 文档和读取时迁移函数。
+- 阶段 4：数据 schema 文档和读取时迁移函数，优先梳理 `data/tasks.json`、`data/config.json`、`data/global_env.json`、`data/proxies.json`、`data/collections.json`。
+- 阶段 5：任务运行链路测试，覆盖运行中状态、停止、超时、失败重试、日志写入、代理环境注入和通知 mock。
