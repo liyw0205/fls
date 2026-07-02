@@ -351,7 +351,7 @@ Blueprint 约定：
 ```sh
 python -B -m unittest discover -s tests
 python -B tools/responsive_smoke.py
-python -m compileall fls-manager.py fls_manager
+python -B -m compileall fls-manager.py fls_manager tests
 ```
 
 手动验证：
@@ -383,14 +383,18 @@ python -m compileall fls-manager.py fls_manager
 - `logs.py` 的日志大小清理和按任务分组保留。
 - `notify.py` 的 webhook、Bark、SMTP 三类 `send_one()` 出口 mock。
 - `proxy.py` 的 GitHub 代理可用性缓存。
+- `storage.py` 的缺失文件、损坏 JSON、父目录创建、临时文件替换和替换失败边界。
+- `notify.py` 的 Server 酱、PushPlus、Telegram、企业微信、钉钉、飞书、Ntfy、Gotify、PushDeer `send_one()` 出口 mock。
+- `proxy.py` 的 GitHub URL 改写、Git 临时配置参数、质量检测 URL 解析和普通代理质量检测并发聚合。
+- `logs.py` 的 `tail_file()` 缺失/尾读/坏 UTF-8 和 `parse_task_name_from_log()` 边界。
 - `auth.py` 的 API 与页面鉴权分支。
 - `backup/_common.py` 的安全解压。
 
 后续优先补充：
 
-- `storage.py` 的异常读写边界和 JSON 原子替换行为。
-- 更多通知渠道 `send_one()` 的无网络 mock 测试。
-- `proxy.py` 的质量检测、GitHub URL 改写和 Git 临时配置参数。
+- `notify.py` 的配置清理、默认通知保存、`split_content()` 多分片标题和 WxPusher 出口 mock。
+- `proxy.py` 的 GitHub 质量检测 concat/Git insteadOf 分支、无 git 和 `subprocess.run()` 失败边界。
+- `logs.py` 的 `latest_log_for_task()`、`cleanup_logs()` 配置异常和 `log_keep_per_task=0` 边界。
 
 ## 11. 已知约束
 
@@ -406,7 +410,7 @@ python -m compileall fls-manager.py fls_manager
 
 优先级高：
 
-- 扩展基础自动化测试，继续覆盖 storage 异常边界、通知渠道和代理质量检测。
+- 扩展基础自动化测试，继续覆盖通知配置工具、GitHub 代理质量检测细分分支和日志边界。
 - 继续维护 `docs/DATA_SCHEMA.md`，新增或调整 `data/*.json` 字段时同步更新读取迁移函数。
 - 把过长路由里的业务流程逐步下沉到 service/helper 模块。
 
@@ -450,3 +454,4 @@ python -m compileall fls-manager.py fls_manager
 - 阶段 4 新增 `tests/test_schema_migration.py`，覆盖核心 JSON 读取迁移和配置归一化。
 - 阶段 5 新增 `tests/test_task_runtime.py`，覆盖任务提交状态、运行次数更新、随机延迟、重试次数、停止流程、worker 环境合并、watcher 通知/不通知/重试分支、代理环境注入和通知发送 mock。
 - 阶段 6 扩展 `tests/test_task_runtime.py`，覆盖 `_start_task_attempt()` 的 Popen 参数和 watcher 线程提交、watcher 超时强杀、日志清理、GitHub 代理缓存、webhook/Bark/SMTP 通知出口 mock。
+- 阶段 7 新增 `tests/test_storage_notify_proxy.py`，覆盖 storage 异常读写、更多通知渠道出口 mock、GitHub URL/Git 配置参数、普通代理质量检测并发聚合，以及日志 tail/任务名解析边界。
