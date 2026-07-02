@@ -1,88 +1,93 @@
 # FLS 会话交接文档
 
 生成时间：2026-07-03
-当前阶段：阶段 10，低风险分页组件抽取
+当前阶段：阶段 11，低风险消息卡组件抽取
 
 ## 本阶段完成进度
 
-完成度：阶段 10 已完成，准备进入阶段 11。
+完成度：阶段 11 已完成，准备进入阶段 12。
 
 已经完成：
 
-- 在 `fls_manager/ui/components.py` 新增 `pagination_card()`：
-  - 保留 `.card`、`.help`、`.action-row`、`.btn` 响应式结构。
-  - 支持链接分页 `href_for`。
-  - 支持按钮分页 `onclick_for`。
-  - 支持禁用上一页/下一页、当前页高亮、首页/尾页和省略号。
-  - 对 URL、onclick、按钮文案和 label 做 HTML escape。
-- 替换 `fls_manager/routes/online_scripts/_common.py` 两处分页：
-  - `online_scripts_page_links()` 使用链接分页，保留 `q` 查询参数。
-  - `install_task_page_links()` 使用按钮分页，保留 `flsInstallGoTaskPage(...)` 行为。
-- 新增 `tests/test_ui_components.py`：
-  - 覆盖单页返回空。
-  - 覆盖链接分页、禁用态、省略号、active 样式和 href 转义。
-  - 覆盖按钮分页和自定义 label。
+- 在 `fls_manager/ui/components.py` 新增 `message_card()`：
+  - 空消息返回空字符串。
+  - 支持 `success`、`error`、`info` 三类提示颜色。
+  - 支持 `strong=True` 加粗强调。
+  - 组件内部统一对消息文本做 HTML escape。
+- 更新 `fls_manager/routes/online_scripts/_common.py`：
+  - 将 `message_card()` 与 `pagination_card()` 一起导入。
+  - 保持在线脚本子路由 `from ._common import *` 的现有组织方式。
+- 替换在线脚本页面提示卡：
+  - `fls_manager/routes/online_scripts/pages.py`：成功/失败消息改用 `message_card(..., strong=True)`。
+  - `fls_manager/routes/online_scripts/source_json.py`：成功/失败消息改用 `message_card()`。
+- 扩展 `tests/test_ui_components.py`：
+  - 覆盖空消息和纯空白消息返回空。
+  - 覆盖成功、错误、普通提示颜色，以及未知类型回退为普通提示。
+  - 覆盖加粗样式。
+  - 覆盖消息内容 HTML 转义。
 - 更新 `DEVELOPMENT.md`：
-  - 将 `pagination_card()` 纳入“已覆盖”。
-  - 调整后续方向为消息结果卡、摘要网格和任务/日志分页后续接入。
-  - 增加阶段 10 开发日志。
+  - 将 `message_card()` 纳入 UI 组件约定。
+  - 将消息卡测试纳入“已覆盖”。
+  - 增加阶段 11 开发日志。
 - 更新 `docs/DEVELOPMENT_PROGRESS.md`：
-  - 新增阶段 10 完成块、验证记录、受限验证和组件策略结论。
+  - 新增阶段 11 完成块、验证记录、受限验证和组件策略结论。
 
 已验证：
 
-- `python -B -m unittest tests.test_ui_components` 通过，4 tests OK。
-- `python -B -m unittest discover -s tests` 通过，82 tests OK。
+- `python -B -m unittest tests.test_ui_components` 通过，8 tests OK。
+- `python -B -m unittest discover -s tests` 通过，86 tests OK。
 - `python -B tools/responsive_smoke.py` 通过。
 - `python -B -m compileall fls-manager.py fls_manager tests` 通过。
 
 未完成或受限：
 
 - 当前环境没有 Playwright/Chromium，仍未做真实浏览器截图检查。
-- 本阶段没有替换任务/日志分页，因为相关文件存在阶段外未提交业务修改。
-- 工作区仍存在本阶段外的既有未提交业务修改，后续提交必须继续只纳入当前阶段相关文件。
+- 本阶段没有触碰任务、日志等长期存在阶段外未提交业务修改的页面。
+- 工作区仍存在阶段外既有未提交业务修改，后续提交必须继续只纳入当前阶段相关文件。
 
 ## 子代理协作情况
 
-- 子代理 A：只读审查分页/重复 UI 候选，建议避开当前脏的 logs/tasks 页面，本阶段优先替换在线脚本相关分页。
-- 子代理 B：只读审查响应式结构约束，确认组件抽取必须保留 `.card`、`.help`、`.action-row`、`.btn` 等结构。
-- 主代理：实现 `pagination_card()`、替换在线脚本分页、补组件单测、运行验证并更新文档。
+- 子代理 A：只读审查 UI 组件候选，建议本阶段优先抽取 `message_card()`，先接入在线脚本页面，暂缓复杂页面。
+- 子代理 B：只读审查摘要网格候选，认为现有 `.fls-summary-grid` 使用点形态差异较大，不建议本阶段抽通用 `summary_grid`。
+- 子代理 C：阶段 11 收尾期间完成只读审查，确认导入路径、转义策略和目标页面接入正确，并建议补齐未知 `kind`、空白消息和默认不加粗测试。
+- 主代理：实现 `message_card()`、替换在线脚本提示卡、补组件单测、运行验证并更新文档。
 
 子代理结论摘要：
 
-- 当前工作区有阶段外未提交改动，尤其 logs/tasks 相关文件，阶段 10 不应触碰这些文件。
-- 分页组件需要保留现有 card/action-row/button class，避免移动端换行和按钮样式回归。
-- `install_task_page_links()` 是 button/onClick 变体，组件必须支持 onclick 生成。
-- responsive smoke 只能检查服务端 HTML 和静态 token，不能替代真实 viewport 截图。
+- `message_card()` 适合作为本阶段低风险组件抽取对象。
+- 组件应只接收纯文本消息，内部统一 `h(message)`，不要让调用方传入未约束 HTML。
+- 摘要网格暂不抽通用组件；如后续需要，优先考虑更小粒度的 `summary_item()`。
+- 当前工作区存在长期阶段外改动，尤其 tasks/logs 相关文件，阶段提交必须精确暂存。
 
 ## 下阶段实现目标
 
-阶段 11 建议目标：继续低风险 UI 组件抽取，优先消息结果卡或摘要网格。
+阶段 12 建议目标：继续低风险 UI 组件抽取或补齐真实响应式验收条件。
 
 具体任务：
 
-1. 只读审查候选页面，优先选择当前未出现在 `git status --short` 的文件。
-2. 消息结果卡候选：
-   - 在线脚本页面的 `msg` / `err` 卡。
-   - 备份、依赖、运行时页面中重复的成功/失败提示卡。
-   - 可新增 `message_card(message, kind="success|error|info")`。
-3. 摘要网格候选：
-   - 只抽取纯 HTML item/helper，不改变 `.fls-summary-grid` 和 `.fls-summary-item` 层级。
-   - 避免 dashboard 等复杂实时数据页面先行改动。
-4. 任务/日志分页后续接入：
-   - 等相关阶段外业务改动收束后，再把 `pagination_card()` 接入 `tasks_page_links()` 和 logs `page_links()`。
-5. 验证：
+1. 先运行 `git -c safe.directory=/data/data/com.termux/files/home/fls status --short`，确认长期阶段外改动仍不被误提交。
+2. 可选方向 A：`message_card()` 第二批接入。
+   - 优先选择未出现在工作区脏改动里的页面。
+   - 可检查在线脚本文档、安装、运行时、依赖等页面的成功/失败提示卡。
+   - 保持 `message_card()` 只处理纯文本，不接收 HTML。
+3. 可选方向 B：抽取小粒度 `summary_item()`。
+   - 不抽通用 `summary_grid`。
+   - 只保留 `.fls-summary-item` 内部稳定结构，避免改变外层布局。
+4. 可选方向 C：如果环境具备浏览器自动化，补真实响应式截图验收。
+   - 重点宽度：390px、768px、1024px、1440px。
+   - 重点页面：`/`、`/tasks`、`/task/new`、`/logs`、`/pull`、`/online-scripts`、`/config`、`/panel/status`。
+5. 阶段 12 验证：
    - `python -B -m unittest discover -s tests`。
    - `python -B tools/responsive_smoke.py`。
    - `python -B -m compileall fls-manager.py fls_manager tests`。
-6. 阶段 11 结束时继续更新 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`、`docs/SESSION_HANDOFF.md`，并提交新的阶段 commit。
+6. 阶段 12 结束时继续更新 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`、`docs/SESSION_HANDOFF.md`，并提交新的阶段 commit。
 
 ## 后续候选
 
-- 有浏览器环境时，按 390px、768px、1024px、1440px 宽度检查 `/`、`/tasks`、`/task/new`、`/logs`、`/pull`、`/online-scripts`、`/config`、`/panel/status`。
+- 等任务/日志相关阶段外改动收束后，把 `pagination_card()` 接入任务和日志分页。
 - 继续拆分过长路由中的业务逻辑到 helper/service。
 - 评估配置、任务、代理、通知 JSON 写入备份或回滚机制。
 
 ## 下一会话启动提示
 
-请从 `docs/SESSION_HANDOFF.md` 开始，继续阶段 11。先读取 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`、`fls_manager/ui/components.py`、候选页面路由和当前 `git status`，不要还原本阶段外的既有修改。优先做低风险消息结果卡或摘要网格抽取，保持 Flask + 原生 CSS/JS 和无 npm 构建链。
+请从 `docs/SESSION_HANDOFF.md` 开始，继续阶段 12。先读取 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`、`fls_manager/ui/components.py`、候选页面路由，并使用 `git -c safe.directory=/data/data/com.termux/files/home/fls status --short` 查看工作区，不要还原本阶段外的既有修改。优先做 `message_card()` 第二批接入或更小粒度的摘要 item，保持 Flask + 原生 CSS/JS 和无 npm 构建链。

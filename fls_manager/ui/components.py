@@ -41,6 +41,27 @@ def table_card(title, headers, rows_html):
 """
 
 
+def message_card(message, kind="info", strong=False):
+    text = str(message or "").strip()
+
+    if not text:
+        return ""
+
+    colors = {
+        "success": "#18a058",
+        "error": "#dc2626",
+        "info": "#6b7280",
+    }
+    color = colors.get(kind, colors["info"])
+    weight = "font-weight:800;" if strong else ""
+
+    return f"""
+<div class="card">
+    <div class="help" style="color:{color};{weight}">{h(text)}</div>
+</div>
+"""
+
+
 def pagination_card(
     page,
     pages,

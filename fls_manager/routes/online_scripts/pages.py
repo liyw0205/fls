@@ -113,8 +113,8 @@ def online_scripts_page():
     </div>
 </div>
 
-{"<div class='card'><div class='help' style='color:#18a058;font-weight:800;'>" + h(msg) + "</div></div>" if msg else ""}
-{"<div class='card'><div class='help' style='color:#dc2626;font-weight:800;'>" + h(err) + "</div></div>" if err else ""}
+{message_card(msg, "success", strong=True)}
+{message_card(err, "error", strong=True)}
 
 <div class="card" id="onlineRefreshStatusCard" style="{refresh_display}">
     <div class="card-title">脚本源刷新状态</div>
@@ -217,4 +217,3 @@ updateOnlineRefreshStatus();
 """
 
     return layout("在线脚本", "online_scripts", body)
-
