@@ -260,6 +260,7 @@ Blueprint 约定：
 - 公共布局由 `fls_manager/ui/layout.py` 生成。
 - 页面内容通常由路由函数拼 HTML 字符串。
 - 用户输入输出到 HTML 时必须使用 `utils.h()` 转义。
+- 低风险通用 HTML 外壳优先放到 `fls_manager/ui/components.py`，当前已有 `page_header_card()` 和 `table_card()`。
 
 静态资源：
 
@@ -344,6 +345,7 @@ Blueprint 约定：
 轻量检查：
 
 ```sh
+python -B tools/responsive_smoke.py
 python -m compileall fls-manager.py fls_manager
 ```
 
@@ -415,3 +417,6 @@ python -m compileall fls-manager.py fls_manager
 - 新增 `.gitignore`，忽略 Python 缓存、虚拟环境和本地运行数据。
 - 根据子代理审查修正横屏平板分类：`fls-mobile` 按布局宽度判断，避免 1024px iPad/Android 平板被强制切到抽屉移动布局。
 - 补充产品参考对象：青龙面板、呆呆面板、白虎面板仅作为信息架构、交互流程和功能演进参考，不改变 FLS 轻量开箱即用定位。
+- 阶段 2 新增轻量响应式烟测工具 `tools/responsive_smoke.py`，用于在没有真实浏览器环境时检查核心页面结构、静态资源版本和响应式关键 token。
+- 阶段 2 新增 `docs/PANEL_REFERENCE.md`，整理青龙面板、呆呆面板、白虎面板参考边界和 FLS 候选需求池。
+- 阶段 2 开始低风险 UI 组件抽取：新增 `fls_manager/ui/components.py`，并在全局变量、通知、代理、脚本管理页面接入 `page_header_card()` 和 `table_card()`。

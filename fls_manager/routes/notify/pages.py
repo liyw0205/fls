@@ -1,4 +1,5 @@
 from ._common import *
+from ...ui.components import page_header_card, table_card
 
 
 @bp.route("/notify")
@@ -35,18 +36,22 @@ def notify_page():
 </tr>
 """
 
-    body = f"""
-<div class="card">
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
-        <div>
-            <div class="card-title">通知管理</div>
-            <div class="help">
+    header = page_header_card(
+        "通知管理",
+        """
                 可新增多个通知实例。任务里选择“使用全局默认通知”时，会使用下面保存的全局默认通知。
-            </div>
-        </div>
-        <a class="btn btn-primary" href="/notify/new">新增通知</a>
-    </div>
-</div>
+            """,
+        '<a class="btn btn-primary" href="/notify/new">新增通知</a>',
+    )
+
+    table = table_card(
+        "通知列表",
+        ("名称", "渠道", "状态", "全局默认", "更新时间", "操作"),
+        rows,
+    )
+
+    body = f"""
+{header}
 
 <form method="post" action="/notify/default">
 <div class="card">
@@ -60,24 +65,7 @@ def notify_page():
 </div>
 </form>
 
-<div class="card">
-    <div class="card-title">通知列表</div>
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>名称</th>
-                    <th>渠道</th>
-                    <th>状态</th>
-                    <th>全局默认</th>
-                    <th>更新时间</th>
-                    <th>操作</th>
-                </tr>
-            </thead>
-            <tbody>{rows}</tbody>
-        </table>
-    </div>
-</div>
+{table}
 """
     return layout("通知管理", "notify", body)
 
@@ -132,4 +120,3 @@ def notify_edit(item_id):
         item["channel"] = url_channel
 
     return notify_form(item)
-

@@ -1,4 +1,5 @@
 from ._common import *
+from ...ui.components import page_header_card, table_card
 
 
 @bp.route("/proxy")
@@ -34,38 +35,24 @@ def proxy_page():
 </tr>
 """
 
-    body = f"""
-<div class="card">
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
-        <div>
-            <div class="card-title">代理管理</div>
-            <div class="help">
+    header = page_header_card(
+        "代理管理",
+        """
                 代理可用于任务运行、脚本拉取、GitHub 加速。<br>
                 禁用代理后，任务编辑页不再显示，已选择该代理的任务运行时会自动跳过。
-            </div>
-        </div>
-        <a class="btn btn-primary" href="/proxy/new">新增代理</a>
-    </div>
-</div>
+            """,
+        '<a class="btn btn-primary" href="/proxy/new">新增代理</a>',
+    )
 
-<div class="card">
-    <div class="card-title">代理列表</div>
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>名称</th>
-                    <th>类型</th>
-                    <th>地址</th>
-                    <th>状态</th>
-                    <th>创建时间</th>
-                    <th>操作</th>
-                </tr>
-            </thead>
-            <tbody>{rows}</tbody>
-        </table>
-    </div>
-</div>
+    table = table_card(
+        "代理列表",
+        ("名称", "类型", "地址", "状态", "创建时间", "操作"),
+        rows,
+    )
+
+    body = f"""
+{header}
+{table}
 
 <div class="card" id="proxyResultCard" style="display:none;">
     <div class="card-title">代理检测结果</div>
@@ -179,4 +166,3 @@ def proxy_edit(proxy_id):
         return redirect(url_for("proxy.proxy_page"))
 
     return proxy_form(proxy, mode="edit")
-
