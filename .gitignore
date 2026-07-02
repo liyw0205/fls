@@ -1,0 +1,19 @@
+# Python runtime artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local FLS runtime data
+data/
+log/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

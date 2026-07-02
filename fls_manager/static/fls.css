@@ -16,6 +16,13 @@
     box-sizing:border-box;
 }
 
+img,
+svg,
+video,
+canvas {
+    max-width:100%;
+}
+
 html, body {
     margin:0;
     padding:0;
@@ -59,6 +66,7 @@ a {
     margin-left:240px;
     width:calc(100% - 240px);
     min-height:100vh;
+    min-width:0;
 }
 
 .brand {
@@ -131,6 +139,7 @@ a {
 .content {
     padding:22px;
     width:100%;
+    min-width:0;
 }
 
 .card {
@@ -153,6 +162,14 @@ a {
     grid-template-columns:repeat(5,minmax(0,1fr));
     gap:16px;
     margin-bottom:18px;
+}
+
+.grid > *,
+.form-grid > *,
+.fls-card-grid > *,
+.fls-summary-grid > *,
+.fls-info-grid > * {
+    min-width:0;
 }
 
 .stat {
@@ -331,6 +348,10 @@ pre.log {
     gap:8px;
     flex-wrap:wrap;
     align-items:center;
+}
+
+.action-row .btn {
+    margin:0;
 }
 
 .mask {
@@ -896,6 +917,56 @@ body.fls-mobile .fls-check-group .fls-inline-check {
     margin:0!important;
 }
 
+/* 平板竖屏通常仍使用抽屉菜单，但内容区可以比手机更密一些 */
+body.fls-tablet.fls-mobile .sidebar {
+    width:280px!important;
+}
+
+body.fls-tablet.fls-mobile .content {
+    padding:16px!important;
+}
+
+body.fls-tablet.fls-mobile .card {
+    padding:16px!important;
+}
+
+body.fls-tablet.fls-mobile .grid {
+    grid-template-columns:repeat(3,minmax(0,1fr))!important;
+    gap:12px!important;
+}
+
+body.fls-tablet.fls-mobile .fls-card-grid {
+    grid-template-columns:repeat(2,minmax(0,1fr))!important;
+}
+
+body.fls-tablet.fls-mobile .form-grid {
+    grid-template-columns:repeat(2,minmax(0,1fr))!important;
+}
+
+body.fls-tablet.fls-mobile .fls-form-float-actions .btn {
+    max-width:120px;
+}
+
+body.fls-phone .form-grid,
+body.fls-phone.fls-mobile .form-grid {
+    grid-template-columns:1fr!important;
+}
+
+body.fls-phone .fls-card-grid,
+body.fls-phone.fls-mobile .fls-card-grid {
+    grid-template-columns:1fr!important;
+}
+
+body.fls-phone .fls-summary-grid,
+body.fls-phone.fls-mobile .fls-summary-grid {
+    grid-template-columns:repeat(2,minmax(0,1fr))!important;
+}
+
+body.fls-phone .fls-check-group,
+body.fls-phone.fls-mobile .fls-check-group {
+    grid-template-columns:1fr!important;
+}
+
 /* ============================================================
    文件管理 / 代理管理：保持横向表格
    ============================================================ */
@@ -1312,6 +1383,69 @@ body.fls-mobile:not(.page-pull):not(.page-proxy):not(.page-deps):not(.page-statu
 @media(max-width:1280px) {
     .grid {
         grid-template-columns:repeat(3,minmax(0,1fr));
+    }
+}
+
+@media(min-width:901px) and (max-width:1180px) {
+    .sidebar {
+        width:208px;
+    }
+
+    .main {
+        margin-left:208px;
+        width:calc(100% - 208px);
+    }
+
+    .brand {
+        height:58px;
+        padding:0 16px;
+        font-size:18px;
+    }
+
+    .nav {
+        padding:12px 8px;
+    }
+
+    .nav a {
+        padding:10px 12px;
+        font-size:14px;
+        border-radius:8px;
+    }
+
+    .topbar {
+        height:58px;
+        padding:0 18px;
+    }
+
+    .content {
+        padding:18px;
+    }
+
+    .card,
+    .stat {
+        padding:16px;
+        border-radius:12px;
+    }
+
+    .form-grid {
+        grid-template-columns:repeat(2,minmax(0,1fr));
+    }
+
+    .fls-card-grid {
+        grid-template-columns:repeat(2,minmax(0,1fr));
+    }
+
+    .fls-summary-grid {
+        grid-template-columns:repeat(3,minmax(0,1fr));
+    }
+
+    table {
+        min-width:860px;
+    }
+
+    .btn {
+        padding:7px 10px;
+        font-size:12px;
     }
 }
 
