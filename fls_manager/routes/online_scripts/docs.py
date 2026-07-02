@@ -305,7 +305,7 @@ body.fls-mobile .fls-doc-raw {{
     </form>
 </div>
 
-{"<div class='card'><div class='help' style='color:#dc2626;font-weight:800;'>文档加载失败：" + h(err) + "</div></div>" if err else ""}
+{message_card("文档加载失败：" + err, "error", strong=True) if err else ""}
 
 <div class="card">
     {doc_html or '<div class="help">暂无文档内容</div>'}
@@ -313,4 +313,3 @@ body.fls-mobile .fls-doc-raw {{
 """
 
     return layout("脚本文档", "online_scripts", body)
-

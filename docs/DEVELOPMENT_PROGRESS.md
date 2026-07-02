@@ -511,8 +511,56 @@
 - `message_card()` 只接收纯文本消息，组件内部负责转义；未知类型回退到 `info`，如后续需要动作按钮或富文本，需要新建明确的安全接口。
 - 摘要网格暂不抽通用 `summary_grid`，因为现有页面结构差异较大；后续可以先抽更小粒度的 `summary_item()`。
 
+## 阶段 12：消息卡第二批接入与路由渲染测试
+
+状态：已完成
+
+目标：
+
+- 继续把 `message_card()` 接入低风险、未处于长期脏改动的页面。
+- 保持组件只处理纯文本消息，不处理富文本或复杂 JS 状态。
+- 补充路由层测试，验证组件接入后的页面渲染和 HTML 转义。
+
+已完成：
+
+- 替换 `fls_manager/routes/online_scripts/docs.py` 的文档加载失败提示卡：
+  - 保留 `err` 为空时不渲染提示卡的行为。
+  - 使用 `message_card(..., "error", strong=True)` 统一错误色、加粗和转义。
+- 替换 `fls_manager/routes/scripts/files.py` 的 3 个普通提示卡：
+  - `/pull/new` 新建脚本页的“暂无操作/新建失败”提示。
+  - `/scripts/view` 查看编辑文件页的“暂无保存操作/保存结果”提示。
+  - `/scripts/rename` 改名页的“暂无操作/改名失败”提示。
+- 更新 `tools/responsive_smoke.py`：
+  - 将 `/pull/new` 纳入页面结构 smoke，覆盖脚本新建页的基础渲染。
+- 新增 `tests/test_ui_route_components.py`：
+  - 覆盖 `/pull/new` 渲染默认 info 消息卡。
+  - 覆盖 `/online-scripts/doc/<id>` 文档加载失败时错误消息卡渲染和 HTML 转义。
+- 子代理 A 完成消息卡候选只读审查，提示不要扩大到复杂 JS 状态或富文本结果；主代理已据此只收束当前改动。
+- 子代理 B 完成摘要 item 只读审查，结论为可做但收益较小，本阶段未采用。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_route_components`：通过，2 tests OK。
+- `python -B -m unittest tests.test_ui_components`：通过，8 tests OK。
+- `python -B -m unittest discover -s tests`：通过，88 tests OK。
+- `python -B tools/responsive_smoke.py`：通过，包含 `/pull/new`。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有触碰任务、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
+- `online_scripts/install.py`、`about/version.py` 等错误提示与标题/按钮或结果详情绑定更紧，本阶段未用 `message_card()` 强拆。
+
+组件策略结论：
+
+- `message_card()` 适合替换纯文本提示卡；复杂状态卡、富文本结果和带动作按钮的错误页暂不纳入。
+- 路由层测试可以低成本覆盖组件接入后的真实渲染，比只测组件字符串更能防止导入和条件渲染回归。
+- `summary_item()` 可以作为后续小范围候选，但当前未脏页面只有在线脚本页 3 个 item，复用收益较低。
+
 ## 下一阶段候选
 
-- 阶段 12：继续低风险 UI 组件抽取，优先 `message_card()` 第二批接入在线脚本文档/安装等未脏页面，或抽取小粒度 `summary_item()`。
+- 阶段 13：继续低风险 UI 组件抽取，优先评估 `fls_manager/routes/scripts/pull.py` 两个结果卡是否适合接入 `message_card()`。
+- 可选小范围：只为在线脚本页抽取 `summary_item(label, value)`，保留外层 `.fls-summary-grid`。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
 - 有浏览器环境时补真实响应式截图验收。

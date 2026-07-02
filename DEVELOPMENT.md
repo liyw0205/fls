@@ -351,7 +351,7 @@ Blueprint 约定：
 ```sh
 python -B -m unittest discover -s tests
 python -B tools/responsive_smoke.py
-python -B -m compileall fls-manager.py fls_manager tests
+python -B -m compileall fls-manager.py fls_manager tests tools
 ```
 
 手动验证：
@@ -394,11 +394,12 @@ python -B -m compileall fls-manager.py fls_manager tests
 - `backup/_common.py` 的备份文件名归一、zip/tar 路径穿越拒绝、安全 tar 解压 filter 兼容、tar 特殊成员拒绝和 DeprecationWarning 回归测试。
 - `ui.components.pagination_card()` 的链接分页、按钮分页、禁用态、省略号和 HTML 转义。
 - `ui.components.message_card()` 的空/空白消息、成功/错误/普通提示、未知类型回退、加粗样式和 HTML 转义。
+- 路由层 UI 组件接入：`/pull/new` 普通提示卡和 `/online-scripts/doc/<id>` 文档加载失败卡的渲染与转义。
 
 后续优先补充：
 
 - 响应式真实浏览器截图验收，重点检查手机、平板、桌面下任务、日志、配置和在线脚本页面。
-- 继续低风险 UI 组件抽取，优先消息结果卡第二批接入或更小粒度的摘要 item；分页组件后续可逐步接入任务/日志页。
+- 继续低风险 UI 组件抽取，优先脚本拉取页消息结果卡或更小粒度的摘要 item；分页组件后续可逐步接入任务/日志页。
 
 ## 11. 已知约束
 
@@ -463,3 +464,4 @@ python -B -m compileall fls-manager.py fls_manager tests
 - 阶段 9 加固 `safe_extract_tar()`，显式使用 tarfile `filter="data"` 并兼容旧 Python；解压前拒绝 tar 特殊成员、链接和跨平台绝对/穿越路径，同时补充 zip 绝对/反斜杠路径测试。
 - 阶段 10 新增通用分页组件 `pagination_card()`，保留 `.card`、`.help`、`.action-row`、`.btn` 响应式结构；先替换在线脚本页和安装选择页两处分页函数，并新增组件单元测试。
 - 阶段 11 新增通用消息卡组件 `message_card()`，集中处理空/空白消息、成功/错误/普通提示颜色、未知类型回退、加粗样式和 HTML 转义；先替换在线脚本列表页和脚本源 JSON 页的成功/失败提示卡，并扩展组件单元测试。
+- 阶段 12 继续 `message_card()` 第二批接入：替换在线脚本文档页的文档加载失败卡，以及脚本新建、编辑、改名页的普通提示卡；新增 `tests/test_ui_route_components.py` 覆盖路由渲染与转义，并把 `/pull/new` 纳入响应式 smoke。
