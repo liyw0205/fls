@@ -50,48 +50,130 @@ DEFAULT_CONFIG = {
     },
 }
 
-def load_config():
-    cfg = read_json(CONFIG_FILE, {})
+
+def _coerce_bool(value, default=False):
+    if isinstance(value, bool):
+        return value
+
+    if isinstance(value, (int, float)):
+        return bool(value)
+
+    text = str(value or "").strip().lower()
+
+    if text in ("1", "true", "yes", "on", "enabled", "enable"):
+        return True
+
+    if text in ("0", "false", "no", "off", "disabled", "disable", ""):
+        return False
+
+    return bool(default)
+
+
+def _coerce_int(value, default=0, min_value=None, max_value=None):
+    try:
+        result = int(value)
+    except Exception:
+        result = int(default)
+
+    if min_value is not None:
+        result = max(int(min_value), result)
+
+    if max_value is not None:
+        result = min(int(max_value), result)
+
+    return result
+
+
+def _normalize_task_types(value):
+    value = value if isinstance(value, dict) else {}
+    result = {}
+
+    for key, default in DEFAULT_CONFIG["task_types"].items():
+        result[key] = _coerce_bool(value.get(key, default), default)
+
+    return result
+
+
+def normalize_config_data(cfg):
     if not isinstance(cfg, dict):
         cfg = {}
 
     merged = DEFAULT_CONFIG.copy()
     merged.update(cfg)
 
-    types = DEFAULT_CONFIG["task_types"].copy()
-    if isinstance(cfg.get("task_types"), dict):
-        types.update(cfg.get("task_types"))
-    merged["task_types"] = types
+    merged["admin_token"] = str(merged.get("admin_token", "") or "").strip()
+    merged["security_verify_enabled"] = _coerce_bool(
+        merged.get("security_verify_enabled", False),
+        False,
+    )
 
-    try:
-        merged["port"] = max(1, min(65535, int(merged.get("port", DEFAULT_PORT))))
-    except Exception:
-        merged["port"] = DEFAULT_PORT
+    security_type = str(merged.get("security_verify_type", "code") or "code").strip()
+    if security_type not in ("code", "totp"):
+        security_type = "code"
+    merged["security_verify_type"] = security_type
+    merged["totp_secret"] = str(merged.get("totp_secret", "") or "").strip()
 
-    try:
-        merged["task_timeout_seconds"] = max(
-            0,
-            int(merged.get("task_timeout_seconds", 1800) or 0)
-        )
-    except Exception:
-        merged["task_timeout_seconds"] = 1800
+    source = str(merged.get("online_script_source", "") or "").strip()
+    merged["online_script_source"] = (
+        source or DEFAULT_CONFIG["online_script_source"]
+    )
 
-    try:
-        delay = int(merged.get("random_delay_seconds", 0) or 0)
-        if delay <= 0:
-            delay = 0
-        else:
-            delay = max(1, min(120, delay))
-        merged["random_delay_seconds"] = delay
-    except Exception:
-        merged["random_delay_seconds"] = 0
+    merged["port"] = _coerce_int(
+        merged.get("port", DEFAULT_PORT),
+        DEFAULT_PORT,
+        1,
+        65535,
+    )
+    merged["log_cleanup_minutes"] = _coerce_int(
+        merged.get("log_cleanup_minutes", LOG_CLEANUP_INTERVAL_MINUTES),
+        LOG_CLEANUP_INTERVAL_MINUTES,
+        1,
+        1440,
+    )
+    merged["log_max_size_mb"] = _coerce_int(
+        merged.get("log_max_size_mb", LOG_MAX_SIZE_MB),
+        LOG_MAX_SIZE_MB,
+        1,
+    )
+    merged["log_keep_per_task"] = _coerce_int(
+        merged.get("log_keep_per_task", LOG_KEEP_PER_TASK),
+        LOG_KEEP_PER_TASK,
+        1,
+    )
+    merged["task_timeout_seconds"] = _coerce_int(
+        merged.get("task_timeout_seconds", 1800),
+        1800,
+        0,
+    )
+    merged["random_delay_seconds"] = _coerce_int(
+        merged.get("random_delay_seconds", 0),
+        0,
+        0,
+        120,
+    )
+    merged["timezone_offset_hours"] = _coerce_int(
+        merged.get("timezone_offset_hours", 8),
+        8,
+        -23,
+        23,
+    )
+    merged["panel_time_offset_seconds"] = _coerce_int(
+        merged.get("panel_time_offset_seconds", 0),
+        0,
+    )
+    merged["task_types"] = _normalize_task_types(merged.get("task_types"))
 
     return merged
+
+
+def load_config():
+    cfg = read_json(CONFIG_FILE, {})
+    return normalize_config_data(cfg)
 
 def save_config(cfg):
     base = load_config()
     base.update(cfg or {})
-    write_json(CONFIG_FILE, base)
+    write_json(CONFIG_FILE, normalize_config_data(base))
 
 def get_host():
     return os.environ.get("FLS_HOST", DEFAULT_HOST)
@@ -120,7 +202,7 @@ def get_timezone_offset_hours():
     except Exception:
         offset = 8
 
-    return max(-24, min(24, offset))
+    return max(-23, min(23, offset))
 
 
 def get_panel_time_offset_seconds():
@@ -177,7 +259,7 @@ def set_panel_time_calibration(offset_hours=8, virtual_now=None):
     except Exception:
         offset_hours = 8
 
-    offset_hours = max(-24, min(24, offset_hours))
+    offset_hours = max(-23, min(23, offset_hours))
     tz = timezone(timedelta(hours=offset_hours), name=f"UTC{offset_hours:+d}")
 
     if virtual_now is None:
@@ -210,4 +292,3 @@ def reset_panel_time_calibration(offset_hours=8):
         offset_hours=offset_hours,
         virtual_now=None,
     )
-    

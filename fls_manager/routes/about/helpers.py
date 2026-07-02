@@ -692,10 +692,10 @@ def utc_offset_options(selected=8):
     except Exception:
         selected = 8
 
-    selected = max(-24, min(24, selected))
+    selected = max(-23, min(23, selected))
     options = ""
 
-    for offset in range(-24, 25):
+    for offset in range(-23, 24):
         text = f"UTC{offset:+d}"
         s = "selected" if offset == selected else ""
         options += f'<option value="{offset}" {s}>{h(text)}</option>'
@@ -709,7 +709,7 @@ def timezone_from_offset(offset):
     except Exception:
         offset = 8
 
-    offset = max(-24, min(24, offset))
+    offset = max(-23, min(23, offset))
 
     return timezone(
         timedelta(hours=offset),

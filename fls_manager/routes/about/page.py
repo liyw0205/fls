@@ -218,7 +218,7 @@ def about():
             <div class="card" style="box-shadow:none;border:1px solid #e5e7eb;margin-top:14px;">
                 <div class="card-title">选择 UTC 偏移自动校准</div>
                 <div class="help">
-                    可选择 <code>UTC-24</code> 到 <code>UTC+24</code>。<br>
+                    可选择 <code>UTC-23</code> 到 <code>UTC+23</code>。<br>
                     例如选择 <code>UTC+7</code>，面板当前时间和 Cron 都会按 UTC+7 计算。<br>
                     不修改系统时间。
                 </div>

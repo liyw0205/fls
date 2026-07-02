@@ -87,7 +87,7 @@
 
 ## 阶段 3：基础自动化测试
 
-状态：已完成，准备提交
+状态：已完成
 
 目标：
 
@@ -126,7 +126,51 @@
 - 测试导入 `fls_manager.*` 前必须先设置临时 `FLS_BASE_DIR`，避免读取真实 `data/`、`scripts/`、`log/`。
 - 涉及 app 创建和 scheduler 的测试结束后要关闭 scheduler，并清理 `sys.modules` 中的 `fls_manager.*`。
 
+## 阶段 4：数据 schema 文档与读取迁移
+
+状态：已完成，准备提交
+
+目标：
+
+- 文档化核心 JSON 数据结构和读取迁移规则。
+- 给 `models.py`、`config.py` 增加最小读取时归一化函数。
+- 为旧字段、缺省字段和坏类型补充标准库单元测试。
+
+已完成：
+
+- 新增 `docs/DATA_SCHEMA.md`，记录 `tasks.json`、`config.json`、`global_env.json`、`proxies.json`、`collections.json` 的规范字段和读取迁移规则。
+- 在 `fls_manager/models.py` 新增任务、全局变量、代理、合集归一化函数。
+- `load_tasks()` / `save_tasks()` 现在会统一清洗任务结构，迁移旧 `notify_ids`，归一化 `random_delay`、`retry_count`、`run_count`、`enabled`、`pinned` 和任务环境变量。
+- `load_global_env()` / `save_global_env()` 会清洗空键并把值转成字符串。
+- `load_proxies()` / `save_proxies()` 会清洗代理类型、布尔状态、缺失 ID 和文本字段。
+- `load_collections()` / `save_collections()` 保留原有缺失 ID 丢弃策略，并把文本字段统一归一。
+- 在 `fls_manager/config.py` 新增 `normalize_config_data()`，集中处理默认配置合并、布尔转换、数值钳制、在线脚本源兜底和 `task_types` 过滤。
+- 新增 `tests/test_schema_migration.py`，覆盖任务旧字段迁移、全局变量清洗、代理归一、合集归一和配置钳制。
+- 根据子代理审查将面板时区偏移范围收紧为 `-23..23`，并同步修复时间同步页选项和 helper。
+- 子代理 A 尝试做 schema 只读审查，但因 429 限流失败；子代理 B 负责本阶段 diff 只读风险审查。
+
+验证记录：
+
+- `python -B -m unittest tests.test_schema_migration`：通过，5 tests OK。
+- `python -B -m unittest discover -s tests`：通过，21 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段只覆盖核心 JSON 读取迁移，尚未覆盖在线脚本缓存、运行时安装状态、备份 job 状态等非核心临时数据。
+- `load_tasks()` 对缺失 ID 的任务会生成新 ID 并写回；如果用户手工维护了外部引用，需要以写回后的 ID 为准。
+- 缺失 `notify` 且没有旧 `notify_ids` 的任务按旧运行时行为迁移为 `none`，不会自动开启默认通知。
+
+迁移策略结论：
+
+- 不引入 Pydantic、Marshmallow 或数据库迁移工具，继续保持标准库优先。
+- 顶层未知配置字段暂时保留，避免破坏后续扩展或用户自定义字段。
+- 对运行时有副作用的迁移只在核心模型读取入口做，路由层不直接读写原始 JSON。
+
 ## 下一阶段候选
 
-- 阶段 4：数据 schema 文档和读取时迁移函数，优先梳理 `data/tasks.json`、`data/config.json`、`data/global_env.json`、`data/proxies.json`、`data/collections.json`。
 - 阶段 5：任务运行链路测试，覆盖运行中状态、停止、超时、失败重试、日志写入、代理环境注入和通知 mock。
+- 阶段 6：继续低风险 UI 组件抽取，优先分页组件、消息结果卡、摘要网格。
