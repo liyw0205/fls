@@ -11,6 +11,7 @@
 
 - 建立 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`、`docs/SESSION_HANDOFF.md` 三份持续开发文档。
 - 写入阶段开发机制：每阶段由主代理加子代理协作，结束前更新进度和交接文档，并提交阶段 commit。
+- 写入产品参考对象：青龙面板、呆呆面板、白虎面板。后续只参考信息架构、交互流程和功能演进，不直接照搬技术栈。
 - 完成响应式基础实现：
   - `fls.js` 添加 `fls-phone`、`fls-tablet`、`fls-desktop`。
   - `fls.css` 添加手机、小平板、横屏平板/中宽桌面规则。
@@ -44,16 +45,17 @@
 
 ## 下阶段实现目标
 
-阶段 2 建议目标：响应式细节验收与组件抽取准备。
+阶段 2 建议目标：响应式细节验收、同类面板对标与组件抽取准备。
 
 具体任务：
 
 1. 在有浏览器环境时，用 390px、768px、1024px、1440px 宽度检查 `/`、`/tasks`、`/task/new`、`/logs`、`/pull`、`/online-scripts`、`/config`、`/panel/status`。
 2. 重点检查 667px、720px、768px 表单页，以及 1024px 平板横屏下 `/tasks`、`/pull`、`/proxy`、`/config` 的表格换行和横滚。
-3. 优先修复全局 CSS 能解决的问题，避免在每个页面写重复样式。
-4. 评估是否把常见卡片、工具栏、表单块从路由内联 HTML 抽到 `fls_manager/ui/`。
-5. 阶段结束时更新 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`、`docs/SESSION_HANDOFF.md`，并提交新的阶段 commit。
+3. 对标青龙面板、呆呆面板、白虎面板，整理 FLS 可借鉴的导航结构、任务详情、订阅管理、运行时管理、Open API 和移动端操作。
+4. 优先修复全局 CSS 能解决的问题，避免在每个页面写重复样式。
+5. 评估是否把常见卡片、工具栏、表单块从路由内联 HTML 抽到 `fls_manager/ui/`。
+6. 阶段结束时更新 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`、`docs/SESSION_HANDOFF.md`，并提交新的阶段 commit。
 
 ## 下一会话启动提示
 
-请从 `docs/SESSION_HANDOFF.md` 开始，继续阶段 2。先读取 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md` 和当前 `git status`，不要还原本阶段外的既有修改。优先做响应式页面验收；如果环境仍无浏览器，先实现可自动检查 HTML/CSS 结构的轻量脚本或继续抽取低风险 UI 组件。
+请从 `docs/SESSION_HANDOFF.md` 开始，继续阶段 2。先读取 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md` 和当前 `git status`，不要还原本阶段外的既有修改。优先做响应式页面验收和同类面板对标；如果环境仍无浏览器，先实现可自动检查 HTML/CSS 结构的轻量脚本，或整理青龙/呆呆/白虎面板对 FLS 可借鉴的功能清单。
