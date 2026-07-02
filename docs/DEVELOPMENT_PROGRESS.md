@@ -172,7 +172,7 @@
 
 ## 阶段 5：任务运行链路测试
 
-状态：已完成，准备提交
+状态：已完成
 
 目标：
 
@@ -211,7 +211,47 @@
 - 不要让测试线程真实启动 worker，也不要给 `force_kill_process()` 传真实进程。
 - 代理与通知测试优先覆盖纯转换和选择逻辑；网络质量检测与真实通知发送只做 mock 测试。
 
+## 阶段 6：任务运行链路深测与日志/通知出口 mock
+
+状态：已完成，准备提交
+
+目标：
+
+- 继续深化任务运行链路测试，覆盖 Popen 参数、watcher 超时、日志清理和通知出口。
+- 保持所有测试不真实启动用户脚本、不真实发网络请求、不真实连接 SMTP。
+- 补充 GitHub 代理可用性缓存测试。
+
+已完成：
+
+- 扩展 `tests/test_task_runtime.py`，新增 `_start_task_attempt()` 测试。
+- 覆盖 `subprocess.Popen()` 的 `cmd`、`shell`、`cwd`、`stdout`、`stderr`、`env`，POSIX 下额外断言 `preexec_fn is os.setsid`。
+- 覆盖 `_start_task_attempt()` 对 `RUNNING` 的 `process`、`pid`、`status`、`attempt`、`total_attempts` 更新。
+- 覆盖 `increase_run_count()` 调用和 watcher 线程提交，但不真实启动 watcher。
+- 覆盖 `task_finish_watcher()` 超时分支：`TimeoutExpired`、`force_kill_process()`、不重试、不发送通知、清理 `RUNNING` 和日志内容。
+- 覆盖 `logs.cleanup_logs()`：超大日志删除、同一任务按日志头分组保留最近 N 个、不同任务互不影响。
+- 覆盖 `notify.send_one()` 的 webhook、Bark、SMTP SSL 分支，全部 mock 网络/SMTP 出口。
+- 覆盖 `proxy.github_proxy_available()`：首次检测、TTL 内缓存命中、过期重新检测、失败缓存、非 GitHub 代理跳过、`use_cache=False` 绕过缓存。
+- 子代理完成阶段 6 只读风险审查，提示 `_start_task_attempt()` 参数位置、GitHub 代理缓存 key 和 TTL 边界等细节；主代理已补对应断言。
+
+验证记录：
+
+- `python -B -m unittest tests.test_task_runtime`：通过，20 tests OK。
+- `python -B -m unittest discover -s tests`：通过，41 tests OK。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 仍未覆盖全部通知渠道，例如 Telegram、Server 酱、PushPlus、企业微信、钉钉、飞书、Ntfy、WxPusher、Gotify、PushDeer。
+- 仍未覆盖 GitHub URL 改写、Git 临时配置参数、代理质量检测并发聚合。
+- `tarfile.extractall()` 在 Python 3.14 输出 DeprecationWarning，后续安全测试阶段仍需处理。
+
+测试策略结论：
+
+- `_start_task_attempt()` 适合用假 `Popen` 和假 `Thread` 覆盖提交行为，不适合跑真实子进程。
+- `send_one()` 分支测试必须 patch `requests` 或 `smtplib` 出口，并优先覆盖请求构造。
+- 日志清理测试必须固定 mtime，不依赖文件创建顺序。
+
 ## 下一阶段候选
 
-- 阶段 6：继续任务运行链路深测，覆盖 `_start_task_attempt()` 的 Popen mock、超时分支、日志清理和通知渠道 `send_one()` mock。
-- 阶段 7：继续低风险 UI 组件抽取，优先分页组件、消息结果卡、摘要网格。
+- 阶段 7：storage 异常边界、更多通知渠道、代理质量检测和 GitHub URL/Git 配置参数测试。
+- 阶段 8：继续低风险 UI 组件抽取，优先分页组件、消息结果卡、摘要网格。

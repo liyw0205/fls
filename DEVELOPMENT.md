@@ -379,14 +379,18 @@ python -m compileall fls-manager.py fls_manager
 - `task_runner.py` 的任务提交、运行状态、随机延迟、重试次数、停止、watcher 通知/重试分支和环境合并。
 - `proxy.py` 的代理 URL、请求代理字典和任务环境变量注入。
 - `notify.py` 的任务通知 ID 选择、默认通知去重和 `send_by_ids()` mock 发送。
+- `task_runner.py` 的 `_start_task_attempt()` Popen 参数、watcher 线程提交和超时 watcher 分支。
+- `logs.py` 的日志大小清理和按任务分组保留。
+- `notify.py` 的 webhook、Bark、SMTP 三类 `send_one()` 出口 mock。
+- `proxy.py` 的 GitHub 代理可用性缓存。
 - `auth.py` 的 API 与页面鉴权分支。
 - `backup/_common.py` 的安全解压。
 
 后续优先补充：
 
 - `storage.py` 的异常读写边界和 JSON 原子替换行为。
-- `task_finish_watcher()` 的超时分支和 `_start_task_attempt()` 的 `subprocess.Popen` mock 分支。
-- 日志清理和通知渠道 `send_one()` 的无网络 mock 测试。
+- 更多通知渠道 `send_one()` 的无网络 mock 测试。
+- `proxy.py` 的质量检测、GitHub URL 改写和 Git 临时配置参数。
 
 ## 11. 已知约束
 
@@ -402,7 +406,7 @@ python -m compileall fls-manager.py fls_manager
 
 优先级高：
 
-- 扩展基础自动化测试，继续覆盖任务子进程启动 mock、日志清理和 storage 异常边界。
+- 扩展基础自动化测试，继续覆盖 storage 异常边界、通知渠道和代理质量检测。
 - 继续维护 `docs/DATA_SCHEMA.md`，新增或调整 `data/*.json` 字段时同步更新读取迁移函数。
 - 把过长路由里的业务流程逐步下沉到 service/helper 模块。
 
@@ -445,3 +449,4 @@ python -m compileall fls-manager.py fls_manager
 - 阶段 4 根据子代理审查将面板时区偏移范围收紧为 `-23..23`，同步修复时间同步页选项和 helper，避免 `datetime.timezone()` 在 `±24` 边界报错。
 - 阶段 4 新增 `tests/test_schema_migration.py`，覆盖核心 JSON 读取迁移和配置归一化。
 - 阶段 5 新增 `tests/test_task_runtime.py`，覆盖任务提交状态、运行次数更新、随机延迟、重试次数、停止流程、worker 环境合并、watcher 通知/不通知/重试分支、代理环境注入和通知发送 mock。
+- 阶段 6 扩展 `tests/test_task_runtime.py`，覆盖 `_start_task_attempt()` 的 Popen 参数和 watcher 线程提交、watcher 超时强杀、日志清理、GitHub 代理缓存、webhook/Bark/SMTP 通知出口 mock。
