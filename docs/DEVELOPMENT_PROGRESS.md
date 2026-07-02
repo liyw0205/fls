@@ -128,7 +128,7 @@
 
 ## 阶段 4：数据 schema 文档与读取迁移
 
-状态：已完成，准备提交
+状态：已完成
 
 目标：
 
@@ -170,7 +170,48 @@
 - 顶层未知配置字段暂时保留，避免破坏后续扩展或用户自定义字段。
 - 对运行时有副作用的迁移只在核心模型读取入口做，路由层不直接读写原始 JSON。
 
+## 阶段 5：任务运行链路测试
+
+状态：已完成，准备提交
+
+目标：
+
+- 为任务运行链路补充可控单元测试，不真实执行用户脚本。
+- 覆盖任务运行状态、停止、失败重试、日志收尾、代理环境注入和通知 mock。
+- 继续使用标准库 `unittest`，保持 Termux/Windows/Linux 开箱即用。
+
+已完成：
+
+- 新增 `tests/test_task_runtime.py`，使用临时 `FLS_BASE_DIR` 和 `sys.modules` 清理隔离真实数据。
+- 覆盖 `increase_run_count()` 对 `run_count`、`last_run_at`、`updated_at` 的持久化更新。
+- 覆盖 `task_random_delay_seconds()` 的 none/default/custom/坏类型分支，并 mock `random.randint()`。
+- 覆盖 `task_retry_count()` 的坏类型、负数、超上限和正常字符串值。
+- 覆盖 `run_task_now()` 的任务不存在、已运行、命令解析失败和正常提交启动状态。
+- 覆盖 `stop_task_now()` 的运行状态清理、手动停止标记和日志追加。
+- 覆盖 `_start_task_worker()` 的环境合并顺序：系统环境、全局变量、任务变量、代理变量和 `FLS_TASK_*`。
+- 覆盖 `task_finish_watcher()` 的不通知、发送通知和失败后进入重试分支，通知发送全程 mock。
+- 覆盖 `proxy.py` 的代理 URL 构造、requests 代理字典、SOCKS 环境注入、GitHub 代理不注入任务环境、禁用代理过滤。
+- 覆盖 `notify.py` 的新旧任务通知字段、默认通知去重、`__none__` 跳过发送和 `send_by_ids()` mock 发送。
+- 子代理完成任务运行/代理/通知测试点只读审查，主代理据此补充 watcher 重试和通知分支。
+
+验证记录：
+
+- `python -B -m unittest tests.test_task_runtime`：通过，12 tests OK。
+- `python -B -m unittest discover -s tests`：通过，33 tests OK。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段不真实执行用户脚本，不真实调用 `subprocess.Popen()`，不发送网络通知。
+- `task_finish_watcher()` 的超时强杀分支、`_start_task_attempt()` 的 Popen 参数、`send_one()` 各渠道网络出口仍待后续 mock 覆盖。
+
+测试策略结论：
+
+- 任务运行链路测试应优先 mock `threading.Thread`、`subprocess.Popen`、`requests`、`smtplib` 和通知/调度器出口。
+- 不要让测试线程真实启动 worker，也不要给 `force_kill_process()` 传真实进程。
+- 代理与通知测试优先覆盖纯转换和选择逻辑；网络质量检测与真实通知发送只做 mock 测试。
+
 ## 下一阶段候选
 
-- 阶段 5：任务运行链路测试，覆盖运行中状态、停止、超时、失败重试、日志写入、代理环境注入和通知 mock。
-- 阶段 6：继续低风险 UI 组件抽取，优先分页组件、消息结果卡、摘要网格。
+- 阶段 6：继续任务运行链路深测，覆盖 `_start_task_attempt()` 的 Popen mock、超时分支、日志清理和通知渠道 `send_one()` mock。
+- 阶段 7：继续低风险 UI 组件抽取，优先分页组件、消息结果卡、摘要网格。
