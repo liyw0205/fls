@@ -51,7 +51,7 @@ def about_time_sync():
 
         if mode == "utc_offset":
             offset = int(utc_offset)
-            offset = max(-24, min(24, offset))
+            offset = max(-23, min(23, offset))
             tz = timezone_from_offset(offset)
 
             network_utc = fetch_network_utc_time()
@@ -78,7 +78,7 @@ def about_time_sync():
 
         if mode == "custom":
             offset = int(utc_offset)
-            offset = max(-24, min(24, offset))
+            offset = max(-23, min(23, offset))
 
             virtual_now = parse_custom_time_with_offset(custom_time, offset)
 

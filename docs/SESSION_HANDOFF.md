@@ -1,81 +1,84 @@
 # FLS 会话交接文档
 
 生成时间：2026-07-03
-当前阶段：阶段 3，基础自动化测试
+当前阶段：阶段 4，数据 schema 文档与读取迁移
 
 ## 本阶段完成进度
 
-完成度：阶段 3 已完成，准备进入阶段 4。
+完成度：阶段 4 已完成，准备进入阶段 5。
 
 已经完成：
 
-- 新增 `tests/test_auth_backup.py`，使用标准库 `unittest` 和临时 `FLS_BASE_DIR` 隔离真实运行数据。
-- 覆盖鉴权核心分支：
-  - 未设置 Token 时 `/api/status` 返回 JSON 403。
-  - 未设置 Token 时页面请求 `/tasks` 跳转 `/setup`。
-  - `X-Token` 命中时 `/api/status` 正常放行。
-  - 错误 Query Token 返回 403。
-  - 正确 Query Token 写入 session，并跳转到移除 token 后的干净 URL。
-- 覆盖备份安全基础分支：
-  - `backup_safe_file()` 将路径穿越式文件名收敛到备份目录。
-  - `safe_extract_zip()` / `safe_extract_tar()` 接受正常相对路径。
-  - `safe_extract_zip()` / `safe_extract_tar()` 拒绝 `../` 路径穿越成员。
-- 新增 `tests/test_command_scheduler.py`，覆盖命令与调度核心分支：
-  - `normalize_script_type()` 常见别名。
-  - `command_list_to_shell()` 参数引用。
-  - `.py` 的 `task` 解析和 `build_command()`。
-  - 混合命令中 `.py` / `.mjs` 的展开。
-  - 5 位和 6 位 Cron 表达式。
-  - `virtual_to_real_time()` / `real_to_virtual_time()` 在 offset 下互逆。
-- 更新 `DEVELOPMENT.md`，将 `python -B -m unittest discover -s tests` 纳入常规验证清单，并记录阶段 3 开发日志。
-- 更新 `docs/DEVELOPMENT_PROGRESS.md`，补充阶段 3 完成项、验证记录、受限验证和后续候选阶段。
+- 新增 `docs/DATA_SCHEMA.md`，文档化核心 JSON 数据结构和读取迁移规则：
+  - `data/tasks.json`
+  - `data/config.json`
+  - `data/global_env.json`
+  - `data/proxies.json`
+  - `data/collections.json`
+- 更新 `fls_manager/models.py`，新增读取/保存归一化函数：
+  - `normalize_task()`
+  - `normalize_env_map()`
+  - `normalize_proxy()`
+  - `normalize_collection()`
+  - `normalize_task_notify()`
+  - `normalize_task_random_delay()`
+- `load_tasks()` / `save_tasks()` 现在会统一清洗任务结构，迁移旧 `notify_ids`，归一化任务环境变量、通知、随机延迟、重试次数、运行次数、置顶状态和启用状态。
+- `load_global_env()` / `save_global_env()` 会清洗空变量名，并把变量值统一转为字符串。
+- `load_proxies()` / `save_proxies()` 会清洗代理类型、缺失 ID、启用状态和文本字段。
+- `load_collections()` / `save_collections()` 保留原有缺失 ID 丢弃策略，并补齐合集名称、备注和时间字段。
+- 更新 `fls_manager/config.py`，新增 `normalize_config_data()`，集中处理默认值合并、布尔转换、数值钳制、在线脚本源兜底和 `task_types` 过滤。
+- 根据子代理审查修正 `timezone_offset_hours` 范围为 `-23..23`，避免 `datetime.timezone()` 在 `±24` 小时边界抛错。
+- 新增 `tests/test_schema_migration.py`，覆盖任务旧字段迁移、全局变量清洗、代理归一、合集归一、配置钳制和时区边界。
+- 更新 `DEVELOPMENT.md`，加入 schema 文档入口、读取迁移规则和阶段 4 开发日志。
+- 更新 `docs/DEVELOPMENT_PROGRESS.md`，补充阶段 4 完成项、验证记录、受限验证和下一阶段候选。
 
 已验证：
 
-- `python -B -m unittest tests.test_auth_backup` 通过，10 tests OK。
-- `python -B -m unittest tests.test_command_scheduler` 通过，6 tests OK。
-- `python -B -m unittest discover -s tests` 通过，16 tests OK。
+- `python -B -m unittest tests.test_schema_migration` 通过，5 tests OK。
+- `python -B -m unittest discover -s tests` 通过，21 tests OK。
 - `python -B tools/responsive_smoke.py` 通过。
-- `git diff --check -- tests/test_auth_backup.py tests/test_command_scheduler.py` 通过。
+- `python -B -m compileall fls-manager.py fls_manager tests` 通过。
+- `git diff --check` 针对阶段 4 文件通过。
 
 未完成或受限：
 
 - 当前环境没有 Playwright/Chromium，仍未做真实浏览器截图检查。
-- Python 3.14 下 `tarfile.extractall()` 会输出 DeprecationWarning；当前测试通过，后续建议显式处理 `filter` 参数并补充链接/特殊文件成员安全测试。
-- 本阶段尚未覆盖真实任务子进程、停止、超时、失败重试、通知发送、日志清理和代理环境注入。
+- 本阶段只覆盖核心 JSON 数据文件；在线脚本缓存、运行时安装状态、备份 job 状态等临时/缓存数据尚未纳入 schema 文档。
+- `load_tasks()` 对缺失 ID 的任务会生成新 ID 并写回；如果外部脚本手工引用了旧任务对象，需要以写回后的 ID 为准。
+- 缺失 `notify` 且没有旧 `notify_ids` 的旧任务按旧运行时行为迁移为 `none`，不会自动开启默认通知。
+- `tarfile.extractall()` 在 Python 3.14 的 DeprecationWarning 仍未处理，留给后续安全测试阶段。
 - 工作区仍存在本阶段外的既有未提交业务修改，后续提交必须继续只纳入当前阶段相关文件。
 
 ## 子代理协作情况
 
-- 子代理 A：实现命令/调度测试，只新增 `tests/test_command_scheduler.py`。
-- 子代理 B：只读审查鉴权/备份测试风险，提示测试前设置 `FLS_BASE_DIR`、patch 使用方模块、清理 scheduler 和全局状态。
-- 主代理：实现鉴权/备份测试，集成验证，更新开发文档、进度文档和交接文档。
+- 子代理 A：尝试做 schema 只读审查，但因 429 限流失败，没有产出可用结论。
+- 子代理 B：只读审查阶段 4 diff，发现 `timezone_offset_hours` 允许 `±24` 会导致 `datetime.timezone()` 抛错；本阶段已修正为 `-23..23` 并补测试。
+- 主代理：实现 schema 文档、读取迁移函数、配置归一化、迁移测试、集成验证、进度文档和交接文档。
 
 子代理结论摘要：
 
-- 测试必须在导入 `fls_manager.*` 前设置临时 `FLS_BASE_DIR`，避免读写真实 `data/`、`scripts/`、`log/`。
-- route 测试如果需要 mock，应 patch 使用方模块，而不是源定义模块。
-- 涉及 `BACKUP_JOBS`、登录失败状态、scheduler 等全局状态的测试要主动清理。
-- 复杂安全边界如 symlink、hardlink、device member、zip bomb、并发任务可放到后续阶段。
+- `timezone_offset_hours` 必须收紧到 Python `datetime.timezone()` 可接受范围，不能允许 `±24`。
+- 后续如果继续修改时间和配置链路，建议补 `get_panel_timezone()`、`set_panel_time_calibration()` 和 `FLS_PORT` 非法环境变量分支测试。
 
 ## 下阶段实现目标
 
-阶段 4 建议目标：数据 schema 文档与读取时迁移函数。
+阶段 5 建议目标：任务运行链路测试。
 
 具体任务：
 
-1. 梳理并文档化核心 JSON 数据结构：
-   - `data/tasks.json`
-   - `data/config.json`
-   - `data/global_env.json`
-   - `data/proxies.json`
-   - `data/collections.json`
-2. 给 `models.py`、`config.py` 或对应功能域增加读取时归一化/迁移函数，优先处理旧字段、缺省字段和类型不一致。
-3. 为迁移函数补充标准库 `unittest`，继续使用临时 `FLS_BASE_DIR`。
-4. 评估是否抽取分页组件、消息结果卡、摘要网格；如果与 schema 阶段冲突，优先保证数据兼容测试。
-5. 有浏览器环境时，按 390px、768px、1024px、1440px 宽度检查 `/`、`/tasks`、`/task/new`、`/logs`、`/pull`、`/online-scripts`、`/config`、`/panel/status`。
-6. 阶段结束时继续更新 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`、`docs/SESSION_HANDOFF.md`，并提交新的阶段 commit。
+1. 为 `fls_manager/task_runner.py` 增加可控单元测试，优先覆盖：
+   - 运行中状态写入和清理。
+   - `increase_run_count()` 对任务运行次数和 `last_run_at` 的更新。
+   - `task_random_delay_seconds()` 的 none/default/custom 分支。
+   - `task_retry_count()` 的坏类型和边界钳制。
+   - 手动停止、超时、失败重试的纯逻辑或 mock 分支。
+2. 为代理环境注入补测试，覆盖 HTTP/SOCKS/GitHub 代理对任务环境的影响。
+3. 为通知发送链路补 mock 测试，避免真实网络请求。
+4. 继续使用标准库 `unittest` 和临时 `FLS_BASE_DIR`，导入 `fls_manager.*` 前先隔离环境。
+5. 如涉及任务子进程，优先 mock `subprocess.Popen` 和通知/调度器，不真实执行用户脚本。
+6. 有浏览器环境时，按 390px、768px、1024px、1440px 宽度检查 `/`、`/tasks`、`/task/new`、`/logs`、`/pull`、`/online-scripts`、`/config`、`/panel/status`。
+7. 阶段结束时继续更新 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`、`docs/SESSION_HANDOFF.md`，并提交新的阶段 commit。
 
 ## 下一会话启动提示
 
-请从 `docs/SESSION_HANDOFF.md` 开始，继续阶段 4。先读取 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md` 和当前 `git status`，不要还原本阶段外的既有修改。优先做数据 schema 文档、读取时兼容迁移和对应单元测试。
+请从 `docs/SESSION_HANDOFF.md` 开始，继续阶段 5。先读取 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`、`docs/DATA_SCHEMA.md` 和当前 `git status`，不要还原本阶段外的既有修改。优先补任务运行链路、代理环境注入和通知 mock 的标准库单元测试。

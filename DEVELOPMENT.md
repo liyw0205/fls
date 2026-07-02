@@ -142,6 +142,8 @@ Blueprint 约定：
 - Linux root 优先：`/root/fls`
 - 兜底：`$HOME/fls`
 
+核心 JSON schema 和读取迁移规则见 `docs/DATA_SCHEMA.md`。
+
 主要数据文件：
 
 - `data/config.json`：系统配置、通知配置、线上脚本源等。
@@ -157,6 +159,8 @@ Blueprint 约定：
 
 - JSON 读写统一走 `fls_manager/storage.py`。
 - 业务数据访问优先走 `fls_manager/models.py`。
+- `tasks.json`、`global_env.json`、`proxies.json`、`collections.json` 读取时会通过 `models.py` 做归一化。
+- `config.json` 读取时会通过 `config.normalize_config_data()` 合并默认值、转换类型并钳制数值范围。
 - 写文件使用临时文件替换，减少半写入文件。
 - 当前锁是进程内 `threading.RLock`，不能保证多进程事务一致性。
 - 不要在路由中直接读写 `data/*.json`，除非是在补充专门的数据访问函数。
@@ -371,12 +375,13 @@ python -m compileall fls-manager.py fls_manager
 
 - `command.py` 的命令解析。
 - `scheduler.py` 的 Cron 和虚拟时间换算。
+- `config.py` / `models.py` 的核心 JSON 读取归一化和兼容迁移。
 - `auth.py` 的 API 与页面鉴权分支。
 - `backup/_common.py` 的安全解压。
 
 后续优先补充：
 
-- `storage.py` / `models.py` 的 JSON 兼容迁移。
+- `storage.py` 的异常读写边界和 JSON 原子替换行为。
 - 任务运行、停止、超时和失败重试的可控单元测试。
 - 日志清理、代理环境注入、通知发送的 mock 测试。
 
@@ -394,8 +399,8 @@ python -m compileall fls-manager.py fls_manager
 
 优先级高：
 
-- 扩展基础自动化测试，继续覆盖 storage/models 兼容迁移、任务运行状态和日志清理。
-- 给 `data/*.json` 增加更明确的 schema 文档和读取时迁移函数。
+- 扩展基础自动化测试，继续覆盖任务运行状态、日志清理和 storage 异常边界。
+- 继续维护 `docs/DATA_SCHEMA.md`，新增或调整 `data/*.json` 字段时同步更新读取迁移函数。
 - 把过长路由里的业务流程逐步下沉到 service/helper 模块。
 
 优先级中：
@@ -431,3 +436,8 @@ python -m compileall fls-manager.py fls_manager
 - 阶段 3 新增 `tests/test_auth_backup.py`，覆盖 Token 初始化、页面/API 鉴权分支、Query Token 清理跳转，以及备份文件名归一和 zip/tar 路径穿越拒绝。
 - 阶段 3 新增 `tests/test_command_scheduler.py`，覆盖脚本类型归一、命令参数引用、`task` 命令构建、混合命令展开、5/6 位 Cron 和虚拟时间互逆换算。
 - 阶段 3 将 `python -B -m unittest discover -s tests` 纳入常规验证清单，并继续保留 `tools/responsive_smoke.py` 作为无浏览器环境下的响应式结构烟测。
+- 阶段 4 新增 `docs/DATA_SCHEMA.md`，文档化 `tasks.json`、`config.json`、`global_env.json`、`proxies.json`、`collections.json` 的规范字段和读取迁移规则。
+- 阶段 4 在 `models.py` 增加任务、全局变量、代理、合集的读取归一化和保存归一化，迁移旧 `notify_ids` 并清洗坏类型。
+- 阶段 4 在 `config.py` 增加 `normalize_config_data()`，集中处理默认值合并、布尔转换、数值钳制和脚本类型过滤。
+- 阶段 4 根据子代理审查将面板时区偏移范围收紧为 `-23..23`，同步修复时间同步页选项和 helper，避免 `datetime.timezone()` 在 `±24` 边界报错。
+- 阶段 4 新增 `tests/test_schema_migration.py`，覆盖核心 JSON 读取迁移和配置归一化。
