@@ -1,6 +1,7 @@
 import contextlib
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -93,12 +94,52 @@ class ImmediateThread:
 class FakeProc:
     def __init__(self, return_code=0):
         self.return_code = return_code
+        self.pid = 4321
 
     def wait(self, timeout=None):
         return self.return_code
 
     def poll(self):
         return self.return_code
+
+
+class TimeoutProc(FakeProc):
+    def wait(self, timeout=None):
+        if timeout is not None:
+            raise subprocess.TimeoutExpired(cmd="demo", timeout=timeout)
+
+        return self.return_code
+
+
+class FakeResponse:
+    def __init__(self, status_code=200, text="OK", json_data=None):
+        self.status_code = status_code
+        self.text = text
+        self._json_data = json_data
+
+    def json(self):
+        if self._json_data is None:
+            raise ValueError("no json")
+
+        return self._json_data
+
+
+class FakeSmtp:
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+        self.login_calls = []
+        self.sendmail_calls = []
+        self.closed = False
+
+    def login(self, *args):
+        self.login_calls.append(args)
+
+    def sendmail(self, *args):
+        self.sendmail_calls.append(args)
+
+    def close(self):
+        self.closed = True
 
 
 class TaskRuntimeTests(unittest.TestCase):
@@ -346,6 +387,75 @@ class TaskRuntimeTests(unittest.TestCase):
             self.assertEqual(captured["env"]["FLS_TASK_PROCESS_NAME"], "FLS-Demo")
             self.assertEqual(captured["source"], "manual")
 
+    def test_start_task_attempt_uses_popen_and_starts_watcher_thread(self):
+        with isolated_fls_modules():
+            from fls_manager import task_runner
+
+            task_runner.RUNNING["t1"] = {"status": "starting"}
+            log_file = Path(os.environ["FLS_BASE_DIR"]) / "log" / "attempt.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_fp = open(log_file, "ab", buffering=0)
+            fake_proc = FakeProc(return_code=None)
+            cmd_info = {
+                "cmd": ["python", "demo.py"],
+                "shell": False,
+                "cwd": str(Path(os.environ["FLS_BASE_DIR"])),
+            }
+            ImmediateThread.created = []
+
+            try:
+                with mock.patch.object(
+                    task_runner.subprocess,
+                    "Popen",
+                    return_value=fake_proc,
+                ) as popen, mock.patch.object(
+                    task_runner,
+                    "increase_run_count",
+                ) as increase_run_count, mock.patch.object(
+                    task_runner.threading,
+                    "Thread",
+                    ImmediateThread,
+                ):
+                    ok = task_runner._start_task_attempt(
+                        "t1",
+                        {"id": "t1", "name": "Demo"},
+                        cmd_info,
+                        "FLS-Demo",
+                        str(log_file),
+                        log_fp,
+                        "manual",
+                        {"ENV": "1"},
+                        1,
+                        3,
+                    )
+            finally:
+                with contextlib.suppress(Exception):
+                    log_fp.close()
+
+            self.assertTrue(ok)
+            popen.assert_called_once()
+            self.assertEqual(popen.call_args.args[0], ["python", "demo.py"])
+            self.assertFalse(popen.call_args.kwargs["shell"])
+            self.assertEqual(popen.call_args.kwargs["cwd"], cmd_info["cwd"])
+            self.assertIs(popen.call_args.kwargs["stdout"], log_fp)
+            self.assertEqual(popen.call_args.kwargs["stderr"], task_runner.subprocess.STDOUT)
+            self.assertEqual(popen.call_args.kwargs["env"], {"ENV": "1"})
+            if os.name != "nt":
+                self.assertIs(popen.call_args.kwargs["preexec_fn"], task_runner.os.setsid)
+            self.assertEqual(task_runner.RUNNING["t1"]["process"], fake_proc)
+            self.assertEqual(task_runner.RUNNING["t1"]["pid"], 4321)
+            self.assertEqual(task_runner.RUNNING["t1"]["status"], "running")
+            self.assertEqual(task_runner.RUNNING["t1"]["attempt"], 1)
+            self.assertEqual(task_runner.RUNNING["t1"]["total_attempts"], 3)
+            increase_run_count.assert_called_once_with("t1")
+            self.assertEqual(len(ImmediateThread.created), 1)
+            watcher = ImmediateThread.created[0]
+            self.assertIs(watcher.target, task_runner.task_finish_watcher)
+            self.assertEqual(watcher.args[0], "t1")
+            self.assertIs(watcher.args[2], fake_proc)
+            self.assertEqual(watcher.args[-2:], (1, 3))
+            self.assertTrue(watcher.started)
+
     def test_finish_watcher_skips_notification_when_task_notify_none(self):
         with isolated_fls_modules():
             from fls_manager import task_runner
@@ -483,6 +593,57 @@ class TaskRuntimeTests(unittest.TestCase):
             self.assertEqual(start_attempt.call_args.args[9], 2)
             send_by_ids.assert_not_called()
 
+    def test_finish_watcher_timeout_kills_process_without_retry(self):
+        with isolated_fls_modules():
+            from fls_manager import task_runner
+
+            log_file = Path(os.environ["FLS_BASE_DIR"]) / "log" / "timeout.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_fp = open(log_file, "ab", buffering=0)
+            proc = TimeoutProc(return_code=-9)
+            task_runner.RUNNING["t1"] = {
+                "status": "running",
+                "process": proc,
+                "log_file": str(log_file),
+                "log_fp": log_fp,
+            }
+
+            with mock.patch.object(
+                task_runner,
+                "load_config",
+                return_value={"task_timeout_seconds": 5},
+            ), mock.patch.object(
+                task_runner,
+                "force_kill_process",
+            ) as force_kill, mock.patch.object(
+                task_runner,
+                "_start_task_attempt",
+            ) as start_attempt, mock.patch.object(
+                task_runner,
+                "send_by_ids",
+            ) as send_by_ids:
+                task_runner.task_finish_watcher(
+                    "t1",
+                    {"id": "t1", "name": "Demo", "notify": {"mode": "none"}},
+                    proc,
+                    str(log_file),
+                    log_fp,
+                    {"cmd": "echo ok"},
+                    "FLS-Demo",
+                    "manual",
+                    {},
+                    attempt=1,
+                    total_attempts=2,
+                )
+
+            self.assertNotIn("t1", task_runner.RUNNING)
+            force_kill.assert_called_once_with(proc)
+            start_attempt.assert_not_called()
+            send_by_ids.assert_not_called()
+            text = log_file.read_text(encoding="utf-8")
+            self.assertIn("任务超时", text)
+            self.assertIn("任务设置为不通知", text)
+
 
 class ProxyRuntimeTests(unittest.TestCase):
     def test_proxy_url_dict_and_environment_injection(self):
@@ -550,6 +711,106 @@ class ProxyRuntimeTests(unittest.TestCase):
             self.assertEqual(proxy.apply_proxy_env({"A": "1"}, "github"), {"A": "1"})
             self.assertIsNone(proxy.get_proxy("disabled"))
 
+    def test_github_proxy_available_uses_cache_and_records_failure(self):
+        with isolated_fls_modules():
+            from fls_manager import proxy
+
+            github_proxy = {
+                "id": "gh",
+                "type": "github",
+                "url": "https://gh.example/",
+            }
+            proxy._GITHUB_PROXY_HEALTH_CACHE.clear()
+
+            with mock.patch.object(
+                proxy.time,
+                "time",
+                side_effect=[100, 110, 200],
+            ), mock.patch.object(
+                proxy,
+                "github_proxy_ping_object",
+                side_effect=[{"status_code": 200}, RuntimeError("down")],
+            ) as ping:
+                self.assertTrue(proxy.github_proxy_available(github_proxy))
+                self.assertTrue(proxy.github_proxy_available(github_proxy))
+                self.assertFalse(proxy.github_proxy_available(github_proxy))
+
+            self.assertEqual(ping.call_count, 2)
+            self.assertEqual(proxy._GITHUB_PROXY_HEALTH_CACHE["gh"], (200, False))
+
+    def test_github_proxy_available_skips_non_github_and_can_bypass_cache(self):
+        with isolated_fls_modules():
+            from fls_manager import proxy
+
+            github_proxy = {
+                "id": "gh",
+                "type": "github",
+                "url": "https://gh.example/",
+            }
+            proxy._GITHUB_PROXY_HEALTH_CACHE.clear()
+            proxy._GITHUB_PROXY_HEALTH_CACHE["gh"] = (100, True)
+
+            with mock.patch.object(
+                proxy,
+                "github_proxy_ping_object",
+                return_value={"status_code": 200},
+            ) as ping:
+                self.assertFalse(proxy.github_proxy_available({"type": "http"}))
+                ping.assert_not_called()
+
+            with mock.patch.object(proxy.time, "time", return_value=110), \
+                    mock.patch.object(
+                        proxy,
+                        "github_proxy_ping_object",
+                        side_effect=RuntimeError("down"),
+                    ) as ping:
+                self.assertFalse(
+                    proxy.github_proxy_available(github_proxy, use_cache=False)
+                )
+
+            ping.assert_called_once_with(github_proxy, timeout=5)
+            self.assertEqual(proxy._GITHUB_PROXY_HEALTH_CACHE["gh"], (110, False))
+
+
+class LogCleanupTests(unittest.TestCase):
+    def test_cleanup_logs_removes_oversized_and_keeps_recent_per_task(self):
+        with isolated_fls_modules():
+            from fls_manager import logs, paths
+
+            paths.LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+            def make_log(name, task_name, mtime, content="body"):
+                path = paths.LOG_DIR / name
+                path.write_text(
+                    f"===== 启动任务: {task_name} =====\n{content}\n",
+                    encoding="utf-8",
+                )
+                os.utime(path, (mtime, mtime))
+                return path
+
+            old_log = make_log("task-a-old.log", "TaskA", 100)
+            mid_log = make_log("task-a-mid.log", "TaskA", 200)
+            new_log = make_log("task-a-new.log", "TaskA", 300)
+            other_log = make_log("task-b.log", "TaskB", 150)
+            huge_log = paths.LOG_DIR / "huge.log"
+            huge_log.write_bytes(b"x" * (1024 * 1024 + 1))
+
+            with mock.patch.object(
+                logs,
+                "load_config",
+                return_value={
+                    "log_keep_per_task": 2,
+                    "log_max_size_mb": 1,
+                },
+            ):
+                logs.cleanup_logs()
+
+            self.assertFalse(huge_log.exists())
+            self.assertFalse(old_log.exists())
+            self.assertTrue(mid_log.exists())
+            self.assertTrue(new_log.exists())
+            self.assertTrue(other_log.exists())
+
 
 class NotifyRuntimeTests(unittest.TestCase):
     def test_task_notify_ids_supports_new_and_legacy_shapes(self):
@@ -607,6 +868,116 @@ class NotifyRuntimeTests(unittest.TestCase):
                     mock.patch.object(notify, "send_one") as send_one:
                 self.assertEqual(notify.send_by_ids("Title", "content", ["__none__"]), [])
                 send_one.assert_not_called()
+
+    def test_send_one_webhook_uses_requests_request(self):
+        with isolated_fls_modules():
+            from fls_manager import notify
+
+            response = FakeResponse(status_code=202, text="accepted")
+
+            item = {
+                "channel": "webhook",
+                "enabled": True,
+                "config": {
+                    "WEBHOOK_URL": "https://hook.example/$title",
+                    "WEBHOOK_METHOD": "POST",
+                    "WEBHOOK_CONTENT_TYPE": "application/json",
+                    "WEBHOOK_HEADERS": "X-Test: yes",
+                },
+            }
+
+            with mock.patch.object(
+                notify.requests,
+                "request",
+                return_value=response,
+            ) as request:
+                ok, msg = notify.send_one(item, "Title", "content")
+
+            self.assertTrue(ok)
+            self.assertEqual(msg, "202 accepted")
+            request.assert_called_once()
+            self.assertEqual(request.call_args.kwargs["method"], "POST")
+            self.assertEqual(request.call_args.kwargs["url"], "https://hook.example/Title")
+            self.assertEqual(
+                request.call_args.kwargs["headers"],
+                {
+                    "X-Test": "yes",
+                    "Content-Type": "application/json",
+                },
+            )
+            self.assertEqual(
+                json.loads(request.call_args.kwargs["data"].decode("utf-8")),
+                {
+                    "title": "Title",
+                    "content": "content",
+                },
+            )
+
+    def test_send_one_bark_uses_requests_post(self):
+        with isolated_fls_modules():
+            from fls_manager import notify
+
+            item = {
+                "channel": "bark",
+                "enabled": True,
+                "config": {
+                    "BARK_PUSH": "device-token",
+                    "BARK_GROUP": "FLS",
+                },
+            }
+
+            with mock.patch.object(
+                notify.requests,
+                "post",
+                return_value=FakeResponse(json_data={"code": 200}),
+            ) as post:
+                ok, msg = notify.send_one(item, "Title", "content")
+
+            self.assertTrue(ok)
+            self.assertIn("'code': 200", msg)
+            post.assert_called_once()
+            self.assertEqual(post.call_args.args[0], "https://api.day.app/device-token")
+            self.assertEqual(
+                post.call_args.kwargs["json"],
+                {
+                    "title": "Title",
+                    "body": "content",
+                    "group": "FLS",
+                },
+            )
+
+    def test_send_one_smtp_uses_smtp_ssl(self):
+        with isolated_fls_modules():
+            from fls_manager import notify
+
+            smtp = FakeSmtp()
+            item = {
+                "channel": "smtp",
+                "enabled": True,
+                "config": {
+                    "SMTP_SERVER": "smtp.example.com:465",
+                    "SMTP_SSL": "true",
+                    "SMTP_EMAIL": "from@example.com",
+                    "SMTP_PASSWORD": "secret",
+                    "SMTP_NAME": "FLS",
+                    "SMTP_TO": "to@example.com",
+                },
+            }
+
+            with mock.patch.object(
+                notify.smtplib,
+                "SMTP_SSL",
+                return_value=smtp,
+            ) as smtp_ssl:
+                ok, msg = notify.send_one(item, "Title", "content")
+
+            self.assertTrue(ok)
+            self.assertEqual(msg, "ok")
+            smtp_ssl.assert_called_once_with("smtp.example.com", 465, timeout=20)
+            self.assertEqual(smtp.login_calls, [("from@example.com", "secret")])
+            self.assertEqual(smtp.sendmail_calls[0][0], "from@example.com")
+            self.assertEqual(smtp.sendmail_calls[0][1], ["to@example.com"])
+            self.assertTrue(smtp.closed)
 
 
 if __name__ == "__main__":
