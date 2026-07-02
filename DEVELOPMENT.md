@@ -391,11 +391,10 @@ python -B -m compileall fls-manager.py fls_manager tests
 - `proxy.py` 的 GitHub 质量检测拼接请求、无 git、Git insteadOf 成功/失败/超时，以及 Git 命令代理拼接 helper。
 - `logs.py` 的 `latest_log_for_task()`、`cleanup_logs()` keep=0、非法配置、无启动头分组和 unlink 异常吞掉边界。
 - `auth.py` 的 API 与页面鉴权分支。
-- `backup/_common.py` 的安全解压。
+- `backup/_common.py` 的备份文件名归一、zip/tar 路径穿越拒绝、安全 tar 解压 filter 兼容、tar 特殊成员拒绝和 DeprecationWarning 回归测试。
 
 后续优先补充：
 
-- `backup/_common.py` 的 Python 3.14 `tarfile.extractall()` filter 参数兼容和特殊 tar 成员安全测试。
 - 响应式真实浏览器截图验收，重点检查手机、平板、桌面下任务、日志、配置和在线脚本页面。
 - 低风险 UI 组件抽取，优先分页组件、消息结果卡、摘要网格。
 
@@ -413,7 +412,6 @@ python -B -m compileall fls-manager.py fls_manager tests
 
 优先级高：
 
-- 处理备份 tar 解压在 Python 3.14 的 `filter` 参数兼容和安全测试。
 - 继续维护 `docs/DATA_SCHEMA.md`，新增或调整 `data/*.json` 字段时同步更新读取迁移函数。
 - 把过长路由里的业务流程逐步下沉到 service/helper 模块。
 - 在具备浏览器环境时补真实截图响应式验收。
@@ -460,3 +458,4 @@ python -B -m compileall fls-manager.py fls_manager tests
 - 阶段 6 扩展 `tests/test_task_runtime.py`，覆盖 `_start_task_attempt()` 的 Popen 参数和 watcher 线程提交、watcher 超时强杀、日志清理、GitHub 代理缓存、webhook/Bark/SMTP 通知出口 mock。
 - 阶段 7 新增 `tests/test_storage_notify_proxy.py`，覆盖 storage 异常读写、更多通知渠道出口 mock、GitHub URL/Git 配置参数、普通代理质量检测并发聚合，以及日志 tail/任务名解析边界。
 - 阶段 8 扩展 `tests/test_storage_notify_proxy.py`，覆盖通知配置清理、默认通知保存过滤、内容分片、WxPusher、多分片发送顺序、GitHub 代理质量检测细分分支、Git 命令代理 helper，以及最新日志和日志清理更多边界。
+- 阶段 9 加固 `safe_extract_tar()`，显式使用 tarfile `filter="data"` 并兼容旧 Python；解压前拒绝 tar 特殊成员、链接和跨平台绝对/穿越路径，同时补充 zip 绝对/反斜杠路径测试。

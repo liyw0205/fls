@@ -267,26 +267,49 @@ def start_backup_job(items):
 # 安全解压
 # ============================================================
 
+def _archive_member_target(base, name):
+    member_name = str(name or "").replace("\\", "/")
+
+    if (
+        member_name.startswith("/")
+        or member_name.startswith("//")
+        or (len(member_name) >= 2 and member_name[1] == ":" and member_name[0].isalpha())
+    ):
+        raise RuntimeError("备份文件包含非法路径")
+
+    target = (base / member_name).resolve()
+
+    if target != base and not str(target).startswith(str(base) + os.sep):
+        raise RuntimeError("备份文件包含非法路径")
+
+    return target
+
+
 def safe_extract_tar(tar, path):
     base = Path(path).resolve()
 
     for member in tar.getmembers():
-        target = (base / member.name).resolve()
+        _archive_member_target(base, member.name)
 
-        if target != base and not str(target).startswith(str(base) + os.sep):
-            raise RuntimeError("备份文件包含非法路径")
+        if member.issym() or member.islnk():
+            raise RuntimeError("备份文件包含不安全链接")
 
-    tar.extractall(path)
+        if not (member.isfile() or member.isdir()):
+            raise RuntimeError("备份文件包含不支持的文件类型")
+
+    try:
+        tar.extractall(path, filter="data")
+    except TypeError as e:
+        if "filter" not in str(e):
+            raise
+        tar.extractall(path)
 
 
 def safe_extract_zip(zip_obj, path):
     base = Path(path).resolve()
 
     for member in zip_obj.infolist():
-        target = (base / member.filename).resolve()
-
-        if target != base and not str(target).startswith(str(base) + os.sep):
-            raise RuntimeError("备份文件包含非法路径")
+        _archive_member_target(base, member.filename)
 
     zip_obj.extractall(path)
 
