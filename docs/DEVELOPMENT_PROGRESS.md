@@ -213,7 +213,7 @@
 
 ## 阶段 6：任务运行链路深测与日志/通知出口 mock
 
-状态：已完成，准备提交
+状态：已完成
 
 目标：
 
@@ -251,7 +251,52 @@
 - `send_one()` 分支测试必须 patch `requests` 或 `smtplib` 出口，并优先覆盖请求构造。
 - 日志清理测试必须固定 mtime，不依赖文件创建顺序。
 
+## 阶段 7：storage、通知渠道、代理质量检测和日志边界补测
+
+状态：已完成
+
+目标：
+
+- 为 `storage.py` 补充异常读写和临时文件替换边界。
+- 为更多 `notify.send_one()` 渠道补无网络 mock 测试。
+- 覆盖 GitHub URL 改写、Git 临时配置参数、代理质量检测 URL 解析和普通代理并发聚合。
+- 补充 `logs.tail_file()` 和 `parse_task_name_from_log()` 边界测试。
+
+已完成：
+
+- 新增 `tests/test_storage_notify_proxy.py`，使用标准库 `unittest`、临时 `FLS_BASE_DIR` 和模块清理隔离真实数据。
+- 覆盖 `storage.read_json()`：文件不存在、JSON 损坏返回传入默认值。
+- 覆盖 `storage.write_json()`：自动创建父目录、临时文件替换后内容完整、替换失败时旧文件保持不变且异常向外抛出。
+- 覆盖 `notify.send_one()` 的 Server 酱、PushPlus、Telegram、企业微信、钉钉、飞书、Ntfy、Gotify、PushDeer 分支，全部 mock `requests.post()`。
+- 覆盖钉钉和飞书签名分支，固定 `time.time()` 保持断言稳定。
+- 覆盖 `proxy.github_proxy_url_from_proxy()`：非 GitHub URL、非 github 类型、`verify=False` 和健康检查失败回退。
+- 覆盖 `proxy.github_git_config_args_from_proxy()`：非 github 类型、`verify=False` 生成 insteadOf 参数、健康检查失败返回空列表。
+- 覆盖 `proxy.parse_quality_urls()`：空值默认、英文/中文逗号、空白分隔、自动补 `https://`、去重且保序。
+- 覆盖 `proxy.quality_proxy_object()` 普通代理并发聚合：所有请求均 mock，单个 URL 异常不影响其他结果，最终结果按输入 URL 顺序返回。
+- 覆盖 `logs.tail_file()`：缺失文件、尾部行读取、坏 UTF-8 字节 replace。
+- 覆盖 `logs.parse_task_name_from_log()`：有启动头、无启动头、缺失文件。
+- 子代理完成阶段 7 只读审查，提示通知出口 mock、代理并发结果顺序、GitHub 代理全局缓存、日志 mtime 和 tail 断言等风险点；主代理据此补充断言。
+
+验证记录：
+
+- `python -B -m unittest tests.test_storage_notify_proxy`：通过，16 tests OK。
+- `python -B -m unittest discover -s tests`：通过，57 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段不真实发网络请求，不真实执行 git，不真实连接 SMTP。
+- `tarfile.extractall()` 在 Python 3.14 输出 DeprecationWarning，后续安全测试阶段仍需处理。
+
+测试策略结论：
+
+- 通知渠道测试优先断请求构造和 `ok` 结果，避免过度依赖 `str(dict)` 的完整字符串。
+- 代理质量检测测试必须 mock `requests.get()`，并只断最终结果按输入 URL 保序。
+- storage 替换失败边界当前会保留 `.tmp` 文件，符合现有实现；后续如增加清理逻辑需同步调整测试。
+
 ## 下一阶段候选
 
-- 阶段 7：storage 异常边界、更多通知渠道、代理质量检测和 GitHub URL/Git 配置参数测试。
-- 阶段 8：继续低风险 UI 组件抽取，优先分页组件、消息结果卡、摘要网格。
+- 阶段 8：继续通知配置工具、WxPusher、GitHub 质量检测 concat/Git insteadOf 细分分支和日志更多边界测试。
+- 阶段 9：继续低风险 UI 组件抽取，优先分页组件、消息结果卡、摘要网格。
