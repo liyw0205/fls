@@ -464,8 +464,55 @@
 - 分页组件只负责稳定外壳和通用页码算法，具体 URL 或 onclick 仍由调用方提供。
 - 在线脚本页是较低风险切片；任务、日志分页后续应在相关业务改动收束后再接入。
 
+## 阶段 11：低风险消息卡组件抽取
+
+状态：已完成
+
+目标：
+
+- 在不引入模板引擎或前端构建链的前提下抽取成功/失败/普通提示卡。
+- 集中处理提示文字 HTML 转义，减少路由内联字符串拼接。
+- 先接入当前未被长期脏改动影响的在线脚本页面。
+
+已完成：
+
+- 在 `fls_manager/ui/components.py` 新增 `message_card()`：
+  - 空消息返回空字符串，调用方不需要重复判断。
+  - 纯空白消息按空消息处理。
+  - 支持 `success`、`error`、`info` 三类颜色。
+  - 未知 `kind` 回退到 `info` 颜色。
+  - 支持 `strong=True` 加粗强调。
+  - 统一对提示文字做 HTML escape。
+- 更新 `fls_manager/routes/online_scripts/_common.py`，让在线脚本子路由可通过通配导入复用 `message_card()`。
+- 替换 `fls_manager/routes/online_scripts/pages.py` 的成功/失败消息提示卡。
+- 替换 `fls_manager/routes/online_scripts/source_json.py` 的成功/失败消息提示卡。
+- 扩展 `tests/test_ui_components.py`：
+  - 覆盖空消息和纯空白消息返回空。
+  - 覆盖成功、错误、普通提示颜色。
+  - 覆盖未知 `kind` 回退到普通提示颜色。
+  - 覆盖加粗样式。
+  - 覆盖消息内容 HTML 转义。
+- 子代理 A/B 在阶段开始前完成只读审查，建议本阶段优先抽取 `message_card()`，暂缓摘要网格和复杂页面；主代理按此收敛范围实施。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_components`：通过，8 tests OK。
+- `python -B -m unittest discover -s tests`：通过，86 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段只替换在线脚本列表页和脚本源 JSON 页，没有触碰存在阶段外未提交改动的任务、日志等页面。
+
+组件策略结论：
+
+- `message_card()` 只接收纯文本消息，组件内部负责转义；未知类型回退到 `info`，如后续需要动作按钮或富文本，需要新建明确的安全接口。
+- 摘要网格暂不抽通用 `summary_grid`，因为现有页面结构差异较大；后续可以先抽更小粒度的 `summary_item()`。
+
 ## 下一阶段候选
 
-- 阶段 11：继续低风险 UI 组件抽取，优先消息结果卡或摘要网格。
+- 阶段 12：继续低风险 UI 组件抽取，优先 `message_card()` 第二批接入在线脚本文档/安装等未脏页面，或抽取小粒度 `summary_item()`。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
 - 有浏览器环境时补真实响应式截图验收。

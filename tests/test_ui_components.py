@@ -1,9 +1,41 @@
 import unittest
 
-from fls_manager.ui.components import pagination_card
+from fls_manager.ui.components import message_card, pagination_card
 
 
 class UiComponentTests(unittest.TestCase):
+    def test_message_card_returns_empty_for_empty_message(self):
+        self.assertEqual(message_card(""), "")
+        self.assertEqual(message_card(None), "")
+        self.assertEqual(message_card("   \n\t  "), "")
+
+    def test_message_card_renders_kind_color_and_strong_style(self):
+        success_html = message_card("保存成功", "success", strong=True)
+        error_html = message_card("保存失败", "error")
+        info_html = message_card("普通提示")
+
+        self.assertIn('<div class="card">', success_html)
+        self.assertIn('style="color:#18a058;font-weight:800;"', success_html)
+        self.assertIn("保存成功", success_html)
+        self.assertIn('style="color:#dc2626;"', error_html)
+        self.assertIn("保存失败", error_html)
+        self.assertIn('style="color:#6b7280;"', info_html)
+        self.assertIn("普通提示", info_html)
+        self.assertNotIn("font-weight:800;", error_html)
+        self.assertNotIn("font-weight:800;", info_html)
+
+    def test_message_card_falls_back_to_info_for_unknown_kind(self):
+        html = message_card("未知类型", "warning")
+
+        self.assertIn('style="color:#6b7280;"', html)
+        self.assertIn("未知类型", html)
+
+    def test_message_card_escapes_message_html(self):
+        html = message_card('<script data-x="1">a & b</script>', "success")
+
+        self.assertIn("&lt;script data-x=&quot;1&quot;&gt;a &amp; b&lt;/script&gt;", html)
+        self.assertNotIn("<script>", html)
+
     def test_pagination_card_returns_empty_for_single_page(self):
         self.assertEqual(
             pagination_card(1, 1, href_for=lambda page: f"/items?page={page}"),

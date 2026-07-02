@@ -36,8 +36,8 @@ def online_scripts_source():
     <a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>
 </div>
 
-{"<div class='card'><div class='help' style='color:#18a058;'>" + h(msg) + "</div></div>" if msg else ""}
-{"<div class='card'><div class='help' style='color:#dc2626;'>" + h(err) + "</div></div>" if err else ""}
+{message_card(msg, "success")}
+{message_card(err, "error")}
 
 <form method="post">
 <div class="card">
