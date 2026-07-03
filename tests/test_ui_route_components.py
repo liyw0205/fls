@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.dont_write_bytecode = True
@@ -241,6 +242,64 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn('style="color:#dc2626;font-weight:800;"', html)
             self.assertIn("保存失败：&lt;bad &amp; &quot;x&quot;&gt;", html)
             self.assertNotIn("<bad", html)
+
+    def test_deps_page_renders_table_card_and_escapes_rows(self):
+        with isolated_app() as (app, _base_dir):
+            packages = [
+                {
+                    "name": '<pkg & "x">',
+                    "version": "1<2",
+                }
+            ]
+
+            with patch(
+                "fls_manager.routes.deps.pip_cmd",
+                return_value=SimpleNamespace(stdout=json.dumps(packages)),
+            ):
+                response = app.test_client().get(
+                    "/deps",
+                    headers={"X-Token": TOKEN},
+                )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">已安装依赖</div>', html)
+            self.assertIn("<th>包名</th>", html)
+            self.assertIn("&lt;pkg &amp; &quot;x&quot;&gt;", html)
+            self.assertIn("1&lt;2", html)
+            self.assertNotIn('<pkg & "x">', html)
+
+    def test_status_page_renders_table_card_with_runtime_table_id(self):
+        with isolated_app() as (app, _base_dir):
+            runtime_items = [
+                {
+                    "name": "<Python>",
+                    "suffix": ".py <x>",
+                    "command": "python",
+                    "version": "3.13",
+                    "install_url": "/install/runtime/python",
+                }
+            ]
+
+            with patch(
+                "fls_manager.routes.status.runtime_items",
+                return_value=runtime_items,
+            ):
+                response = app.test_client().get(
+                    "/panel/status",
+                    headers={"X-Token": TOKEN},
+                )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">运行环境</div>', html)
+            self.assertIn('<table id="runtimeTable">', html)
+            self.assertIn("<th>脚本类型</th>", html)
+            self.assertIn("&lt;Python&gt;", html)
+            self.assertIn(".py &lt;x&gt;", html)
+            self.assertNotIn("<Python>", html)
 
     def test_online_script_doc_error_renders_escaped_message_card(self):
         with isolated_app() as (app, base_dir):

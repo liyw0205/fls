@@ -1,6 +1,11 @@
 import unittest
 
-from fls_manager.ui.components import message_card, pagination_card, summary_item
+from fls_manager.ui.components import (
+    message_card,
+    pagination_card,
+    summary_item,
+    table_card,
+)
 
 
 class UiComponentTests(unittest.TestCase):
@@ -56,6 +61,26 @@ class UiComponentTests(unittest.TestCase):
 
         self.assertIn("缓存脚本数", html)
         self.assertIn('<div class="fls-summary-num">12</div>', html)
+
+    def test_table_card_renders_optional_help_actions_and_table_id(self):
+        html = table_card(
+            "<依赖>",
+            ["包名", "版本 <x>"],
+            '<tr><td colspan="2">暂无</td></tr>',
+            help_html="说明<br><b>raw</b>",
+            actions_html='<a class="btn btn-gray" href="/deps">返回</a>',
+            table_id='runtime"table',
+        )
+
+        self.assertIn('<div class="card-title">&lt;依赖&gt;</div>', html)
+        self.assertIn("<th>包名</th>", html)
+        self.assertIn("<th>版本 &lt;x&gt;</th>", html)
+        self.assertIn('<table id="runtime&quot;table">', html)
+        self.assertIn('<div class="help">说明<br><b>raw</b></div>', html)
+        self.assertIn('<div class="action-row">', html)
+        self.assertIn('href="/deps"', html)
+        self.assertIn('<tr><td colspan="2">暂无</td></tr>', html)
+        self.assertNotIn("<依赖>", html)
 
     def test_pagination_card_returns_empty_for_single_page(self):
         self.assertEqual(
