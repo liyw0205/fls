@@ -1,4 +1,5 @@
 import contextlib
+import io
 import json
 import os
 import sys
@@ -72,6 +73,98 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertIn('style="color:#6b7280;"', html)
             self.assertIn("暂无操作", html)
+
+    def test_pull_fetch_renders_error_message_card(self):
+        with isolated_app() as (app, _base_dir):
+            response = app.test_client().post(
+                "/pull/fetch",
+                data={"url": ""},
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">结果</div>', html)
+            self.assertIn('style="color:#dc2626;font-weight:800;"', html)
+            self.assertIn("URL 不能为空", html)
+
+    def test_pull_fetch_success_renders_success_message_card(self):
+        with isolated_app() as (app, _base_dir):
+            with patch(
+                "fls_manager.routes.scripts.pull.fetch_file_bytes",
+                return_value=b"print('ok')\n",
+            ):
+                response = app.test_client().post(
+                    "/pull/fetch",
+                    data={
+                        "url": "https://example.invalid/demo.py",
+                        "filename": "demo.py",
+                        "pull_type": "file",
+                    },
+                    headers={"X-Token": TOKEN},
+                )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">结果</div>', html)
+            self.assertIn('style="color:#18a058;font-weight:800;"', html)
+            self.assertIn("文件拉取成功", html)
+
+    def test_pull_fetch_failure_escapes_message_card(self):
+        with isolated_app() as (app, _base_dir):
+            with patch(
+                "fls_manager.routes.scripts.pull.fetch_file_bytes",
+                side_effect=RuntimeError('<bad & "x">'),
+            ):
+                response = app.test_client().post(
+                    "/pull/fetch",
+                    data={
+                        "url": "https://example.invalid/demo.py",
+                        "filename": "demo.py",
+                        "pull_type": "file",
+                    },
+                    headers={"X-Token": TOKEN},
+                )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('style="color:#dc2626;font-weight:800;"', html)
+            self.assertIn("拉取失败：&lt;bad &amp; &quot;x&quot;&gt;", html)
+            self.assertNotIn("<bad", html)
+
+    def test_pull_import_renders_error_message_card(self):
+        with isolated_app() as (app, _base_dir):
+            response = app.test_client().post(
+                "/pull/import",
+                data={},
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">结果</div>', html)
+            self.assertIn('style="color:#dc2626;font-weight:800;"', html)
+            self.assertIn("请选择要导入的文件", html)
+
+    def test_pull_import_success_renders_success_message_card(self):
+        with isolated_app() as (app, _base_dir):
+            response = app.test_client().post(
+                "/pull/import",
+                data={"file": (io.BytesIO(b"print('ok')\n"), "demo.py")},
+                headers={"X-Token": TOKEN},
+                content_type="multipart/form-data",
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">结果</div>', html)
+            self.assertIn('style="color:#18a058;font-weight:800;"', html)
+            self.assertIn("文件导入成功", html)
 
     def test_online_script_doc_error_renders_escaped_message_card(self):
         with isolated_app() as (app, base_dir):
