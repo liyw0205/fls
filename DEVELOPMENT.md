@@ -197,7 +197,16 @@ Blueprint 约定：
 - `PERMANENT_SESSION_LIFETIME`。
 - `SESSION_COOKIE_HTTPONLY=True`。
 - `SESSION_COOKIE_SAMESITE="Lax"`。
+- `app.before_request(csrf_before_request)`。
 - `app.before_request(auth_before_request)`。
+
+CSRF 约定：
+
+- 统一 `layout()` 会为 POST 表单注入隐藏字段 `csrf_token`，并在页面 `<meta name="csrf-token">` 输出同一个 token。
+- `fls_manager/static/fls.js` 会为同源非 GET `fetch()` 自动补 `X-CSRF-Token`。
+- 普通 session POST 必须通过 CSRF 校验。
+- `X-Token` 命中管理 Token 的机器请求会跳过 CSRF，便于 API 和脚本调用。
+- 破坏性页面路由必须优先使用 POST，不应通过 GET 删除、置顶、取出或停止资源。
 
 鉴权优先级：
 
@@ -218,6 +227,7 @@ Blueprint 约定：
 
 - 新增 API 应让错误响应保持 JSON。
 - 新增页面应走统一 `layout()`，避免绕过鉴权流程。
+- 新增 POST 表单应使用 `method="post"` 并让 `layout()` 自动注入 CSRF；不要手写 GET 破坏性链接。
 - 返回跳转 URL 时优先使用 `utils.get_back_url()` 或等价校验，避免开放重定向。
 
 ## 6. 任务执行链路
@@ -448,6 +458,7 @@ python -B -m compileall fls-manager.py fls_manager tests tools
 - 阶段 16 扩展组件与路由测试，覆盖 `table_card()` 可选结构、`/deps` 依赖列表转义，以及 `/panel/status` 运行环境表格 ID 和运行时字段转义。
 - 阶段 16 推送前合并远端任务运行历史改动，更新 `tests/test_task_runtime.py` 以覆盖当前 `task_retry_config()`、`schedule_task_retry()` 和 `_start_task_worker()` 行为。
 - 阶段 17 优先收束长期脏文件方向：补齐旧 `retry_count` 到新 `retry` 的读取迁移，并新增任务复制/批量操作、合集批量加入、日志分组删除的回归测试。
+- 阶段 18 继续处理长期脏文件剩余风险：补充 CSRF 注入、session POST 校验、`X-Token` API 豁免，以及日志删除、合集删除、任务置顶拒绝 GET 的安全回归测试。
 - 阶段 15 继续低风险消息卡接入：`fls_manager/routes/tasks/config_file.py` 的任务配置保存结果统一使用 `message_card()`，保留成功/失败加粗色彩和空消息不渲染行为。
 - 阶段 15 扩展 `tests/test_ui_route_components.py`，覆盖 `/task/config/<id>` 保存成功提示、写入失败提示和错误消息 HTML 转义。
 - 阶段 15 避开已有长期脏改动的任务列表、日志、认证/API 和 `ui/tables.py`，只触碰未脏的任务配置文件路由。

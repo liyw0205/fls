@@ -804,8 +804,48 @@
 - 原工作区的大部分脏文件能力已经存在于远端基线，本阶段主要补齐可验证的兼容迁移和回归测试。
 - 旧 `retry_count` 不能再作为新实现入口；后续任务重试相关开发统一使用 `retry.attempts` 和 `retry.interval_seconds`。
 
+## 阶段 18：CSRF 与破坏性路由安全回归测试
+
+状态：已完成
+
+目标：
+
+- 继续按用户要求处理长期脏文件剩余方向，识别旧实现回退风险。
+- 固化 CSRF、防 GET 破坏性操作和 `X-Token` API 调用边界。
+- 避免后续清理原脏工作区时误把安全约束改回旧状态。
+
+已完成：
+
+- 扩展 `tests/test_auth_backup.py`：
+  - 覆盖页面 `layout()` 输出 `<meta name="csrf-token">` 并向 POST 表单注入隐藏 `csrf_token`。
+  - 覆盖普通 session POST 缺少 CSRF token 时返回 400，且不写入任务数据。
+  - 覆盖普通 session POST 携带有效 CSRF token 时可正常创建任务。
+  - 覆盖 `X-Token` 管理请求可绕过 CSRF，继续支持脚本/API 客户端。
+  - 覆盖 `/logfile/delete/<filename>`、`/collection/delete/<id>`、`/task/pin/<id>` 拒绝 GET，并保持原数据不变。
+- 更新 `DEVELOPMENT.md`：
+  - 明确 `create_app()` 同时注册 `csrf_before_request` 和 `auth_before_request`。
+  - 记录 CSRF token 注入、fetch 自动带 token、`X-Token` 豁免和破坏性页面路由必须 POST 的约定。
+
+验证记录：
+
+- `python -B -m unittest tests.test_auth_backup`：通过，20 tests OK。
+- `python -B -m unittest discover -s tests`：通过，111 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段只补安全回归测试和开发文档，没有改动路由实现。
+
+收束结论：
+
+- 原脏 diff 中移除 CSRF、把删除/置顶改回 GET、回退 POST 表单的方向不应继续迁入。
+- 后续处理原工作区时，可以优先丢弃这些旧实现回退，只保留已经在远端基线中通过测试覆盖的功能。
+
 ## 下一阶段候选
 
-- 阶段 18：继续查找未脏页面中的纯文本提示卡或稳定表格卡，避免复杂 JS 状态、富文本结果和带按钮的完整错误页。
+- 阶段 19：继续查找未脏页面中的纯文本提示卡或稳定表格卡，避免复杂 JS 状态、富文本结果和带按钮的完整错误页。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/online-scripts` 的摘要项和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
