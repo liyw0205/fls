@@ -97,20 +97,9 @@ def online_scripts_page():
 </form>
 
 <div class="fls-summary-grid">
-    <div class="fls-summary-item">
-        <div class="fls-summary-label">缓存脚本数</div>
-        <div class="fls-summary-num">{len(items)}</div>
-    </div>
-
-    <div class="fls-summary-item">
-        <div class="fls-summary-label">可导入任务</div>
-        <div class="fls-summary-num">{task_total}</div>
-    </div>
-
-    <div class="fls-summary-item">
-        <div class="fls-summary-label">有安装命令</div>
-        <div class="fls-summary-num">{install_total}</div>
-    </div>
+    {summary_item("缓存脚本数", len(items))}
+    {summary_item("可导入任务", task_total)}
+    {summary_item("有安装命令", install_total)}
 </div>
 
 {message_card(msg, "success", strong=True)}

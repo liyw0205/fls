@@ -1,6 +1,6 @@
 import unittest
 
-from fls_manager.ui.components import message_card, pagination_card
+from fls_manager.ui.components import message_card, pagination_card, summary_item
 
 
 class UiComponentTests(unittest.TestCase):
@@ -42,6 +42,20 @@ class UiComponentTests(unittest.TestCase):
 
         self.assertIn("&lt;script data-x=&quot;1&quot;&gt;a &amp; b&lt;/script&gt;", html)
         self.assertNotIn("<script>", html)
+
+    def test_summary_item_renders_structure_and_escapes_text(self):
+        html = summary_item("<标签>", '7 & "8"')
+
+        self.assertIn('<div class="fls-summary-item">', html)
+        self.assertIn('<div class="fls-summary-label">&lt;标签&gt;</div>', html)
+        self.assertIn('<div class="fls-summary-num">7 &amp; &quot;8&quot;</div>', html)
+        self.assertNotIn("<标签>", html)
+
+    def test_summary_item_accepts_numeric_value(self):
+        html = summary_item("缓存脚本数", 12)
+
+        self.assertIn("缓存脚本数", html)
+        self.assertIn('<div class="fls-summary-num">12</div>', html)
 
     def test_pagination_card_returns_empty_for_single_page(self):
         self.assertEqual(
