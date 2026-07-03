@@ -1247,8 +1247,48 @@
 - 批量任务 API 客户端不应解析中文 `msg` 来判断局部成功、跳过或失败。
 - 后续改动需要继续保留 `ok` / `msg` 兼容字段，并维护新增结构化字段的稳定性。
 
+## 阶段 29：任务启动失败历史收尾回归测试
+
+状态：已完成
+
+目标：
+
+- 继续收束原长期脏文件中任务运行历史相关的旧实现回退。
+- 固化 `_start_task_worker()` 在启动进程失败时的历史收尾行为。
+- 防止任务启动失败后卡在 `starting`、缺失 `start_failed` 历史或遗留打开的日志句柄。
+
+已完成：
+
+- 扩展 `tests/test_task_runtime.py`：
+  - 模拟 `subprocess.Popen()` 抛出 `OSError`。
+  - 覆盖 `_start_task_worker()` 把历史记录更新为 `start_failed`。
+  - 覆盖启动失败消息、结束时间和日志文件路径写入 `task_history.json`。
+  - 覆盖启动失败日志写入任务日志文件。
+  - 覆盖日志句柄关闭、`RUNNING` 运行态清理和失败重试调度入口调用。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 29。
+  - 记录阶段 29 对任务启动失败历史收尾的回归测试。
+
+验证记录：
+
+- `python -B -m unittest tests.test_task_runtime`：通过，20 tests OK。
+- `python -B -m unittest discover -s tests`：通过，123 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段只补任务启动失败历史收尾回归测试，没有改动任务运行时代码。
+
+收束结论：
+
+- 任务启动失败应作为完整运行历史收尾，不应停留在 `starting`。
+- 启动失败路径需要同时维护历史记录、任务日志、日志句柄和 `RUNNING` 状态清理。
+
 ## 下一阶段候选
 
-- 阶段 29：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖任务运行失败历史收尾或错误提示渲染边界。
+- 阶段 30：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖错误提示渲染、任务运行失败通知边界或批量 API 前端消费。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

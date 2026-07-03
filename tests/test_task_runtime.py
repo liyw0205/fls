@@ -429,6 +429,91 @@ class TaskRuntimeTests(unittest.TestCase):
             self.assertEqual(watcher.args[-3:], ("history-1", 100.0, 0))
             self.assertTrue(watcher.started)
 
+    def test_start_task_worker_records_start_failed_history_and_clears_running(self):
+        with isolated_fls_modules():
+            from fls_manager import paths, task_runner
+
+            task_runner.RUNNING["t1"] = {"status": "starting"}
+            log_file = Path(os.environ["FLS_BASE_DIR"]) / "log" / "start-failed.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_fp = open(log_file, "ab", buffering=0)
+
+            write_json(
+                paths.TASK_HISTORY_FILE,
+                [
+                    {
+                        "id": "history-1",
+                        "task_id": "t1",
+                        "task_name": "Demo",
+                        "status": "starting",
+                        "start_at": "2026-07-04 06:00:00",
+                        "message": "已提交启动",
+                    }
+                ],
+            )
+
+            with mock.patch.object(
+                task_runner,
+                "load_global_env",
+                return_value={},
+            ), mock.patch.object(
+                task_runner,
+                "apply_proxy_env",
+                side_effect=lambda env, proxy_id: env,
+            ), mock.patch.object(
+                task_runner,
+                "task_random_delay_seconds",
+                return_value=0,
+            ), mock.patch.object(
+                task_runner.subprocess,
+                "Popen",
+                side_effect=OSError("no executable"),
+            ), mock.patch.object(
+                task_runner,
+                "schedule_task_retry",
+                return_value=(False, ""),
+            ) as schedule_retry, mock.patch.object(
+                task_runner,
+                "now_str",
+                return_value="2026-07-04 06:00:03",
+            ):
+                task_runner._start_task_worker(
+                    "t1",
+                    {
+                        "id": "t1",
+                        "name": "Demo",
+                        "command": "missing-binary",
+                    },
+                    {
+                        "cmd": ["missing-binary"],
+                        "shell": False,
+                        "cwd": str(Path(os.environ["FLS_BASE_DIR"])),
+                        "display_cmd": "missing-binary",
+                    },
+                    "FLS-Demo",
+                    str(log_file),
+                    log_fp,
+                    "manual",
+                    "history-1",
+                    100.0,
+                    0,
+                )
+
+            self.assertNotIn("t1", task_runner.RUNNING)
+            self.assertTrue(log_fp.closed)
+            schedule_retry.assert_called_once()
+
+            history = read_json(paths.TASK_HISTORY_FILE)
+            self.assertEqual(len(history), 1)
+            self.assertEqual(history[0]["status"], "start_failed")
+            self.assertEqual(history[0]["message"], "启动失败：no executable")
+            self.assertEqual(history[0]["end_at"], "2026-07-04 06:00:03")
+            self.assertEqual(history[0]["log_file"], str(log_file))
+
+            log_text = log_file.read_text(encoding="utf-8")
+            self.assertIn("===== 启动任务: Demo =====", log_text)
+            self.assertIn("启动失败: no executable", log_text)
+
     def test_finish_watcher_skips_notification_when_task_notify_none(self):
         with isolated_fls_modules():
             from fls_manager import task_runner
