@@ -648,6 +648,72 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertNotIn("Beta", html)
             self.assertNotIn("hidden", html)
 
+    def test_dashboard_keeps_recent_and_abnormal_history_summaries(self):
+        with isolated_app() as (app, base_dir):
+            data_dir = base_dir / "data"
+            log_dir = base_dir / "log"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            log_dir.mkdir(parents=True, exist_ok=True)
+            success_log = log_dir / "success-history.log"
+            failed_log = log_dir / "failed-history.log"
+            success_log.write_text("success\n", encoding="utf-8")
+            failed_log.write_text("failed\n", encoding="utf-8")
+            (data_dir / "task_history.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "h1",
+                            "task_id": "success",
+                            "task_name": "Recent <ok>",
+                            "status": "success",
+                            "start_at": "2026-07-04 03:00:00",
+                            "duration_seconds": 2,
+                            "message": "done <ok>",
+                            "log_file": str(success_log),
+                        },
+                        {
+                            "id": "h2",
+                            "task_id": "failed",
+                            "task_name": "Broken <x>",
+                            "status": "failed",
+                            "start_at": "2026-07-04 03:01:00",
+                            "duration_seconds": 5,
+                            "message": "boom <bad>",
+                            "log_file": str(failed_log),
+                        },
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            response = app.test_client().get(
+                "/",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">最近运行</div>', html)
+            self.assertIn('<div class="card-title">最近异常</div>', html)
+            self.assertIn("Recent &lt;ok&gt;", html)
+            self.assertIn("Broken &lt;x&gt;", html)
+            self.assertIn('<span class="badge green">成功</span>', html)
+            self.assertIn('<span class="badge red">失败</span>', html)
+            self.assertIn("<td>done &lt;ok&gt;</td>", html)
+            self.assertIn("<td>boom &lt;bad&gt;</td>", html)
+            self.assertIn(
+                'href="/logfile/success-history.log?back=/"',
+                html,
+            )
+            self.assertIn(
+                'href="/logfile/failed-history.log?back=/"',
+                html,
+            )
+            self.assertNotIn("Recent <ok>", html)
+            self.assertNotIn("Broken <x>", html)
+            self.assertNotIn("boom <bad>", html)
+
     def test_deps_page_renders_table_card_and_escapes_rows(self):
         with isolated_app() as (app, _base_dir):
             packages = [
