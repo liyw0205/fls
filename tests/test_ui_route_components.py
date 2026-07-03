@@ -62,6 +62,17 @@ def shutdown_scheduler():
 
 
 class UiRouteComponentTests(unittest.TestCase):
+    def test_static_js_formats_structured_bulk_action_messages(self):
+        js = (ROOT / "fls_manager" / "static" / "fls.js").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("function flsBulkActionMessage", js)
+        self.assertIn("submitted_count", js)
+        self.assertIn("stopped_count", js)
+        self.assertIn("skipped_count", js)
+        self.assertIn("failures", js)
+
     def test_scripts_new_renders_info_message_card(self):
         with isolated_app() as (app, _base_dir):
             response = app.test_client().get(
@@ -391,6 +402,7 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn("task-bulk-btn", html)
             self.assertIn("taskBulkAction('enable')", html)
             self.assertIn("taskBulkAction('delete')", html)
+            self.assertIn("flsBulkActionMessage(json", html)
             self.assertIn("task-action-more", html)
             self.assertIn("task-action-more-menu", html)
             self.assertIn("taskAjaxAction('copy','task-list')", html)

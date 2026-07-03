@@ -439,15 +439,16 @@ async function flsCollectionTaskBulkAction(collectionId, action){
         var json = await res.json();
 
         if(!json.ok){
-            alert(json.msg || (label + "失败"));
+            alert(flsBulkActionMessage(json, json.msg || (label + "失败")));
             flsCollectionTaskCards(collectionId).forEach(function(card){
                 card.style.opacity = "1";
             });
             return;
         }
 
-        if(json.msg){
-            alert(json.msg);
+        var bulkMessage = flsBulkActionMessage(json, json.msg || (label + "完成"));
+        if(bulkMessage){
+            alert(bulkMessage);
         }
 
         if(typeof flsClearPageCache === "function"){

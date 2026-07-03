@@ -339,6 +339,8 @@ class BulkWorkflowTests(unittest.TestCase):
             self.assertIn('name="task_ids"', html)
             self.assertIn("multiple", html)
             self.assertIn("collection-bulk-toolbar", html)
+            self.assertIn("flsCollectionTaskBulkAction", html)
+            self.assertIn("flsBulkActionMessage(json", html)
 
     def test_collection_task_cards_keep_post_actions_collapsed_command_and_anchor_back(self):
         with isolated_app() as (app, _base_dir):

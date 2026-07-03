@@ -704,7 +704,7 @@ async function taskBulkAction(action){{
         const json = await res.json();
 
         if(!json.ok){{
-            alert(json.msg || (label + "失败"));
+            alert(flsBulkActionMessage(json, json.msg || (label + "失败")));
             ids.forEach(function(id){{
                 document.querySelectorAll('[data-task-id="' + taskCssValue(id) + '"]').forEach(function(row){{
                     row.style.opacity = "1";
@@ -713,8 +713,9 @@ async function taskBulkAction(action){{
             return;
         }}
 
-        if(json.msg){{
-            alert(json.msg);
+        const bulkMessage = flsBulkActionMessage(json, json.msg || (label + "完成"));
+        if(bulkMessage){{
+            alert(bulkMessage);
         }}
 
         if(typeof flsClearPageCache === "function"){{

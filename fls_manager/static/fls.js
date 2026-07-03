@@ -95,6 +95,75 @@ if(!window.__FLS_ALERT_PATCHED__){
     window.__FLS_ALERT_PATCHED__ = true;
 }
 
+function flsNumberValue(value){
+    const numberValue = Number(value || 0);
+
+    if(!Number.isFinite(numberValue) || numberValue < 0) return 0;
+
+    return Math.floor(numberValue);
+}
+
+function flsFailureSummary(failures, failedCount, prefix){
+    if(!Array.isArray(failures) || !failures.length || !failedCount) return "";
+
+    const first = failures.slice(0, 3).map(function(item){
+        return String(item || "");
+    }).filter(Boolean);
+
+    if(!first.length) return "";
+
+    let text = failedCount + " 个" + prefix + "：" + first.join("；");
+
+    if(failedCount > first.length){
+        text += " 等 " + failedCount + " 个";
+    }
+
+    return text;
+}
+
+function flsBulkActionMessage(json, fallback){
+    json = json || {};
+
+    const action = String(json.action || "");
+    const fallbackText = String(fallback || json.msg || "");
+
+    if(!json.ok){
+        return String(json.msg || fallbackText || "操作失败");
+    }
+
+    const count = flsNumberValue(json.count);
+    const updatedCount = flsNumberValue(json.updated_count);
+    const deletedCount = flsNumberValue(json.deleted_count);
+    const submittedCount = flsNumberValue(json.submitted_count);
+    const stoppedCount = flsNumberValue(json.stopped_count);
+    const skippedCount = flsNumberValue(json.skipped_count);
+    const failedCount = flsNumberValue(json.failed_count);
+    const parts = [];
+
+    if(action === "enable"){
+        parts.push("已启用 " + (updatedCount || count) + " 个任务");
+    } else if(action === "disable"){
+        parts.push("已禁用 " + (updatedCount || count) + " 个任务");
+    } else if(action === "clear_collection"){
+        parts.push("已取出 " + (updatedCount || count) + " 个任务");
+    } else if(action === "delete"){
+        parts.push("已删除 " + (deletedCount || count) + " 个任务");
+    } else if(action === "run"){
+        parts.push("已提交运行 " + submittedCount + " 个任务");
+        const failureText = flsFailureSummary(json.failures, failedCount, "未运行");
+        if(failureText) parts.push(failureText);
+    } else if(action === "stop"){
+        parts.push("已结束 " + stoppedCount + " 个任务");
+        if(skippedCount) parts.push("跳过 " + skippedCount + " 个未运行任务");
+        const failureText = flsFailureSummary(json.failures, failedCount, "结束失败");
+        if(failureText) parts.push(failureText);
+    }
+
+    if(parts.length) return parts.join("；");
+
+    return fallbackText;
+}
+
 function flsViewportWidth(){
     var w = window.innerWidth || document.documentElement.clientWidth || 0;
     var sw = window.screen ? window.screen.width : 0;

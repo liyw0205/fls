@@ -1326,8 +1326,56 @@
 - 失败任务只有在已经计划重试时才应跳过完成通知。
 - 未计划重试的失败任务需要完整收尾历史和日志，并继续按任务通知配置发送结果。
 
+## 阶段 31：批量 API 前端消费回归测试
+
+状态：已完成
+
+目标：
+
+- 继续收束阶段 28 批量任务 API 结构化字段的前端消费闭环。
+- 让普通任务列表和合集页批量操作优先使用结构化计数字段生成提示，而不是只展示后端 `msg`。
+- 防止后续前端回退到解析或透传中文消息，丢失局部成功、跳过和失败明细。
+
+已完成：
+
+- 更新 `fls_manager/static/fls.js`：
+  - 新增 `flsBulkActionMessage()`，根据 `action`、`count`、`updated_count`、`deleted_count`、`submitted_count`、`stopped_count`、`skipped_count`、`failed_count` 和 `failures` 生成批量操作提示。
+  - 新增计数和失败明细辅助函数，失败明细最多展示前三条并保留总失败数。
+- 更新 `fls_manager/ui/tables.py`：
+  - 普通任务列表批量操作成功/失败提示改用 `flsBulkActionMessage()`。
+- 更新 `fls_manager/routes/tasks/collections.py`：
+  - 合集页任务批量操作成功/失败提示改用 `flsBulkActionMessage()`。
+- 更新 `fls_manager/ui/layout.py`：
+  - 静态资源版本提升到 `20260704-31`，确保浏览器加载新的 `fls.js`。
+- 扩展测试：
+  - `tests/test_ui_route_components.py` 覆盖静态 JS 中存在结构化批量消息函数和普通任务页调用。
+  - `tests/test_bulk_workflows.py` 覆盖合集页批量入口调用结构化消息函数。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 31。
+  - 记录阶段 31 对批量 API 前端消费的接入。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_route_components`：通过，20 tests OK。
+- `python -B -m unittest tests.test_bulk_workflows`：通过，8 tests OK。
+- `node --check fls_manager/static/fls.js`：通过。
+- `python -B -m unittest discover -s tests`：通过，125 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段只接入前端提示格式化，没有改变批量 API 的字段或操作语义。
+
+收束结论：
+
+- 批量任务 API 的结构化字段现在已有普通任务页和合集页前端消费路径。
+- 后续如果新增批量动作，应同步扩展 `flsBulkActionMessage()` 和对应 API 字段测试。
+
 ## 下一阶段候选
 
-- 阶段 31：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖错误提示渲染或批量 API 前端消费。
+- 阶段 32：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖错误提示渲染或其它长期脏文件剩余 UI 边界。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
