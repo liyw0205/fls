@@ -882,8 +882,47 @@
 - 旧 `retry_count` 表单和提交后固定返回 `/tasks` 的方向不应继续迁入。
 - 任务编辑页需要保留安全清洗后的 `back`，尤其是从合集进入任务编辑后回到对应合集锚点。
 
+## 阶段 20：合集页任务卡片回归测试
+
+状态：已完成
+
+目标：
+
+- 继续收束原长期脏文件中合集页任务卡片相关的旧实现回退。
+- 固化合集页任务卡片的长命令折叠、POST 破坏性操作表单和带合集锚点的 `back` 参数。
+- 防止后续把合集页任务操作退回 GET 链接或丢失合集锚点。
+
+已完成：
+
+- 扩展 `tests/test_bulk_workflows.py`：
+  - 覆盖合集页长命令渲染为 `fls-collapsible-code` 折叠代码块。
+  - 覆盖任务配置、编辑链接携带 `/collections?...#collection-<id>` 的编码后 `back` 参数。
+  - 覆盖停止、置顶、取出任务继续使用 POST 表单。
+  - 覆盖添加任务到合集和删除合集的表单 action 保留当前查询参数与合集锚点。
+  - 覆盖停止、置顶、取出任务、删除合集没有回退成 GET 链接。
+- 更新 `DEVELOPMENT.md`：
+  - 记录阶段 20 对合集页任务卡片行为的回归测试。
+
+验证记录：
+
+- `python -B -m unittest tests.test_bulk_workflows`：通过，7 tests OK。
+- `python -B -m unittest discover -s tests`：通过，114 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段只补合集页渲染回归测试和开发文档，没有改动路由实现。
+
+收束结论：
+
+- 合集页任务卡片不应回退到未折叠长命令和 GET 破坏性链接。
+- 合集页任务操作需要保留带锚点的 back 参数，确保操作或编辑后能回到对应合集位置。
+
 ## 下一阶段候选
 
-- 阶段 20：继续查找未脏页面中的纯文本提示卡或稳定表格卡，避免复杂 JS 状态、富文本结果和带按钮的完整错误页。
+- 阶段 21：继续查找未脏页面中的纯文本提示卡或稳定表格卡，避免复杂 JS 状态、富文本结果和带按钮的完整错误页。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/online-scripts` 的摘要项和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

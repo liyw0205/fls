@@ -460,6 +460,7 @@ python -B -m compileall fls-manager.py fls_manager tests tools
 - 阶段 17 优先收束长期脏文件方向：补齐旧 `retry_count` 到新 `retry` 的读取迁移，并新增任务复制/批量操作、合集批量加入、日志分组删除的回归测试。
 - 阶段 18 继续处理长期脏文件剩余风险：补充 CSRF 注入、session POST 校验、`X-Token` API 豁免，以及日志删除、合集删除、任务置顶拒绝 GET 的安全回归测试。
 - 阶段 19 固化任务表单当前行为：编辑页保留清洗后的 `back` 返回路径，表单使用 `retry_attempts` / `retry_interval_seconds`，提交后保存新 `retry` 结构并拒绝外部 back 跳转。
+- 阶段 20 固化合集页任务卡片当前行为：长命令使用折叠代码块，停止、置顶、取出、删除合集等破坏性操作继续使用 POST 表单，任务操作 back 参数保留合集锚点。
 - 阶段 15 继续低风险消息卡接入：`fls_manager/routes/tasks/config_file.py` 的任务配置保存结果统一使用 `message_card()`，保留成功/失败加粗色彩和空消息不渲染行为。
 - 阶段 15 扩展 `tests/test_ui_route_components.py`，覆盖 `/task/config/<id>` 保存成功提示、写入失败提示和错误消息 HTML 转义。
 - 阶段 15 避开已有长期脏改动的任务列表、日志、认证/API 和 `ui/tables.py`，只触碰未脏的任务配置文件路由。

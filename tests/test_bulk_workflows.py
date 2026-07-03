@@ -247,6 +247,86 @@ class BulkWorkflowTests(unittest.TestCase):
             self.assertIn("multiple", html)
             self.assertIn("collection-bulk-toolbar", html)
 
+    def test_collection_task_cards_keep_post_actions_collapsed_command_and_anchor_back(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.COLLECTION_FILE,
+                [
+                    {
+                        "id": "c1",
+                        "name": "合集一",
+                        "remark": "",
+                        "created_at": "2026-07-04 00:00:00",
+                        "updated_at": "2026-07-04 00:00:00",
+                    }
+                ],
+            )
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task(
+                        "t1",
+                        name="合集任务",
+                        command="task demo.py " + "--flag " * 24,
+                        collection_id="c1",
+                        config_path="conf/app.yml",
+                    ),
+                    sample_task("t2", name="可加入任务"),
+                ],
+            )
+
+            response = app.test_client().get(
+                "/collections?task_q=available",
+                headers={"X-Token": TOKEN},
+            )
+            html = response.get_data(as_text=True)
+
+            encoded_collection_back = (
+                "/collections%3Ftask_q%3Davailable%23collection-c1"
+            )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("fls-collapsible-code", html)
+            self.assertIn("fls-value-preview", html)
+
+            self.assertIn(
+                f'href="/task/config/t1?back={encoded_collection_back}"',
+                html,
+            )
+            self.assertIn(
+                f'href="/task/edit/t1?back={encoded_collection_back}"',
+                html,
+            )
+            self.assertIn(
+                f'action="/stop/t1?back={encoded_collection_back}"',
+                html,
+            )
+            self.assertIn(
+                f'action="/task/pin/t1?back={encoded_collection_back}"',
+                html,
+            )
+            self.assertIn(
+                f'action="/task/collection/clear/t1?back={encoded_collection_back}"',
+                html,
+            )
+            self.assertIn(
+                'action="/collection/add-task/c1?back='
+                '/collections%3Ftask_q%3Davailable%23collection-c1"',
+                html,
+            )
+            self.assertIn(
+                'action="/collection/delete/c1?back='
+                '/collections%3Ftask_q%3Davailable"',
+                html,
+            )
+
+            self.assertNotIn('href="/stop/t1', html)
+            self.assertNotIn('href="/task/pin/t1', html)
+            self.assertNotIn('href="/task/collection/clear/t1', html)
+            self.assertNotIn('href="/collection/delete/c1', html)
+
     def test_log_groups_delete_deletes_only_selected_groups(self):
         with isolated_app() as (app, base_dir):
             log_dir = base_dir / "log"
