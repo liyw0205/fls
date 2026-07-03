@@ -960,8 +960,47 @@
 - 普通任务列表不应回退到未折叠长命令、GET 破坏性链接或丢失 `/tasks` back 参数。
 - 当前批量和单任务动作入口应继续走 AJAX POST/API 流程，便于刷新局部任务块并保留 CSRF 边界。
 
+## 阶段 22：日志管理页分组动作回归测试
+
+状态：已完成
+
+目标：
+
+- 继续收束原长期脏文件中日志管理页相关的旧实现回退。
+- 固化 `/logs` 页面分组批量选择、分组批量删除、单组删除入口和单文件 POST 删除表单。
+- 防止后续把日志删除入口回退成 GET 链接，或丢失日志分组名 HTML 转义。
+
+已完成：
+
+- 扩展 `tests/test_ui_route_components.py`：
+  - 覆盖日志管理页继续渲染 `log-bulk-toolbar`、分组选框、全选控件和删除选中分组按钮。
+  - 覆盖页面脚本继续调用 `/api/logs/groups/delete` 执行分组删除。
+  - 覆盖单组删除按钮继续调用 `flsLogsDeleteGroups([this.dataset.group])`。
+  - 覆盖日志分组名在 `data-log-group`、`value` 和标题中正确 HTML 转义。
+  - 覆盖单文件删除继续使用 POST 表单，且没有回退成 `/logfile/delete/<file>` 的 GET 链接。
+- 更新 `DEVELOPMENT.md`：
+  - 记录阶段 22 对日志管理页当前行为的回归测试。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_route_components`：通过，15 tests OK。
+- `python -B -m unittest discover -s tests`：通过，116 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段只补日志管理页路由回归测试和开发文档，没有改动页面实现。
+
+收束结论：
+
+- 日志管理页不应回退到 GET 删除链接或丢失分组批量删除 UI。
+- 分组名来自日志内容，页面属性和值与标题都需要继续 HTML 转义。
+
 ## 下一阶段候选
 
-- 阶段 22：继续把原长期脏 diff 中剩余风险转化为回归测试，优先找任务/日志页面中仍未覆盖的 POST 动作、返回路径和折叠展示。
-- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/online-scripts` 和脚本拉取页面。
+- 阶段 23：继续把原长期脏 diff 中剩余风险转化为回归测试，优先找任务运行历史、批量 API 状态字段或日志查看页返回路径中仍未覆盖的边界。
+- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

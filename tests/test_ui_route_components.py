@@ -402,6 +402,53 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertNotIn('href="/stop/task-list', html)
             self.assertNotIn('href="/task/delete/task-list', html)
 
+    def test_logs_page_keeps_group_bulk_controls_and_post_delete_forms(self):
+        with isolated_app() as (app, base_dir):
+            log_dir = base_dir / "log"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            (log_dir / "alpha-one.log").write_text(
+                "===== 启动任务: Alpha <x> =====\nalpha\n",
+                encoding="utf-8",
+            )
+            (log_dir / "beta.log").write_text(
+                "===== 启动任务: Beta =====\nbeta\n",
+                encoding="utf-8",
+            )
+
+            response = app.test_client().get(
+                "/logs",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("log-bulk-toolbar", html)
+            self.assertIn("logsSelectAllGroups", html)
+            self.assertIn("logsDeleteSelectedGroupsBtn", html)
+            self.assertIn("flsLogsToggleAllGroups", html)
+            self.assertIn("flsLogsDeleteSelectedGroups", html)
+            self.assertIn('fetch("/api/logs/groups/delete"', html)
+            self.assertIn('class="log-group-select"', html)
+            self.assertIn('data-log-group="Alpha &lt;x&gt;"', html)
+            self.assertIn('value="Alpha &lt;x&gt;"', html)
+            self.assertIn("任务：Alpha &lt;x&gt;", html)
+            self.assertNotIn("Alpha <x>", html)
+            self.assertIn(
+                "flsLogsDeleteGroups([this.dataset.group]);",
+                html,
+            )
+            self.assertIn(
+                '<form class="inline-form" method="post" '
+                'action="/logfile/delete/alpha-one.log?back=/logs">',
+                html,
+            )
+            self.assertIn(
+                '<a class="btn btn-orange" href="/logfile/alpha-one.log?back=/logs">',
+                html,
+            )
+            self.assertNotIn('href="/logfile/delete/alpha-one.log', html)
+
     def test_deps_page_renders_table_card_and_escapes_rows(self):
         with isolated_app() as (app, _base_dir):
             packages = [
