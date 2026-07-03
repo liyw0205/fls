@@ -701,8 +701,63 @@
 - 对写文件失败等异常消息，路由层可以直接传纯文本给组件，由组件集中做 HTML 转义。
 - 后续接入仍应优先选择未脏文件里的稳定结构，避免为了抽组件而拆散完整操作页。
 
+## 阶段 16：表格卡组件增强与依赖/状态页接入
+
+状态：已完成
+
+目标：
+
+- 继续低风险 UI 组件抽取，优先未脏文件和稳定表格结构。
+- 扩展现有 `table_card()`，避免新增重复表格外壳。
+- 保留运行环境页既有 `runtimeTable` ID，避免破坏移动端响应式 CSS。
+
+已完成：
+
+- 更新 `fls_manager/ui/components.py`：
+  - `table_card()` 新增可选 `help_html`。
+  - `table_card()` 新增可选 `actions_html`，使用 `.action-row` 承载操作按钮。
+  - `table_card()` 新增可选 `table_id`，用于保留页面已有响应式表格选择器。
+  - 保持旧调用兼容，继续转义 title 和 headers。
+- 更新 `fls_manager/routes/deps.py`：
+  - `/deps` 的“已安装依赖”表格接入 `table_card()`。
+  - `/deps/refresh` 的“核心依赖检测”表格接入 `table_card()`，返回按钮放入操作区。
+- 更新 `fls_manager/routes/status.py`：
+  - `/panel/status` 的运行环境表格接入 `table_card()`。
+  - 通过 `table_id="runtimeTable"` 保留移动端 CSS 依赖。
+- 扩展 `tests/test_ui_components.py`：
+  - 覆盖 `table_card()` 可选说明区、操作区、表格 ID。
+  - 覆盖标题和表头 HTML 转义。
+  - 覆盖 `rows_html` 作为调用方已构造 HTML 透传。
+- 扩展 `tests/test_ui_route_components.py`：
+  - mock `pip_cmd()` 覆盖 `/deps` 依赖列表渲染和包名/版本转义。
+  - mock `runtime_items()` 覆盖 `/panel/status` 表格 ID 保留和运行时字段转义。
+- 更新 `DEVELOPMENT.md`：
+  - 将 `table_card()` 可选结构测试纳入已覆盖项。
+  - 将 `/deps`、`/deps/refresh`、`/panel/status` 表格卡接入纳入路由组件覆盖。
+  - 增加阶段 16 开发日志。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_components tests.test_ui_route_components`：通过，23 tests OK。
+- `python -B -m unittest discover -s tests`：通过，101 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
+- `table_card()` 的 `help_html` 和 `actions_html` 是调用方构造的 HTML 片段；用户输入仍必须在调用前显式转义。
+
+组件策略结论：
+
+- `table_card()` 适合稳定表格外壳，复杂批量工具栏、实时状态和动态 JS 表格仍不强行接入。
+- 页面已有 CSS/JS 依赖的表格 ID 必须通过 `table_id` 保留。
+- 后续可继续在未脏页面接入 `table_card()`，但任务/日志分页仍等相关长期改动收束后再处理。
+
 ## 下一阶段候选
 
-- 阶段 16：继续查找未脏页面中的纯文本提示卡，避免复杂 JS 状态、富文本结果和带按钮的完整错误页。
+- 阶段 17：继续查找未脏页面中的纯文本提示卡或稳定表格卡，避免复杂 JS 状态、富文本结果和带按钮的完整错误页。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/online-scripts` 的摘要项和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

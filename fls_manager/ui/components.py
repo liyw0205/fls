@@ -8,7 +8,9 @@ def page_header_card(title, help_html="", actions_html=""):
 
     help_block = ""
     if str(help_html or "").strip():
-        help_block = f'<div class="help">{help_html}</div>'
+        help_block = f"""
+    <div class="help">{help_html}</div>
+    <br>"""
 
     return f"""
 <div class="card">
@@ -23,20 +25,40 @@ def page_header_card(title, help_html="", actions_html=""):
 """
 
 
-def table_card(title, headers, rows_html):
+def table_card(
+    title,
+    headers,
+    rows_html,
+    help_html="",
+    actions_html="",
+    table_id="",
+):
     head_html = "".join(f"<th>{h(item)}</th>" for item in headers)
+    table_id_attr = f' id="{h(table_id)}"' if str(table_id or "").strip() else ""
+
+    help_block = ""
+    if str(help_html or "").strip():
+        help_block = f'<div class="help">{help_html}</div>'
+
+    actions_block = ""
+    if str(actions_html or "").strip():
+        actions_block = f"""
+    <br>
+    <div class="action-row">{actions_html}</div>"""
 
     return f"""
 <div class="card">
     <div class="card-title">{h(title)}</div>
+    {help_block}
     <div class="table-wrap">
-        <table>
+        <table{table_id_attr}>
             <thead>
                 <tr>{head_html}</tr>
             </thead>
             <tbody>{rows_html}</tbody>
         </table>
     </div>
+    {actions_block}
 </div>
 """
 

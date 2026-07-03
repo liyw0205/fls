@@ -6,6 +6,7 @@ from pathlib import Path
 from flask import Blueprint
 
 from ..ui.layout import layout
+from ..ui.components import table_card
 from ..utils import h
 
 bp = Blueprint("status", __name__)
@@ -132,29 +133,16 @@ def panel_status():
 </tr>
 """
 
-    body = f"""
-<div class="card">
-    <div class="card-title">运行环境</div>
-    <div class="help">
+    body = table_card(
+        "运行环境",
+        ["环境", "脚本类型", "检测命令", "版本", "操作"],
+        runtime_rows,
+        help_html="""
         这里显示 task 可用的脚本运行器状态。<br>
         Linux / Termux 点击安装会调用系统包管理器安装。<br>
         Windows 会跳转官方下载页面。
-    </div>
-    <br>
-    <div class="table-wrap">
-        <table id="runtimeTable">
-            <thead>
-                <tr>
-                    <th>环境</th>
-                    <th>脚本类型</th>
-                    <th>检测命令</th>
-                    <th>版本</th>
-                    <th>操作</th>
-                </tr>
-            </thead>
-            <tbody>{runtime_rows}</tbody>
-        </table>
-    </div>
-</div>
-"""
+        """,
+        table_id="runtimeTable",
+    )
+
     return layout("运行环境", "status", body)

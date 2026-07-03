@@ -392,11 +392,13 @@ python -B -m compileall fls-manager.py fls_manager tests tools
 - `logs.py` 的 `latest_log_for_task()`、`cleanup_logs()` keep=0、非法配置、无启动头分组和 unlink 异常吞掉边界。
 - `auth.py` 的 API 与页面鉴权分支。
 - `backup/_common.py` 的备份文件名归一、zip/tar 路径穿越拒绝、安全 tar 解压 filter 兼容、tar 特殊成员拒绝和 DeprecationWarning 回归测试。
+- `ui.components.table_card()` 的可选说明区、操作区、表格 ID、标题和表头 HTML 转义。
 - `ui.components.pagination_card()` 的链接分页、按钮分页、禁用态、省略号和 HTML 转义。
 - `ui.components.message_card()` 的空/空白消息、成功/错误/普通提示、未知类型回退、加粗样式、可选标题和 HTML 转义。
 - `ui.components.summary_item()` 的统计项结构、数字 value 和 HTML 转义。
 - 路由层 UI 组件接入：`/pull/new`、`/pull/fetch`、`/pull/import` 普通/结果提示卡和 `/online-scripts/doc/<id>` 文档加载失败卡的渲染与转义。
 - 路由层 UI 组件接入：`/task/config/<id>` 保存成功/失败提示卡的渲染与转义。
+- 路由层 UI 组件接入：`/deps`、`/deps/refresh` 和 `/panel/status` 表格卡渲染、响应式表格 ID 保留与 HTML 转义。
 
 后续优先补充：
 
@@ -440,6 +442,9 @@ python -B -m compileall fls-manager.py fls_manager tests tools
 
 ### 2026-07-04
 
+- 阶段 16 扩展 `table_card()`，支持可选说明区、操作区和 `table_id`，同时保持标题和表头转义以及旧调用兼容。
+- 阶段 16 将依赖管理页、依赖刷新结果页和运行环境页接入 `table_card()`；运行环境页保留 `runtimeTable` ID，避免破坏移动端响应式表格 CSS。
+- 阶段 16 扩展组件与路由测试，覆盖 `table_card()` 可选结构、`/deps` 依赖列表转义，以及 `/panel/status` 运行环境表格 ID 和运行时字段转义。
 - 阶段 15 继续低风险消息卡接入：`fls_manager/routes/tasks/config_file.py` 的任务配置保存结果统一使用 `message_card()`，保留成功/失败加粗色彩和空消息不渲染行为。
 - 阶段 15 扩展 `tests/test_ui_route_components.py`，覆盖 `/task/config/<id>` 保存成功提示、写入失败提示和错误消息 HTML 转义。
 - 阶段 15 避开已有长期脏改动的任务列表、日志、认证/API 和 `ui/tables.py`，只触碰未脏的任务配置文件路由。

@@ -12,6 +12,7 @@ from ..state import DEPS_RUNNING
 from ..utils import h, now_str, safe_name, get_back_url
 from ..logs import tail_file
 from ..ui.layout import layout
+from ..ui.components import table_card
 
 bp = Blueprint("deps", __name__)
 
@@ -140,6 +141,12 @@ def deps_page():
 </tr>
 """
 
+    installed_table = table_card(
+        "已安装依赖",
+        ["包名", "版本", "操作"],
+        rows or '<tr><td colspan="3">暂无依赖</td></tr>',
+    )
+
     body = f"""
 <div class="card">
     <div class="card-title">安装依赖</div>
@@ -155,21 +162,7 @@ def deps_page():
     </div>
 </div>
 
-<div class="card">
-    <div class="card-title">已安装依赖</div>
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>包名</th>
-                    <th>版本</th>
-                    <th>操作</th>
-                </tr>
-            </thead>
-            <tbody>{rows or '<tr><td colspan="3">暂无依赖</td></tr>'}</tbody>
-        </table>
-    </div>
-</div>
+{installed_table}
 """
     return layout("依赖管理", "deps", body)
 
@@ -320,29 +313,20 @@ def deps_refresh():
 </tr>
 """
 
+    core_table = table_card(
+        "核心依赖检测",
+        ["依赖", "状态", "版本 / 错误"],
+        rows,
+        actions_html='<a class="btn btn-gray" href="/deps">返回依赖管理</a>',
+    )
+
     body = f"""
 <div class="card">
     <div class="card-title">刷新依赖完成</div>
     <div class="help">刷新时间：{h(result["time"])}</div>
 </div>
 
-<div class="card">
-    <div class="card-title">核心依赖检测</div>
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>依赖</th>
-                    <th>状态</th>
-                    <th>版本 / 错误</th>
-                </tr>
-            </thead>
-            <tbody>{rows}</tbody>
-        </table>
-    </div>
-    <br>
-    <a class="btn btn-gray" href="/deps">返回依赖管理</a>
-</div>
+{core_table}
 """
     return layout("刷新依赖", "deps", body)
 
