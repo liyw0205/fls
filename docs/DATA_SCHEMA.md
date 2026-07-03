@@ -1,6 +1,6 @@
 # FLS 数据 Schema 与读取迁移
 
-更新时间：2026-07-03
+更新时间：2026-07-04
 
 本文记录 `data/*.json` 的当前结构和读取时归一化规则。FLS 仍采用轻量 JSON 文件存储；结构演进优先通过读取时兼容迁移完成，不引入数据库迁移层。
 
@@ -30,7 +30,7 @@
 - `proxy_id`：字符串，代理 ID。
 - `notify`：对象，结构为 `{"mode": "none|default|custom", "ids": []}`。
 - `random_delay`：对象，结构为 `{"mode": "none|default|custom", "seconds": 0}`，`seconds` 范围 `0-120`。
-- `retry_count`：整数，范围 `0-20`。
+- `retry`：对象，结构为 `{"attempts": 0, "interval_seconds": 60}`；`attempts` 范围 `0-5`，`interval_seconds` 范围 `5-3600`。
 - `run_count`：非负整数。
 - `pinned`：布尔值。
 - `created_at`：字符串，创建时间。
@@ -46,7 +46,8 @@
   - 包含 `__default__` => `{"mode": "default", "ids": []}`
   - 其他 ID => `{"mode": "custom", "ids": [...]}`
 - 缺失 `notify` 且没有 `notify_ids` 时按旧运行时行为归一为 `none`，避免给旧任务意外开启通知。
-- `random_delay.seconds`、`retry_count`、`run_count` 会转整数并钳制到有效范围。
+- 旧字段 `retry_count` 会迁移为 `retry.attempts`，写回时移除旧字段；新任务默认 `retry.interval_seconds=60`。
+- `random_delay.seconds`、`retry.attempts`、`retry.interval_seconds`、`run_count` 会转整数并钳制到有效范围。
 - `enabled`、`pinned` 支持布尔、数字和常见字符串值。
 
 ## data/config.json

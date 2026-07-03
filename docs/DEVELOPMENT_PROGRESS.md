@@ -140,7 +140,7 @@
 
 - 新增 `docs/DATA_SCHEMA.md`，记录 `tasks.json`、`config.json`、`global_env.json`、`proxies.json`、`collections.json` 的规范字段和读取迁移规则。
 - 在 `fls_manager/models.py` 新增任务、全局变量、代理、合集归一化函数。
-- `load_tasks()` / `save_tasks()` 现在会统一清洗任务结构，迁移旧 `notify_ids`，归一化 `random_delay`、`retry_count`、`run_count`、`enabled`、`pinned` 和任务环境变量。
+- `load_tasks()` / `save_tasks()` 现在会统一清洗任务结构，迁移旧 `notify_ids` 和旧 `retry_count`，归一化 `notify`、`random_delay`、`retry`、`run_count`、`enabled`、`pinned` 和任务环境变量。
 - `load_global_env()` / `save_global_env()` 会清洗空键并把值转成字符串。
 - `load_proxies()` / `save_proxies()` 会清洗代理类型、布尔状态、缺失 ID 和文本字段。
 - `load_collections()` / `save_collections()` 保留原有缺失 ID 丢弃策略，并把文本字段统一归一。
@@ -185,7 +185,7 @@
 - 新增 `tests/test_task_runtime.py`，使用临时 `FLS_BASE_DIR` 和 `sys.modules` 清理隔离真实数据。
 - 覆盖 `increase_run_count()` 对 `run_count`、`last_run_at`、`updated_at` 的持久化更新。
 - 覆盖 `task_random_delay_seconds()` 的 none/default/custom/坏类型分支，并 mock `random.randint()`。
-- 覆盖 `task_retry_count()` 的坏类型、负数、超上限和正常字符串值。
+- 覆盖 `task_retry_config()` 的坏类型、负数、超上限和正常字符串值。
 - 覆盖 `run_task_now()` 的任务不存在、已运行、命令解析失败和正常提交启动状态。
 - 覆盖 `stop_task_now()` 的运行状态清理、手动停止标记和日志追加。
 - 覆盖 `_start_task_worker()` 的环境合并顺序：系统环境、全局变量、任务变量、代理变量和 `FLS_TASK_*`。
@@ -759,8 +759,53 @@
 - 页面已有 CSS/JS 依赖的表格 ID 必须通过 `table_id` 保留。
 - 后续可继续在未脏页面接入 `table_card()`，但任务/日志分页仍等相关长期改动收束后再处理。
 
+## 阶段 17：脏文件功能收束与批量操作回归测试
+
+状态：已完成
+
+目标：
+
+- 按用户要求优先处理长期脏文件方向，确认远端基线已承接的功能，不重复搬运旧实现。
+- 修正旧 `retry_count` 与当前 `retry` 配置的读取迁移缺口。
+- 为任务复制、任务批量操作、合集批量加入和日志分组删除补回归测试。
+
+已完成：
+
+- 更新 `fls_manager/models.py`：
+  - 新增 `normalize_task_retry()`。
+  - 读取旧 `retry_count` 时迁移到 `retry.attempts`，默认 `retry.interval_seconds=60`。
+  - 保存归一化任务时移除旧 `retry_count`，保持和任务表单、运行器的当前 `retry` 结构一致。
+- 新增 `tests/test_bulk_workflows.py`：
+  - 覆盖 `/api/task/action/copy/<id>` 复制任务时重置 `run_count`、`pinned`、`last_run_at`，并保留 `retry` 配置。
+  - 覆盖 `/api/task/bulk-action` 的去重禁用、批量取出合集、批量删除和空选择拒绝。
+  - 覆盖 `/collection/add-task/<collection_id>` 一次加入多个任务，并检查合集页存在多选和批量工具栏 UI。
+  - 覆盖 `/api/logs/groups/delete` 删除选中日志分组，以及空选择返回 400。
+- 更新 `tests/test_schema_migration.py`：
+  - 覆盖旧 `retry_count` 到新 `retry` 的读取迁移和写回清理。
+- 更新 `DEVELOPMENT.md` 与 `docs/DATA_SCHEMA.md`：
+  - 将任务重试规范字段改为 `retry`。
+  - 明确 `retry_count` 仅作为旧数据兼容字段。
+
+验证记录：
+
+- `python -B -m unittest tests.test_schema_migration tests.test_bulk_workflows`：通过，11 tests OK。
+- `python -B -m unittest discover -s tests`：通过，106 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有在原长期脏工作区执行 destructive reset；开发和提交继续基于干净临时 worktree。
+
+收束结论：
+
+- 原工作区的大部分脏文件能力已经存在于远端基线，本阶段主要补齐可验证的兼容迁移和回归测试。
+- 旧 `retry_count` 不能再作为新实现入口；后续任务重试相关开发统一使用 `retry.attempts` 和 `retry.interval_seconds`。
+
 ## 下一阶段候选
 
-- 阶段 17：继续查找未脏页面中的纯文本提示卡或稳定表格卡，避免复杂 JS 状态、富文本结果和带按钮的完整错误页。
+- 阶段 18：继续查找未脏页面中的纯文本提示卡或稳定表格卡，避免复杂 JS 状态、富文本结果和带按钮的完整错误页。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/online-scripts` 的摘要项和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

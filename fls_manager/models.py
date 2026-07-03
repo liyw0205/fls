@@ -3,7 +3,10 @@ import uuid
 from .paths import TASK_FILE, TASK_HISTORY_FILE, GLOBAL_ENV_FILE, PROXY_FILE, COLLECTION_FILE
 from .storage import read_json, write_json
 
-MAX_TASK_RETRY_COUNT = 20
+MAX_TASK_RETRY_ATTEMPTS = 5
+MIN_TASK_RETRY_INTERVAL_SECONDS = 5
+MAX_TASK_RETRY_INTERVAL_SECONDS = 3600
+DEFAULT_TASK_RETRY_INTERVAL_SECONDS = 60
 TASK_NOTIFY_MODES = ("none", "default", "custom")
 TASK_RANDOM_DELAY_MODES = ("none", "default", "custom")
 PROXY_TYPES = ("http", "https", "socks4", "socks5", "socks5h", "github")
@@ -152,6 +155,38 @@ def normalize_task_random_delay(task):
     }
 
 
+def normalize_task_retry(task):
+    task = task if isinstance(task, dict) else {}
+    retry = task.get("retry")
+
+    attempts_value = 0
+    interval_value = DEFAULT_TASK_RETRY_INTERVAL_SECONDS
+
+    if isinstance(retry, dict):
+        attempts_value = retry.get("attempts", 0)
+        interval_value = retry.get(
+            "interval_seconds",
+            DEFAULT_TASK_RETRY_INTERVAL_SECONDS,
+        )
+    elif "retry_count" in task:
+        attempts_value = task.get("retry_count", 0)
+
+    return {
+        "attempts": _as_int(
+            attempts_value,
+            0,
+            0,
+            MAX_TASK_RETRY_ATTEMPTS,
+        ),
+        "interval_seconds": _as_int(
+            interval_value,
+            DEFAULT_TASK_RETRY_INTERVAL_SECONDS,
+            MIN_TASK_RETRY_INTERVAL_SECONDS,
+            MAX_TASK_RETRY_INTERVAL_SECONDS,
+        ),
+    }
+
+
 def normalize_task(task):
     if not isinstance(task, dict):
         return None
@@ -178,12 +213,8 @@ def normalize_task(task):
     item["notify"] = normalize_task_notify(item)
     item.pop("notify_ids", None)
     item["random_delay"] = normalize_task_random_delay(item)
-    item["retry_count"] = _as_int(
-        item.get("retry_count", 0),
-        0,
-        0,
-        MAX_TASK_RETRY_COUNT,
-    )
+    item["retry"] = normalize_task_retry(item)
+    item.pop("retry_count", None)
     item["run_count"] = _as_int(item.get("run_count", 0), 0, 0)
     item["pinned"] = _as_bool(item.get("pinned", False), False)
     item["created_at"] = _as_text(item.get("created_at"))

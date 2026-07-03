@@ -1,7 +1,7 @@
 # FLS 开发文档
 
 更新时间：2026-07-04
-基线：`main` / `b8762aa`
+基线：`main` / 阶段 17
 
 本文用于后续开发协作。每次完成开发后，都要同步更新本文的“开发日志”和“后续方向”，必要时同步调整架构、数据模型、接口和验证清单。
 
@@ -179,14 +179,15 @@ Blueprint 约定：
 - `proxy_id`：代理 ID。
 - `notify`：任务结束通知配置，形如 `{"mode": "default|none|custom", "ids": []}`。
 - `random_delay`：随机延迟配置，形如 `{"mode": "none|default|custom", "seconds": 0}`。
-- `retry_count`：失败重试次数，范围 `0-20`。
+- `retry`：失败重试配置，形如 `{"attempts": 0, "interval_seconds": 60}`；`attempts` 范围 `0-5`，`interval_seconds` 范围 `5-3600`。
 - `run_count`：运行次数。
 - `pinned`：列表置顶。
 - `created_at` / `updated_at` / `last_run_at`：面板时间字符串。
 
 兼容字段：
 
-- 旧版任务可能包含 `notify_ids`，`routes/tasks/forms.py` 会归一化为新的 `notify` 结构。
+- 旧版任务可能包含 `notify_ids`，`models.py` 会读取迁移为新的 `notify` 结构。
+- 旧版任务可能包含 `retry_count`，`models.py` 会读取迁移为新的 `retry` 结构并在写回时移除旧字段。
 
 ## 5. 请求、鉴权与安全流程
 
@@ -446,6 +447,7 @@ python -B -m compileall fls-manager.py fls_manager tests tools
 - 阶段 16 将依赖管理页、依赖刷新结果页和运行环境页接入 `table_card()`；运行环境页保留 `runtimeTable` ID，避免破坏移动端响应式表格 CSS。
 - 阶段 16 扩展组件与路由测试，覆盖 `table_card()` 可选结构、`/deps` 依赖列表转义，以及 `/panel/status` 运行环境表格 ID 和运行时字段转义。
 - 阶段 16 推送前合并远端任务运行历史改动，更新 `tests/test_task_runtime.py` 以覆盖当前 `task_retry_config()`、`schedule_task_retry()` 和 `_start_task_worker()` 行为。
+- 阶段 17 优先收束长期脏文件方向：补齐旧 `retry_count` 到新 `retry` 的读取迁移，并新增任务复制/批量操作、合集批量加入、日志分组删除的回归测试。
 - 阶段 15 继续低风险消息卡接入：`fls_manager/routes/tasks/config_file.py` 的任务配置保存结果统一使用 `message_card()`，保留成功/失败加粗色彩和空消息不渲染行为。
 - 阶段 15 扩展 `tests/test_ui_route_components.py`，覆盖 `/task/config/<id>` 保存成功提示、写入失败提示和错误消息 HTML 转义。
 - 阶段 15 避开已有长期脏改动的任务列表、日志、认证/API 和 `ui/tables.py`，只触碰未脏的任务配置文件路由。

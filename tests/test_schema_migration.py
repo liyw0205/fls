@@ -119,7 +119,11 @@ class SchemaMigrationTests(unittest.TestCase):
                 first["random_delay"],
                 {"mode": "custom", "seconds": 120},
             )
-            self.assertEqual(first["retry_count"], 20)
+            self.assertEqual(
+                first["retry"],
+                {"attempts": 5, "interval_seconds": 60},
+            )
+            self.assertNotIn("retry_count", first)
             self.assertEqual(first["run_count"], 0)
             self.assertTrue(first["pinned"])
             self.assertEqual(first["remark"], "")
@@ -136,6 +140,10 @@ class SchemaMigrationTests(unittest.TestCase):
                 second["random_delay"],
                 {"mode": "none", "seconds": 0},
             )
+            self.assertEqual(
+                second["retry"],
+                {"attempts": 0, "interval_seconds": 60},
+            )
             self.assertTrue(second["enabled"])
 
             direct = models.normalize_task(
@@ -149,12 +157,20 @@ class SchemaMigrationTests(unittest.TestCase):
                         "mode": "default",
                         "seconds": 88,
                     },
+                    "retry": {
+                        "attempts": "3",
+                        "interval_seconds": "30",
+                    },
                 }
             )
             self.assertEqual(direct["notify"], {"mode": "default", "ids": []})
             self.assertEqual(
                 direct["random_delay"],
                 {"mode": "default", "seconds": 0},
+            )
+            self.assertEqual(
+                direct["retry"],
+                {"attempts": 3, "interval_seconds": 30},
             )
 
             self.assertEqual(read_json(paths.TASK_FILE), tasks)
