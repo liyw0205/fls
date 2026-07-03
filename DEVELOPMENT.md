@@ -445,6 +445,7 @@ python -B -m compileall fls-manager.py fls_manager tests tools
 - 阶段 16 扩展 `table_card()`，支持可选说明区、操作区和 `table_id`，同时保持标题和表头转义以及旧调用兼容。
 - 阶段 16 将依赖管理页、依赖刷新结果页和运行环境页接入 `table_card()`；运行环境页保留 `runtimeTable` ID，避免破坏移动端响应式表格 CSS。
 - 阶段 16 扩展组件与路由测试，覆盖 `table_card()` 可选结构、`/deps` 依赖列表转义，以及 `/panel/status` 运行环境表格 ID 和运行时字段转义。
+- 阶段 16 推送前合并远端任务运行历史改动，更新 `tests/test_task_runtime.py` 以覆盖当前 `task_retry_config()`、`schedule_task_retry()` 和 `_start_task_worker()` 行为。
 - 阶段 15 继续低风险消息卡接入：`fls_manager/routes/tasks/config_file.py` 的任务配置保存结果统一使用 `message_card()`，保留成功/失败加粗色彩和空消息不渲染行为。
 - 阶段 15 扩展 `tests/test_ui_route_components.py`，覆盖 `/task/config/<id>` 保存成功提示、写入失败提示和错误消息 HTML 转义。
 - 阶段 15 避开已有长期脏改动的任务列表、日志、认证/API 和 `ui/tables.py`，只触碰未脏的任务配置文件路由。

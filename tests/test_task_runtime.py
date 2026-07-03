@@ -205,10 +205,28 @@ class TaskRuntimeTests(unittest.TestCase):
             self.assertEqual(value, 9)
             randint.assert_called_once_with(1, 120)
 
-            self.assertEqual(task_runner.task_retry_count({"retry_count": "bad"}), 0)
-            self.assertEqual(task_runner.task_retry_count({"retry_count": -5}), 0)
-            self.assertEqual(task_runner.task_retry_count({"retry_count": 99}), 20)
-            self.assertEqual(task_runner.task_retry_count({"retry_count": "3"}), 3)
+            self.assertEqual(
+                task_runner.task_retry_config({"retry": "bad"}),
+                {"attempts": 0, "interval_seconds": 60},
+            )
+            self.assertEqual(
+                task_runner.task_retry_config(
+                    {"retry": {"attempts": -5, "interval_seconds": 1}}
+                ),
+                {"attempts": 0, "interval_seconds": 5},
+            )
+            self.assertEqual(
+                task_runner.task_retry_config(
+                    {"retry": {"attempts": 99, "interval_seconds": 9999}}
+                ),
+                {"attempts": 5, "interval_seconds": 3600},
+            )
+            self.assertEqual(
+                task_runner.task_retry_config(
+                    {"retry": {"attempts": "3", "interval_seconds": "30"}}
+                ),
+                {"attempts": 3, "interval_seconds": 30},
+            )
 
     def test_run_task_now_sets_running_state_without_starting_worker(self):
         with isolated_fls_modules():
@@ -257,7 +275,10 @@ class TaskRuntimeTests(unittest.TestCase):
                     (False, "任务不存在"),
                 )
 
-            task_runner.RUNNING["t1"] = {"status": "running"}
+            task_runner.RUNNING["t1"] = {
+                "status": "running",
+                "process": FakeProc(return_code=None),
+            }
 
             with mock.patch.object(task_runner, "get_task", return_value={"id": "t1"}):
                 self.assertEqual(
@@ -282,7 +303,7 @@ class TaskRuntimeTests(unittest.TestCase):
             log_file.parent.mkdir(parents=True, exist_ok=True)
             task_runner.RUNNING["t1"] = {
                 "status": "running",
-                "process": None,
+                "process": FakeProc(return_code=None),
                 "log_file": str(log_file),
             }
 
@@ -300,7 +321,7 @@ class TaskRuntimeTests(unittest.TestCase):
                 (False, "任务未运行"),
             )
 
-    def test_start_task_worker_builds_environment_and_calls_attempt(self):
+    def test_start_task_worker_builds_environment_starts_popen_and_watcher(self):
         with isolated_fls_modules():
             from fls_manager import task_runner
 
@@ -308,6 +329,7 @@ class TaskRuntimeTests(unittest.TestCase):
             log_file = Path(os.environ["FLS_BASE_DIR"]) / "log" / "worker.log"
             log_file.parent.mkdir(parents=True, exist_ok=True)
             log_fp = open(log_file, "ab", buffering=0)
+            fake_proc = FakeProc(return_code=None)
 
             task = {
                 "id": "t1",
@@ -318,31 +340,14 @@ class TaskRuntimeTests(unittest.TestCase):
                     "SHARED": "task",
                 },
                 "proxy_id": "p1",
-                "retry_count": 2,
             }
             cmd_info = {
-                "cmd": "echo ok",
-                "shell": True,
+                "cmd": ["python", "demo.py"],
+                "shell": False,
                 "cwd": str(Path(os.environ["FLS_BASE_DIR"])),
-                "display_cmd": "echo ok",
+                "display_cmd": "python demo.py",
             }
-            captured = {}
-
-            def fake_attempt(task_id, task_snapshot, cmd_info_arg, process_name,
-                             log_file_arg, log_fp_arg, source, env, attempt,
-                             total_attempts):
-                captured.update({
-                    "task_id": task_id,
-                    "task_snapshot": task_snapshot,
-                    "cmd_info": cmd_info_arg,
-                    "process_name": process_name,
-                    "log_file": log_file_arg,
-                    "source": source,
-                    "env": env,
-                    "attempt": attempt,
-                    "total_attempts": total_attempts,
-                })
-                return True
+            ImmediateThread.created = []
 
             try:
                 with mock.patch.object(
@@ -358,9 +363,19 @@ class TaskRuntimeTests(unittest.TestCase):
                     "task_random_delay_seconds",
                     return_value=0,
                 ), mock.patch.object(
+                    task_runner.subprocess,
+                    "Popen",
+                    return_value=fake_proc,
+                ) as popen, mock.patch.object(
                     task_runner,
-                    "_start_task_attempt",
-                    side_effect=fake_attempt,
+                    "increase_run_count",
+                ) as increase_run_count, mock.patch.object(
+                    task_runner,
+                    "update_task_history",
+                ) as update_history, mock.patch.object(
+                    task_runner.threading,
+                    "Thread",
+                    ImmediateThread,
                 ):
                     task_runner._start_task_worker(
                         "t1",
@@ -370,90 +385,48 @@ class TaskRuntimeTests(unittest.TestCase):
                         str(log_file),
                         log_fp,
                         "manual",
+                        "history-1",
+                        100.0,
+                        0,
                     )
             finally:
                 with contextlib.suppress(Exception):
                     log_fp.close()
 
-            self.assertEqual(captured["task_id"], "t1")
-            self.assertEqual(captured["attempt"], 1)
-            self.assertEqual(captured["total_attempts"], 3)
-            self.assertEqual(captured["env"]["GLOBAL_ONLY"], "g")
-            self.assertEqual(captured["env"]["TASK_ONLY"], "1")
-            self.assertEqual(captured["env"]["SHARED"], "task")
-            self.assertEqual(captured["env"]["HTTP_PROXY"], "http://proxy")
-            self.assertEqual(captured["env"]["FLS_TASK_ID"], "t1")
-            self.assertEqual(captured["env"]["FLS_TASK_NAME"], "Demo")
-            self.assertEqual(captured["env"]["FLS_TASK_PROCESS_NAME"], "FLS-Demo")
-            self.assertEqual(captured["source"], "manual")
-
-    def test_start_task_attempt_uses_popen_and_starts_watcher_thread(self):
-        with isolated_fls_modules():
-            from fls_manager import task_runner
-
-            task_runner.RUNNING["t1"] = {"status": "starting"}
-            log_file = Path(os.environ["FLS_BASE_DIR"]) / "log" / "attempt.log"
-            log_file.parent.mkdir(parents=True, exist_ok=True)
-            log_fp = open(log_file, "ab", buffering=0)
-            fake_proc = FakeProc(return_code=None)
-            cmd_info = {
-                "cmd": ["python", "demo.py"],
-                "shell": False,
-                "cwd": str(Path(os.environ["FLS_BASE_DIR"])),
-            }
-            ImmediateThread.created = []
-
-            try:
-                with mock.patch.object(
-                    task_runner.subprocess,
-                    "Popen",
-                    return_value=fake_proc,
-                ) as popen, mock.patch.object(
-                    task_runner,
-                    "increase_run_count",
-                ) as increase_run_count, mock.patch.object(
-                    task_runner.threading,
-                    "Thread",
-                    ImmediateThread,
-                ):
-                    ok = task_runner._start_task_attempt(
-                        "t1",
-                        {"id": "t1", "name": "Demo"},
-                        cmd_info,
-                        "FLS-Demo",
-                        str(log_file),
-                        log_fp,
-                        "manual",
-                        {"ENV": "1"},
-                        1,
-                        3,
-                    )
-            finally:
-                with contextlib.suppress(Exception):
-                    log_fp.close()
-
-            self.assertTrue(ok)
             popen.assert_called_once()
             self.assertEqual(popen.call_args.args[0], ["python", "demo.py"])
             self.assertFalse(popen.call_args.kwargs["shell"])
             self.assertEqual(popen.call_args.kwargs["cwd"], cmd_info["cwd"])
             self.assertIs(popen.call_args.kwargs["stdout"], log_fp)
             self.assertEqual(popen.call_args.kwargs["stderr"], task_runner.subprocess.STDOUT)
-            self.assertEqual(popen.call_args.kwargs["env"], {"ENV": "1"})
+            env = popen.call_args.kwargs["env"]
+            self.assertEqual(env["GLOBAL_ONLY"], "g")
+            self.assertEqual(env["TASK_ONLY"], "1")
+            self.assertEqual(env["SHARED"], "task")
+            self.assertEqual(env["HTTP_PROXY"], "http://proxy")
+            self.assertEqual(env["FLS_TASK_ID"], "t1")
+            self.assertEqual(env["FLS_TASK_NAME"], "Demo")
+            self.assertEqual(env["FLS_TASK_PROCESS_NAME"], "FLS-Demo")
             if os.name != "nt":
                 self.assertIs(popen.call_args.kwargs["preexec_fn"], task_runner.os.setsid)
             self.assertEqual(task_runner.RUNNING["t1"]["process"], fake_proc)
             self.assertEqual(task_runner.RUNNING["t1"]["pid"], 4321)
             self.assertEqual(task_runner.RUNNING["t1"]["status"], "running")
-            self.assertEqual(task_runner.RUNNING["t1"]["attempt"], 1)
-            self.assertEqual(task_runner.RUNNING["t1"]["total_attempts"], 3)
             increase_run_count.assert_called_once_with("t1")
+            update_history.assert_any_call("history-1", {"status": "starting"})
+            update_history.assert_any_call(
+                "history-1",
+                {
+                    "status": "running",
+                    "pid": 4321,
+                },
+            )
             self.assertEqual(len(ImmediateThread.created), 1)
             watcher = ImmediateThread.created[0]
             self.assertIs(watcher.target, task_runner.task_finish_watcher)
             self.assertEqual(watcher.args[0], "t1")
             self.assertIs(watcher.args[2], fake_proc)
-            self.assertEqual(watcher.args[-2:], (1, 3))
+            self.assertEqual(watcher.args[-3:], ("history-1", 100.0, 0))
             self.assertTrue(watcher.started)
 
     def test_finish_watcher_skips_notification_when_task_notify_none(self):
@@ -481,10 +454,9 @@ class TaskRuntimeTests(unittest.TestCase):
                     FakeProc(0),
                     str(log_file),
                     log_fp,
-                    {"cmd": "echo ok"},
-                    "FLS-Demo",
-                    "manual",
-                    {},
+                    "",
+                    0,
+                    0,
                 )
 
             self.assertNotIn("t1", task_runner.RUNNING)
@@ -533,10 +505,9 @@ class TaskRuntimeTests(unittest.TestCase):
                     FakeProc(0),
                     str(log_file),
                     log_fp,
-                    {"cmd": "echo ok"},
-                    "FLS-Demo",
-                    "manual",
-                    {},
+                    "",
+                    0,
+                    0,
                 )
 
             self.assertNotIn("t1", task_runner.RUNNING)
@@ -564,9 +535,9 @@ class TaskRuntimeTests(unittest.TestCase):
                     return_value={"task_timeout_seconds": 0},
                 ), mock.patch.object(
                     task_runner,
-                    "_start_task_attempt",
-                    return_value=True,
-                ) as start_attempt, mock.patch.object(
+                    "schedule_task_retry",
+                    return_value=(True, "退出码 2，已计划第 1/2 次重试"),
+                ) as schedule_retry, mock.patch.object(
                     task_runner,
                     "send_by_ids",
                 ) as send_by_ids:
@@ -576,22 +547,20 @@ class TaskRuntimeTests(unittest.TestCase):
                         FakeProc(2),
                         str(log_file),
                         log_fp,
-                        {"cmd": "echo ok"},
-                        "FLS-Demo",
-                        "manual",
-                        {},
-                        attempt=1,
-                        total_attempts=2,
+                        "history-1",
+                        100.0,
+                        0,
                     )
             finally:
                 with contextlib.suppress(Exception):
                     log_fp.close()
 
-            self.assertEqual(task_runner.RUNNING["t1"]["status"], "retrying")
-            start_attempt.assert_called_once()
-            self.assertEqual(start_attempt.call_args.args[8], 2)
-            self.assertEqual(start_attempt.call_args.args[9], 2)
+            self.assertNotIn("t1", task_runner.RUNNING)
+            schedule_retry.assert_called_once()
+            self.assertEqual(schedule_retry.call_args.args[0], "t1")
+            self.assertEqual(schedule_retry.call_args.args[2], 0)
             send_by_ids.assert_not_called()
+            self.assertIn("已计划失败重试", log_file.read_text(encoding="utf-8"))
 
     def test_finish_watcher_timeout_kills_process_without_retry(self):
         with isolated_fls_modules():
@@ -617,8 +586,9 @@ class TaskRuntimeTests(unittest.TestCase):
                 "force_kill_process",
             ) as force_kill, mock.patch.object(
                 task_runner,
-                "_start_task_attempt",
-            ) as start_attempt, mock.patch.object(
+                "schedule_task_retry",
+                return_value=(False, ""),
+            ) as schedule_retry, mock.patch.object(
                 task_runner,
                 "send_by_ids",
             ) as send_by_ids:
@@ -628,17 +598,14 @@ class TaskRuntimeTests(unittest.TestCase):
                     proc,
                     str(log_file),
                     log_fp,
-                    {"cmd": "echo ok"},
-                    "FLS-Demo",
-                    "manual",
-                    {},
-                    attempt=1,
-                    total_attempts=2,
+                    "",
+                    0,
+                    0,
                 )
 
             self.assertNotIn("t1", task_runner.RUNNING)
             force_kill.assert_called_once_with(proc)
-            start_attempt.assert_not_called()
+            schedule_retry.assert_called_once()
             send_by_ids.assert_not_called()
             text = log_file.read_text(encoding="utf-8")
             self.assertIn("任务超时", text)

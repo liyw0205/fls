@@ -26,6 +26,9 @@
 - 扩展 `tests/test_ui_route_components.py`：
   - mock `pip_cmd()` 覆盖 `/deps` 依赖列表渲染和包名/版本转义。
   - mock `runtime_items()` 覆盖 `/panel/status` 表格 ID 保留和运行时字段转义。
+- 更新 `tests/test_task_runtime.py`：
+  - 合并远端任务运行历史改动后，测试改为覆盖当前 `task_retry_config()` 和 `schedule_task_retry()`。
+  - 启动链路测试改为直接覆盖 `_start_task_worker()` 内的环境合并、`subprocess.Popen()` 参数和 watcher 线程提交。
 - 更新 `DEVELOPMENT.md`：
   - 将 `table_card()` 可选结构测试纳入已覆盖项。
   - 将 `/deps`、`/deps/refresh`、`/panel/status` 表格卡接入纳入路由组件覆盖。
@@ -36,7 +39,7 @@
 已验证：
 
 - `python -B -m unittest tests.test_ui_components tests.test_ui_route_components` 通过，23 tests OK。
-- `python -B -m unittest discover -s tests` 通过，101 tests OK。
+- `python -B -m unittest discover -s tests` 通过，100 tests OK。
 - `python -B tools/responsive_smoke.py` 通过。
 - `python -B -m compileall fls-manager.py fls_manager tests tools` 通过。
 - `git diff --check` 通过。
