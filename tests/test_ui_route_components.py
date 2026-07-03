@@ -489,6 +489,97 @@ class UiRouteComponentTests(unittest.TestCase):
             )
             self.assertNotIn("example.invalid", html)
 
+    def test_task_log_page_keeps_history_table_actions_and_safe_back(self):
+        with isolated_app() as (app, base_dir):
+            data_dir = base_dir / "data"
+            log_dir = base_dir / "log"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            log_dir.mkdir(parents=True, exist_ok=True)
+            history_log = log_dir / "task-history.log"
+            history_log.write_text("history\n", encoding="utf-8")
+            (data_dir / "tasks.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "task-history",
+                            "name": "历史任务 <x>",
+                            "command": "task demo.py --name <x>",
+                            "config_path": "conf/app.yml",
+                            "enabled": True,
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (data_dir / "task_history.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "history-1",
+                            "task_id": "task-history",
+                            "task_name": "历史任务 <x>",
+                            "command": "task demo.py --name <x>",
+                            "status": "failed",
+                            "start_at": "2026-07-04 01:00:00",
+                            "duration_seconds": 3,
+                            "return_code": 2,
+                            "source": "manual",
+                            "message": "exit <bad>",
+                            "log_file": str(history_log),
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            client = app.test_client()
+
+            response = client.get(
+                "/log/task-history?back=/history",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("日志：历史任务 &lt;x&gt;", html)
+            self.assertNotIn("历史任务 <x>", html)
+            self.assertIn('<div class="card-title">最近运行历史</div>', html)
+            self.assertIn('<span class="badge red">失败</span>', html)
+            self.assertIn("<td>manual</td>", html)
+            self.assertIn("<td>exit &lt;bad&gt;</td>", html)
+            self.assertIn(
+                'href="/logfile/task-history.log?back=/log/task-history"',
+                html,
+            )
+            self.assertIn('href="/run/task-history?back=/history"', html)
+            self.assertIn(
+                'action="/stop/task-history?back=/history"',
+                html,
+            )
+            self.assertIn(
+                'href="/task/config/task-history?back=/history"',
+                html,
+            )
+            self.assertIn('<a class="btn btn-gray" href="/history">返回</a>', html)
+            self.assertIn('fetch("/api/log/task-history?lines=1200"', html)
+            self.assertNotIn('href="/stop/task-history', html)
+
+            response = client.get(
+                "/log/task-history?back=https://example.invalid/evil",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<a class="btn btn-gray" href="/tasks">返回</a>', html)
+            self.assertIn(
+                'action="/stop/task-history?back=/tasks"',
+                html,
+            )
+            self.assertNotIn("example.invalid", html)
+
     def test_deps_page_renders_table_card_and_escapes_rows(self):
         with isolated_app() as (app, _base_dir):
             packages = [

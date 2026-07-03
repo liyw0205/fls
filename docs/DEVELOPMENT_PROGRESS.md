@@ -1038,8 +1038,48 @@
 - 日志文件详情页必须继续清洗外部 `back`，并将删除操作限制在 POST 表单。
 - 日志查看页的实时拉取 API 路径应继续使用当前日志文件名，不依赖用户可控外部地址。
 
+## 阶段 24：任务日志页历史表格回归测试
+
+状态：已完成
+
+目标：
+
+- 继续收束原长期脏文件中任务运行历史和任务日志详情页相关的旧实现回退。
+- 固化 `/log/<task_id>` 页面最近运行历史表格、状态徽标、日志链接、操作入口和安全 `back` 行为。
+- 防止后续移除任务运行历史、把停止操作回退成 GET 链接，或让外部 `back` 进入任务日志页操作入口。
+
+已完成：
+
+- 扩展 `tests/test_ui_route_components.py`：
+  - 覆盖任务日志页展示 `最近运行历史` 表格。
+  - 覆盖历史记录状态徽标、来源、说明和日志链接渲染，并对任务名、命令和说明做 HTML 转义。
+  - 覆盖运行、停止、配置和返回入口继续携带安全站内 `back=/history`。
+  - 覆盖停止任务继续使用 POST 表单，且没有回退成 `/stop/<id>` 的 GET 链接。
+  - 覆盖外部 `back=https://example.invalid/evil` 被清洗回 `/tasks`。
+  - 覆盖任务日志页前端继续从 `/api/log/<task_id>?lines=1200` 拉取内容。
+- 更新 `DEVELOPMENT.md`：
+  - 记录阶段 24 对任务日志页历史表格和安全 back 行为的回归测试。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_route_components`：通过，17 tests OK。
+- `python -B -m unittest discover -s tests`：通过，118 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段只补任务日志页路由回归测试和开发文档，没有改动页面实现。
+
+收束结论：
+
+- 任务运行历史不应从任务日志页退化移除，历史记录中的用户可控文本必须继续转义。
+- 任务日志页的停止操作和返回路径需要继续保留当前安全边界。
+
 ## 下一阶段候选
 
-- 阶段 24：继续把原长期脏 diff 中剩余风险转化为回归测试，优先找任务运行历史、批量 API 状态字段或任务详情页历史表格中仍未覆盖的边界。
+- 阶段 25：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖全局运行历史页筛选、批量 API 状态字段或任务运行历史数据模型边界。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
