@@ -1,7 +1,7 @@
 # FLS 开发文档
 
 更新时间：2026-07-04
-基线：`main` / 阶段 25
+基线：`main` / 阶段 26
 
 本文用于后续开发协作。每次完成开发后，都要同步更新本文的“开发日志”和“后续方向”，必要时同步调整架构、数据模型、接口和验证清单。
 
@@ -148,6 +148,7 @@ Blueprint 约定：
 
 - `data/config.json`：系统配置、通知配置、线上脚本源等。
 - `data/tasks.json`：任务列表。
+- `data/task_history.json`：任务运行历史。
 - `data/global_env.json`：全局环境变量。
 - `data/proxies.json`：代理配置。
 - `data/collections.json`：任务合集。
@@ -159,7 +160,7 @@ Blueprint 约定：
 
 - JSON 读写统一走 `fls_manager/storage.py`。
 - 业务数据访问优先走 `fls_manager/models.py`。
-- `tasks.json`、`global_env.json`、`proxies.json`、`collections.json` 读取时会通过 `models.py` 做归一化。
+- `tasks.json`、`task_history.json`、`global_env.json`、`proxies.json`、`collections.json` 读取时会通过 `models.py` 做归一化。
 - `config.json` 读取时会通过 `config.normalize_config_data()` 合并默认值、转换类型并钳制数值范围。
 - 写文件使用临时文件替换，减少半写入文件。
 - 当前锁是进程内 `threading.RLock`，不能保证多进程事务一致性。
@@ -466,6 +467,7 @@ python -B -m compileall fls-manager.py fls_manager tests tools
 - 阶段 23 固化日志文件详情页返回路径：合法站内 `back` 继续用于返回按钮和删除表单，外部 `back` 会清洗回 `/logs`，日志删除入口继续保持 POST 表单。
 - 阶段 24 固化任务日志页历史表格：最近运行历史继续展示状态、来源、说明和日志链接，运行、停止、配置、返回入口保留安全 `back`，外部 `back` 清洗回 `/tasks`。
 - 阶段 25 固化全局运行历史页：关键词和状态筛选继续生效，历史表格展示状态、来源、重试、说明和日志链接，用户可控历史字段继续 HTML 转义。
+- 阶段 26 固化任务运行历史数据模型：历史读取过滤坏行，更新按 ID 写回，新增记录插入顶部并按上限裁剪，按任务筛选继续可用；同步补充 `task_history.json` schema 文档。
 - 阶段 15 继续低风险消息卡接入：`fls_manager/routes/tasks/config_file.py` 的任务配置保存结果统一使用 `message_card()`，保留成功/失败加粗色彩和空消息不渲染行为。
 - 阶段 15 扩展 `tests/test_ui_route_components.py`，覆盖 `/task/config/<id>` 保存成功提示、写入失败提示和错误消息 HTML 转义。
 - 阶段 15 避开已有长期脏改动的任务列表、日志、认证/API 和 `ui/tables.py`，只触碰未脏的任务配置文件路由。

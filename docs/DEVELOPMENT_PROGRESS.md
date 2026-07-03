@@ -1118,8 +1118,51 @@
 - 全局运行历史页不应退化为无筛选或无历史表格的静态列表。
 - 历史记录来自运行过程和用户任务配置，所有展示字段都需要继续 HTML 转义。
 
+## 阶段 26：任务运行历史数据模型回归测试
+
+状态：已完成
+
+目标：
+
+- 继续收束原长期脏文件中任务运行历史数据模型相关的旧实现回退。
+- 固化 `task_history.json` 读取过滤、按任务筛选、按 ID 更新、新记录置顶和历史上限裁剪行为。
+- 防止后续移除任务运行历史或让坏数据破坏历史页、任务日志页和仪表盘历史摘要。
+
+已完成：
+
+- 扩展 `tests/test_schema_migration.py`：
+  - 覆盖 `load_task_history()` 过滤非对象历史记录。
+  - 覆盖 `task_history_for_task()` 按 `task_id` 筛选并遵守 limit。
+  - 覆盖 `update_task_history()` 按历史 ID 更新并写回文件。
+  - 覆盖空 ID 和不存在 ID 更新返回 `False`。
+  - 覆盖 `add_task_history()` 把新记录插入顶部，并通过 `TASK_HISTORY_LIMIT` 裁剪旧记录。
+- 更新 `docs/DATA_SCHEMA.md`：
+  - 新增 `data/task_history.json` 字段、读取规则和写入裁剪规则。
+  - 通用规则补充 `task_history.json` 由 `models.py` 规范化读取。
+- 更新 `DEVELOPMENT.md`：
+  - 记录 `data/task_history.json` 为主要数据文件。
+  - 记录阶段 26 对任务运行历史数据模型和 schema 文档的回归测试。
+
+验证记录：
+
+- `python -B -m unittest tests.test_schema_migration`：通过，6 tests OK。
+- `python -B -m unittest discover -s tests`：通过，120 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段只补任务运行历史数据模型回归测试和文档，没有改动模型实现。
+
+收束结论：
+
+- `task_history.json` 是运行历史、任务日志页和仪表盘历史摘要的共同数据源，不应被后续旧实现回退移除。
+- 历史文件读取需要容忍坏行，写入需要保持最新记录在前并控制文件规模。
+
 ## 下一阶段候选
 
-- 阶段 26：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖任务运行历史数据模型、批量 API 状态字段或仪表盘历史摘要边界。
+- 阶段 27：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖批量 API 状态字段、仪表盘历史摘要或任务运行失败历史收尾边界。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

@@ -10,7 +10,7 @@
 - 业务读取优先走 `fls_manager/models.py` 或 `fls_manager/config.py`。
 - 新增字段必须提供默认值；删除旧字段时先在读取时迁移，不能直接让旧数据报错。
 - 环境隔离测试必须在导入 `fls_manager.*` 前设置临时 `FLS_BASE_DIR`。
-- 当前读取时会规范化 `tasks.json`、`global_env.json`、`proxies.json`、`collections.json`；配置读取由 `normalize_config_data()` 规范化返回值。
+- 当前读取时会规范化 `tasks.json`、`task_history.json`、`global_env.json`、`proxies.json`、`collections.json`；配置读取由 `normalize_config_data()` 规范化返回值。
 
 ## data/tasks.json
 
@@ -49,6 +49,35 @@
 - 旧字段 `retry_count` 会迁移为 `retry.attempts`，写回时移除旧字段；新任务默认 `retry.interval_seconds=60`。
 - `random_delay.seconds`、`retry.attempts`、`retry.interval_seconds`、`run_count` 会转整数并钳制到有效范围。
 - `enabled`、`pinned` 支持布尔、数字和常见字符串值。
+
+## data/task_history.json
+
+类型：任务运行历史对象数组。
+
+规范字段：
+
+- `id`：字符串，历史记录 ID。
+- `task_id`：字符串，任务 ID。
+- `task_name`：字符串，任务名快照。
+- `command`：字符串，任务命令快照。
+- `status`：字符串，常见值包括 `success`、`failed`、`timeout`、`stopped`、`running`、`starting`、`delaying`、`start_failed`。
+- `source`：字符串，运行来源，例如 `manual`、`cron`、`retry`。
+- `retry_attempt`：整数，当前重试次数。
+- `max_retries`：整数，最大重试次数。
+- `start_at` / `end_at`：字符串，开始和结束时间。
+- `duration_seconds`：数字或整数，耗时秒数。
+- `return_code`：整数或 `null`。
+- `log_file`：字符串，日志文件路径。
+- `message`：字符串，状态说明。
+
+读取和写入规则：
+
+- 非数组数据读取为空数组。
+- 非对象历史记录读取时会被过滤。
+- `save_task_history()` 最多保留最近 `500` 条记录。
+- `add_task_history()` 会把新记录插入到数组开头并按上限裁剪。
+- `update_task_history()` 按 `id` 更新第一条匹配记录；找不到或传空 ID 时返回 `False`。
+- `task_history_for_task(task_id, limit)` 按 `task_id` 过滤并按传入上限返回，最少返回上限为 `1`。
 
 ## data/config.json
 
