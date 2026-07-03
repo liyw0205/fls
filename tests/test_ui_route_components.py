@@ -580,6 +580,74 @@ class UiRouteComponentTests(unittest.TestCase):
             )
             self.assertNotIn("example.invalid", html)
 
+    def test_history_page_filters_rows_and_escapes_history_fields(self):
+        with isolated_app() as (app, base_dir):
+            data_dir = base_dir / "data"
+            log_dir = base_dir / "log"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            log_dir.mkdir(parents=True, exist_ok=True)
+            alpha_log = log_dir / "alpha-history.log"
+            alpha_log.write_text("alpha\n", encoding="utf-8")
+            (data_dir / "task_history.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "h1",
+                            "task_id": "alpha",
+                            "task_name": "Alpha <x>",
+                            "command": "task alpha.py --arg <x>",
+                            "status": "success",
+                            "start_at": "2026-07-04 02:00:00",
+                            "end_at": "2026-07-04 02:00:03",
+                            "duration_seconds": 3,
+                            "return_code": 0,
+                            "source": "manual",
+                            "retry_attempt": 1,
+                            "max_retries": 3,
+                            "message": "done <ok>",
+                            "log_file": str(alpha_log),
+                        },
+                        {
+                            "id": "h2",
+                            "task_id": "beta",
+                            "task_name": "Beta",
+                            "command": "task beta.py",
+                            "status": "failed",
+                            "source": "cron",
+                            "message": "hidden",
+                        },
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            response = app.test_client().get(
+                "/history?q=Alpha%20%3Cx%3E&status=success",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">运行历史</div>', html)
+            self.assertIn("当前匹配 <b>1</b> 条", html)
+            self.assertIn('name="q" value="Alpha &lt;x&gt;"', html)
+            self.assertIn('<option value="success" selected>成功</option>', html)
+            self.assertIn("Alpha &lt;x&gt;", html)
+            self.assertIn("task alpha.py --arg &lt;x&gt;", html)
+            self.assertIn('<span class="badge green">成功</span>', html)
+            self.assertIn("<td>manual</td>", html)
+            self.assertIn("<td>1/3</td>", html)
+            self.assertIn("<td>done &lt;ok&gt;</td>", html)
+            self.assertIn(
+                'href="/logfile/alpha-history.log?back=/history"',
+                html,
+            )
+            self.assertNotIn("Alpha <x>", html)
+            self.assertNotIn("done <ok>", html)
+            self.assertNotIn("Beta", html)
+            self.assertNotIn("hidden", html)
+
     def test_deps_page_renders_table_card_and_escapes_rows(self):
         with isolated_app() as (app, _base_dir):
             packages = [
