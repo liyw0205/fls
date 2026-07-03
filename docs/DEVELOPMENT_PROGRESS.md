@@ -1458,8 +1458,51 @@
 - 脚本操作失败路径现在和其它表单页一致，使用明显错误卡片而不是普通灰色提示。
 - 写入或改名异常不会让用户刚输入的内容从页面上丢失。
 
+## 阶段 34：合集加入任务兼容边界
+
+状态：已完成
+
+目标：
+
+- 继续收束原长期脏文件中合集任务操作相关的兼容边界。
+- 固化合集“放入任务”对多选 `task_ids` 和旧单选 `task_id` 的兼容行为。
+- 保证重复选择会去重，混入不存在任务时不会部分写入。
+
+已完成：
+
+- 更新 `fls_manager/routes/tasks/collections.py`：
+  - 新增 `_collection_task_ids_from_form()`，集中解析加入合集表单中的任务 ID。
+  - 同时接受 `task_ids` 多选字段和旧版 `task_id` 单选字段。
+  - 去除空值和重复 ID，保持空选择重定向行为。
+  - 保留所有选择 ID 必须存在的校验，缺失任务时返回 404 且不进入写入循环。
+- 扩展 `tests/test_bulk_workflows.py`：
+  - 覆盖 `task_ids` 与 `task_id` 同时存在时去重并正确加入合集。
+  - 覆盖仅提交旧版 `task_id` 字段时仍能加入合集。
+  - 覆盖选择中包含不存在任务时返回 404，且已有任务不会被部分加入合集。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 34。
+  - 记录阶段 34 对合集加入任务兼容边界的固化。
+
+验证记录：
+
+- `python -B -m unittest tests.test_bulk_workflows`：通过，10 tests OK。
+- `python -B -m unittest discover -s tests`：通过，132 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有改变合集批量操作 API、合集页批量工具栏或任务排序语义，只固化加入任务表单解析和异常边界。
+
+收束结论：
+
+- 合集加入任务入口现在对旧表单和新多选表单都有明确测试约束。
+- 混入无效任务 ID 时不会出现一部分任务已被加入、一部分失败的状态。
+
 ## 下一阶段候选
 
-- 阶段 34：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界或更多错误提示渲染。
+- 阶段 35：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界或更多错误提示渲染。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

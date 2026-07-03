@@ -535,6 +535,28 @@ def _collection_form(item=None):
 """
 
 
+def _collection_task_ids_from_form():
+    raw_ids = list(request.form.getlist("task_ids"))
+    legacy_id = request.form.get("task_id", "").strip()
+
+    if legacy_id:
+        raw_ids.append(legacy_id)
+
+    task_ids = []
+    seen = set()
+
+    for raw_task_id in raw_ids:
+        task_id = str(raw_task_id or "").strip()
+
+        if not task_id or task_id in seen:
+            continue
+
+        seen.add(task_id)
+        task_ids.append(task_id)
+
+    return task_ids
+
+
 @bp.route("/collections")
 def collections_page():
     q = request.args.get("q", "").strip()
@@ -830,18 +852,7 @@ def collection_add_task(collection_id):
     if not collection:
         abort(404)
 
-    task_ids = []
-    seen = set()
-
-    for raw_task_id in request.form.getlist("task_ids") or [request.form.get("task_id", "")]:
-        task_id = str(raw_task_id or "").strip()
-
-        if not task_id or task_id in seen:
-            continue
-
-        seen.add(task_id)
-        task_ids.append(task_id)
-
+    task_ids = _collection_task_ids_from_form()
     if not task_ids:
         return redirect(get_back_url("/collections"))
 

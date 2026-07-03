@@ -342,6 +342,100 @@ class BulkWorkflowTests(unittest.TestCase):
             self.assertIn("flsCollectionTaskBulkAction", html)
             self.assertIn("flsBulkActionMessage(json", html)
 
+    def test_collection_add_task_keeps_legacy_task_id_compatibility_and_dedupes(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.COLLECTION_FILE,
+                [
+                    {
+                        "id": "c1",
+                        "name": "合集一",
+                        "remark": "",
+                        "created_at": "2026-07-04 00:00:00",
+                        "updated_at": "2026-07-04 00:00:00",
+                    }
+                ],
+            )
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1"),
+                    sample_task("t2"),
+                    sample_task("t3"),
+                ],
+            )
+
+            response = app.test_client().post(
+                "/collection/add-task/c1",
+                data={
+                    "task_ids": ["t1", "t1", "t2"],
+                    "task_id": "t2",
+                },
+                headers={"X-Token": TOKEN},
+            )
+
+            self.assertEqual(response.status_code, 302)
+
+            tasks = {task["id"]: task for task in read_json(base_dir / "data" / "tasks.json")}
+            self.assertEqual(tasks["t1"]["collection_id"], "c1")
+            self.assertEqual(tasks["t2"]["collection_id"], "c1")
+            self.assertEqual(tasks["t3"]["collection_id"], "")
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1"),
+                    sample_task("t2"),
+                ],
+            )
+
+            response = app.test_client().post(
+                "/collection/add-task/c1",
+                data={"task_id": "t1"},
+                headers={"X-Token": TOKEN},
+            )
+
+            self.assertEqual(response.status_code, 302)
+
+            tasks = {task["id"]: task for task in read_json(base_dir / "data" / "tasks.json")}
+            self.assertEqual(tasks["t1"]["collection_id"], "c1")
+            self.assertEqual(tasks["t2"]["collection_id"], "")
+
+    def test_collection_add_task_missing_task_aborts_without_partial_write(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.COLLECTION_FILE,
+                [
+                    {
+                        "id": "c1",
+                        "name": "合集一",
+                        "remark": "",
+                        "created_at": "2026-07-04 00:00:00",
+                        "updated_at": "2026-07-04 00:00:00",
+                    }
+                ],
+            )
+            original_tasks = [
+                sample_task("t1"),
+                sample_task("t2"),
+            ]
+            write_json(paths.TASK_FILE, original_tasks)
+
+            response = app.test_client().post(
+                "/collection/add-task/c1",
+                data={"task_ids": ["t1", "missing"]},
+                headers={"X-Token": TOKEN},
+            )
+
+            self.assertEqual(response.status_code, 404)
+            tasks = {task["id"]: task for task in read_json(base_dir / "data" / "tasks.json")}
+            self.assertEqual(tasks["t1"]["collection_id"], "")
+            self.assertEqual(tasks["t2"]["collection_id"], "")
+
     def test_collection_task_cards_keep_post_actions_collapsed_command_and_anchor_back(self):
         with isolated_app() as (app, _base_dir):
             from fls_manager import paths
