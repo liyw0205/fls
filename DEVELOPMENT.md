@@ -1,7 +1,7 @@
 # FLS 开发文档
 
 更新时间：2026-07-04
-基线：`main` / 阶段 29
+基线：`main` / 阶段 30
 
 本文用于后续开发协作。每次完成开发后，都要同步更新本文的“开发日志”和“后续方向”，必要时同步调整架构、数据模型、接口和验证清单。
 
@@ -472,6 +472,7 @@ python -B -m compileall fls-manager.py fls_manager tests tools
 - 阶段 27 固化仪表盘历史摘要：最近运行和最近异常继续展示任务历史、状态徽标、说明和日志链接，历史记录中的用户可控文本继续 HTML 转义。
 - 阶段 28 增强批量任务 API 状态字段：`/api/task/bulk-action` 保留 `ok/msg`，新增 `action/count` 以及启用、禁用、取出、删除、运行、停止对应的结构化计数和失败明细。
 - 阶段 29 固化任务启动失败历史收尾：`_start_task_worker()` 在 `Popen` 启动失败时继续写入 `start_failed` 历史、记录失败日志、关闭日志句柄并清理运行态。
+- 阶段 30 固化任务失败不重试通知边界：`task_finish_watcher()` 在失败且未计划重试时继续写入 `failed` 历史、保留退出码和消息，并发送任务完成通知。
 - 阶段 15 继续低风险消息卡接入：`fls_manager/routes/tasks/config_file.py` 的任务配置保存结果统一使用 `message_card()`，保留成功/失败加粗色彩和空消息不渲染行为。
 - 阶段 15 扩展 `tests/test_ui_route_components.py`，覆盖 `/task/config/<id>` 保存成功提示、写入失败提示和错误消息 HTML 转义。
 - 阶段 15 避开已有长期脏改动的任务列表、日志、认证/API 和 `ui/tables.py`，只触碰未脏的任务配置文件路由。

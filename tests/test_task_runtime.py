@@ -599,6 +599,90 @@ class TaskRuntimeTests(unittest.TestCase):
             send_by_ids.assert_called_once_with("Demo", "script output", ["n1"])
             self.assertIn("通知结果", log_file.read_text(encoding="utf-8"))
 
+    def test_finish_watcher_records_failed_history_and_notifies_without_retry(self):
+        with isolated_fls_modules():
+            from fls_manager import paths, task_runner
+
+            log_file = Path(os.environ["FLS_BASE_DIR"]) / "log" / "failed-notify.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_fp = open(log_file, "ab", buffering=0)
+            task_runner.RUNNING["t1"] = {
+                "status": "running",
+                "process": FakeProc(7),
+                "log_file": str(log_file),
+                "log_fp": log_fp,
+            }
+            write_json(
+                paths.TASK_HISTORY_FILE,
+                [
+                    {
+                        "id": "history-1",
+                        "task_id": "t1",
+                        "task_name": "Broken Task",
+                        "status": "running",
+                        "start_at": "2026-07-04 06:10:00",
+                        "message": "运行中",
+                    }
+                ],
+            )
+
+            with mock.patch.object(
+                task_runner,
+                "load_config",
+                return_value={"task_timeout_seconds": 0},
+            ), mock.patch.object(
+                task_runner,
+                "schedule_task_retry",
+                return_value=(False, ""),
+            ) as schedule_retry, mock.patch.object(
+                task_runner,
+                "tail_file",
+                return_value=(
+                    "===== 启动任务: Broken Task =====\n"
+                    "============================================================\n"
+                    "failure output\n"
+                    "===== 任务已结束: now ====="
+                ),
+            ), mock.patch.object(
+                task_runner,
+                "send_by_ids",
+                return_value=[{"name": "One", "ok": True, "msg": "ok"}],
+            ) as send_by_ids, mock.patch.object(
+                task_runner,
+                "now_str",
+                return_value="2026-07-04 06:10:07",
+            ):
+                task_runner.task_finish_watcher(
+                    "t1",
+                    {
+                        "id": "t1",
+                        "name": "Broken Task",
+                        "notify": {"mode": "custom", "ids": ["n1"]},
+                    },
+                    FakeProc(7),
+                    str(log_file),
+                    log_fp,
+                    "history-1",
+                    100.0,
+                    0,
+                )
+
+            self.assertNotIn("t1", task_runner.RUNNING)
+            schedule_retry.assert_called_once()
+            send_by_ids.assert_called_once_with("Broken Task", "failure output", ["n1"])
+
+            history = read_json(paths.TASK_HISTORY_FILE)
+            self.assertEqual(history[0]["status"], "failed")
+            self.assertEqual(history[0]["return_code"], 7)
+            self.assertEqual(history[0]["message"], "退出码 7")
+            self.assertEqual(history[0]["end_at"], "2026-07-04 06:10:07")
+            self.assertEqual(history[0]["log_file"], str(log_file))
+
+            text = log_file.read_text(encoding="utf-8")
+            self.assertIn("退出码: 7", text)
+            self.assertIn("通知结果", text)
+            self.assertIn("One: 成功 - ok", text)
+
     def test_finish_watcher_retries_failed_attempt_before_notification(self):
         with isolated_fls_modules():
             from fls_manager import task_runner

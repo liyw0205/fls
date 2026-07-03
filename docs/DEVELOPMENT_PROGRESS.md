@@ -1287,8 +1287,47 @@
 - 任务启动失败应作为完整运行历史收尾，不应停留在 `starting`。
 - 启动失败路径需要同时维护历史记录、任务日志、日志句柄和 `RUNNING` 状态清理。
 
+## 阶段 30：任务失败不重试通知边界回归测试
+
+状态：已完成
+
+目标：
+
+- 继续收束原长期脏文件中任务运行失败、历史记录和通知出口相关的旧实现回退。
+- 固化 `task_finish_watcher()` 在任务失败且未计划重试时的收尾行为。
+- 防止失败任务跳过通知、缺失 `failed` 历史、丢失退出码或仍被误判为待重试。
+
+已完成：
+
+- 扩展 `tests/test_task_runtime.py`：
+  - 模拟任务进程返回非零退出码且 `schedule_task_retry()` 不计划重试。
+  - 覆盖 `task_history.json` 写入 `failed` 状态、退出码、结束时间、日志路径和失败消息。
+  - 覆盖失败任务仍使用用户脚本日志内容发送通知。
+  - 覆盖 `RUNNING` 运行态清理，以及任务日志继续记录退出码和通知结果。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 30。
+  - 记录阶段 30 对任务失败不重试通知边界的回归测试。
+
+验证记录：
+
+- `python -B -m unittest tests.test_task_runtime`：通过，21 tests OK。
+- `python -B -m unittest discover -s tests`：通过，124 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段只补任务失败不重试通知边界回归测试，没有改动任务运行时代码或通知实现。
+
+收束结论：
+
+- 失败任务只有在已经计划重试时才应跳过完成通知。
+- 未计划重试的失败任务需要完整收尾历史和日志，并继续按任务通知配置发送结果。
+
 ## 下一阶段候选
 
-- 阶段 30：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖错误提示渲染、任务运行失败通知边界或批量 API 前端消费。
+- 阶段 31：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖错误提示渲染或批量 API 前端消费。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
