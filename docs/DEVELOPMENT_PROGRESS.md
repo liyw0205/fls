@@ -611,9 +611,54 @@
 - 路由中应显式维护消息状态，不应依赖中文文案包含“成功”来推断样式。
 - `summary_item()` 仍可作为后续小范围候选，但当前复用收益较低。
 
+## 阶段 14：在线脚本摘要项组件抽取
+
+状态：已完成
+
+目标：
+
+- 抽取小粒度 `summary_item(label, value)`。
+- 只替换在线脚本页 3 个同构 `.fls-summary-item`。
+- 保留外层 `.fls-summary-grid`，不抽通用 summary grid。
+
+已完成：
+
+- 在 `fls_manager/ui/components.py` 新增 `summary_item(label, value)`：
+  - 输出 `.fls-summary-item`、`.fls-summary-label`、`.fls-summary-num` 结构。
+  - 统一对 label 和 value 做 HTML escape。
+  - 支持数字 value。
+- 更新 `fls_manager/routes/online_scripts/_common.py`：
+  - 将 `summary_item()` 暴露给在线脚本子路由。
+- 更新 `fls_manager/routes/online_scripts/pages.py`：
+  - 替换“缓存脚本数”“可导入任务”“有安装命令”三个统计项。
+  - 保留外层 `.fls-summary-grid` 和页面其它结构。
+- 扩展 `tests/test_ui_components.py`：
+  - 覆盖 `summary_item()` 输出结构。
+  - 覆盖 label/value HTML 转义。
+  - 覆盖数字 value 渲染。
+- 子代理尝试并行审查 `summary_item()` 与未脏页面候选，但本轮两个子代理均因 429 限流失败；主代理按阶段 13 交接文档和现有代码完成低风险实现。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_components`：通过，11 tests OK。
+- `python -B -m unittest discover -s tests`：通过，96 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有触碰任务、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
+- `summary_item()` 当前只在在线脚本页复用；任务页的 `.fls-summary-item` 结构更复杂，仍不接入。
+
+组件策略结论：
+
+- `summary_item()` 只负责最小 label/value 统计项，不承担网格布局职责。
+- 不抽通用 `summary_grid`，避免把结构差异较大的页面硬统一。
+- 后续组件抽取继续优先选择未脏文件和纯文本/稳定结构，避免复杂 JS 状态。
+
 ## 下一阶段候选
 
-- 阶段 14：可选小范围抽取 `summary_item(label, value)`，只替换在线脚本页 3 个统计 item，保留外层 `.fls-summary-grid`。
-- 继续查找未脏页面中的纯文本提示卡，避免复杂 JS 状态、富文本结果和带按钮的完整错误页。
+- 阶段 15：继续查找未脏页面中的纯文本提示卡，避免复杂 JS 状态、富文本结果和带按钮的完整错误页。
+- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/online-scripts` 的摘要项和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
-- 有浏览器环境时补真实响应式截图验收。

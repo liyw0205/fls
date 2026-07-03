@@ -66,6 +66,15 @@ def message_card(message, kind="info", strong=False, title=""):
 """
 
 
+def summary_item(label, value):
+    return f"""
+<div class="fls-summary-item">
+    <div class="fls-summary-label">{h(label)}</div>
+    <div class="fls-summary-num">{h(value)}</div>
+</div>
+"""
+
+
 def pagination_card(
     page,
     pages,
