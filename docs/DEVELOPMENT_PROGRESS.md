@@ -1200,8 +1200,55 @@
 - 仪表盘应继续把 `task_history.json` 的最近运行和异常历史作为首页可见摘要。
 - 历史摘要中的任务名、说明和日志入口属于用户可见数据，必须持续保持转义与安全站内链接。
 
+## 阶段 28：批量任务 API 状态字段
+
+状态：已完成
+
+目标：
+
+- 继续收束原长期脏文件中批量任务操作相关的 API 行为。
+- 让 `/api/task/bulk-action` 在保留 `ok` / `msg` 兼容字段的同时，返回脚本客户端和前端可直接使用的结构化状态字段。
+- 覆盖批量启用/禁用、取出合集、删除、运行和停止时的计数、跳过和失败明细。
+
+已完成：
+
+- 更新 `fls_manager/routes/api.py`：
+  - 新增 `_bulk_payload()`，统一批量成功响应的 `action`、`count` 和扩展字段。
+  - 批量启用/禁用、取出合集返回 `updated_count`。
+  - 批量删除返回 `deleted_count`。
+  - 批量运行返回 `submitted_count`、`failed_count` 和 `failures`。
+  - 批量停止返回 `stopped_count`、`skipped_count`、`failed_count` 和 `failures`。
+  - 未知操作、空选择和任务缺失错误也返回 `action` / `count`，任务缺失时额外返回 `missing_count` / `missing_ids`。
+- 扩展 `tests/test_bulk_workflows.py`：
+  - 覆盖重复任务 ID 去重后的 `count`。
+  - 覆盖批量禁用、取出合集、删除的结构化计数字段。
+  - 覆盖批量运行的提交成功数、失败数和失败明细。
+  - 覆盖批量停止的结束数、跳过数、失败数和失败明细。
+  - 覆盖空选择错误仍返回 `action` 和 `count`。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 28。
+  - 记录批量任务 API 响应字段约定和阶段 28 开发日志。
+
+验证记录：
+
+- `python -B -m unittest tests.test_bulk_workflows`：通过，8 tests OK。
+- `python -B -m unittest discover -s tests`：通过，122 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段只扩展批量任务 API 的 JSON 字段，没有调整任务列表或合集页前端交互。
+
+收束结论：
+
+- 批量任务 API 客户端不应解析中文 `msg` 来判断局部成功、跳过或失败。
+- 后续改动需要继续保留 `ok` / `msg` 兼容字段，并维护新增结构化字段的稳定性。
+
 ## 下一阶段候选
 
-- 阶段 28：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖批量 API 状态字段、任务运行失败历史收尾或错误提示渲染边界。
+- 阶段 29：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖任务运行失败历史收尾或错误提示渲染边界。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

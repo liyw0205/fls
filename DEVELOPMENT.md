@@ -1,7 +1,7 @@
 # FLS 开发文档
 
 更新时间：2026-07-04
-基线：`main` / 阶段 27
+基线：`main` / 阶段 28
 
 本文用于后续开发协作。每次完成开发后，都要同步更新本文的“开发日志”和“后续方向”，必要时同步调整架构、数据模型、接口和验证清单。
 
@@ -124,7 +124,7 @@ sh fls.sh log
 - `fls_manager/routes/runtime.py`：Node 等运行时安装。
 - `fls_manager/routes/status.py`：环境状态页。
 - `fls_manager/routes/about/`：版本、更新、面板控制、时间同步。
-- `fls_manager/routes/api.py`：任务状态、调度器状态、任务动作 API。
+- `fls_manager/routes/api.py`：任务状态、调度器状态、任务动作和批量任务 API。
 
 Blueprint 约定：
 
@@ -227,6 +227,7 @@ CSRF 约定：
 开发注意：
 
 - 新增 API 应让错误响应保持 JSON。
+- `/api/task/bulk-action` 应保持 `ok` / `msg` 兼容字段，并返回 `action`、`count` 及对应动作的结构化计数字段，便于前端和脚本客户端判断局部成功、跳过和失败。
 - 新增页面应走统一 `layout()`，避免绕过鉴权流程。
 - 新增 POST 表单应使用 `method="post"` 并让 `layout()` 自动注入 CSRF；不要手写 GET 破坏性链接。
 - 返回跳转 URL 时优先使用 `utils.get_back_url()` 或等价校验，避免开放重定向。
@@ -469,6 +470,7 @@ python -B -m compileall fls-manager.py fls_manager tests tools
 - 阶段 25 固化全局运行历史页：关键词和状态筛选继续生效，历史表格展示状态、来源、重试、说明和日志链接，用户可控历史字段继续 HTML 转义。
 - 阶段 26 固化任务运行历史数据模型：历史读取过滤坏行，更新按 ID 写回，新增记录插入顶部并按上限裁剪，按任务筛选继续可用；同步补充 `task_history.json` schema 文档。
 - 阶段 27 固化仪表盘历史摘要：最近运行和最近异常继续展示任务历史、状态徽标、说明和日志链接，历史记录中的用户可控文本继续 HTML 转义。
+- 阶段 28 增强批量任务 API 状态字段：`/api/task/bulk-action` 保留 `ok/msg`，新增 `action/count` 以及启用、禁用、取出、删除、运行、停止对应的结构化计数和失败明细。
 - 阶段 15 继续低风险消息卡接入：`fls_manager/routes/tasks/config_file.py` 的任务配置保存结果统一使用 `message_card()`，保留成功/失败加粗色彩和空消息不渲染行为。
 - 阶段 15 扩展 `tests/test_ui_route_components.py`，覆盖 `/task/config/<id>` 保存成功提示、写入失败提示和错误消息 HTML 转义。
 - 阶段 15 避开已有长期脏改动的任务列表、日志、认证/API 和 `ui/tables.py`，只触碰未脏的任务配置文件路由。

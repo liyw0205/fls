@@ -114,7 +114,8 @@ class BulkWorkflowTests(unittest.TestCase):
                 )
 
             self.assertEqual(response.status_code, 200)
-            self.assertTrue(response.get_json()["ok"])
+            payload = response.get_json()
+            self.assertTrue(payload["ok"])
             reload_scheduler.assert_called_once()
 
             tasks = read_json(base_dir / "data" / "tasks.json")
@@ -150,7 +151,11 @@ class BulkWorkflowTests(unittest.TestCase):
                 )
 
             self.assertEqual(response.status_code, 200)
-            self.assertTrue(response.get_json()["ok"])
+            payload = response.get_json()
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["action"], "disable")
+            self.assertEqual(payload["count"], 2)
+            self.assertEqual(payload["updated_count"], 2)
             reload_scheduler.assert_called_once()
 
             tasks = {task["id"]: task for task in read_json(base_dir / "data" / "tasks.json")}
@@ -165,7 +170,11 @@ class BulkWorkflowTests(unittest.TestCase):
             )
 
             self.assertEqual(response.status_code, 200)
-            self.assertTrue(response.get_json()["ok"])
+            payload = response.get_json()
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["action"], "clear_collection")
+            self.assertEqual(payload["count"], 2)
+            self.assertEqual(payload["updated_count"], 2)
 
             tasks = {task["id"]: task for task in read_json(base_dir / "data" / "tasks.json")}
             self.assertEqual(tasks["t1"]["collection_id"], "")
@@ -181,13 +190,94 @@ class BulkWorkflowTests(unittest.TestCase):
                     )
 
             self.assertEqual(response.status_code, 200)
-            self.assertTrue(response.get_json()["ok"])
+            payload = response.get_json()
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["action"], "delete")
+            self.assertEqual(payload["count"], 2)
+            self.assertEqual(payload["deleted_count"], 2)
             self.assertEqual(stop_task_now.call_count, 2)
             reload_scheduler.assert_called_once()
             self.assertEqual(
                 [task["id"] for task in read_json(base_dir / "data" / "tasks.json")],
                 ["t3"],
             )
+
+    def test_task_bulk_run_and_stop_return_structured_status_fields(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1"),
+                    sample_task("t2"),
+                    sample_task("t3"),
+                ],
+            )
+
+            client = app.test_client()
+
+            def fake_run_task(task_id, source="manual"):
+                results = {
+                    "t1": (True, "已提交启动"),
+                    "t2": (False, "任务已在运行"),
+                    "t3": (False, "命令为空"),
+                }
+                return results[task_id]
+
+            with patch(
+                "fls_manager.routes.api.run_task_now",
+                side_effect=fake_run_task,
+            ) as run_task_now:
+                response = client.post(
+                    "/api/task/bulk-action",
+                    json={"action": "run", "task_ids": ["t1", "t2", "t3"]},
+                    headers={"X-Token": TOKEN},
+                )
+
+            payload = response.get_json()
+
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["action"], "run")
+            self.assertEqual(payload["count"], 3)
+            self.assertEqual(payload["submitted_count"], 1)
+            self.assertEqual(payload["failed_count"], 2)
+            self.assertEqual(
+                payload["failures"],
+                ["Task t2: 任务已在运行", "Task t3: 命令为空"],
+            )
+            self.assertEqual(run_task_now.call_count, 3)
+
+            def fake_stop_task(task_id):
+                results = {
+                    "t1": (True, "已结束"),
+                    "t2": (False, "任务未运行"),
+                    "t3": (False, "停止失败"),
+                }
+                return results[task_id]
+
+            with patch(
+                "fls_manager.routes.api.stop_task_now",
+                side_effect=fake_stop_task,
+            ) as stop_task_now:
+                response = client.post(
+                    "/api/task/bulk-action",
+                    json={"action": "stop", "task_ids": ["t1", "t2", "t3"]},
+                    headers={"X-Token": TOKEN},
+                )
+
+            payload = response.get_json()
+
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["action"], "stop")
+            self.assertEqual(payload["count"], 3)
+            self.assertEqual(payload["stopped_count"], 1)
+            self.assertEqual(payload["skipped_count"], 1)
+            self.assertEqual(payload["failed_count"], 1)
+            self.assertEqual(payload["failures"], ["Task t3: 停止失败"])
+            self.assertEqual(stop_task_now.call_count, 3)
 
     def test_task_bulk_rejects_empty_selection(self):
         with isolated_app() as (app, _base_dir):
@@ -198,7 +288,10 @@ class BulkWorkflowTests(unittest.TestCase):
             )
 
             self.assertEqual(response.status_code, 400)
-            self.assertFalse(response.get_json()["ok"])
+            payload = response.get_json()
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["action"], "enable")
+            self.assertEqual(payload["count"], 0)
 
     def test_collection_add_task_accepts_multiple_task_ids(self):
         with isolated_app() as (app, base_dir):

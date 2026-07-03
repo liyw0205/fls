@@ -55,6 +55,18 @@ def _copy_task(tasks, task_id):
     return None
 
 
+def _bulk_payload(action, task_ids, msg, **extra):
+    payload = {
+        "ok": True,
+        "msg": msg,
+        "action": action,
+        "count": len(task_ids),
+    }
+    payload.update(extra)
+
+    return payload
+
+
 @bp.route("/api/status")
 def api_status():
     result = []
@@ -207,10 +219,20 @@ def api_task_bulk_action():
         task_ids = _unique_task_ids(raw_task_ids)
 
         if action not in ("enable", "disable", "run", "stop", "delete", "clear_collection"):
-            return jsonify({"ok": False, "msg": "未知批量操作"}), 400
+            return jsonify({
+                "ok": False,
+                "msg": "未知批量操作",
+                "action": action,
+                "count": len(task_ids),
+            }), 400
 
         if not task_ids:
-            return jsonify({"ok": False, "msg": "请选择任务"}), 400
+            return jsonify({
+                "ok": False,
+                "msg": "请选择任务",
+                "action": action,
+                "count": 0,
+            }), 400
 
         tasks = load_tasks()
         task_map = {str(task.get("id") or ""): task for task in tasks}
@@ -220,6 +242,10 @@ def api_task_bulk_action():
             return jsonify({
                 "ok": False,
                 "msg": f"有 {len(missing)} 个任务不存在，请刷新后重试",
+                "action": action,
+                "count": len(task_ids),
+                "missing_count": len(missing),
+                "missing_ids": missing,
             }), 404
 
         selected = set(task_ids)
@@ -235,10 +261,12 @@ def api_task_bulk_action():
             save_tasks(tasks)
             reload_scheduler()
 
-            return jsonify({
-                "ok": True,
-                "msg": f"已{'启用' if enabled else '禁用'} {len(task_ids)} 个任务",
-            })
+            return jsonify(_bulk_payload(
+                action,
+                task_ids,
+                f"已{'启用' if enabled else '禁用'} {len(task_ids)} 个任务",
+                updated_count=len(task_ids),
+            ))
 
         if action == "run":
             ok_count = 0
@@ -259,7 +287,14 @@ def api_task_bulk_action():
                 if len(failed) > 3:
                     parts.append(f"等 {len(failed)} 个")
 
-            return jsonify({"ok": True, "msg": "；".join(parts)})
+            return jsonify(_bulk_payload(
+                action,
+                task_ids,
+                "；".join(parts),
+                submitted_count=ok_count,
+                failed_count=len(failed),
+                failures=failed,
+            ))
 
         if action == "stop":
             ok_count = 0
@@ -285,7 +320,15 @@ def api_task_bulk_action():
                 if len(failed) > 3:
                     parts.append(f"等 {len(failed)} 个")
 
-            return jsonify({"ok": True, "msg": "；".join(parts)})
+            return jsonify(_bulk_payload(
+                action,
+                task_ids,
+                "；".join(parts),
+                stopped_count=ok_count,
+                skipped_count=skipped,
+                failed_count=len(failed),
+                failures=failed,
+            ))
 
         if action == "delete":
             for task_id in task_ids:
@@ -299,10 +342,12 @@ def api_task_bulk_action():
             save_tasks(tasks)
             reload_scheduler()
 
-            return jsonify({
-                "ok": True,
-                "msg": f"已删除 {len(task_ids)} 个任务",
-            })
+            return jsonify(_bulk_payload(
+                action,
+                task_ids,
+                f"已删除 {len(task_ids)} 个任务",
+                deleted_count=len(task_ids),
+            ))
 
         if action == "clear_collection":
             for task in tasks:
@@ -312,10 +357,12 @@ def api_task_bulk_action():
 
             save_tasks(tasks)
 
-            return jsonify({
-                "ok": True,
-                "msg": f"已取出 {len(task_ids)} 个任务",
-            })
+            return jsonify(_bulk_payload(
+                action,
+                task_ids,
+                f"已取出 {len(task_ids)} 个任务",
+                updated_count=len(task_ids),
+            ))
 
         return jsonify({"ok": False, "msg": "未知批量操作"}), 400
 
