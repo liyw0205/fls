@@ -166,6 +166,82 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn('style="color:#18a058;font-weight:800;"', html)
             self.assertIn("文件导入成功", html)
 
+    def test_task_config_save_success_renders_message_card(self):
+        with isolated_app() as (app, base_dir):
+            tasks_file = base_dir / "data" / "tasks.json"
+            tasks_file.parent.mkdir(parents=True, exist_ok=True)
+            tasks_file.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "task-config",
+                            "name": "配置任务",
+                            "command": "task demo.py",
+                            "config_path": "conf/app.yml",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            response = app.test_client().post(
+                "/task/config/task-config",
+                data={"content": "key: value\n"},
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('style="color:#18a058;font-weight:800;"', html)
+            self.assertIn("保存成功", html)
+            self.assertEqual(
+                (base_dir / "scripts" / "conf" / "app.yml").read_text(
+                    encoding="utf-8"
+                ),
+                "key: value\n",
+            )
+
+    def test_task_config_save_failure_escapes_message_card(self):
+        with isolated_app() as (app, base_dir):
+            tasks_file = base_dir / "data" / "tasks.json"
+            tasks_file.parent.mkdir(parents=True, exist_ok=True)
+            tasks_file.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "task-config",
+                            "name": "配置任务",
+                            "command": "task demo.py",
+                            "config_path": "conf/app.yml",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            real_write_text = Path.write_text
+
+            def fail_config_write(path, *args, **kwargs):
+                if path.name == "app.yml":
+                    raise RuntimeError('<bad & "x">')
+
+                return real_write_text(path, *args, **kwargs)
+
+            with patch("pathlib.Path.write_text", new=fail_config_write):
+                response = app.test_client().post(
+                    "/task/config/task-config",
+                    data={"content": "key: value\n"},
+                    headers={"X-Token": TOKEN},
+                )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('style="color:#dc2626;font-weight:800;"', html)
+            self.assertIn("保存失败：&lt;bad &amp; &quot;x&quot;&gt;", html)
+            self.assertNotIn("<bad", html)
+
     def test_online_script_doc_error_renders_escaped_message_card(self):
         with isolated_app() as (app, base_dir):
             cache_file = base_dir / "data" / "online_scripts_cache.json"
