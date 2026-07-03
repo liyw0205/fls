@@ -304,6 +304,82 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn('name="retry_interval_seconds" type="number" min="5" max="3600" value="90"', html)
             self.assertNotIn('name="retry_count"', html)
 
+    def test_task_new_validation_error_renders_message_card_and_preserves_form(self):
+        with isolated_app() as (app, _base_dir):
+            response = app.test_client().post(
+                "/task/new",
+                data={
+                    "name": 'Bad <task "x">',
+                    "command": "",
+                    "cron": "",
+                    "back": "/tasks?q=bad",
+                    "enabled": "1",
+                },
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 400)
+            self.assertIn('style="color:#dc2626;font-weight:800;"', html)
+            self.assertIn("命令不能为空", html)
+            self.assertIn(
+                'value="Bad &lt;task &quot;x&quot;&gt;"',
+                html,
+            )
+            self.assertIn('name="back" value="/tasks?q=bad"', html)
+            self.assertIn('href="/tasks?q=bad"', html)
+            self.assertNotIn('Bad <task "x">', html)
+
+    def test_task_edit_validation_error_keeps_safe_back_and_does_not_save(self):
+        with isolated_app() as (app, base_dir):
+            data_dir = base_dir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            tasks_file = data_dir / "tasks.json"
+            tasks_file.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "task-edit",
+                            "name": "原任务",
+                            "command": "task demo.py",
+                            "collection_id": "",
+                            "retry": {
+                                "attempts": 1,
+                                "interval_seconds": 30,
+                            },
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            response = app.test_client().post(
+                "/task/edit/task-edit?back=https://example.invalid/evil",
+                data={
+                    "name": 'Cron <bad>',
+                    "command": "task demo.py",
+                    "cron": "* *",
+                    "retry_attempts": "2",
+                    "retry_interval_seconds": "45",
+                    "enabled": "1",
+                },
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+            task = json.loads(tasks_file.read_text(encoding="utf-8"))[0]
+
+            self.assertEqual(response.status_code, 400)
+            self.assertIn('style="color:#dc2626;font-weight:800;"', html)
+            self.assertIn("Cron 不合法：Cron 格式错误", html)
+            self.assertIn('name="back" value="/tasks"', html)
+            self.assertIn('href="/tasks"', html)
+            self.assertIn('value="Cron &lt;bad&gt;"', html)
+            self.assertNotIn("Cron <bad>", html)
+            self.assertEqual(task["name"], "原任务")
+            self.assertEqual(task["retry"], {"attempts": 1, "interval_seconds": 30})
+
     def test_task_edit_saves_retry_and_sanitizes_external_back_url(self):
         with isolated_app() as (app, base_dir):
             data_dir = base_dir / "data"

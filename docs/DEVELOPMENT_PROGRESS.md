@@ -1374,8 +1374,50 @@
 - 批量任务 API 的结构化字段现在已有普通任务页和合集页前端消费路径。
 - 后续如果新增批量动作，应同步扩展 `flsBulkActionMessage()` 和对应 API 字段测试。
 
+## 阶段 32：任务表单错误提示渲染
+
+状态：已完成
+
+目标：
+
+- 继续收束原长期脏文件中错误提示渲染相关的 UI 边界。
+- 让新建/编辑任务校验失败时仍显示完整任务表单，而不是返回纯文本错误。
+- 保留用户已填写内容和安全 `back`，同时确保用户输入继续 HTML 转义。
+
+已完成：
+
+- 更新 `fls_manager/routes/tasks/pages.py`：
+  - 新增 `_task_from_post()`，统一从 POST 表单构建任务草稿。
+  - 新增 `_task_form_error()`，使用 `message_card()` 渲染错误提示并返回任务表单。
+  - 新建任务和编辑任务的必填、Cron、合集校验失败改为返回错误卡片页面，HTTP 状态码仍为 400。
+  - 编辑任务校验失败不会写回 `tasks.json`。
+- 扩展 `tests/test_ui_route_components.py`：
+  - 覆盖新建任务命令为空时渲染错误卡片、保留安全 `back` 和转义任务名。
+  - 覆盖编辑任务 Cron 错误时渲染错误卡片、外部 `back` 清洗回 `/tasks`、保留表单值且不保存。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 32。
+  - 记录阶段 32 对任务表单错误提示渲染的改进。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_route_components`：通过，22 tests OK。
+- `python -B -m unittest discover -s tests`：通过，127 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段只改任务新建/编辑表单的校验错误渲染，没有调整任务保存字段语义。
+
+收束结论：
+
+- 任务表单错误不应脱离后台布局直接返回纯文本。
+- 校验失败路径应保留用户输入、保留安全返回路径，并继续对用户可控字段做 HTML 转义。
+
 ## 下一阶段候选
 
-- 阶段 32：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖错误提示渲染或其它长期脏文件剩余 UI 边界。
+- 阶段 33：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界或更多错误提示渲染。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

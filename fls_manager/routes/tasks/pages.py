@@ -25,6 +25,7 @@ from ...models import (
 )
 from ...utils import h, now_str
 from ...ui.layout import layout
+from ...ui.components import message_card
 from ...ui.tables import tasks_table
 from ...scheduler import reload_scheduler, cron_to_trigger
 
@@ -108,6 +109,35 @@ def _render_collection_cards(collections, all_tasks):
         cards = '<div class="fls-empty-card">暂无合集，请点击“新建合集”</div>'
 
     return f'<div class="fls-summary-grid">{cards}</div>'
+
+
+def _task_from_post(base=None):
+    task = dict(base or {})
+    task.update({
+        "name": request.form.get("name", "").strip(),
+        "remark": request.form.get("remark", "").strip(),
+        "command": request.form.get("command", "").strip(),
+        "cron": request.form.get("cron", "").strip(),
+        "config_path": request.form.get("config_path", "").strip(),
+        "collection_id": request.form.get("collection_id", "").strip(),
+        "enabled": request.form.get("enabled") == "1",
+        "env": parse_task_env_from_form(),
+        "proxy_id": request.form.get("proxy_id", "").strip(),
+        "notify": parse_notify_from_form(),
+        "random_delay": parse_random_delay_from_form(),
+        "retry": parse_retry_from_form(),
+    })
+
+    return task
+
+
+def _task_form_error(title, back_url, message, task):
+    body = message_card(message, "error", strong=True) + task_form(
+        task,
+        back_url=back_url,
+    )
+
+    return layout(title, "tasks", body), 400
 
 
 @bp.route("/tasks")
@@ -233,47 +263,36 @@ def task_new():
     back_url = _task_form_back_url()
 
     if request.method == "POST":
-        name = request.form.get("name", "").strip()
-        command = request.form.get("command", "").strip()
-        cron_expr = request.form.get("cron", "").strip()
-        collection_id = request.form.get("collection_id", "").strip()
+        task = _task_from_post()
+        name = task.get("name", "")
+        command = task.get("command", "")
+        cron_expr = task.get("cron", "")
+        collection_id = task.get("collection_id", "")
 
         if not name:
-            return "任务名不能为空", 400
+            return _task_form_error("新建任务", back_url, "任务名不能为空", task)
 
         if not command:
-            return "命令不能为空", 400
+            return _task_form_error("新建任务", back_url, "命令不能为空", task)
 
         if cron_expr:
             try:
                 cron_to_trigger(cron_expr)
             except Exception as e:
-                return f"Cron 不合法：{e}", 400
+                return _task_form_error("新建任务", back_url, f"Cron 不合法：{e}", task)
 
         if collection_id and not get_collection(collection_id):
-            return "合集不存在", 400
+            return _task_form_error("新建任务", back_url, "合集不存在", task)
 
         tasks = load_tasks()
 
-        task = {
+        task.update({
             "id": uuid.uuid4().hex,
-            "name": name,
-            "remark": request.form.get("remark", "").strip(),
-            "command": command,
-            "cron": cron_expr,
-            "config_path": request.form.get("config_path", "").strip(),
-            "collection_id": collection_id,
-            "enabled": request.form.get("enabled") == "1",
-            "env": parse_task_env_from_form(),
-            "proxy_id": request.form.get("proxy_id", "").strip(),
-            "notify": parse_notify_from_form(),
-            "random_delay": parse_random_delay_from_form(),
-            "retry": parse_retry_from_form(),
             "run_count": 0,
             "pinned": False,
             "created_at": now_str(),
             "updated_at": now_str(),
-        }
+        })
 
         tasks.append(task)
         save_tasks(tasks)
@@ -300,38 +319,41 @@ def task_edit(task_id):
     back_url = _task_form_back_url(task)
 
     if request.method == "POST":
-        name = request.form.get("name", "").strip()
-        command = request.form.get("command", "").strip()
-        cron_expr = request.form.get("cron", "").strip()
-        collection_id = request.form.get("collection_id", "").strip()
+        draft = _task_from_post(task)
+        name = draft.get("name", "")
+        command = draft.get("command", "")
+        cron_expr = draft.get("cron", "")
+        collection_id = draft.get("collection_id", "")
 
         if not name:
-            return "任务名不能为空", 400
+            return _task_form_error("编辑任务", back_url, "任务名不能为空", draft)
 
         if not command:
-            return "命令不能为空", 400
+            return _task_form_error("编辑任务", back_url, "命令不能为空", draft)
 
         if cron_expr:
             try:
                 cron_to_trigger(cron_expr)
             except Exception as e:
-                return f"Cron 不合法：{e}", 400
+                return _task_form_error("编辑任务", back_url, f"Cron 不合法：{e}", draft)
 
         if collection_id and not get_collection(collection_id):
-            return "合集不存在", 400
+            return _task_form_error("编辑任务", back_url, "合集不存在", draft)
 
-        task["name"] = name
-        task["remark"] = request.form.get("remark", "").strip()
-        task["command"] = command
-        task["cron"] = cron_expr
-        task["config_path"] = request.form.get("config_path", "").strip()
-        task["collection_id"] = collection_id
-        task["enabled"] = request.form.get("enabled") == "1"
-        task["env"] = parse_task_env_from_form()
-        task["proxy_id"] = request.form.get("proxy_id", "").strip()
-        task["notify"] = parse_notify_from_form()
-        task["random_delay"] = parse_random_delay_from_form()
-        task["retry"] = parse_retry_from_form()
+        task.update({
+            "name": draft.get("name", ""),
+            "remark": draft.get("remark", ""),
+            "command": draft.get("command", ""),
+            "cron": draft.get("cron", ""),
+            "config_path": draft.get("config_path", ""),
+            "collection_id": draft.get("collection_id", ""),
+            "enabled": draft.get("enabled", True),
+            "env": draft.get("env", {}),
+            "proxy_id": draft.get("proxy_id", ""),
+            "notify": draft.get("notify"),
+            "random_delay": draft.get("random_delay"),
+            "retry": draft.get("retry"),
+        })
         task["updated_at"] = now_str()
         task.setdefault("run_count", 0)
         task.setdefault("pinned", False)
