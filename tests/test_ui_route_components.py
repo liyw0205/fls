@@ -353,6 +353,55 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertEqual(task["retry"], {"attempts": 4, "interval_seconds": 120})
             self.assertNotIn("retry_count", task)
 
+    def test_tasks_page_keeps_ajax_actions_bulk_toolbar_and_collapsible_command(self):
+        with isolated_app() as (app, base_dir):
+            data_dir = base_dir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            (data_dir / "tasks.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "task-list",
+                            "name": "普通任务",
+                            "command": "task demo.py " + "--flag " * 24,
+                            "config_path": "conf/app.yml",
+                            "enabled": True,
+                            "pinned": False,
+                            "retry": {
+                                "attempts": 0,
+                                "interval_seconds": 60,
+                            },
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            response = app.test_client().get(
+                "/tasks",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("fls-collapsible-code", html)
+            self.assertIn("fls-value-preview", html)
+            self.assertIn("task-bulk-toolbar", html)
+            self.assertIn("task-bulk-btn", html)
+            self.assertIn("taskBulkAction('enable')", html)
+            self.assertIn("taskBulkAction('delete')", html)
+            self.assertIn("task-action-more", html)
+            self.assertIn("task-action-more-menu", html)
+            self.assertIn("taskAjaxAction('copy','task-list')", html)
+            self.assertIn("taskAjaxAction('pin','task-list')", html)
+            self.assertIn("taskAjaxAction('stop','task-list')", html)
+            self.assertIn('href="/task/edit/task-list?back=/tasks"', html)
+            self.assertIn('href="/task/config/task-list?back=/tasks"', html)
+            self.assertNotIn('href="/task/pin/task-list', html)
+            self.assertNotIn('href="/stop/task-list', html)
+            self.assertNotIn('href="/task/delete/task-list', html)
+
     def test_deps_page_renders_table_card_and_escapes_rows(self):
         with isolated_app() as (app, _base_dir):
             packages = [

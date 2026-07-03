@@ -921,8 +921,47 @@
 - 合集页任务卡片不应回退到未折叠长命令和 GET 破坏性链接。
 - 合集页任务操作需要保留带锚点的 back 参数，确保操作或编辑后能回到对应合集位置。
 
+## 阶段 21：普通任务列表动作回归测试
+
+状态：已完成
+
+目标：
+
+- 继续收束原长期脏文件中普通任务列表相关的旧实现回退。
+- 固化 `/tasks` 页面长命令折叠、批量工具栏、更多菜单和 AJAX 单任务动作。
+- 防止后续把普通任务列表回退成 GET 停止/置顶/删除链接，或丢失编辑、配置入口的 `/tasks` 返回参数。
+
+已完成：
+
+- 扩展 `tests/test_ui_route_components.py`：
+  - 覆盖普通任务列表长命令渲染为 `fls-collapsible-code` 折叠代码块，并保留 `fls-value-preview` 预览。
+  - 覆盖批量工具栏和批量按钮继续渲染，并保留 `taskBulkAction('enable')`、`taskBulkAction('delete')` 调用。
+  - 覆盖单任务更多菜单继续渲染，并保留复制、置顶、停止等 `taskAjaxAction(...)` 动作。
+  - 覆盖编辑和配置链接继续携带 `/tasks` back 参数。
+  - 覆盖任务列表没有回退成 `/task/pin/<id>`、`/stop/<id>`、`/task/delete/<id>` 这类 GET 链接。
+- 更新 `DEVELOPMENT.md`：
+  - 记录阶段 21 对普通任务列表当前行为的回归测试。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_route_components`：通过，14 tests OK。
+- `python -B -m unittest discover -s tests`：通过，115 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段只补普通任务列表路由回归测试和开发文档，没有改动页面实现。
+
+收束结论：
+
+- 普通任务列表不应回退到未折叠长命令、GET 破坏性链接或丢失 `/tasks` back 参数。
+- 当前批量和单任务动作入口应继续走 AJAX POST/API 流程，便于刷新局部任务块并保留 CSRF 边界。
+
 ## 下一阶段候选
 
-- 阶段 21：继续查找未脏页面中的纯文本提示卡或稳定表格卡，避免复杂 JS 状态、富文本结果和带按钮的完整错误页。
-- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/online-scripts` 的摘要项和脚本拉取页面。
+- 阶段 22：继续把原长期脏 diff 中剩余风险转化为回归测试，优先找任务/日志页面中仍未覆盖的 POST 动作、返回路径和折叠展示。
+- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
