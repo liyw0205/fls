@@ -243,6 +243,116 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn("保存失败：&lt;bad &amp; &quot;x&quot;&gt;", html)
             self.assertNotIn("<bad", html)
 
+    def test_task_edit_form_preserves_back_url_and_retry_fields(self):
+        with isolated_app() as (app, base_dir):
+            data_dir = base_dir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            (data_dir / "collections.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "c1",
+                            "name": "合集一",
+                            "remark": "",
+                            "created_at": "2026-07-04 00:00:00",
+                            "updated_at": "2026-07-04 00:00:00",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (data_dir / "tasks.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "task-edit",
+                            "name": "编辑任务",
+                            "command": "task demo.py",
+                            "collection_id": "c1",
+                            "retry": {
+                                "attempts": 2,
+                                "interval_seconds": 90,
+                            },
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            response = app.test_client().get(
+                "/task/edit/task-edit?back=/collections%23collection-c1",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('name="back" value="/collections#collection-c1"', html)
+            self.assertIn('href="/collections#collection-c1"', html)
+            self.assertIn('name="retry_attempts" type="number" min="0" max="5" value="2"', html)
+            self.assertIn('name="retry_interval_seconds" type="number" min="5" max="3600" value="90"', html)
+            self.assertNotIn('name="retry_count"', html)
+
+    def test_task_edit_saves_retry_and_sanitizes_external_back_url(self):
+        with isolated_app() as (app, base_dir):
+            data_dir = base_dir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            (data_dir / "collections.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "c1",
+                            "name": "合集一",
+                            "remark": "",
+                            "created_at": "2026-07-04 00:00:00",
+                            "updated_at": "2026-07-04 00:00:00",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            tasks_file = data_dir / "tasks.json"
+            tasks_file.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "task-edit",
+                            "name": "编辑任务",
+                            "command": "task demo.py",
+                            "collection_id": "c1",
+                            "retry": {
+                                "attempts": 1,
+                                "interval_seconds": 30,
+                            },
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            response = app.test_client().post(
+                "/task/edit/task-edit",
+                data={
+                    "back": "https://example.invalid/evil",
+                    "name": "编辑任务2",
+                    "command": "task demo2.py",
+                    "collection_id": "c1",
+                    "retry_attempts": "4",
+                    "retry_interval_seconds": "120",
+                    "enabled": "1",
+                },
+                headers={"X-Token": TOKEN},
+            )
+
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.headers.get("Location"), "/collections#collection-c1")
+
+            task = json.loads(tasks_file.read_text(encoding="utf-8"))[0]
+
+            self.assertEqual(task["name"], "编辑任务2")
+            self.assertEqual(task["retry"], {"attempts": 4, "interval_seconds": 120})
+            self.assertNotIn("retry_count", task)
+
     def test_deps_page_renders_table_card_and_escapes_rows(self):
         with isolated_app() as (app, _base_dir):
             packages = [

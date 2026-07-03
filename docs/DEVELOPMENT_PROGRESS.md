@@ -844,8 +844,46 @@
 - 原脏 diff 中移除 CSRF、把删除/置顶改回 GET、回退 POST 表单的方向不应继续迁入。
 - 后续处理原工作区时，可以优先丢弃这些旧实现回退，只保留已经在远端基线中通过测试覆盖的功能。
 
+## 阶段 19：任务表单返回路径与 retry 回归测试
+
+状态：已完成
+
+目标：
+
+- 继续收束原长期脏文件中任务表单相关的旧实现回退。
+- 固化当前任务编辑页的 `back` 返回路径、外部 URL 清洗和新 `retry` 表单结构。
+- 防止后续把旧 `retry_count` 表单和固定返回 `/tasks` 的行为重新迁入。
+
+已完成：
+
+- 扩展 `tests/test_ui_route_components.py`：
+  - 覆盖 `/task/edit/<id>?back=...` 渲染隐藏 `back` 字段，并保留返回按钮链接。
+  - 覆盖任务编辑表单渲染 `retry_attempts` 和 `retry_interval_seconds`，并不渲染旧 `retry_count`。
+  - 覆盖提交任务编辑时保存当前 `retry` 结构。
+  - 覆盖外部 `back` URL 被清洗，合集任务默认回到 `/collections#collection-<id>`。
+- 更新 `DEVELOPMENT.md`：
+  - 记录阶段 19 对任务表单返回路径和 retry 结构的回归测试。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_route_components`：通过，13 tests OK。
+- `python -B -m unittest discover -s tests`：通过，113 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段只补路由回归测试和开发文档，没有改动路由实现。
+
+收束结论：
+
+- 旧 `retry_count` 表单和提交后固定返回 `/tasks` 的方向不应继续迁入。
+- 任务编辑页需要保留安全清洗后的 `back`，尤其是从合集进入任务编辑后回到对应合集锚点。
+
 ## 下一阶段候选
 
-- 阶段 19：继续查找未脏页面中的纯文本提示卡或稳定表格卡，避免复杂 JS 状态、富文本结果和带按钮的完整错误页。
+- 阶段 20：继续查找未脏页面中的纯文本提示卡或稳定表格卡，避免复杂 JS 状态、富文本结果和带按钮的完整错误页。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/online-scripts` 的摘要项和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
