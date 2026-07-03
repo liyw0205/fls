@@ -8,6 +8,7 @@ from .helpers import task_config_safe_path
 from ...models import get_task
 from ...utils import h, get_back_url
 from ...ui.layout import layout
+from ...ui.components import message_card
 
 
 @bp.route("/task/config/<task_id>", methods=["GET", "POST"])
@@ -91,8 +92,7 @@ def task_config_edit(task_id):
     <a class="btn btn-gray" href="{h(back_url)}">返回</a>
 </div>
 
-{"<div class='card'><div class='help' style='color:#18a058;font-weight:800;'>" + h(msg) + "</div></div>" if msg and msg.startswith("保存成功") else ""}
-{"<div class='card'><div class='help' style='color:#dc2626;font-weight:800;'>" + h(msg) + "</div></div>" if msg and not msg.startswith("保存成功") else ""}
+{message_card(msg, "success" if msg.startswith("保存成功") else "error", strong=True)}
 
 <div class="card">
     <div class="card-title">配置内容</div>

@@ -1,6 +1,6 @@
 # FLS 开发文档
 
-更新时间：2026-07-03
+更新时间：2026-07-04
 基线：`main` / `b8762aa`
 
 本文用于后续开发协作。每次完成开发后，都要同步更新本文的“开发日志”和“后续方向”，必要时同步调整架构、数据模型、接口和验证清单。
@@ -264,7 +264,7 @@ Blueprint 约定：
 - 公共布局由 `fls_manager/ui/layout.py` 生成。
 - 页面内容通常由路由函数拼 HTML 字符串。
 - 用户输入输出到 HTML 时必须使用 `utils.h()` 转义。
-- 低风险通用 HTML 外壳优先放到 `fls_manager/ui/components.py`，当前已有 `page_header_card()`、`table_card()`、`message_card()` 和 `pagination_card()`。
+- 低风险通用 HTML 外壳优先放到 `fls_manager/ui/components.py`，当前已有 `page_header_card()`、`table_card()`、`message_card()`、`summary_item()` 和 `pagination_card()`。
 
 静态资源：
 
@@ -396,6 +396,7 @@ python -B -m compileall fls-manager.py fls_manager tests tools
 - `ui.components.message_card()` 的空/空白消息、成功/错误/普通提示、未知类型回退、加粗样式、可选标题和 HTML 转义。
 - `ui.components.summary_item()` 的统计项结构、数字 value 和 HTML 转义。
 - 路由层 UI 组件接入：`/pull/new`、`/pull/fetch`、`/pull/import` 普通/结果提示卡和 `/online-scripts/doc/<id>` 文档加载失败卡的渲染与转义。
+- 路由层 UI 组件接入：`/task/config/<id>` 保存成功/失败提示卡的渲染与转义。
 
 后续优先补充：
 
@@ -436,6 +437,12 @@ python -B -m compileall fls-manager.py fls_manager tests tools
 - 增加更细的操作审计日志。
 
 ## 13. 开发日志
+
+### 2026-07-04
+
+- 阶段 15 继续低风险消息卡接入：`fls_manager/routes/tasks/config_file.py` 的任务配置保存结果统一使用 `message_card()`，保留成功/失败加粗色彩和空消息不渲染行为。
+- 阶段 15 扩展 `tests/test_ui_route_components.py`，覆盖 `/task/config/<id>` 保存成功提示、写入失败提示和错误消息 HTML 转义。
+- 阶段 15 避开已有长期脏改动的任务列表、日志、认证/API 和 `ui/tables.py`，只触碰未脏的任务配置文件路由。
 
 ### 2026-07-03
 

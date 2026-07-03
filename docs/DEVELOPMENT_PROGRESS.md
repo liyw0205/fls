@@ -1,6 +1,6 @@
 # FLS 开发进度
 
-更新时间：2026-07-03
+更新时间：2026-07-04
 
 本文记录阶段开发进度。每个阶段结束前必须更新本文件，并生成或更新 `docs/SESSION_HANDOFF.md`。
 
@@ -657,8 +657,52 @@
 - 不抽通用 `summary_grid`，避免把结构差异较大的页面硬统一。
 - 后续组件抽取继续优先选择未脏文件和纯文本/稳定结构，避免复杂 JS 状态。
 
+## 阶段 15：任务配置保存结果卡接入
+
+状态：已完成
+
+目标：
+
+- 继续查找未脏页面中的纯文本提示卡。
+- 复用已有 `message_card()`，不新增组件 API。
+- 避开复杂 JS 状态、富文本结果、带按钮的完整错误页，以及当前长期脏改动文件。
+
+已完成：
+
+- 更新 `fls_manager/routes/tasks/config_file.py`：
+  - 导入 `message_card()`。
+  - 将任务配置保存成功/失败的两段内联结果卡替换为 `message_card()`。
+  - 保留成功绿色、失败红色、加粗强调和空消息不渲染行为。
+- 扩展 `tests/test_ui_route_components.py`：
+  - 覆盖 `/task/config/<id>` 保存成功后渲染绿色加粗消息卡。
+  - 覆盖配置文件实际写入内容。
+  - 覆盖写入失败后渲染红色加粗消息卡，并对异常消息做 HTML 转义。
+- 更新 `DEVELOPMENT.md`：
+  - 将 `summary_item()` 补入当前组件列表。
+  - 将任务配置保存结果卡纳入已覆盖路由组件接入。
+  - 增加阶段 15 开发日志。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_route_components`：通过，9 tests OK。
+- `python -B -m unittest discover -s tests`：通过，98 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
+- 本阶段仅覆盖任务配置保存结果卡；无 `config_path` 和路径非法的完整错误页仍保留原结构，因为它们带返回/编辑按钮。
+
+组件策略结论：
+
+- `message_card()` 继续只处理纯文本消息和短标题，不承载动作按钮。
+- 对写文件失败等异常消息，路由层可以直接传纯文本给组件，由组件集中做 HTML 转义。
+- 后续接入仍应优先选择未脏文件里的稳定结构，避免为了抽组件而拆散完整操作页。
+
 ## 下一阶段候选
 
-- 阶段 15：继续查找未脏页面中的纯文本提示卡，避免复杂 JS 状态、富文本结果和带按钮的完整错误页。
+- 阶段 16：继续查找未脏页面中的纯文本提示卡，避免复杂 JS 状态、富文本结果和带按钮的完整错误页。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/online-scripts` 的摘要项和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
