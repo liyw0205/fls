@@ -86,6 +86,94 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn('style="color:#6b7280;"', html)
             self.assertIn("暂无操作", html)
 
+    def test_scripts_new_failure_renders_error_message_and_preserves_form(self):
+        with isolated_app() as (app, base_dir):
+            with patch(
+                "fls_manager.routes.scripts.files.script_safe_path",
+                side_effect=RuntimeError('<bad & "x">'),
+            ):
+                response = app.test_client().post(
+                    "/pull/new",
+                    data={
+                        "item_type": "file",
+                        "name": "new <file>.py",
+                        "content": 'print("<x>")\n',
+                    },
+                    headers={"X-Token": TOKEN},
+                )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('style="color:#dc2626;font-weight:800;"', html)
+            self.assertIn("新建失败：&lt;bad &amp; &quot;x&quot;&gt;", html)
+            self.assertIn('value="new &lt;file&gt;.py"', html)
+            self.assertIn("print(&quot;&lt;x&gt;&quot;)", html)
+            self.assertNotIn("<bad", html)
+            self.assertNotIn("new <file>.py", html)
+            self.assertFalse((base_dir / "scripts" / "new <file>.py").exists())
+
+    def test_scripts_view_save_failure_preserves_posted_content(self):
+        with isolated_app() as (app, base_dir):
+            script_file = base_dir / "scripts" / "demo.py"
+            script_file.write_text('print("old")\n', encoding="utf-8")
+
+            real_write_text = Path.write_text
+
+            def fail_script_write(path, *args, **kwargs):
+                if path.name == "demo.py":
+                    raise RuntimeError('<bad & "x">')
+
+                return real_write_text(path, *args, **kwargs)
+
+            with patch("pathlib.Path.write_text", new=fail_script_write):
+                response = app.test_client().post(
+                    "/scripts/view?path=demo.py",
+                    data={"content": 'print("updated <x>")\n'},
+                    headers={"X-Token": TOKEN},
+                )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('style="color:#dc2626;font-weight:800;"', html)
+            self.assertIn("保存失败：&lt;bad &amp; &quot;x&quot;&gt;", html)
+            self.assertIn("print(&quot;updated &lt;x&gt;&quot;)", html)
+            self.assertNotIn("<bad", html)
+            self.assertEqual(script_file.read_text(encoding="utf-8"), 'print("old")\n')
+
+    def test_scripts_rename_failure_renders_error_message_and_preserves_name(self):
+        with isolated_app() as (app, base_dir):
+            script_file = base_dir / "scripts" / "demo.py"
+            script_file.write_text('print("old")\n', encoding="utf-8")
+            new_name = '<renamed & "x">.py'
+
+            real_rename = Path.rename
+
+            def fail_rename(path, *args, **kwargs):
+                if path.name == "demo.py":
+                    raise RuntimeError('<bad & "x">')
+
+                return real_rename(path, *args, **kwargs)
+
+            with patch("pathlib.Path.rename", new=fail_rename):
+                response = app.test_client().post(
+                    "/scripts/rename?path=demo.py",
+                    data={"new_name": new_name},
+                    headers={"X-Token": TOKEN},
+                )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('style="color:#dc2626;font-weight:800;"', html)
+            self.assertIn("改名失败：&lt;bad &amp; &quot;x&quot;&gt;", html)
+            self.assertIn('value="&lt;renamed &amp; &quot;x&quot;&gt;.py"', html)
+            self.assertNotIn("<bad", html)
+            self.assertNotIn(new_name, html)
+            self.assertEqual(script_file.read_text(encoding="utf-8"), 'print("old")\n')
+            self.assertFalse((base_dir / "scripts" / new_name).exists())
+
     def test_pull_fetch_renders_error_message_card(self):
         with isolated_app() as (app, _base_dir):
             response = app.test_client().post(
