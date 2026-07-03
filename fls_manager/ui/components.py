@@ -41,11 +41,14 @@ def table_card(title, headers, rows_html):
 """
 
 
-def message_card(message, kind="info", strong=False):
+def message_card(message, kind="info", strong=False, title=""):
     text = str(message or "").strip()
 
     if not text:
         return ""
+
+    title_text = str(title or "").strip()
+    title_html = f'<div class="card-title">{h(title_text)}</div>' if title_text else ""
 
     colors = {
         "success": "#18a058",
@@ -57,6 +60,7 @@ def message_card(message, kind="info", strong=False):
 
     return f"""
 <div class="card">
+    {title_html}
     <div class="help" style="color:{color};{weight}">{h(text)}</div>
 </div>
 """

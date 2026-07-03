@@ -558,9 +558,62 @@
 - 路由层测试可以低成本覆盖组件接入后的真实渲染，比只测组件字符串更能防止导入和条件渲染回归。
 - `summary_item()` 可以作为后续小范围候选，但当前未脏页面只有在线脚本页 3 个 item，复用收益较低。
 
+## 阶段 13：脚本拉取结果卡接入
+
+状态：已完成
+
+目标：
+
+- 继续把 `message_card()` 接入脚本拉取/导入结果卡。
+- 保留原结果卡的“结果”标题，不引入卡片套卡。
+- 用显式状态变量控制成功、失败和空状态样式，避免依赖文案推断。
+
+已完成：
+
+- 扩展 `fls_manager/ui/components.py`：
+  - `message_card()` 新增可选 `title` 参数。
+  - 标题同样使用 `h()` 做 HTML escape。
+  - 未传标题时保持原输出结构兼容。
+- 更新 `fls_manager/routes/scripts/pull.py`：
+  - 新增 `pull_result_card()` 复用 `message_card(..., title="结果")`。
+  - `/pull/fetch` 使用 `msg_kind` / `msg_strong` 显式区分空状态、拉取成功、校验失败和拉取异常。
+  - `/pull/import` 使用 `msg_kind` / `msg_strong` 显式区分空状态、导入成功、校验失败和导入异常。
+  - 保留原表单、代理、下载、Git、解压和路径安全逻辑不变。
+- 扩展 `tests/test_ui_components.py`：
+  - 覆盖 `message_card(title=...)` 标题渲染和标题 HTML 转义。
+- 扩展 `tests/test_ui_route_components.py`：
+  - 覆盖 `/pull/fetch` 空 URL 错误卡。
+  - 覆盖 `/pull/fetch` 文件拉取成功卡，使用 mock 避免真实网络。
+  - 覆盖 `/pull/fetch` 拉取异常消息 HTML 转义。
+  - 覆盖 `/pull/import` 无文件错误卡。
+  - 覆盖 `/pull/import` 普通文件导入成功卡，使用临时 `FLS_BASE_DIR`。
+- 更新 `tools/responsive_smoke.py`：
+  - 将 `/pull/fetch` 和 `/pull/import` 纳入页面结构 smoke。
+- 子代理 A 完成 `scripts/pull.py` 只读审查，建议只替换两处纯文本结果卡，并改为显式状态变量；本阶段已采纳。
+- 子代理 B 完成 `summary_item()` 只读审查，认为该方向收益低于本阶段消息卡接入，本阶段未采用。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_components tests.test_ui_route_components`：通过，16 tests OK。
+- `python -B -m unittest discover -s tests`：通过，94 tests OK。
+- `python -B tools/responsive_smoke.py`：通过，包含 `/pull/fetch` 和 `/pull/import`。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有触碰任务、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
+- 本阶段只覆盖普通文件拉取/导入分支；Git 仓库拉取、zip/tar 导入继续依赖既有逻辑和安全测试。
+
+组件策略结论：
+
+- `message_card(title=...)` 适合带短标题的纯文本结果卡，可以避免卡片套卡并保留页面语义。
+- 路由中应显式维护消息状态，不应依赖中文文案包含“成功”来推断样式。
+- `summary_item()` 仍可作为后续小范围候选，但当前复用收益较低。
+
 ## 下一阶段候选
 
-- 阶段 13：继续低风险 UI 组件抽取，优先评估 `fls_manager/routes/scripts/pull.py` 两个结果卡是否适合接入 `message_card()`。
-- 可选小范围：只为在线脚本页抽取 `summary_item(label, value)`，保留外层 `.fls-summary-grid`。
+- 阶段 14：可选小范围抽取 `summary_item(label, value)`，只替换在线脚本页 3 个统计 item，保留外层 `.fls-summary-grid`。
+- 继续查找未脏页面中的纯文本提示卡，避免复杂 JS 状态、富文本结果和带按钮的完整错误页。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
 - 有浏览器环境时补真实响应式截图验收。

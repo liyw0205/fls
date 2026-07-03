@@ -22,14 +22,21 @@ from .helpers import (
 
 from ...paths import SCRIPT_DIR
 from ...utils import h
+from ...ui.components import message_card
 from ...ui.layout import layout
 from ...proxy import proxy_select_options, apply_proxy_env
+
+
+def pull_result_card(msg, kind="info", strong=False):
+    return message_card(msg or "暂无操作", kind, strong=strong, title="结果")
 
 
 @bp.route("/pull/fetch", methods=["GET", "POST"])
 def pull_fetch():
     current_rel = request.args.get("p", "").strip().strip("/")
     msg = ""
+    msg_kind = "info"
+    msg_strong = False
     proxy_options = proxy_select_options("")
 
     if request.method == "POST":
@@ -41,6 +48,8 @@ def pull_fetch():
 
         if not url:
             msg = "URL 不能为空"
+            msg_kind = "error"
+            msg_strong = True
         else:
             try:
                 if pull_type == "repo":
@@ -67,6 +76,8 @@ def pull_fetch():
                     )
 
                     msg = f"仓库拉取成功：{target}"
+                    msg_kind = "success"
+                    msg_strong = True
                 else:
                     if not filename:
                         filename = guess_filename_from_url(url)
@@ -77,9 +88,13 @@ def pull_fetch():
                     target.write_bytes(fetch_file_bytes(url, proxy_id))
 
                     msg = f"文件拉取成功：{target}"
+                    msg_kind = "success"
+                    msg_strong = True
 
             except Exception as e:
                 msg = f"拉取失败：{e}"
+                msg_kind = "error"
+                msg_strong = True
 
     body = f"""
 <div class="card">
@@ -122,10 +137,7 @@ def pull_fetch():
     </form>
 </div>
 
-<div class="card">
-    <div class="card-title">结果</div>
-    <div class="help">{h(msg or "暂无操作")}</div>
-</div>
+{pull_result_card(msg, msg_kind, msg_strong)}
 """
     return layout("拉取脚本", "pull", body)
 
@@ -134,6 +146,8 @@ def pull_fetch():
 def pull_import():
     current_rel = request.args.get("p", "").strip().strip("/")
     msg = ""
+    msg_kind = "info"
+    msg_strong = False
 
     if request.method == "POST":
         current_rel = request.form.get("current_rel", "").strip().strip("/")
@@ -142,6 +156,8 @@ def pull_import():
 
         if not upload or not upload.filename:
             msg = "请选择要导入的文件"
+            msg_kind = "error"
+            msg_strong = True
         else:
             tmp_dir = tempfile.mkdtemp()
 
@@ -165,6 +181,8 @@ def pull_import():
                         safe_extract_tar(tar, target_dir)
 
                     msg = f"压缩包导入成功：{target_dir}"
+                    msg_kind = "success"
+                    msg_strong = True
 
                 elif lower.endswith(".zip"):
                     target_rel = f"{current_rel}/{save_as}" if current_rel and save_as else (save_as or current_rel)
@@ -175,6 +193,8 @@ def pull_import():
                         safe_extract_zip(z, target_dir)
 
                     msg = f"ZIP 导入成功：{target_dir}"
+                    msg_kind = "success"
+                    msg_strong = True
 
                 else:
                     target_rel = f"{current_rel}/{filename}" if current_rel else filename
@@ -182,9 +202,13 @@ def pull_import():
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(tmp_file, target)
                     msg = f"文件导入成功：{target}"
+                    msg_kind = "success"
+                    msg_strong = True
 
             except Exception as e:
                 msg = f"导入失败：{e}"
+                msg_kind = "error"
+                msg_strong = True
             finally:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -214,9 +238,6 @@ def pull_import():
     </form>
 </div>
 
-<div class="card">
-    <div class="card-title">结果</div>
-    <div class="help">{h(msg or "暂无操作")}</div>
-</div>
+{pull_result_card(msg, msg_kind, msg_strong)}
 """
     return layout("导入脚本", "pull", body)

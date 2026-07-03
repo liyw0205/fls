@@ -30,6 +30,13 @@ class UiComponentTests(unittest.TestCase):
         self.assertIn('style="color:#6b7280;"', html)
         self.assertIn("未知类型", html)
 
+    def test_message_card_renders_optional_title_and_escapes_it(self):
+        html = message_card("提示", title="<结果>")
+
+        self.assertIn('<div class="card-title">&lt;结果&gt;</div>', html)
+        self.assertIn("提示", html)
+        self.assertNotIn("<结果>", html)
+
     def test_message_card_escapes_message_html(self):
         html = message_card('<script data-x="1">a & b</script>', "success")
 
