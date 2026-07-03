@@ -999,8 +999,47 @@
 - 日志管理页不应回退到 GET 删除链接或丢失分组批量删除 UI。
 - 分组名来自日志内容，页面属性和值与标题都需要继续 HTML 转义。
 
+## 阶段 23：日志文件详情页返回路径回归测试
+
+状态：已完成
+
+目标：
+
+- 继续收束原长期脏文件中日志查看页相关的返回路径和删除入口风险。
+- 固化 `/logfile/<filename>` 页面合法站内 `back`、外部 `back` 清洗、日志删除 POST 表单和日志 API 拉取路径。
+- 防止后续把日志文件删除入口回退成 GET 链接，或让外部 URL 进入返回按钮和删除表单。
+
+已完成：
+
+- 扩展 `tests/test_ui_route_components.py`：
+  - 覆盖 `/logfile/live.log?back=/history` 渲染返回按钮到 `/history`。
+  - 覆盖日志文件删除表单继续使用 POST，并保留安全 `back=/history`。
+  - 覆盖日志详情页前端继续从 `/api/logfile/live.log?lines=1500` 拉取内容。
+  - 覆盖外部 `back=https://example.invalid/evil` 被清洗回 `/logs`。
+  - 覆盖页面没有回退成 `/logfile/delete/<file>` 的 GET 删除链接。
+- 更新 `DEVELOPMENT.md`：
+  - 记录阶段 23 对日志文件详情页返回路径和 POST 删除入口的回归测试。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_route_components`：通过，16 tests OK。
+- `python -B -m unittest discover -s tests`：通过，117 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段只补日志文件详情页路由回归测试和开发文档，没有改动页面实现。
+
+收束结论：
+
+- 日志文件详情页必须继续清洗外部 `back`，并将删除操作限制在 POST 表单。
+- 日志查看页的实时拉取 API 路径应继续使用当前日志文件名，不依赖用户可控外部地址。
+
 ## 下一阶段候选
 
-- 阶段 23：继续把原长期脏 diff 中剩余风险转化为回归测试，优先找任务运行历史、批量 API 状态字段或日志查看页返回路径中仍未覆盖的边界。
+- 阶段 24：继续把原长期脏 diff 中剩余风险转化为回归测试，优先找任务运行历史、批量 API 状态字段或任务详情页历史表格中仍未覆盖的边界。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

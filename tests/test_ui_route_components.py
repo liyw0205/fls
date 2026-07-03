@@ -449,6 +449,46 @@ class UiRouteComponentTests(unittest.TestCase):
             )
             self.assertNotIn('href="/logfile/delete/alpha-one.log', html)
 
+    def test_logfile_view_preserves_safe_back_and_sanitizes_external_back(self):
+        with isolated_app() as (app, base_dir):
+            log_dir = base_dir / "log"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            (log_dir / "live.log").write_text("live\n", encoding="utf-8")
+
+            client = app.test_client()
+
+            response = client.get(
+                "/logfile/live.log?back=/history",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">日志文件：live.log</div>', html)
+            self.assertIn('<a class="btn btn-gray" href="/history">返回</a>', html)
+            self.assertIn(
+                'action="/logfile/delete/live.log?back=/history"',
+                html,
+            )
+            self.assertIn('fetch("/api/logfile/live.log?lines=1500"', html)
+            self.assertNotIn('href="/logfile/delete/live.log', html)
+
+            response = client.get(
+                "/logfile/live.log?back=https://example.invalid/evil",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<a class="btn btn-gray" href="/logs">返回</a>', html)
+            self.assertIn(
+                'action="/logfile/delete/live.log?back=/logs"',
+                html,
+            )
+            self.assertNotIn("example.invalid", html)
+
     def test_deps_page_renders_table_card_and_escapes_rows(self):
         with isolated_app() as (app, _base_dir):
             packages = [
