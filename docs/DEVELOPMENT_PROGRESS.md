@@ -973,3 +973,58 @@
 - 阶段 21：继续查找未脏页面中的纯文本提示卡或小型头部卡；可评估关于页面板控制结果页，但避免影响真实启停行为。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/about`、`/about/job-log/<id>`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
+
+## 阶段 21：面板控制结果头部卡接入
+
+状态：已完成
+
+目标：
+
+- 继续低风险 UI 组件抽取，优先未脏文件和小型结果页。
+- 复用已有 `page_header_card()`，不新增组件 API。
+- 只替换面板重启/停止结果页渲染外壳，不改变真实重启/停止行为。
+
+已完成：
+
+- 更新 `fls_manager/routes/about/panel_control.py`：
+  - 导入 `page_header_card()`。
+  - 将重启失败、正在重启、停止失败、正在停止四个结果卡接入头部卡。
+  - 保留控制脚本缺失时的红色强调提示和平台路径说明。
+  - 保留成功分支中的系统类型、当前 PID、控制脚本路径、返回/日志入口。
+  - 保留重启成功页 10 秒后返回仪表盘的 `setTimeout()` 脚本，并修正普通字符串中的 JS 单花括号。
+  - 保留所有动态路径字段 HTML 转义。
+- 扩展 `tests/test_ui_route_components.py`：
+  - 覆盖 `/about/restart-panel` 控制脚本缺失提示卡渲染与路径转义。
+  - 覆盖 `/about/restart-panel` 成功结果卡渲染，并 mock `threading.Thread`，避免真实重启。
+  - 覆盖 `/about/stop-panel` 控制脚本缺失提示卡渲染与路径转义。
+  - 覆盖 `/about/stop-panel` 成功结果卡渲染，并 mock `threading.Thread`，避免真实停止。
+- 更新 `DEVELOPMENT.md`：
+  - 将 `/about/restart-panel`、`/about/stop-panel` 面板控制结果头部卡纳入路由组件覆盖。
+  - 增加阶段 21 开发日志。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_route_components`：通过，20 tests OK。
+- `python -B -m compileall fls_manager/routes/about/panel_control.py tests/test_ui_route_components.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，111 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
+- 本阶段通过 mock 验证重启/停止结果页渲染，没有执行真实面板重启或停止。
+
+组件策略结论：
+
+- `page_header_card()` 适合小型结果页和说明加操作按钮的控制结果页。
+- 带真实副作用的路由测试必须 mock 外部动作出口，只验证渲染和调度提交，不触发真实启停。
+- 后续继续优先选择未脏页面的小范围改动；复杂 JS 状态、认证/API 和任务/日志脏文件暂缓。
+
+## 下一阶段候选
+
+- 阶段 22：继续查找未脏页面中的纯文本提示卡或小型头部卡；可评估在线脚本安装确认页、安装日志页等，但避开复杂安装状态和富文本结果。
+- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/about`、`/about/job-log/<id>`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
+- 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

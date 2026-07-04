@@ -381,6 +381,129 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn("loadAboutJobLog", html)
             self.assertNotIn("<更新", html)
 
+    def test_restart_panel_missing_script_renders_header_card(self):
+        with isolated_app() as (app, base_dir):
+            missing_script = base_dir / 'missing-<restart>.sh'
+
+            with patch(
+                "fls_manager.routes.about.panel_control.fls_control_script",
+                return_value=missing_script,
+            ):
+                response = app.test_client().post(
+                    "/about/restart-panel",
+                    headers={"X-Token": TOKEN},
+                )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 400)
+            self.assertIn('<div class="card-title">重启失败</div>', html)
+            self.assertIn("未找到 FLS 控制脚本", html)
+            self.assertIn("missing-&lt;restart&gt;.sh", html)
+            self.assertIn('<div class="action-row">', html)
+            self.assertIn('href="/about"', html)
+            self.assertNotIn("<restart>", html)
+
+    def test_restart_panel_success_renders_header_card_without_running_thread(self):
+        with isolated_app() as (app, base_dir):
+            script = base_dir / "fls.sh"
+            script.write_text("#!/bin/sh\n", encoding="utf-8")
+            created_threads = []
+
+            class FakeThread:
+                def __init__(self, *args, **kwargs):
+                    self.args = args
+                    self.kwargs = kwargs
+                    self.started = False
+                    created_threads.append(self)
+
+                def start(self):
+                    self.started = True
+
+            with patch(
+                "fls_manager.routes.about.panel_control.fls_control_script",
+                return_value=script,
+            ), patch(
+                "fls_manager.routes.about.panel_control.threading.Thread",
+                new=FakeThread,
+            ):
+                response = app.test_client().post(
+                    "/about/restart-panel",
+                    headers={"X-Token": TOKEN},
+                )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(len(created_threads), 1)
+            self.assertTrue(created_threads[0].started)
+            self.assertEqual(created_threads[0].kwargs.get("name"), "fls-panel-restart")
+            self.assertIn('<div class="card-title">正在重启面板</div>', html)
+            self.assertIn("控制脚本", html)
+            self.assertIn('href="/logfile/fls-manager-daemon.log?back=/about"', html)
+            self.assertIn("setTimeout(function(){", html)
+
+    def test_stop_panel_missing_script_renders_header_card(self):
+        with isolated_app() as (app, base_dir):
+            missing_script = base_dir / 'missing-<stop>.sh'
+
+            with patch(
+                "fls_manager.routes.about.panel_control.fls_control_script",
+                return_value=missing_script,
+            ):
+                response = app.test_client().post(
+                    "/about/stop-panel",
+                    headers={"X-Token": TOKEN},
+                )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 400)
+            self.assertIn('<div class="card-title">停止失败</div>', html)
+            self.assertIn("未找到 FLS 控制脚本", html)
+            self.assertIn("missing-&lt;stop&gt;.sh", html)
+            self.assertIn('<div class="action-row">', html)
+            self.assertIn('href="/about"', html)
+            self.assertNotIn("<stop>", html)
+
+    def test_stop_panel_success_renders_header_card_without_running_thread(self):
+        with isolated_app() as (app, base_dir):
+            script = base_dir / "fls.sh"
+            script.write_text("#!/bin/sh\n", encoding="utf-8")
+            created_threads = []
+
+            class FakeThread:
+                def __init__(self, *args, **kwargs):
+                    self.args = args
+                    self.kwargs = kwargs
+                    self.started = False
+                    created_threads.append(self)
+
+                def start(self):
+                    self.started = True
+
+            with patch(
+                "fls_manager.routes.about.panel_control.fls_control_script",
+                return_value=script,
+            ), patch(
+                "fls_manager.routes.about.panel_control.threading.Thread",
+                new=FakeThread,
+            ):
+                response = app.test_client().post(
+                    "/about/stop-panel",
+                    headers={"X-Token": TOKEN},
+                )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(len(created_threads), 1)
+            self.assertTrue(created_threads[0].started)
+            self.assertEqual(created_threads[0].kwargs.get("name"), "fls-panel-stop")
+            self.assertIn('<div class="card-title">正在停止面板</div>', html)
+            self.assertIn("停止后需要你手动重新启动面板", html)
+            self.assertIn('href="/logfile/fls-manager-daemon.log?back=/about"', html)
+
     def test_notify_test_renders_result_table_card_and_escapes_return(self):
         with isolated_app() as (app, base_dir):
             config_file = base_dir / "data" / "config.json"
