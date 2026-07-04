@@ -593,6 +593,59 @@ class BulkWorkflowTests(unittest.TestCase):
                 ["t1", "t2"],
             )
 
+    def test_legacy_task_toggle_post_updates_task_and_uses_safe_back(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1", enabled=True),
+                    sample_task("t2", enabled=True),
+                ],
+            )
+
+            with patch("fls_manager.routes.tasks.actions.reload_scheduler") as reload_scheduler:
+                response = app.test_client().post(
+                    "/task/toggle/t1?back=/tasks",
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.headers.get("Location"), "/tasks")
+            reload_scheduler.assert_called_once()
+
+            tasks = {task["id"]: task for task in read_json(base_dir / "data" / "tasks.json")}
+            self.assertFalse(tasks["t1"]["enabled"])
+            self.assertTrue(tasks["t2"]["enabled"])
+
+    def test_legacy_task_toggle_missing_task_aborts_without_side_effects(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1", enabled=True),
+                    sample_task("t2", enabled=False),
+                ],
+            )
+
+            with patch("fls_manager.routes.tasks.actions.save_tasks") as save_tasks:
+                with patch("fls_manager.routes.tasks.actions.reload_scheduler") as reload_scheduler:
+                    response = app.test_client().post(
+                        "/task/toggle/missing?back=/tasks",
+                        headers={"X-Token": TOKEN},
+                    )
+
+            self.assertEqual(response.status_code, 404)
+            save_tasks.assert_not_called()
+            reload_scheduler.assert_not_called()
+
+            tasks = {task["id"]: task for task in read_json(base_dir / "data" / "tasks.json")}
+            self.assertTrue(tasks["t1"]["enabled"])
+            self.assertFalse(tasks["t2"]["enabled"])
+
     def test_collection_add_task_accepts_multiple_task_ids(self):
         with isolated_app() as (app, base_dir):
             from fls_manager import paths

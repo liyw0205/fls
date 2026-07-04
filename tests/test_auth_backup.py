@@ -279,6 +279,7 @@ class CsrfSafetyTests(unittest.TestCase):
                 "/logfile/delete/demo.log",
                 "/collection/delete/c1",
                 "/task/pin/t1",
+                "/task/toggle/t1",
             ):
                 with self.subTest(url=url):
                     response = client.get(url, headers={"X-Token": "unit-token"})
@@ -286,6 +287,7 @@ class CsrfSafetyTests(unittest.TestCase):
 
             self.assertTrue(log_file.exists())
             self.assertEqual(read_json(base_dir / "data" / "collections.json")[0]["id"], "c1")
+            self.assertTrue(read_json(base_dir / "data" / "tasks.json")[0]["enabled"])
             self.assertFalse(read_json(base_dir / "data" / "tasks.json")[0]["pinned"])
 
 

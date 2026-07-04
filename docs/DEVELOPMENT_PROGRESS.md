@@ -1691,8 +1691,55 @@
 - 单项删除和批量删除现在共享同一停止失败删除边界。
 - 停止失败不会再导致任务配置被删除，避免运行态任务失去面板侧配置记录。
 
+## 阶段 39：兼容任务切换入口 POST 边界
+
+状态：已完成
+
+目标：
+
+- 继续收束任务页面遗留动作入口的 HTTP 方法边界。
+- 避免 `/task/toggle/<id>` 通过 GET 修改任务启用状态。
+- 目标任务不存在时不写回任务文件、不重载调度器。
+
+已完成：
+
+- 更新 `fls_manager/routes/tasks/actions.py`：
+  - `/task/toggle/<id>` 改为 `methods=["POST"]`，GET 自动返回 405。
+  - 切换前记录是否命中目标任务；目标不存在时 `abort(404)`。
+  - 目标不存在时不调用 `save_tasks()`，也不调用 `reload_scheduler()`。
+  - 成功切换后使用 `get_back_url("/tasks")` 返回，继续清洗 back 参数。
+- 扩展 `tests/test_auth_backup.py`：
+  - 将 `/task/toggle/t1` 纳入破坏性路由拒绝 GET 的回归测试。
+  - 断言 GET 被拒绝后任务 `enabled` 不变。
+- 扩展 `tests/test_bulk_workflows.py`：
+  - 覆盖兼容页面 POST 切换任务启用状态并按安全 back 返回。
+  - 覆盖目标任务不存在时返回 404，且不保存、不重载、任务文件不变。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 39。
+  - 在 API/页面开发注意和测试覆盖列表中记录 `/task/toggle/<id>` POST-only 边界。
+  - 增加阶段 39 开发日志。
+
+验证记录：
+
+- `python -B -m unittest tests.test_auth_backup.CsrfSafetyTests.test_destructive_routes_reject_get_requests tests.test_bulk_workflows.BulkWorkflowTests.test_legacy_task_toggle_post_updates_task_and_uses_safe_back tests.test_bulk_workflows.BulkWorkflowTests.test_legacy_task_toggle_missing_task_aborts_without_side_effects`：通过，3 tests OK。
+- `python -B -m compileall fls_manager/routes/tasks/actions.py tests/test_auth_backup.py tests/test_bulk_workflows.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，148 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有改变普通任务列表当前 AJAX API 切换入口，只收紧兼容保留的页面路由。
+
+收束结论：
+
+- 遗留 `/task/toggle/<id>` 不再允许 GET 修改状态。
+- 兼容页面切换入口与其它破坏性页面动作保持 POST-only 和缺失任务无副作用约束。
+
 ## 下一阶段候选
 
-- 阶段 39：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
+- 阶段 40：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

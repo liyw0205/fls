@@ -34,20 +34,25 @@ def task_delete(task_id):
     return redirect(get_back_url("/tasks"))
 
 
-@bp.route("/task/toggle/<task_id>")
+@bp.route("/task/toggle/<task_id>", methods=["POST"])
 def task_toggle(task_id):
     tasks = load_tasks()
+    found = False
 
     for task in tasks:
         if task.get("id") == task_id:
             task["enabled"] = not task.get("enabled", True)
             task["updated_at"] = now_str()
+            found = True
             break
+
+    if not found:
+        abort(404)
 
     save_tasks(tasks)
     reload_scheduler()
 
-    return redirect(url_for("tasks.tasks_page"))
+    return redirect(get_back_url("/tasks"))
 
 
 @bp.route("/task/pin/<task_id>", methods=["POST"])
