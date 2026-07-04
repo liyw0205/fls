@@ -1,4 +1,5 @@
 from ._common import *
+from ...ui.components import table_card
 
 
 @bp.route("/notify/test/<item_id>")
@@ -14,18 +15,33 @@ def notify_test(item_id):
         f"这是一条测试通知。\n时间：{now_str()}",
     )
 
-    body = f"""
-<div class="card">
-    <div class="card-title">通知测试结果</div>
-    <div class="help">
-        通知：<b>{h(item.get("name"))}</b><br>
-        渠道：<b>{h(channel_name(item.get("channel")))}</b><br>
-        结果：<b>{"成功" if ok else "失败"}</b><br>
-        返回：{h(msg)}
-    </div>
-    <br>
-    <a class="btn btn-gray" href="/notify">返回通知管理</a>
-</div>
+    status_badge = (
+        '<span class="badge green">成功</span>'
+        if ok else
+        '<span class="badge red">失败</span>'
+    )
+    rows = f"""
+<tr>
+    <td><b>通知</b></td>
+    <td>{h(item.get("name"))}</td>
+</tr>
+<tr>
+    <td><b>渠道</b></td>
+    <td>{h(channel_name(item.get("channel")))}</td>
+</tr>
+<tr>
+    <td><b>结果</b></td>
+    <td>{status_badge}</td>
+</tr>
+<tr>
+    <td><b>返回</b></td>
+    <td>{h(msg)}</td>
+</tr>
 """
+    body = table_card(
+        "通知测试结果",
+        ["项目", "值"],
+        rows,
+        actions_html='<a class="btn btn-gray" href="/notify">返回通知管理</a>',
+    )
     return layout("通知测试", "notify", body)
-

@@ -335,6 +335,50 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn("https://github.com/liyw0205/fls", html)
             self.assertIn("<td><b>控制脚本</b></td>", html)
 
+    def test_notify_test_renders_result_table_card_and_escapes_return(self):
+        with isolated_app() as (app, base_dir):
+            config_file = base_dir / "data" / "config.json"
+            config_file.parent.mkdir(parents=True, exist_ok=True)
+            config_file.write_text(
+                json.dumps(
+                    {
+                        "notify_items": [
+                            {
+                                "id": "notify-test",
+                                "name": '<通知 & "x">',
+                                "channel": "webhook",
+                                "enabled": True,
+                                "config": {},
+                            }
+                        ],
+                        "notify_default_ids": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch(
+                "fls_manager.routes.notify.test.send_one",
+                return_value=(False, '<bad & "x">'),
+            ):
+                response = app.test_client().get(
+                    "/notify/test/notify-test",
+                    headers={"X-Token": TOKEN},
+                )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">通知测试结果</div>', html)
+            self.assertIn("<th>项目</th>", html)
+            self.assertIn("<th>值</th>", html)
+            self.assertIn("&lt;通知 &amp; &quot;x&quot;&gt;", html)
+            self.assertIn("自定义 Webhook", html)
+            self.assertIn('<span class="badge red">失败</span>', html)
+            self.assertIn("&lt;bad &amp; &quot;x&quot;&gt;", html)
+            self.assertIn('href="/notify"', html)
+            self.assertNotIn('<bad & "x">', html)
+
     def test_online_script_doc_error_renders_escaped_message_card(self):
         with isolated_app() as (app, base_dir):
             cache_file = base_dir / "data" / "online_scripts_cache.json"

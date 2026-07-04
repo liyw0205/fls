@@ -865,3 +865,56 @@
 - 阶段 19：继续查找未脏页面中的稳定表格卡或纯文本提示卡；可评估后台任务日志页、通知测试结果页等小页面。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/about`、`/`、`/online-scripts`、`/pull/fetch`、`/pull/import`、`/deps`、`/panel/status`。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
+
+## 阶段 19：通知测试结果表格卡接入
+
+状态：已完成
+
+目标：
+
+- 继续低风险 UI 组件抽取，优先未脏文件和小型稳定页面。
+- 复用已有 `table_card()`，不新增组件 API。
+- 保留通知测试结果的返回操作，不把带动作按钮的页面硬塞进 `message_card()`。
+
+已完成：
+
+- 更新 `fls_manager/routes/notify/test.py`：
+  - 导入 `table_card()`。
+  - 将通知测试结果详情接入 `table_card()`。
+  - 使用 badge 展示成功/失败状态。
+  - 通过 `actions_html` 保留“返回通知管理”按钮。
+  - 保留通知名称、渠道名称和返回消息的 HTML 转义。
+- 扩展 `tests/test_ui_route_components.py`：
+  - 覆盖 `/notify/test/<id>` 通知测试结果表格卡渲染。
+  - mock `send_one()`，避免真实发送通知。
+  - 断言通知名称、渠道、失败 badge、返回消息转义和返回按钮存在。
+- 更新 `DEVELOPMENT.md`：
+  - 将 `/notify/test/<id>` 通知测试结果表格卡纳入路由组件覆盖。
+  - 增加阶段 19 开发日志。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_route_components`：通过，14 tests OK。
+- `python -B -m compileall fls_manager/routes/notify/test.py tests/test_ui_route_components.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，104 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
+- 本阶段只 mock 通知发送出口，不真实调用任何通知渠道。
+
+组件策略结论：
+
+- 带短操作区的稳定结果详情页适合 `table_card(actions_html=...)`。
+- `message_card()` 仍只用于纯文本提示，不承载带字段列表和动作按钮的结果页。
+- 后续继续优先选择未脏页面的小范围改动；动态日志和复杂 JS 区域暂缓。
+
+## 下一阶段候选
+
+- 阶段 20：继续查找未脏页面中的稳定表格卡或纯文本提示卡；可评估后台任务日志不存在页等小页面，但避免实时日志主体。
+- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/about`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
+- 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

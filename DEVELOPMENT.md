@@ -398,7 +398,7 @@ python -B -m compileall fls-manager.py fls_manager tests tools
 - `ui.components.summary_item()` 的统计项结构、数字 value 和 HTML 转义。
 - 路由层 UI 组件接入：`/pull/new`、`/pull/fetch`、`/pull/import` 普通/结果提示卡和 `/online-scripts/doc/<id>` 文档加载失败卡的渲染与转义。
 - 路由层 UI 组件接入：`/task/config/<id>` 保存成功/失败提示卡的渲染与转义。
-- 路由层 UI 组件接入：`/deps`、`/deps/refresh`、`/panel/status`、`/` 仪表盘环境状态和 `/about` 面板信息表格卡渲染、响应式表格 ID 保留与 HTML 转义。
+- 路由层 UI 组件接入：`/deps`、`/deps/refresh`、`/panel/status`、`/` 仪表盘环境状态、`/about` 面板信息和 `/notify/test/<id>` 通知测试结果表格卡渲染、响应式表格 ID 保留与 HTML 转义。
 
 后续优先补充：
 
@@ -442,6 +442,7 @@ python -B -m compileall fls-manager.py fls_manager tests tools
 
 ### 2026-07-05
 
+- 阶段 19 将通知测试结果页接入 `table_card()`，用状态 badge 展示成功/失败，保留返回通知管理操作区，并补充通知测试路由渲染与返回消息转义测试。
 - 阶段 18 将关于页“面板信息”只读表格接入 `table_card()`，保留项目仓库链接和路径字段转义，同时补充 `/about` 路由渲染测试并把 `/about` 纳入响应式 smoke。
 - 阶段 17 将仪表盘“环境状态”接入 `table_card()`，保留峰值 CPU 说明和现有环境行渲染，同时补充 `/` 路由渲染测试覆盖表格标题、表头和关键行。
 
