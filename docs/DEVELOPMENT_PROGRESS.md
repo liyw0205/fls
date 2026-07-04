@@ -1028,3 +1028,56 @@
 - 阶段 22：继续查找未脏页面中的纯文本提示卡或小型头部卡；可评估在线脚本安装确认页、安装日志页等，但避开复杂安装状态和富文本结果。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/about`、`/about/job-log/<id>`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
+
+## 阶段 22：在线脚本安装日志头部卡接入
+
+状态：已完成
+
+目标：
+
+- 继续低风险 UI 组件抽取，优先未脏文件和小型日志页。
+- 复用已有 `page_header_card()`，不新增组件 API。
+- 只替换在线脚本安装日志页头部卡，不触碰实时日志主体、自动刷新脚本和安装状态逻辑。
+
+已完成：
+
+- 更新 `fls_manager/routes/online_scripts/_common.py`：
+  - 导入 `page_header_card()`，供在线脚本子路由通配导入复用。
+- 更新 `fls_manager/routes/online_scripts/logs.py`：
+  - 将安装记录不存在提示接入头部卡，保留“返回”和“查看日志管理”入口。
+  - 将存在记录时的安装状态头部接入头部卡，保留状态、日志文件、返回、脚本管理、任务管理和停止安装按钮。
+  - 保留实时日志 `<pre id="log">`、日志控制条和 `loadLog()` 自动刷新逻辑。
+  - 保留动态脚本名称、状态、日志文件、安装 ID 和返回地址的 HTML 转义。
+- 扩展 `tests/test_ui_route_components.py`：
+  - 覆盖 `/online-scripts/log/<id>` 不存在记录提示卡渲染。
+  - 覆盖 `/online-scripts/log/<id>` 存在且运行中记录头部卡渲染、动态字段转义、停止安装按钮和实时日志主体保留。
+- 更新 `DEVELOPMENT.md`：
+  - 将 `/online-scripts/log/<id>` 在线脚本安装日志头部卡纳入路由组件覆盖。
+  - 增加阶段 22 开发日志。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_route_components`：通过，22 tests OK。
+- `python -B -m compileall fls_manager/routes/online_scripts/_common.py fls_manager/routes/online_scripts/logs.py tests/test_ui_route_components.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，113 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
+- 本阶段只验证在线脚本安装日志页初始渲染和静态日志 shell，不通过真实浏览器执行自动刷新脚本，也不执行真实在线脚本安装。
+
+组件策略结论：
+
+- `page_header_card()` 适合小型日志页头部，动态日志主体和轮询脚本保持原样。
+- 运行中任务的停止按钮可以作为调用方构造的 `actions_html` 传入，但安装 ID 必须在调用方先转义。
+- 后续继续优先选择未脏页面的小范围改动；涉及真实安装、下载或复杂 JS 状态的流程暂缓。
+
+## 下一阶段候选
+
+- 阶段 23：继续查找未脏页面中的纯文本提示卡或小型头部卡；可评估在线脚本安装目标已存在确认页，但避免改变实际安装提交逻辑。
+- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/online-scripts/log/<id>`、`/about`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
+- 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

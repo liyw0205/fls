@@ -583,6 +583,57 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn("文档加载失败：&lt;bad &amp; &quot;x&quot;&gt;", html)
             self.assertNotIn("<bad", html)
 
+    def test_online_install_log_missing_renders_header_card(self):
+        with isolated_app() as (app, _base_dir):
+            response = app.test_client().get(
+                "/online-scripts/log/missing-install",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">在线脚本日志</div>', html)
+            self.assertIn("安装记录不存在或面板已重启", html)
+            self.assertIn('<div class="action-row">', html)
+            self.assertIn('href="/online-scripts"', html)
+            self.assertIn('href="/logs?back=/online-scripts"', html)
+
+    def test_online_install_log_existing_renders_header_card_and_log_shell(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING
+
+            ONLINE_INSTALL_RUNNING["install-x"] = {
+                "id": "install-x",
+                "script_id": "demo",
+                "script_name": '<脚本 & "x">',
+                "log_file": 'online-install-<x>.log',
+                "running": True,
+                "status": "running <ok>",
+                "returncode": None,
+                "error": "",
+            }
+
+            response = app.test_client().get(
+                "/online-scripts/log/install-x?back=/online-scripts",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("在线脚本下载安装日志：&lt;脚本 &amp; &quot;x&quot;&gt;", html)
+            self.assertIn("running &lt;ok&gt;", html)
+            self.assertIn("online-install-&lt;x&gt;.log", html)
+            self.assertIn('<div class="action-row">', html)
+            self.assertIn('href="/online-scripts"', html)
+            self.assertIn('href="/pull"', html)
+            self.assertIn('href="/tasks"', html)
+            self.assertIn('action="/online-scripts/install-stop/install-x"', html)
+            self.assertIn('<pre class="log" id="log">加载中...</pre>', html)
+            self.assertIn("loadLog", html)
+            self.assertNotIn("<脚本", html)
+
 
 if __name__ == "__main__":
     unittest.main()

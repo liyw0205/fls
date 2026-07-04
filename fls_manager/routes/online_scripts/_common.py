@@ -9,7 +9,7 @@ import requests
 from flask import Blueprint, request, redirect, url_for, abort, jsonify
 
 from ...utils import h, get_back_url
-from ...ui.components import message_card, pagination_card, summary_item
+from ...ui.components import message_card, page_header_card, pagination_card, summary_item
 from ...ui.layout import layout
 from ...ui.log_controls import log_controls
 from ...logs import tail_file

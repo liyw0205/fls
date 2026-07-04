@@ -31,18 +31,17 @@ def online_install_log(install_id):
     info = ONLINE_INSTALL_RUNNING.get(install_id)
 
     if not info:
-        body = f"""
-<div class="card">
-    <div class="card-title">在线脚本日志</div>
-    <div class="help">
+        body = page_header_card(
+            "在线脚本日志",
+            help_html="""
         安装记录不存在或面板已重启。<br>
         可以到日志管理中查找 online-script-install-*.log。
-    </div>
-    <br>
-    <a class="btn btn-gray" href="{h(back_url)}">返回</a>
-    <a class="btn btn-blue" href="/logs?back={h(back_url)}">查看日志管理</a>
-</div>
-"""
+""",
+            actions_html=f"""
+<a class="btn btn-gray" href="{h(back_url)}">返回</a>
+<a class="btn btn-blue" href="/logs?back={h(back_url)}">查看日志管理</a>
+""",
+        )
         return layout("在线脚本日志", "online_scripts", body)
 
     stop_install_button = ""
@@ -54,20 +53,22 @@ def online_install_log(install_id):
 </form>
 """
 
-    body = f"""
-<div class="card">
-    <div class="card-title">在线脚本下载安装日志：{h(info.get("script_name") or install_id)}</div>
-    <div class="help">
+    header_card = page_header_card(
+        f'在线脚本下载安装日志：{info.get("script_name") or install_id}',
+        help_html=f"""
         状态：<b id="installStatus">{h(info.get("status") or "-")}</b><br>
         日志文件：{h(info.get("log_file") or "-")}
-    </div>
-    <br>
-    <a class="btn btn-gray" href="{h(back_url)}">返回</a>
-    <a class="btn btn-blue" href="/pull">脚本管理</a>
-    <a class="btn btn-orange" href="/tasks">任务管理</a>
-    {stop_install_button}
-</div>
+""",
+        actions_html=f"""
+<a class="btn btn-gray" href="{h(back_url)}">返回</a>
+<a class="btn btn-blue" href="/pull">脚本管理</a>
+<a class="btn btn-orange" href="/tasks">任务管理</a>
+{stop_install_button}
+""",
+    )
 
+    body = f"""
+{header_card}
 <pre class="log" id="log">加载中...</pre>
 {log_controls()}
 
@@ -137,4 +138,3 @@ window.__FLS_ACTIVE_LOG_INTERVAL__ = setInterval(loadLog, 2000);
 """
 
     return layout("在线脚本日志", "online_scripts", body)
-
