@@ -398,7 +398,7 @@ python -B -m compileall fls-manager.py fls_manager tests tools
 - `ui.components.summary_item()` 的统计项结构、数字 value 和 HTML 转义。
 - 路由层 UI 组件接入：`/pull/new`、`/pull/fetch`、`/pull/import` 普通/结果提示卡和 `/online-scripts/doc/<id>` 文档加载失败卡的渲染与转义。
 - 路由层 UI 组件接入：`/task/config/<id>` 保存成功/失败提示卡的渲染与转义。
-- 路由层 UI 组件接入：`/deps`、`/deps/refresh`、`/panel/status`、`/` 仪表盘环境状态、`/about` 面板信息、`/notify/test/<id>` 通知测试结果、`/about/job-log/<id>` 后台任务日志头部卡、`/about/restart-panel`、`/about/stop-panel` 面板控制结果头部卡和 `/online-scripts/log/<id>` 在线脚本安装日志头部卡渲染、响应式表格 ID 保留与 HTML 转义。
+- 路由层 UI 组件接入：`/deps`、`/deps/refresh`、`/panel/status`、`/` 仪表盘环境状态、`/about` 面板信息、`/notify/test/<id>` 通知测试结果、`/about/job-log/<id>` 后台任务日志头部卡、`/about/restart-panel`、`/about/stop-panel` 面板控制结果头部卡、`/online-scripts/log/<id>` 在线脚本安装日志头部卡和 `/online-scripts/install/<id>` 安装确认头部卡渲染、响应式表格 ID 保留与 HTML 转义。
 
 后续优先补充：
 
@@ -442,6 +442,7 @@ python -B -m compileall fls-manager.py fls_manager tests tools
 
 ### 2026-07-05
 
+- 阶段 23 将在线脚本安装目标路径非法和目标已存在确认页接入 `page_header_card()`，保留继续安装表单和隐藏字段，并补充 `/online-scripts/install/<id>` 路由渲染、路径转义和不触发真实安装的确认页测试。
 - 阶段 22 将在线脚本安装日志页头部接入 `page_header_card()`，保留安装记录缺失提示、停止安装按钮和实时日志主体，并补充 `/online-scripts/log/<id>` 路由渲染与动态字段转义测试。
 - 阶段 21 将面板重启/停止结果页接入 `page_header_card()`，保留控制脚本缺失提示、成功后的跳转脚本和面板日志入口，并通过 mock 控制脚本与线程补充路由渲染测试，避免触发真实启停。
 - 阶段 20 将后台任务日志页头部接入 `page_header_card()`，保留不存在记录提示、返回/日志入口和实时日志主体，并补充 `page_header_card()` 与 `/about/job-log/<id>` 路由渲染测试。

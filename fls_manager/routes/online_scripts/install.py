@@ -41,14 +41,12 @@ def online_scripts_install(script_id):
     try:
         target = online_script_target(item)
     except Exception as e:
-        return layout("在线脚本安装失败", "online_scripts", f"""
-<div class="card">
-    <div class="card-title">目标路径非法</div>
-    <div class="help">{h(e)}</div>
-    <br>
-    <a class="btn btn-gray" href="/online-scripts">返回</a>
-</div>
-"""), 400
+        body = page_header_card(
+            "目标路径非法",
+            help_html=h(e),
+            actions_html='<a class="btn btn-gray" href="/online-scripts">返回</a>',
+        )
+        return layout("在线脚本安装失败", "online_scripts", body), 400
 
     selected_task_hidden = ""
 
@@ -80,21 +78,19 @@ def online_scripts_install(script_id):
         proxy_options = proxy_select_options(proxy_id)
         has_task = script_has_task(item)
 
-        body = f"""
-<div class="card">
-    <div class="card-title">目标已存在，请确认</div>
-    <div class="help" style="color:#dc2626;">
-        检测到同名文件或文件夹已经存在。为避免意外覆盖，已暂停操作。<br>
-        目标路径：<b>{h(target)}</b>
-    </div>
-    <br>
-    <div class="help">
+        header_card = page_header_card(
+            "目标已存在，请确认",
+            help_html=f"""
+        <span style="color:#dc2626;">检测到同名文件或文件夹已经存在。为避免意外覆盖，已暂停操作。</span><br>
+        目标路径：<b>{h(target)}</b><br>
         如果是 Git 仓库目录，继续后会执行 <code>git pull</code> 更新。<br>
         如果是 raw 文件，继续后会覆盖该文件。<br>
         如果目标是非 Git 文件夹，继续也不会强行覆盖，需要你手动处理。
-    </div>
-</div>
+""",
+        )
 
+        body = f"""
+{header_card}
 <div class="card">
     <form method="post" action="/online-scripts/install/{h(script_id)}">
         <input type="hidden" name="force" value="1">
@@ -173,4 +169,3 @@ def online_scripts_install_stop(install_id):
             err="" if ok else msg,
         )
     )
-

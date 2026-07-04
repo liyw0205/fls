@@ -583,6 +583,78 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn("文档加载失败：&lt;bad &amp; &quot;x&quot;&gt;", html)
             self.assertNotIn("<bad", html)
 
+    def test_online_install_invalid_target_renders_header_card(self):
+        with isolated_app() as (app, base_dir):
+            cache_file = base_dir / "data" / "online_scripts_cache.json"
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            cache_file.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "bad-target",
+                            "name": "Bad Target",
+                            "type": "raw",
+                            "link": "https://example.invalid/demo.py",
+                            "link_name": "../bad.py",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            response = app.test_client().post(
+                "/online-scripts/install/bad-target",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 400)
+            self.assertIn('<div class="card-title">目标路径非法</div>', html)
+            self.assertIn("目标路径非法", html)
+            self.assertIn('<div class="action-row">', html)
+            self.assertIn('href="/online-scripts"', html)
+
+    def test_online_install_existing_target_renders_header_card(self):
+        with isolated_app() as (app, base_dir):
+            cache_file = base_dir / "data" / "online_scripts_cache.json"
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            cache_file.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "exists-demo",
+                            "name": "Exists Demo",
+                            "type": "raw",
+                            "link": "https://example.invalid/demo.py",
+                            "link_name": 'exists-<x>.py',
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            target = base_dir / "scripts" / 'exists-<x>.py'
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("print('old')\n", encoding="utf-8")
+
+            response = app.test_client().post(
+                "/online-scripts/install/exists-demo",
+                data={"proxy_id": "", "import_task": "0"},
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">目标已存在，请确认</div>', html)
+            self.assertIn("检测到同名文件或文件夹已经存在", html)
+            self.assertIn("exists-&lt;x&gt;.py", html)
+            self.assertIn('<form method="post" action="/online-scripts/install/exists-demo">', html)
+            self.assertIn('name="force" value="1"', html)
+            self.assertIn("确认继续", html)
+            self.assertIn('href="/online-scripts"', html)
+            self.assertNotIn("<x>", html)
+
     def test_online_install_log_missing_renders_header_card(self):
         with isolated_app() as (app, _base_dir):
             response = app.test_client().get(
