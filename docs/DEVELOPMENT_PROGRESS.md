@@ -1341,3 +1341,55 @@
 - 阶段 28：继续查找未脏页面中的纯文本提示卡或小型头部卡；可评估备份导入早期错误/失败提示是否适合接入组件，但需确认是否接受从纯文本改为 HTML。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/backup`、备份导入完成页、`/about` 版本失败页、`/online-scripts/install-select/<id>`、`/online-scripts/doc/<id>`、`/online-scripts/install/<id>`、`/online-scripts/log/<id>`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
+
+## 阶段 28：脚本调试日志头部卡接入
+
+状态：已完成
+
+目标：
+
+- 继续低风险 UI 组件抽取，优先未脏文件和小型日志页。
+- 复用已有 `page_header_card()`，不新增组件 API。
+- 只替换脚本调试日志页头部卡，不触碰真实调试启动、停止、日志轮询和 API 逻辑。
+
+已完成：
+
+- 更新 `fls_manager/routes/scripts/debug.py`：
+  - 导入 `page_header_card()`。
+  - 将 `/scripts/debug-log/<id>` 调试记录不存在提示接入头部卡，保留返回和日志管理入口。
+  - 将存在记录时的状态头部接入头部卡，保留运行状态、PID、脚本路径、日志文件、停止调试按钮、返回和脚本管理入口。
+  - 保留实时日志 `<pre id="log">`、日志浮动控制和 `loadScriptDebugLog()` 自动刷新逻辑。
+  - 保留动态 PID、脚本路径、日志文件、调试 ID 和返回地址的 HTML 转义。
+- 扩展 `tests/test_ui_route_components.py`：
+  - 覆盖 `/scripts/debug-log/<id>` 不存在记录提示卡渲染。
+  - 覆盖 `/scripts/debug-log/<id>` 存在且运行中记录头部卡渲染、动态字段转义、停止调试按钮和实时日志主体保留。
+- 更新 `DEVELOPMENT.md`：
+  - 将 `/scripts/debug-log/<id>` 脚本调试日志头部卡纳入路由组件覆盖。
+  - 增加阶段 28 开发日志。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_route_components`：通过，32 tests OK。
+- `python -B -m compileall fls_manager/routes/scripts/debug.py tests/test_ui_route_components.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，123 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
+- 本阶段只验证脚本调试日志页初始渲染和静态日志 shell，不启动真实脚本调试进程，也不通过真实浏览器执行自动刷新脚本。
+
+组件策略结论：
+
+- `page_header_card()` 适合小型实时日志页头部，动态日志主体、浮动日志控制和轮询脚本保持原样。
+- 运行中调试记录的停止按钮可以作为调用方构造的 `actions_html` 传入，但调试 ID 和返回地址必须在调用方先转义。
+- 后续继续优先选择未脏页面的小范围改动；真实调试启动、安装、下载和复杂 JS 状态流程暂缓。
+
+## 下一阶段候选
+
+- 阶段 29：继续查找未脏页面中的纯文本提示卡或小型头部卡；可评估依赖安装日志页头部卡，但避免真实 pip 安装。
+- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/scripts/debug-log/<id>`、`/backup`、备份导入完成页、`/about` 版本失败页、`/online-scripts/install-select/<id>`、`/online-scripts/doc/<id>`、`/online-scripts/install/<id>`、`/online-scripts/log/<id>`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
+- 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

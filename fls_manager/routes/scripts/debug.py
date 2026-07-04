@@ -19,6 +19,7 @@ from .helpers import (
 from ...paths import LOG_DIR
 from ...utils import h, now_str, safe_name, get_back_url
 from ...ui.layout import layout
+from ...ui.components import page_header_card
 from ...ui.log_controls import log_controls
 from ...logs import tail_file
 from ...models import load_global_env
@@ -250,18 +251,17 @@ def scripts_debug_log(debug_id):
     info = SCRIPT_DEBUG_RUNNING.get(debug_id)
 
     if not info:
-        body = f"""
-<div class="card">
-    <div class="card-title">脚本调试日志</div>
-    <div class="help">
+        body = page_header_card(
+            "脚本调试日志",
+            help_html="""
         调试记录不存在或面板已重启。<br>
         可以到日志管理里查找 <code>script-debug-*.log</code>。
-    </div>
-    <br>
-    <a class="btn btn-gray" href="{h(back_url)}">返回</a>
-    <a class="btn btn-blue" href="/logs?back={h(back_url)}">日志管理</a>
-</div>
-"""
+""",
+            actions_html=f"""
+<a class="btn btn-gray" href="{h(back_url)}">返回</a>
+<a class="btn btn-blue" href="/logs?back={h(back_url)}">日志管理</a>
+""",
+        )
         return layout("脚本调试日志", "pull", body)
 
     stop_btn = ""
@@ -273,20 +273,23 @@ def scripts_debug_log(debug_id):
 </a>
 """
 
-    body = f"""
-<div class="card">
-    <div class="card-title">脚本调试日志</div>
-    <div class="help">
+    header_card = page_header_card(
+        "脚本调试日志",
+        help_html=f"""
         状态：<b id="debugStatus">{"运行中" if info.get("running") else "已结束"}</b><br>
         PID：{h(info.get("pid") or "-")}<br>
         脚本：{h(info.get("script") or "-")}<br>
         日志文件：{h(info.get("log_file") or "-")}
-    </div>
-    <br>
-    {stop_btn}
-    <a class="btn btn-gray" href="{h(back_url)}">返回</a>
-    <a class="btn btn-blue" href="/pull">脚本管理</a>
-</div>
+""",
+        actions_html=f"""
+{stop_btn}
+<a class="btn btn-gray" href="{h(back_url)}">返回</a>
+<a class="btn btn-blue" href="/pull">脚本管理</a>
+""",
+    )
+
+    body = f"""
+{header_card}
 
 <pre class="log" id="log">加载中...</pre>
 {log_controls()}

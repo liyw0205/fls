@@ -846,6 +846,60 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn("loadLog", html)
             self.assertNotIn("<脚本", html)
 
+    def test_script_debug_log_missing_renders_header_card(self):
+        with isolated_app() as (app, _base_dir):
+            response = app.test_client().get(
+                "/scripts/debug-log/missing-debug?back=/pull",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">脚本调试日志</div>', html)
+            self.assertIn("调试记录不存在或面板已重启", html)
+            self.assertIn("script-debug-*.log", html)
+            self.assertIn('<div class="action-row">', html)
+            self.assertIn('href="/pull"', html)
+            self.assertIn('href="/logs?back=/pull"', html)
+
+    def test_script_debug_log_existing_renders_header_card_and_log_shell(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.routes.scripts.debug import SCRIPT_DEBUG_RUNNING
+
+            SCRIPT_DEBUG_RUNNING["debug-x"] = {
+                "id": "debug-x",
+                "script": '/tmp/script-<x>.py',
+                "rel": 'script-<x>.py',
+                "log_file": 'script-debug-<x>.log',
+                "running": True,
+                "process": None,
+                "pid": '<123>',
+                "returncode": None,
+                "error": "",
+            }
+
+            response = app.test_client().get(
+                "/scripts/debug-log/debug-x?back=/pull",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">脚本调试日志</div>', html)
+            self.assertIn('<b id="debugStatus">运行中</b>', html)
+            self.assertIn("PID：&lt;123&gt;", html)
+            self.assertIn("/tmp/script-&lt;x&gt;.py", html)
+            self.assertIn("script-debug-&lt;x&gt;.log", html)
+            self.assertIn('<div class="action-row">', html)
+            self.assertIn('href="/scripts/debug-stop/debug-x?back=/pull"', html)
+            self.assertIn('href="/pull"', html)
+            self.assertIn('<pre class="log" id="log">加载中...</pre>', html)
+            self.assertIn('id="flsLogNewTip"', html)
+            self.assertIn("loadScriptDebugLog", html)
+            self.assertNotIn("<x>", html)
+
     def test_backup_import_success_renders_header_card(self):
         with isolated_app() as (app, base_dir):
             archive = io.BytesIO()
