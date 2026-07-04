@@ -12,7 +12,7 @@ from ..state import DEPS_RUNNING
 from ..utils import h, now_str, safe_name, get_back_url
 from ..logs import tail_file
 from ..ui.layout import layout
-from ..ui.components import table_card
+from ..ui.components import page_header_card, table_card
 
 bp = Blueprint("deps", __name__)
 
@@ -224,17 +224,20 @@ def deps_install_log(install_id):
     log_file = info.get("log_file") if info else ""
     running = is_deps_install_running(install_id)
 
-    body = f"""
-<div class="card">
-    <div class="card-title">安装日志：{h(package)}</div>
-    <div class="help">
+    header_card = page_header_card(
+        f"安装日志：{package}",
+        help_html=f"""
         状态：<b id="installStatus">{"安装中" if running else "已结束"}</b><br>
         日志文件：{h(log_file or "当前进程已结束，无法定位日志")}
-    </div>
-    <br>
-    <a class="btn btn-gray" href="{h(back_url)}">返回</a>
-    <a class="btn btn-blue" href="/deps/refresh">刷新依赖</a>
-</div>
+""",
+        actions_html=f"""
+<a class="btn btn-gray" href="{h(back_url)}">返回</a>
+<a class="btn btn-blue" href="/deps/refresh">刷新依赖</a>
+""",
+    )
+
+    body = f"""
+{header_card}
 
 <pre class="log" id="log">加载中...</pre>
 

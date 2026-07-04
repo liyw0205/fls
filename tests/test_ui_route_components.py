@@ -900,6 +900,61 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn("loadScriptDebugLog", html)
             self.assertNotIn("<x>", html)
 
+    def test_deps_install_log_missing_renders_header_card_and_log_shell(self):
+        with isolated_app() as (app, _base_dir):
+            response = app.test_client().get(
+                "/deps/install-log/missing-install?back=/deps",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">安装日志：未知</div>', html)
+            self.assertIn('<b id="installStatus">已结束</b>', html)
+            self.assertIn("当前进程已结束，无法定位日志", html)
+            self.assertIn('<div class="action-row">', html)
+            self.assertIn('href="/deps"', html)
+            self.assertIn('href="/deps/refresh"', html)
+            self.assertIn('<pre class="log" id="log">加载中...</pre>', html)
+            self.assertIn("loadLog", html)
+
+    def test_deps_install_log_existing_renders_header_card_and_log_shell(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.state import DEPS_RUNNING
+
+            class FakeProc:
+                def poll(self):
+                    return None
+
+            DEPS_RUNNING["deps-x"] = {
+                "process": FakeProc(),
+                "package": '<Pkg & "x">',
+                "log_file": 'deps-install-<x>.log',
+                "log_fp": None,
+                "finished": False,
+                "returncode": None,
+            }
+
+            response = app.test_client().get(
+                "/deps/install-log/deps-x?back=/deps",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("安装日志：&lt;Pkg &amp; &quot;x&quot;&gt;", html)
+            self.assertIn('<b id="installStatus">安装中</b>', html)
+            self.assertIn("deps-install-&lt;x&gt;.log", html)
+            self.assertIn('<div class="action-row">', html)
+            self.assertIn('href="/deps"', html)
+            self.assertIn('href="/deps/refresh"', html)
+            self.assertIn('<pre class="log" id="log">加载中...</pre>', html)
+            self.assertIn("loadLog", html)
+            self.assertNotIn("<Pkg", html)
+            self.assertNotIn("<x>", html)
+
     def test_backup_import_success_renders_header_card(self):
         with isolated_app() as (app, base_dir):
             archive = io.BytesIO()
