@@ -210,6 +210,18 @@ def online_scripts_install_select(script_id):
     display_start = start + 1 if filtered_total else 0
     display_end = min(end, filtered_total)
 
+    header_card = page_header_card(
+        f'选择任务并安装：{item.get("name") or script_id}',
+        help_html=f"""
+                脚本 ID：{h(item.get("id"))}<br>
+                脚本类型：{h(item.get("type"))}<br>
+                保存名：{h(item.get("link_name"))}<br>
+                共检测到 <b>{total_tasks}</b> 个可导入任务。默认全选全部任务。<br>
+选择约 <b id="selectedTaskCount">{selected_count}</b> 个任务。
+""",
+        actions_html='<a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>',
+    )
+
     body = f"""
 <style>
 .fls-install-select-head {{
@@ -302,24 +314,7 @@ body.fls-mobile .fls-install-task-list {{
 <input type="hidden" name="select_mode" value="all">
 <input type="hidden" name="excluded_task_indexes" id="excludedTaskIndexes" value="{h(excluded_text)}">
 
-<div class="card">
-    <div class="fls-install-select-head">
-        <div>
-            <div class="card-title">选择任务并安装：{h(item.get("name") or script_id)}</div>
-            <div class="help">
-                脚本 ID：{h(item.get("id"))}<br>
-                脚本类型：{h(item.get("type"))}<br>
-                保存名：{h(item.get("link_name"))}<br>
-                共检测到 <b>{total_tasks}</b> 个可导入任务。默认全选全部任务。<br>
-选择约 <b id="selectedTaskCount">{selected_count}</b> 个任务。
-            </div>
-        </div>
-
-        <div class="action-row">
-            <a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>
-        </div>
-    </div>
-</div>
+{header_card}
 
 <div class="card">
     <div class="card-title">安装选项</div>
@@ -561,4 +556,3 @@ flsApplyExcludedToVisible();
 """
 
     return layout("选择任务并安装", "online_scripts", body)
-

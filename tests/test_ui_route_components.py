@@ -686,6 +686,56 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn('href="/online-scripts"', html)
             self.assertNotIn("<x>", html)
 
+    def test_online_install_select_renders_header_card_and_keeps_task_shell(self):
+        with isolated_app() as (app, base_dir):
+            cache_file = base_dir / "data" / "online_scripts_cache.json"
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            cache_file.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "select-demo",
+                            "name": '<Install & "x">',
+                            "type": "raw",
+                            "link": "https://example.invalid/select.py",
+                            "link_name": 'select-<x>.py',
+                            "task_cron": [
+                                {
+                                    "name": "任务一",
+                                    "cron": "0 1 * * *",
+                                    "command": "task select.py",
+                                    "remark": "备注",
+                                }
+                            ],
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            response = app.test_client().get(
+                "/online-scripts/install-select/select-demo",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(
+                "选择任务并安装：&lt;Install &amp; &quot;x&quot;&gt;",
+                html,
+            )
+            self.assertIn("脚本 ID：select-demo", html)
+            self.assertIn("保存名：select-&lt;x&gt;.py", html)
+            self.assertIn('<b id="selectedTaskCount">1</b>', html)
+            self.assertIn('<div class="action-row">', html)
+            self.assertIn('href="/online-scripts"', html)
+            self.assertIn('id="onlineInstallSelectForm"', html)
+            self.assertIn('name="select_mode" value="all"', html)
+            self.assertIn("选择要导入的任务", html)
+            self.assertIn("flsInstallGoTaskPage", html)
+            self.assertNotIn("<Install", html)
+
     def test_online_install_log_missing_renders_header_card(self):
         with isolated_app() as (app, _base_dir):
             response = app.test_client().get(
