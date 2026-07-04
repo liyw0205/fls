@@ -1,4 +1,5 @@
 from ._common import *
+from ...ui.components import page_header_card, table_card
 
 
 @bp.route("/env/delete/<key>")
@@ -47,39 +48,28 @@ def env_import_from_tasks():
 
         return redirect(url_for("env.env_page"))
 
-    body = f"""
-<form method="post">
-<div class="card">
-    <div class="card-title">从任务变量导入到全局变量</div>
-    <div class="help">
+    header_card = page_header_card(
+        "从任务变量导入到全局变量",
+        help_html="""
         选择要导入的任务变量。默认勾选全部。<br>
-        如果变量名已存在，勾选“允许覆盖”才会覆盖全局变量。
-    </div>
-    <br>
-    <label>
+        如果变量名已存在，勾选“允许覆盖”才会覆盖全局变量。<br><br>
+        <label>
         <input type="checkbox" name="overwrite" value="1" style="width:auto;">
         允许覆盖已有全局变量
-    </label>
-</div>
+        </label>
+""",
+    )
 
-<div class="card">
-    <div class="card-title">可导入变量</div>
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>选择</th>
-                    <th>任务</th>
-                    <th>变量名</th>
-                    <th>值</th>
-                    <th>导入状态</th>
-                </tr>
-            </thead>
-            <tbody>{collect_task_env_rows()}</tbody>
-        </table>
-    </div>
-</div>
+    import_table = table_card(
+        "可导入变量",
+        ("选择", "任务", "变量名", "值", "导入状态"),
+        collect_task_env_rows(),
+    )
 
+    body = f"""
+<form method="post">
+{header_card}
+{import_table}
 <div class="card">
     <button class="btn btn-primary" type="submit">导入所选变量</button>
     <a class="btn btn-gray" href="/env">返回</a>
@@ -87,4 +77,3 @@ def env_import_from_tasks():
 </form>
 """
     return layout("导入全局变量", "env", body)
-

@@ -325,6 +325,54 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn('<pre class="log">removed &lt;pkg &amp; &quot;x&quot;&gt;\n</pre>', html)
             self.assertNotIn('<pkg & "x">', html)
 
+    def test_env_import_renders_header_card_and_table_card(self):
+        with isolated_app() as (app, base_dir):
+            data_dir = base_dir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            (data_dir / "tasks.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "task-env",
+                            "name": '<Task & "x">',
+                            "command": "task demo.py",
+                            "env": {
+                                '<ENV & "x">': 'value <x>',
+                                "NEW_ENV": "new",
+                            },
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (data_dir / "global_env.json").write_text(
+                json.dumps({'<ENV & "x">': "old"}),
+                encoding="utf-8",
+            )
+
+            response = app.test_client().get(
+                "/env/import",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">从任务变量导入到全局变量</div>', html)
+            self.assertIn("允许覆盖已有全局变量", html)
+            self.assertIn('<div class="card-title">可导入变量</div>', html)
+            self.assertIn("<th>选择</th>", html)
+            self.assertIn("&lt;Task &amp; &quot;x&quot;&gt;", html)
+            self.assertIn("&lt;ENV &amp; &quot;x&quot;&gt;", html)
+            self.assertIn("value &lt;x&gt;", html)
+            self.assertIn('<span class="badge orange">将覆盖</span>', html)
+            self.assertIn('<span class="badge green">新增</span>', html)
+            self.assertIn('name="overwrite" value="1"', html)
+            self.assertIn("导入所选变量", html)
+            self.assertIn('href="/env"', html)
+            self.assertNotIn("<Task", html)
+            self.assertNotIn("<ENV", html)
+
     def test_status_page_renders_table_card_with_runtime_table_id(self):
         with isolated_app() as (app, _base_dir):
             runtime_items = [
