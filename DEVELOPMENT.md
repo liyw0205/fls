@@ -398,7 +398,7 @@ python -B -m compileall fls-manager.py fls_manager tests tools
 - `ui.components.summary_item()` 的统计项结构、数字 value 和 HTML 转义。
 - 路由层 UI 组件接入：`/pull/new`、`/pull/fetch`、`/pull/import` 普通/结果提示卡和 `/online-scripts/doc/<id>` 文档加载失败卡、无文档链接提示卡的渲染与转义。
 - 路由层 UI 组件接入：`/task/config/<id>` 保存成功/失败提示卡的渲染与转义。
-- 路由层 UI 组件接入：`/deps`、`/deps/refresh`、`/panel/status`、`/` 仪表盘环境状态、`/about` 面板信息、`/notify/test/<id>` 通知测试结果、`/about/job-log/<id>` 后台任务日志头部卡、`/about/restart-panel`、`/about/stop-panel` 面板控制结果头部卡、`/about/refresh-log`、`/about/update-version` 版本失败头部卡、`/online-scripts/log/<id>` 在线脚本安装日志头部卡、`/online-scripts/install/<id>` 安装确认头部卡和 `/online-scripts/install-select/<id>` 安装选择页头部卡渲染、响应式表格 ID 保留与 HTML 转义。
+- 路由层 UI 组件接入：`/deps`、`/deps/refresh`、`/panel/status`、`/` 仪表盘环境状态、`/about` 面板信息、`/notify/test/<id>` 通知测试结果、`/about/job-log/<id>` 后台任务日志头部卡、`/about/restart-panel`、`/about/stop-panel` 面板控制结果头部卡、`/about/refresh-log`、`/about/update-version` 版本失败头部卡、`/online-scripts/log/<id>` 在线脚本安装日志头部卡、`/online-scripts/install/<id>` 安装确认头部卡、`/online-scripts/install-select/<id>` 安装选择页头部卡和 `/backup/import` 备份导入完成页头部卡渲染、响应式表格 ID 保留与 HTML 转义。
 
 后续优先补充：
 
@@ -442,6 +442,7 @@ python -B -m compileall fls-manager.py fls_manager tests tools
 
 ### 2026-07-05
 
+- 阶段 27 将备份导入完成页接入 `page_header_card()`，保留已恢复内容、依赖恢复、日志信息和返回/日志入口，并通过临时 `FLS_BASE_DIR` 内的小型 tar.gz 备份补充 `/backup/import` 成功渲染测试，避免触碰真实数据。
 - 阶段 26 将关于页刷新更新日志和更新版本的失败结果页接入 `page_header_card()`，保留返回关于页入口，并通过 mock Git 可用性/仓库状态补充失败分支路由测试。
 - 阶段 25 将在线脚本安装选择页顶部说明接入 `page_header_card()`，保留任务选择表单、隐藏字段、分页和任务选择 JS，并补充 `/online-scripts/install-select/<id>` 路由渲染、字段转义和任务选择 shell 保留测试。
 - 阶段 24 将在线脚本文档无 `doc_link` 提示接入 `page_header_card()`，保留返回在线脚本入口，并补充 `/online-scripts/doc/<id>` 无文档链接路由渲染测试。

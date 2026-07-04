@@ -1288,3 +1288,56 @@
 - 阶段 27：继续查找未脏页面中的纯文本提示卡或小型头部卡；可评估备份导入完成页或备份导入失败页，但避免执行真实大范围恢复。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/about` 版本失败页、`/online-scripts/install-select/<id>`、`/online-scripts/doc/<id>`、`/online-scripts/install/<id>`、`/online-scripts/log/<id>`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
+
+## 阶段 27：备份导入完成页头部卡接入
+
+状态：已完成
+
+目标：
+
+- 继续低风险 UI 组件抽取，优先未脏文件和小型结果页。
+- 复用已有 `page_header_card()`，不新增组件 API。
+- 只替换备份导入成功结果页，不改变上传、解压、安全检查、恢复和依赖安装逻辑。
+
+已完成：
+
+- 更新 `fls_manager/routes/backup/restore.py`：
+  - 导入 `page_header_card()`。
+  - 将 `/backup/import` 成功结果页接入头部卡。
+  - 保留已恢复内容、依赖恢复状态、依赖日志路径、返回备份恢复和查看日志入口。
+  - 保留恢复内容、依赖消息和日志路径的 HTML 转义。
+  - 未改动未上传文件、未选择恢复内容和失败分支的既有响应形态。
+- 扩展 `tests/test_ui_route_components.py`：
+  - 覆盖 `/backup/import` 导入小型 tar.gz 后的成功结果页渲染。
+  - 测试使用临时 `FLS_BASE_DIR` 和内存归档，只恢复测试目录内的 `data/config.json`。
+  - mock `reload_scheduler()`，避免触发真实调度器刷新副作用。
+- 更新 `DEVELOPMENT.md`：
+  - 将 `/backup/import` 备份导入完成页头部卡纳入路由组件覆盖。
+  - 增加阶段 27 开发日志。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_route_components`：通过，30 tests OK。
+- `python -B -m compileall fls_manager/routes/backup/restore.py tests/test_ui_route_components.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，121 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
+- 本阶段只验证小型隔离备份的 `data` 恢复成功路径，没有执行真实大范围恢复、脚本目录恢复或依赖安装。
+
+组件策略结论：
+
+- `page_header_card()` 适合备份导入完成这类简短结果页，恢复详情作为 `help_html` 保留即可。
+- 对有文件系统副作用的路由测试必须使用临时 `FLS_BASE_DIR`，并优先构造最小归档。
+- 备份失败和早期参数错误分支仍保持现状，避免一次阶段同时改变 HTTP 状态和响应形态。
+
+## 下一阶段候选
+
+- 阶段 28：继续查找未脏页面中的纯文本提示卡或小型头部卡；可评估备份导入早期错误/失败提示是否适合接入组件，但需确认是否接受从纯文本改为 HTML。
+- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/backup`、备份导入完成页、`/about` 版本失败页、`/online-scripts/install-select/<id>`、`/online-scripts/doc/<id>`、`/online-scripts/install/<id>`、`/online-scripts/log/<id>`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
+- 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

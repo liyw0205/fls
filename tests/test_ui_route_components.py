@@ -3,6 +3,7 @@ import io
 import json
 import os
 import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -844,6 +845,47 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn('<pre class="log" id="log">加载中...</pre>', html)
             self.assertIn("loadLog", html)
             self.assertNotIn("<脚本", html)
+
+    def test_backup_import_success_renders_header_card(self):
+        with isolated_app() as (app, base_dir):
+            archive = io.BytesIO()
+
+            with tarfile.open(fileobj=archive, mode="w:gz") as tar:
+                payload = b'{"restored": true}\n'
+                info = tarfile.TarInfo("data/config.json")
+                info.size = len(payload)
+                tar.addfile(info, io.BytesIO(payload))
+
+            archive.seek(0)
+
+            with patch(
+                "fls_manager.routes.backup.restore.reload_scheduler",
+            ) as reload_mock:
+                response = app.test_client().post(
+                    "/backup/import",
+                    data={
+                        "file": (archive, "backup.tar.gz"),
+                        "restore_items": "data",
+                    },
+                    headers={"X-Token": TOKEN},
+                    content_type="multipart/form-data",
+                )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            reload_mock.assert_called_once_with()
+            self.assertIn('<div class="card-title">备份导入完成</div>', html)
+            self.assertIn("已恢复：配置 data", html)
+            self.assertIn("依赖恢复：未恢复依赖", html)
+            self.assertIn("日志：-", html)
+            self.assertIn('<div class="action-row">', html)
+            self.assertIn('href="/backup"', html)
+            self.assertIn('href="/logs"', html)
+            self.assertEqual(
+                (base_dir / "data" / "config.json").read_text(encoding="utf-8"),
+                '{"restored": true}\n',
+            )
 
 
 if __name__ == "__main__":

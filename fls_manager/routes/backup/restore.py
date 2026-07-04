@@ -1,4 +1,5 @@
 from ._common import *
+from ...ui.components import page_header_card
 
 
 @bp.route("/backup/download/<path:filename>")
@@ -114,19 +115,18 @@ def backup_import():
 
         reload_scheduler()
 
-        body = f"""
-<div class="card">
-    <div class="card-title">备份导入完成</div>
-    <div class="help">
+        body = page_header_card(
+            "备份导入完成",
+            help_html=f"""
         已恢复：{h("、".join(restored) or "-")}<br>
         依赖恢复：{h(deps_msg or "未恢复依赖")}<br>
         日志：{h(deps_log or "-")}
-    </div>
-    <br>
-    <a class="btn btn-primary" href="/backup">返回备份恢复</a>
-    <a class="btn btn-gray" href="/logs">查看日志</a>
-</div>
-"""
+""",
+            actions_html="""
+<a class="btn btn-primary" href="/backup">返回备份恢复</a>
+<a class="btn btn-gray" href="/logs">查看日志</a>
+""",
+        )
         return layout("备份导入完成", "backup", body)
 
     except Exception as e:
