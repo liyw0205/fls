@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import quote
 from unittest.mock import patch
 
 sys.dont_write_bytecode = True
@@ -372,6 +373,88 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn('href="/env"', html)
             self.assertNotIn("<Task", html)
             self.assertNotIn("<ENV", html)
+
+    def test_env_view_all_renders_header_card_and_escapes_textarea(self):
+        with isolated_app() as (app, base_dir):
+            data_dir = base_dir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            (data_dir / "global_env.json").write_text(
+                json.dumps({'<ENV & "x">': "value <x>"}),
+                encoding="utf-8",
+            )
+
+            response = app.test_client().get(
+                "/env/view",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">查看全部全局变量</div>', html)
+            self.assertIn("保存后会整体覆盖", html)
+            self.assertIn('name="env_text"', html)
+            self.assertIn(
+                "&lt;ENV &amp; &quot;x&quot;&gt;=&quot;value &lt;x&gt;&quot;",
+                html,
+            )
+            self.assertIn("保存全部", html)
+            self.assertIn('href="/env"', html)
+            self.assertNotIn("<ENV", html)
+
+    def test_env_new_renders_header_card_and_keeps_validation_text(self):
+        with isolated_app() as (app, _base_dir):
+            client = app.test_client()
+            response = client.get(
+                "/env/new",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">新增全局变量</div>', html)
+            self.assertIn("全局变量会对所有任务生效", html)
+            self.assertIn('name="key"', html)
+            self.assertIn('name="value"', html)
+            self.assertIn("保存", html)
+            self.assertIn('href="/env"', html)
+
+            invalid = client.post(
+                "/env/new",
+                data={"key": "", "value": "x"},
+                headers={"X-Token": TOKEN},
+            )
+
+            self.assertEqual(invalid.status_code, 400)
+            self.assertEqual(invalid.get_data(as_text=True), "变量名不能为空")
+
+    def test_env_edit_renders_header_card_and_escapes_values(self):
+        with isolated_app() as (app, base_dir):
+            data_dir = base_dir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            key = '<ENV & "x">'
+            (data_dir / "global_env.json").write_text(
+                json.dumps({key: "value <x>"}),
+                encoding="utf-8",
+            )
+
+            response = app.test_client().get(
+                f"/env/edit/{quote(key, safe='')}",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">编辑全局变量</div>', html)
+            self.assertIn("修改变量名会先移除原变量", html)
+            self.assertIn('value="&lt;ENV &amp; &quot;x&quot;&gt;"', html)
+            self.assertIn('value="value &lt;x&gt;"', html)
+            self.assertIn("保存", html)
+            self.assertIn('href="/env"', html)
+            self.assertNotIn("<ENV", html)
+            self.assertNotIn("<x>", html)
 
     def test_status_page_renders_table_card_with_runtime_table_id(self):
         with isolated_app() as (app, _base_dir):

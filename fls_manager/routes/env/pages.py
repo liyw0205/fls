@@ -37,15 +37,16 @@ def env_view_all():
         return redirect(url_for("env.env_page"))
 
     env_text = env_to_text(load_global_env())
+    header = page_header_card(
+        "查看全部全局变量",
+        "可一次性查看和编辑全部全局变量，保存后会整体覆盖。",
+    )
 
     body = f"""
 <form method="post">
+{header}
 <div class="card">
-    <div class="card-title">查看全部全局变量</div>
     <textarea name="env_text" placeholder='变量名="变量值"'>{h(env_text)}</textarea>
-    <div class="help">
-        可一次性查看和编辑全部全局变量，保存后会整体覆盖。
-    </div>
 </div>
 
 <div class="card">
@@ -72,10 +73,15 @@ def env_new():
 
         return redirect(url_for("env.env_page"))
 
-    body = """
+    header = page_header_card(
+        "新增全局变量",
+        "全局变量会对所有任务生效；任务变量中同名变量仍会优先覆盖。",
+    )
+
+    body = f"""
 <form method="post">
+{header}
 <div class="card">
-    <div class="card-title">新增全局变量</div>
     <div class="form-grid">
         <div class="form-item">
             <label>变量名</label>
@@ -119,10 +125,15 @@ def env_edit(key):
 
         return redirect(url_for("env.env_page"))
 
+    header = page_header_card(
+        "编辑全局变量",
+        "修改变量名会先移除原变量，再保存为新的变量名。",
+    )
+
     body = f"""
 <form method="post">
+{header}
 <div class="card">
-    <div class="card-title">编辑全局变量</div>
     <div class="form-grid">
         <div class="form-item">
             <label>变量名</label>
