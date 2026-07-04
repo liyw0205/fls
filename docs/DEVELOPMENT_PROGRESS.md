@@ -1695,8 +1695,56 @@
 - 对带 JS 实时结果的页面，本阶段只移动静态头部，避免改动 `innerHTML` 状态更新和请求流程。
 - 后续继续优先选择未脏页面的小范围头部卡或纯文本提示卡；涉及真实网络检测或复杂表单提交的流程保持原状。
 
+## 阶段 35：脚本文件表单页头部卡接入
+
+状态：已完成
+
+目标：
+
+- 继续低风险 UI 组件抽取，优先未脏文件和 GET 渲染无副作用页面。
+- 复用已有 `page_header_card()`，不新增组件 API。
+- 只替换脚本新建、查看/编辑和改名页面的说明头部，不改变文件创建、保存和改名流程。
+
+已完成：
+
+- 更新 `fls_manager/routes/scripts/files.py`：
+  - 导入 `page_header_card()`。
+  - 将 `/pull/new` 顶部说明接入头部卡。
+  - 将 `/scripts/view` 文件查看/编辑头部接入头部卡，并保留保存文件、调试运行、改名和返回按钮。
+  - 将 `/scripts/rename` 顶部说明接入头部卡。
+  - 保留 CodeMirror textarea、文件内容、输入字段和 `message_card()` 提示卡。
+  - 保留脚本路径、文件名和文件内容的 HTML 转义。
+- 扩展 `tests/test_ui_route_components.py`：
+  - 覆盖 `/pull/new` 头部卡和空操作提示卡。
+  - 覆盖 `/scripts/view` 头部卡、操作按钮、CodeMirror textarea、文件内容转义和提示卡。
+  - 覆盖 `/scripts/rename` 头部卡、动态路径/文件名转义和提示卡。
+- 更新 `DEVELOPMENT.md`：
+  - 将 `/pull/new`、`/scripts/view`、`/scripts/rename` 脚本文件表单页头部卡纳入路由组件覆盖。
+  - 增加阶段 35 开发日志。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_route_components`：通过，44 tests OK。
+- `python -B -m compileall fls_manager/routes/scripts/files.py tests/test_ui_route_components.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，135 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
+- 本阶段只验证脚本文件表单页 GET 初始渲染，没有提交创建、保存或改名操作。
+
+组件策略结论：
+
+- `page_header_card()` 可以承载表单页标题、路径说明和少量操作按钮；编辑器主体和消息卡继续由页面局部管理。
+- 文件内容和路径仍必须在路由层传入组件前明确转义；组件只转义标题，不转义 `help_html` 和 `actions_html`。
+- 后续继续优先选择未脏页面的小范围头部卡或纯文本提示卡；涉及真实文件写入的 POST 流程保持原状。
+
 ## 下一阶段候选
 
-- 阶段 35：继续查找未脏页面中的纯文本提示卡或小型头部卡；可评估脚本查看/改名页面或配置页中的局部头部，但避免复杂 JS 状态和 POST 纯文本错误响应形态变化。
-- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/proxy/new`、`/proxy/edit/<id>`、`/env/view`、`/env/new`、`/env/edit/<key>`、`/env/import`、`/deps/uninstall`、`/deps/refresh`、`/deps/install-log/<id>`、`/scripts/debug-log/<id>`、`/backup`、`/about` 版本失败页、`/online-scripts/install-select/<id>`、`/online-scripts/doc/<id>`、`/online-scripts/install/<id>`、`/online-scripts/log/<id>`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
+- 阶段 36：继续查找未脏页面中的纯文本提示卡或小型头部卡；可评估配置页局部头部或其它只读结果页，但避免复杂 JS 状态和 POST 纯文本错误响应形态变化。
+- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/pull/new`、`/scripts/view`、`/scripts/rename`、`/proxy/new`、`/proxy/edit/<id>`、`/env/view`、`/env/new`、`/env/edit/<key>`、`/env/import`、`/deps/uninstall`、`/deps/refresh`、`/deps/install-log/<id>`、`/scripts/debug-log/<id>`、`/backup`、`/about` 版本失败页、`/online-scripts/install-select/<id>`、`/online-scripts/doc/<id>`、`/online-scripts/install/<id>`、`/online-scripts/log/<id>`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

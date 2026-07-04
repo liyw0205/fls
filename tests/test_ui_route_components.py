@@ -74,8 +74,66 @@ class UiRouteComponentTests(unittest.TestCase):
             html = response.get_data(as_text=True)
 
             self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">新建文件 / 文件夹</div>', html)
+            self.assertIn("当前目录：scripts 根目录", html)
             self.assertIn('style="color:#6b7280;"', html)
             self.assertIn("暂无操作", html)
+
+    def test_scripts_view_renders_header_card_and_escapes_content(self):
+        with isolated_app() as (app, base_dir):
+            script_rel = 'dir-<x>/demo-<x>.py'
+            script_path = base_dir / "scripts" / script_rel
+            script_path.parent.mkdir(parents=True, exist_ok=True)
+            script_path.write_text("print('<x>')\n", encoding="utf-8")
+
+            response = app.test_client().get(
+                "/scripts/view",
+                query_string={"path": script_rel},
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(
+                '<div class="card-title">查看 / 编辑文件：demo-&lt;x&gt;.py</div>',
+                html,
+            )
+            self.assertIn("路径：", html)
+            self.assertIn("dir-&lt;x&gt;/demo-&lt;x&gt;.py", html)
+            self.assertIn('<div class="action-row">', html)
+            self.assertIn("保存文件", html)
+            self.assertIn("调试运行", html)
+            self.assertIn("改名", html)
+            self.assertIn('class="fls-code-editor"', html)
+            self.assertIn("print(&#x27;&lt;x&gt;&#x27;)", html)
+            self.assertIn("暂无保存操作", html)
+            self.assertNotIn("<x>", html)
+
+    def test_scripts_rename_renders_header_card_and_escapes_path(self):
+        with isolated_app() as (app, base_dir):
+            script_rel = 'rename-<x>.sh'
+            script_path = base_dir / "scripts" / script_rel
+            script_path.parent.mkdir(parents=True, exist_ok=True)
+            script_path.write_text("echo ok\n", encoding="utf-8")
+
+            response = app.test_client().get(
+                "/scripts/rename",
+                query_string={"path": script_rel},
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">改名</div>', html)
+            self.assertIn("当前路径：", html)
+            self.assertIn("rename-&lt;x&gt;.sh", html)
+            self.assertIn('name="new_name" required value="rename-&lt;x&gt;.sh"', html)
+            self.assertIn("保存改名", html)
+            self.assertIn('href="/pull"', html)
+            self.assertIn("暂无操作", html)
+            self.assertNotIn("<x>", html)
 
     def test_pull_fetch_renders_error_message_card(self):
         with isolated_app() as (app, _base_dir):

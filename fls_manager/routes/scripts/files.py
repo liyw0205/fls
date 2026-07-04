@@ -15,7 +15,7 @@ from .helpers import (
 
 from ...paths import SCRIPT_DIR
 from ...utils import h
-from ...ui.components import message_card
+from ...ui.components import message_card, page_header_card
 from ...ui.layout import layout
 
 
@@ -50,13 +50,15 @@ def scripts_new():
         except Exception as e:
             msg = f"新建失败：{e}"
 
+    header = page_header_card(
+        "新建文件 / 文件夹",
+        f"当前目录：{h(current_rel or 'scripts 根目录')}",
+    )
+
     body = f"""
 <form method="post">
 <input type="hidden" name="current_rel" value="{h(current_rel)}">
-<div class="card">
-    <div class="card-title">新建文件 / 文件夹</div>
-    <div class="help">当前目录：{h(current_rel or 'scripts 根目录')}</div>
-</div>
+{header}
 <div class="card">
     <div class="form-grid">
         <div class="form-item">
@@ -109,18 +111,25 @@ def scripts_view():
 
     content = target.read_text(encoding="utf-8", errors="replace")
     rel = script_rel_path(target)
-
-    body = f"""
-<form method="post">
-<div class="card">
-    <div class="card-title">查看 / 编辑文件：{h(target.name)}</div>
-    <div class="help">路径：{h(target)}</div>
-    <br>
+    parent_rel = (
+        str(target.parent.relative_to(SCRIPT_DIR))
+        if target.parent != SCRIPT_DIR
+        else ""
+    )
+    header = page_header_card(
+        f"查看 / 编辑文件：{target.name}",
+        f"路径：{h(target)}",
+        f"""
     <button class="btn btn-primary" type="submit">保存文件</button>
     <a class="btn btn-primary" href="{h(script_debug_url(rel))}">调试运行</a>
     <a class="btn btn-orange" href="{h(rename_url(rel))}">改名</a>
-    <a class="btn btn-gray" href="{h(script_url(str(target.parent.relative_to(SCRIPT_DIR)) if target.parent != SCRIPT_DIR else ''))}">返回</a>
-</div>
+    <a class="btn btn-gray" href="{h(script_url(parent_rel))}">返回</a>
+        """,
+    )
+
+    body = f"""
+<form method="post">
+{header}
 <div class="card">
     <textarea
         name="content"
@@ -165,12 +174,14 @@ def scripts_rename():
         except Exception as e:
             msg = f"改名失败：{e}"
 
+    header = page_header_card(
+        "改名",
+        f"当前路径：{h(target)}",
+    )
+
     body = f"""
 <form method="post">
-<div class="card">
-    <div class="card-title">改名</div>
-    <div class="help">当前路径：{h(target)}</div>
-</div>
+{header}
 <div class="card">
     <div class="form-item">
         <label>新名称</label>
