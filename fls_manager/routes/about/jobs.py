@@ -4,6 +4,7 @@ from . import bp
 from .state import ABOUT_JOBS
 
 from ...ui.layout import layout
+from ...ui.components import page_header_card
 from ...ui.log_controls import log_controls
 from ...utils import h, get_back_url
 from ...logs import tail_file
@@ -15,34 +16,35 @@ def about_job_log(job_id):
     info = ABOUT_JOBS.get(job_id)
 
     if not info:
-        body = f"""
-<div class="card">
-    <div class="card-title">后台任务日志</div>
-    <div class="help">
+        body = page_header_card(
+            "后台任务日志",
+            help_html="""
         任务记录不存在或面板已重启。<br>
         可以到日志管理中查找 about-*.log。
-    </div>
-    <br>
-    <a class="btn btn-gray" href="{h(back_url)}">返回</a>
-    <a class="btn btn-blue" href="/logs?back={h(back_url)}">查看日志管理</a>
-</div>
-"""
+""",
+            actions_html=f"""
+<a class="btn btn-gray" href="{h(back_url)}">返回</a>
+<a class="btn btn-blue" href="/logs?back={h(back_url)}">查看日志管理</a>
+""",
+        )
         return layout("后台任务日志", "about", body)
 
-    body = f"""
-<div class="card">
-    <div class="card-title">后台任务日志：{h(info.get("title") or job_id)}</div>
-    <div class="help">
+    header_card = page_header_card(
+        f'后台任务日志：{info.get("title") or job_id}',
+        help_html=f"""
         状态：<b id="aboutJobStatus">{h(info.get("status") or "-")}</b><br>
         日志文件：{h(info.get("log_file") or "-")}<br>
         更新时间：<span id="aboutJobUpdatedAt">{h(info.get("updated_at") or "-")}</span>
-    </div>
-    <br>
-    <a class="btn btn-gray" href="{h(back_url)}">返回关于页</a>
-    <a class="btn btn-blue" href="/logs?back={h(back_url)}">日志管理</a>
-    <a class="btn btn-orange" href="/logfile/fls-manager-daemon.log?back={h(back_url)}">面板日志</a>
-</div>
+""",
+        actions_html=f"""
+<a class="btn btn-gray" href="{h(back_url)}">返回关于页</a>
+<a class="btn btn-blue" href="/logs?back={h(back_url)}">日志管理</a>
+<a class="btn btn-orange" href="/logfile/fls-manager-daemon.log?back={h(back_url)}">面板日志</a>
+""",
+    )
 
+    body = f"""
+{header_card}
 <pre class="log" id="log">加载中...</pre>
 {log_controls()}
 

@@ -918,3 +918,58 @@
 - 阶段 20：继续查找未脏页面中的稳定表格卡或纯文本提示卡；可评估后台任务日志不存在页等小页面，但避免实时日志主体。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/about`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
+
+## 阶段 20：后台任务日志头部卡接入
+
+状态：已完成
+
+目标：
+
+- 继续低风险 UI 组件抽取，优先未脏文件和小型稳定页面。
+- 复用已有 `page_header_card()`，不新增组件 API。
+- 只替换后台任务日志页头部卡，不触碰实时日志主体和自动刷新脚本。
+
+已完成：
+
+- 更新 `fls_manager/routes/about/jobs.py`：
+  - 导入 `page_header_card()`。
+  - 将后台任务记录不存在提示接入头部卡，保留“返回”和“查看日志管理”入口。
+  - 将存在记录时的任务状态头部接入头部卡，保留状态、日志文件、更新时间和三个操作按钮。
+  - 保留实时日志 `<pre id="log">`、日志控制条和 `loadAboutJobLog()` 自动刷新逻辑。
+  - 保留动态标题、状态、日志文件和返回地址的 HTML 转义。
+- 扩展 `tests/test_ui_components.py`：
+  - 覆盖 `page_header_card()` 的标题转义、说明区和操作区渲染。
+- 扩展 `tests/test_ui_route_components.py`：
+  - 覆盖 `/about/job-log/<id>` 不存在记录提示卡渲染。
+  - 覆盖 `/about/job-log/<id>` 存在记录头部卡渲染、动态字段转义、操作按钮和实时日志主体保留。
+- 更新 `DEVELOPMENT.md`：
+  - 将 `/about/job-log/<id>` 后台任务日志头部卡纳入路由组件覆盖。
+  - 增加阶段 20 开发日志。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_components`：通过，13 tests OK。
+- `python -B -m unittest tests.test_ui_route_components`：通过，16 tests OK。
+- `python -B -m compileall fls_manager/routes/about/jobs.py tests/test_ui_components.py tests/test_ui_route_components.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，107 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
+- 本阶段只验证页面初始渲染和静态日志 shell，不通过真实浏览器执行后台任务日志自动刷新脚本。
+
+组件策略结论：
+
+- `page_header_card()` 适合小型说明加操作按钮的页面头部。
+- 实时日志主体、自动滚动和轮询脚本保持原样，不强行组件化。
+- 后续继续优先选择未脏页面的小范围改动；复杂 JS 状态和嵌套卡片暂缓。
+
+## 下一阶段候选
+
+- 阶段 21：继续查找未脏页面中的纯文本提示卡或小型头部卡；可评估关于页面板控制结果页，但避免影响真实启停行为。
+- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/about`、`/about/job-log/<id>`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
+- 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

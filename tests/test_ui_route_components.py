@@ -335,6 +335,52 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn("https://github.com/liyw0205/fls", html)
             self.assertIn("<td><b>控制脚本</b></td>", html)
 
+    def test_about_job_missing_renders_header_card(self):
+        with isolated_app() as (app, _base_dir):
+            response = app.test_client().get(
+                "/about/job-log/missing-job",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">后台任务日志</div>', html)
+            self.assertIn("任务记录不存在或面板已重启", html)
+            self.assertIn('<div class="action-row">', html)
+            self.assertIn('href="/about"', html)
+            self.assertIn('href="/logs?back=/about"', html)
+
+    def test_about_job_existing_renders_header_card_and_log_shell(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.routes.about.state import ABOUT_JOBS
+
+            ABOUT_JOBS["job-x"] = {
+                "title": '<更新 & "x">',
+                "status": "running <ok>",
+                "log_file": 'about-<x>.log',
+                "updated_at": "2026-07-05 01:02:03",
+                "running": True,
+            }
+
+            response = app.test_client().get(
+                "/about/job-log/job-x?back=/about",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("后台任务日志：&lt;更新 &amp; &quot;x&quot;&gt;", html)
+            self.assertIn("running &lt;ok&gt;", html)
+            self.assertIn("about-&lt;x&gt;.log", html)
+            self.assertIn('<div class="action-row">', html)
+            self.assertIn('href="/logs?back=/about"', html)
+            self.assertIn('href="/logfile/fls-manager-daemon.log?back=/about"', html)
+            self.assertIn('<pre class="log" id="log">加载中...</pre>', html)
+            self.assertIn("loadAboutJobLog", html)
+            self.assertNotIn("<更新", html)
+
     def test_notify_test_renders_result_table_card_and_escapes_return(self):
         with isolated_app() as (app, base_dir):
             config_file = base_dir / "data" / "config.json"

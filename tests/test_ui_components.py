@@ -2,6 +2,7 @@ import unittest
 
 from fls_manager.ui.components import (
     message_card,
+    page_header_card,
     pagination_card,
     summary_item,
     table_card,
@@ -9,6 +10,19 @@ from fls_manager.ui.components import (
 
 
 class UiComponentTests(unittest.TestCase):
+    def test_page_header_card_renders_actions_and_escapes_title(self):
+        html = page_header_card(
+            "<标题>",
+            help_html='说明<br><b>raw</b>',
+            actions_html='<a class="btn" href="/x">操作</a>',
+        )
+
+        self.assertIn('<div class="card-title">&lt;标题&gt;</div>', html)
+        self.assertIn('<div class="help">说明<br><b>raw</b></div>', html)
+        self.assertIn('<div class="action-row">', html)
+        self.assertIn('href="/x"', html)
+        self.assertNotIn("<标题>", html)
+
     def test_message_card_returns_empty_for_empty_message(self):
         self.assertEqual(message_card(""), "")
         self.assertEqual(message_card(None), "")
