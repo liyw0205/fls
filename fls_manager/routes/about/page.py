@@ -7,6 +7,7 @@ from .helpers import (
     fls_control_script,
 )
 from ...ui.layout import layout
+from ...ui.components import table_card
 from ...utils import h
 from ...paths import BASE_DIR, DATA_DIR, LOG_DIR, SCRIPT_DIR
 from ...constants import MAIN_PROCESS_NAME, TASK_PROCESS_PREFIX
@@ -107,6 +108,58 @@ def about():
 
     current_offset = get_timezone_offset_hours()
     script = fls_control_script()
+
+    panel_info_rows = f"""
+<tr>
+    <td><b>作者</b></td>
+    <td>{h("余生只有凄渺")}</td>
+</tr>
+<tr>
+    <td><b>QQ群</b></td>
+    <td>{h("923184177")}</td>
+</tr>
+<tr>
+    <td><b>项目仓库</b></td>
+    <td>
+        <a href="https://github.com/liyw0205/fls" target="_blank">
+            https://github.com/liyw0205/fls
+        </a>
+    </td>
+</tr>
+<tr>
+    <td><b>主进程名</b></td>
+    <td>{h(MAIN_PROCESS_NAME)}</td>
+</tr>
+<tr>
+    <td><b>任务进程标识前缀</b></td>
+    <td>{h(TASK_PROCESS_PREFIX)}</td>
+</tr>
+<tr>
+    <td><b>工作目录</b></td>
+    <td>{h(BASE_DIR)}</td>
+</tr>
+<tr>
+    <td><b>数据目录</b></td>
+    <td>{h(DATA_DIR)}</td>
+</tr>
+<tr>
+    <td><b>日志目录</b></td>
+    <td>{h(LOG_DIR)}</td>
+</tr>
+<tr>
+    <td><b>脚本目录</b></td>
+    <td>{h(SCRIPT_DIR)}</td>
+</tr>
+<tr>
+    <td><b>控制脚本</b></td>
+    <td>{h(script)}</td>
+</tr>
+"""
+    panel_info_table = table_card(
+        "面板信息",
+        ["项目", "值"],
+        panel_info_rows,
+    )
 
     body = f"""
 <style>
@@ -337,59 +390,7 @@ flsToggleTimeSyncMode();
 
 {version_card}
 
-<div class="card">
-    <div class="card-title">面板信息</div>
-    <div class="table-wrap">
-        <table>
-            <tbody>
-                <tr>
-                    <td><b>作者</b></td>
-                    <td>{h("余生只有凄渺")}</td>
-                </tr>
-                <tr>
-                    <td><b>QQ群</b></td>
-                    <td>{h("923184177")}</td>
-                </tr>
-                <tr>
-                    <td><b>项目仓库</b></td>
-                    <td>
-                        <a href="https://github.com/liyw0205/fls" target="_blank">
-                            https://github.com/liyw0205/fls
-                        </a>
-                    </td>
-                </tr>
-                <tr>
-                    <td><b>主进程名</b></td>
-                    <td>{h(MAIN_PROCESS_NAME)}</td>
-                </tr>
-                <tr>
-                    <td><b>任务进程标识前缀</b></td>
-                    <td>{h(TASK_PROCESS_PREFIX)}</td>
-                </tr>
-                <tr>
-                    <td><b>工作目录</b></td>
-                    <td>{h(BASE_DIR)}</td>
-                </tr>
-                <tr>
-                    <td><b>数据目录</b></td>
-                    <td>{h(DATA_DIR)}</td>
-                </tr>
-                <tr>
-                    <td><b>日志目录</b></td>
-                    <td>{h(LOG_DIR)}</td>
-                </tr>
-                <tr>
-                    <td><b>脚本目录</b></td>
-                    <td>{h(SCRIPT_DIR)}</td>
-                </tr>
-                <tr>
-                    <td><b>控制脚本</b></td>
-                    <td>{h(script)}</td>
-                </tr>
-            </tbody>
-        </table>
-    </div>
-</div>
+{panel_info_table}
 
 <div class="card">
     <div class="card-title">任务命令规则</div>

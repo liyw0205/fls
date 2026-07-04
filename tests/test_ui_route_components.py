@@ -318,6 +318,23 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn("<td><b>面板时区</b></td>", html)
             self.assertIn("<td><b>工作目录</b></td>", html)
 
+    def test_about_page_renders_panel_info_table_card(self):
+        with isolated_app() as (app, _base_dir):
+            response = app.test_client().get(
+                "/about",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">面板信息</div>', html)
+            self.assertIn("<th>项目</th>", html)
+            self.assertIn("<th>值</th>", html)
+            self.assertIn("<td><b>项目仓库</b></td>", html)
+            self.assertIn("https://github.com/liyw0205/fls", html)
+            self.assertIn("<td><b>控制脚本</b></td>", html)
+
     def test_online_script_doc_error_renders_escaped_message_card(self):
         with isolated_app() as (app, base_dir):
             cache_file = base_dir / "data" / "online_scripts_cache.json"

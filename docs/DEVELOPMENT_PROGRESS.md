@@ -812,3 +812,56 @@
 - 阶段 18：继续查找未脏页面中的纯文本提示卡或稳定表格卡，例如关于页的只读信息表格，但避免嵌套卡片和折叠更新日志。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/`、`/online-scripts`、`/pull/fetch`、`/pull/import`、`/deps`、`/panel/status`。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
+
+## 阶段 18：关于页面板信息表格卡接入
+
+状态：已完成
+
+目标：
+
+- 继续低风险 UI 组件抽取，优先未脏文件和稳定只读表格。
+- 复用已有 `table_card()`，不新增组件 API。
+- 避开关于页折叠更新日志、时间校准嵌套卡片和长期阶段外脏文件。
+
+已完成：
+
+- 更新 `fls_manager/routes/about/page.py`：
+  - 导入 `table_card()`。
+  - 将“面板信息”只读表格接入 `table_card()`。
+  - 保留项目仓库链接、主进程名、任务进程标识前缀、目录路径和控制脚本字段。
+  - 保留动态字段和路径字段的 HTML 转义。
+- 扩展 `tests/test_ui_route_components.py`：
+  - 覆盖 `/about` 面板信息表格卡渲染。
+  - 断言表格标题、表头、项目仓库链接和控制脚本字段存在。
+- 更新 `tools/responsive_smoke.py`：
+  - 将 `/about` 纳入页面结构 smoke。
+- 更新 `DEVELOPMENT.md`：
+  - 将 `/about` 面板信息表格卡纳入路由组件覆盖。
+  - 增加阶段 18 开发日志。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_route_components`：通过，13 tests OK。
+- `python -B -m compileall fls_manager/routes/about/page.py tests/test_ui_route_components.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，103 tests OK。
+- `python -B tools/responsive_smoke.py`：通过，包含 `/about`。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
+- 关于页的更新日志折叠表格和时间校准嵌套卡片结构暂不组件化，避免扩大改动面。
+
+组件策略结论：
+
+- `table_card()` 适合只读、稳定、无 JS 选择器依赖的表格。
+- 带链接的单元格可以作为调用方已构造 HTML 传入，但用户输入仍必须在调用前显式转义。
+- 后续继续优先选择未脏页面的小范围改动；复杂折叠、嵌套卡片和动态 JS 区域暂缓。
+
+## 下一阶段候选
+
+- 阶段 19：继续查找未脏页面中的稳定表格卡或纯文本提示卡；可评估后台任务日志页、通知测试结果页等小页面。
+- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/about`、`/`、`/online-scripts`、`/pull/fetch`、`/pull/import`、`/deps`、`/panel/status`。
+- 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
