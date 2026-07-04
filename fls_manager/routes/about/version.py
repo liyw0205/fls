@@ -11,6 +11,7 @@ from .helpers import (
     update_version_worker,
 )
 from ...ui.layout import layout
+from ...ui.components import page_header_card
 from ...utils import h
 from ...paths import BASE_DIR
 
@@ -18,29 +19,23 @@ from ...paths import BASE_DIR
 @bp.route("/about/refresh-log", methods=["POST"])
 def about_refresh_log():
     if not git_available():
-        body = """
-<div class="card">
-    <div class="card-title">刷新失败</div>
-    <div class="help" style="color:#dc2626;">
-        系统未安装 git。
-    </div>
-    <br>
-    <a class="btn btn-gray" href="/about">返回关于页</a>
-</div>
-"""
+        body = page_header_card(
+            "刷新失败",
+            help_html='<span style="color:#dc2626;">系统未安装 git。</span>',
+            actions_html='<a class="btn btn-gray" href="/about">返回关于页</a>',
+        )
         return layout("刷新失败", "about", body)
 
     if not is_git_repo():
-        body = f"""
-<div class="card">
-    <div class="card-title">刷新失败</div>
-    <div class="help" style="color:#dc2626;">
-        当前目录不是 Git 仓库：{h(BASE_DIR)}
-    </div>
-    <br>
-    <a class="btn btn-gray" href="/about">返回关于页</a>
-</div>
-"""
+        body = page_header_card(
+            "刷新失败",
+            help_html=(
+                '<span style="color:#dc2626;">'
+                f"当前目录不是 Git 仓库：{h(BASE_DIR)}"
+                "</span>"
+            ),
+            actions_html='<a class="btn btn-gray" href="/about">返回关于页</a>',
+        )
         return layout("刷新失败", "about", body)
 
     job_id = start_about_job(
@@ -63,42 +58,35 @@ def about_update_version():
     version = request.form.get("version", "").strip()
 
     if not re.fullmatch(r"[0-9a-fA-F]{7,40}", version):
-        body = f"""
-<div class="card">
-    <div class="card-title">更新失败</div>
-    <div class="help" style="color:#dc2626;">
-        版本号非法：{h(version)}
-    </div>
-    <br>
-    <a class="btn btn-gray" href="/about">返回关于页</a>
-</div>
-"""
+        body = page_header_card(
+            "更新失败",
+            help_html=(
+                '<span style="color:#dc2626;">'
+                f"版本号非法：{h(version)}"
+                "</span>"
+            ),
+            actions_html='<a class="btn btn-gray" href="/about">返回关于页</a>',
+        )
         return layout("更新失败", "about", body)
 
     if not git_available():
-        body = """
-<div class="card">
-    <div class="card-title">更新失败</div>
-    <div class="help" style="color:#dc2626;">
-        系统未安装 git。
-    </div>
-    <br>
-    <a class="btn btn-gray" href="/about">返回关于页</a>
-</div>
-"""
+        body = page_header_card(
+            "更新失败",
+            help_html='<span style="color:#dc2626;">系统未安装 git。</span>',
+            actions_html='<a class="btn btn-gray" href="/about">返回关于页</a>',
+        )
         return layout("更新失败", "about", body)
 
     if not is_git_repo():
-        body = f"""
-<div class="card">
-    <div class="card-title">更新失败</div>
-    <div class="help" style="color:#dc2626;">
-        当前目录不是 Git 仓库：{h(BASE_DIR)}
-    </div>
-    <br>
-    <a class="btn btn-gray" href="/about">返回关于页</a>
-</div>
-"""
+        body = page_header_card(
+            "更新失败",
+            help_html=(
+                '<span style="color:#dc2626;">'
+                f"当前目录不是 Git 仓库：{h(BASE_DIR)}"
+                "</span>"
+            ),
+            actions_html='<a class="btn btn-gray" href="/about">返回关于页</a>',
+        )
         return layout("更新失败", "about", body)
 
     job_id = start_about_job(

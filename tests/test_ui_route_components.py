@@ -335,6 +335,64 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn("https://github.com/liyw0205/fls", html)
             self.assertIn("<td><b>控制脚本</b></td>", html)
 
+    def test_about_refresh_log_no_git_renders_header_card(self):
+        with isolated_app() as (app, _base_dir):
+            with patch(
+                "fls_manager.routes.about.version.git_available",
+                return_value=False,
+            ):
+                response = app.test_client().post(
+                    "/about/refresh-log",
+                    headers={"X-Token": TOKEN},
+                )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">刷新失败</div>', html)
+            self.assertIn("系统未安装 git。", html)
+            self.assertIn('<div class="action-row">', html)
+            self.assertIn('href="/about"', html)
+
+    def test_about_refresh_log_not_repo_renders_header_card(self):
+        with isolated_app() as (app, _base_dir):
+            with patch(
+                "fls_manager.routes.about.version.git_available",
+                return_value=True,
+            ), patch(
+                "fls_manager.routes.about.version.is_git_repo",
+                return_value=False,
+            ):
+                response = app.test_client().post(
+                    "/about/refresh-log",
+                    headers={"X-Token": TOKEN},
+                )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">刷新失败</div>', html)
+            self.assertIn("当前目录不是 Git 仓库", html)
+            self.assertIn('<div class="action-row">', html)
+            self.assertIn('href="/about"', html)
+
+    def test_about_update_invalid_version_renders_header_card_and_escapes_value(self):
+        with isolated_app() as (app, _base_dir):
+            response = app.test_client().post(
+                "/about/update-version",
+                data={"version": '<bad & "x">'},
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">更新失败</div>', html)
+            self.assertIn("版本号非法：&lt;bad &amp; &quot;x&quot;&gt;", html)
+            self.assertIn('<div class="action-row">', html)
+            self.assertIn('href="/about"', html)
+            self.assertNotIn("<bad", html)
+
     def test_about_job_missing_renders_header_card(self):
         with isolated_app() as (app, _base_dir):
             response = app.test_client().get(
