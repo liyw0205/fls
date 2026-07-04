@@ -396,7 +396,7 @@ python -B -m compileall fls-manager.py fls_manager tests tools
 - `ui.components.pagination_card()` 的链接分页、按钮分页、禁用态、省略号和 HTML 转义。
 - `ui.components.message_card()` 的空/空白消息、成功/错误/普通提示、未知类型回退、加粗样式、可选标题和 HTML 转义。
 - `ui.components.summary_item()` 的统计项结构、数字 value 和 HTML 转义。
-- 路由层 UI 组件接入：`/pull/new` 脚本新建头部卡和普通提示卡、`/pull/fetch`、`/pull/import` 普通/结果提示卡和 `/online-scripts/doc/<id>` 文档加载失败卡、无文档链接提示卡的渲染与转义。
+- 路由层 UI 组件接入：`/pull/new` 脚本新建头部卡和普通提示卡、`/pull/fetch` 和 `/pull/import` 表单头部卡、普通/结果提示卡，以及 `/online-scripts/doc/<id>` 文档加载失败卡、无文档链接提示卡的渲染与转义。
 - 路由层 UI 组件接入：`/task/config/<id>` 保存成功/失败提示卡的渲染与转义。
 - 路由层 UI 组件接入：`/env/import` 任务变量导入页头部卡和表格卡、`/env/view` 全局变量全文编辑页头部卡、`/env/new` 和 `/env/edit/<key>` 全局变量表单头部卡、`/proxy/new` 和 `/proxy/edit/<id>` 代理表单头部卡、`/scripts/view` 和 `/scripts/rename` 脚本文件表单头部卡、`/config` 脚本类型表格卡、`/deps` 依赖列表、`/deps/refresh` 依赖刷新完成页头部卡、`/deps/install-log/<id>` 依赖安装日志头部卡、`/deps/uninstall` 依赖卸载结果页头部卡、`/panel/status`、`/` 仪表盘环境状态、`/about` 面板信息、`/notify/test/<id>` 通知测试结果、`/about/job-log/<id>` 后台任务日志头部卡、`/about/restart-panel`、`/about/stop-panel` 面板控制结果头部卡、`/about/refresh-log`、`/about/update-version` 版本失败头部卡、`/online-scripts/log/<id>` 在线脚本安装日志头部卡、`/online-scripts/install/<id>` 安装确认头部卡、`/online-scripts/install-select/<id>` 安装选择页头部卡、`/backup/import` 备份导入完成页头部卡和 `/scripts/debug-log/<id>` 脚本调试日志头部卡渲染、响应式表格 ID 保留与 HTML 转义。
 
@@ -442,6 +442,7 @@ python -B -m compileall fls-manager.py fls_manager tests tools
 
 ### 2026-07-05
 
+- 阶段 37 将脚本拉取和导入表单页接入 `page_header_card()`，保留拉取类型、代理选择、文件上传、返回入口和结果消息卡，并补充 `/pull/fetch`、`/pull/import` GET 路由渲染与目录转义测试。
 - 阶段 36 将配置页“task 可执行脚本类型”表格接入 `table_card()`，保留表单内 checkbox、保存配置按钮和安全验证 JS，并补充 `/config` 路由渲染与启用状态测试。
 - 阶段 35 将脚本新建、查看/编辑和改名页面接入 `page_header_card()`，保留 CodeMirror textarea、保存/调试/改名/返回按钮和提示消息卡，并补充 `/pull/new`、`/scripts/view`、`/scripts/rename` 路由渲染与转义测试。
 - 阶段 34 将代理新增和编辑表单页接入 `page_header_card()`，保留代理字段卡、自定义质量检测地址、实时测试/质量检测 JS 和保存逻辑，并补充 `/proxy/new`、`/proxy/edit/<id>` 路由渲染与转义测试。

@@ -22,7 +22,7 @@ from .helpers import (
 
 from ...paths import SCRIPT_DIR
 from ...utils import h
-from ...ui.components import message_card
+from ...ui.components import message_card, page_header_card
 from ...ui.layout import layout
 from ...proxy import proxy_select_options, apply_proxy_env
 
@@ -96,9 +96,14 @@ def pull_fetch():
                 msg_kind = "error"
                 msg_strong = True
 
+    header = page_header_card(
+        "拉取脚本 / 仓库",
+        f"当前目录：{h(current_rel or 'scripts 根目录')}",
+    )
+
     body = f"""
+{header}
 <div class="card">
-    <div class="card-title">拉取脚本 / 仓库</div>
     <form method="post">
         <input type="hidden" name="current_rel" value="{h(current_rel)}">
 
@@ -212,9 +217,14 @@ def pull_import():
             finally:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
 
+    header = page_header_card(
+        "导入脚本 / 压缩包",
+        f"当前目录：{h(current_rel or 'scripts 根目录')}",
+    )
+
     body = f"""
+{header}
 <div class="card">
-    <div class="card-title">导入脚本 / 压缩包</div>
     <form method="post" enctype="multipart/form-data">
         <input type="hidden" name="current_rel" value="{h(current_rel)}">
 

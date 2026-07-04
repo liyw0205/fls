@@ -150,6 +150,28 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn('style="color:#dc2626;font-weight:800;"', html)
             self.assertIn("URL 不能为空", html)
 
+    def test_pull_fetch_get_renders_header_card_and_form_shell(self):
+        with isolated_app() as (app, _base_dir):
+            response = app.test_client().get(
+                "/pull/fetch",
+                query_string={"p": "dir-<x>"},
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">拉取脚本 / 仓库</div>', html)
+            self.assertIn("当前目录：dir-&lt;x&gt;", html)
+            self.assertIn('name="current_rel" value="dir-&lt;x&gt;"', html)
+            self.assertIn('name="pull_type"', html)
+            self.assertIn('name="url"', html)
+            self.assertIn('name="proxy_id"', html)
+            self.assertIn("开始拉取", html)
+            self.assertIn("返回脚本管理", html)
+            self.assertIn("暂无操作", html)
+            self.assertNotIn("<x>", html)
+
     def test_pull_fetch_success_renders_success_message_card(self):
         with isolated_app() as (app, _base_dir):
             with patch(
@@ -210,6 +232,28 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn('<div class="card-title">结果</div>', html)
             self.assertIn('style="color:#dc2626;font-weight:800;"', html)
             self.assertIn("请选择要导入的文件", html)
+
+    def test_pull_import_get_renders_header_card_and_form_shell(self):
+        with isolated_app() as (app, _base_dir):
+            response = app.test_client().get(
+                "/pull/import",
+                query_string={"p": "dir-<x>"},
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">导入脚本 / 压缩包</div>', html)
+            self.assertIn("当前目录：dir-&lt;x&gt;", html)
+            self.assertIn('enctype="multipart/form-data"', html)
+            self.assertIn('name="current_rel" value="dir-&lt;x&gt;"', html)
+            self.assertIn('type="file" name="file"', html)
+            self.assertIn('name="save_as"', html)
+            self.assertIn("开始导入", html)
+            self.assertIn("返回脚本管理", html)
+            self.assertIn("暂无操作", html)
+            self.assertNotIn("<x>", html)
 
     def test_pull_import_success_renders_success_message_card(self):
         with isolated_app() as (app, _base_dir):
