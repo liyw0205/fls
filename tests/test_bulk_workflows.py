@@ -293,6 +293,70 @@ class BulkWorkflowTests(unittest.TestCase):
             self.assertEqual(payload["action"], "enable")
             self.assertEqual(payload["count"], 0)
 
+    def test_task_action_delete_existing_task_stops_removes_and_reloads(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1"),
+                    sample_task("t2"),
+                ],
+            )
+
+            with patch("fls_manager.routes.api.stop_task_now") as stop_task_now:
+                with patch("fls_manager.routes.api.reload_scheduler") as reload_scheduler:
+                    response = app.test_client().post(
+                        "/api/task/action/delete/t1",
+                        headers={"X-Token": TOKEN},
+                    )
+
+            payload = response.get_json()
+
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["msg"], "已删除")
+            stop_task_now.assert_called_once_with("t1")
+            reload_scheduler.assert_called_once()
+            self.assertEqual(
+                [task["id"] for task in read_json(base_dir / "data" / "tasks.json")],
+                ["t2"],
+            )
+
+    def test_task_action_delete_missing_task_returns_404_without_side_effects(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1"),
+                    sample_task("t2"),
+                ],
+            )
+
+            with patch("fls_manager.routes.api.stop_task_now") as stop_task_now:
+                with patch("fls_manager.routes.api.save_tasks") as save_tasks:
+                    with patch("fls_manager.routes.api.reload_scheduler") as reload_scheduler:
+                        response = app.test_client().post(
+                            "/api/task/action/delete/missing",
+                            headers={"X-Token": TOKEN},
+                        )
+
+            payload = response.get_json()
+
+            self.assertEqual(response.status_code, 404)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["msg"], "任务不存在")
+            stop_task_now.assert_not_called()
+            save_tasks.assert_not_called()
+            reload_scheduler.assert_not_called()
+            self.assertEqual(
+                [task["id"] for task in read_json(base_dir / "data" / "tasks.json")],
+                ["t1", "t2"],
+            )
+
     def test_collection_add_task_accepts_multiple_task_ids(self):
         with isolated_app() as (app, base_dir):
             from fls_manager import paths

@@ -188,10 +188,16 @@ def api_task_action(action, task_id):
             })
 
         if action == "delete":
+            tasks = load_tasks()
+            found = any(t.get("id") == task_id for t in tasks)
+
+            if not found:
+                return jsonify({"ok": False, "msg": "任务不存在"}), 404
+
             stop_task_now(task_id)
 
             tasks = [
-                t for t in load_tasks()
+                t for t in tasks
                 if t.get("id") != task_id
             ]
 

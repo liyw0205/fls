@@ -1501,8 +1501,51 @@
 - 合集加入任务入口现在对旧表单和新多选表单都有明确测试约束。
 - 混入无效任务 ID 时不会出现一部分任务已被加入、一部分失败的状态。
 
+## 阶段 35：单项任务删除 API 缺失边界
+
+状态：已完成
+
+目标：
+
+- 继续收束原长期脏文件中任务操作 API 相关的边界风险。
+- 让单项任务删除 API 与复制、置顶、切换和批量任务 API 一样，对不存在任务返回明确失败。
+- 保证缺失任务删除请求不会停止任务、写回任务文件或重载调度器。
+
+已完成：
+
+- 更新 `fls_manager/routes/api.py`：
+  - `/api/task/action/delete/<id>` 先读取任务列表并确认目标存在。
+  - 目标不存在时返回 `404` 和 `{"ok": false, "msg": "任务不存在"}`。
+  - 目标存在时复用已读取任务列表删除目标，避免删除路径重复读取。
+  - 保持成功删除时停止任务、保存任务列表、重载调度器和返回 `{"ok": true, "msg": "已删除"}` 的原有行为。
+- 扩展 `tests/test_bulk_workflows.py`：
+  - 覆盖单项删除存在任务时会调用 `stop_task_now()`、删除目标并重载调度器。
+  - 覆盖单项删除不存在任务时返回 404，且不调用 `stop_task_now()`、`save_tasks()`、`reload_scheduler()`，任务文件保持不变。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 35。
+  - 在 API 开发注意中记录单项删除缺失任务的 404 和无副作用约定。
+  - 增加阶段 35 开发日志。
+
+验证记录：
+
+- `python -B -m unittest tests.test_bulk_workflows`：通过，12 tests OK。
+- `python -B -m unittest discover -s tests`：通过，134 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段只改单项任务删除 API 的缺失任务边界，没有调整任务列表前端、批量任务 API、任务停止语义或调度器行为。
+
+收束结论：
+
+- 单项删除任务 API 不再对不存在任务返回“已删除”的成功假象。
+- 删除缺失任务不会产生无意义的文件写入或调度器重载。
+
 ## 下一阶段候选
 
-- 阶段 35：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界或更多错误提示渲染。
+- 阶段 36：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
