@@ -11,14 +11,11 @@ def online_script_doc(script_id):
     doc_link = str(item.get("doc_link") or "").strip()
 
     if not doc_link:
-        body = """
-<div class="card">
-    <div class="card-title">脚本文档</div>
-    <div class="help">该脚本未提供 doc_link。</div>
-    <br>
-    <a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>
-</div>
-"""
+        body = page_header_card(
+            "脚本文档",
+            help_html="该脚本未提供 doc_link。",
+            actions_html='<a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>',
+        )
         return layout("脚本文档", "online_scripts", body)
 
     proxy_id = request.args.get("proxy_id", "").strip()

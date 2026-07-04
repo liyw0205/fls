@@ -1133,3 +1133,53 @@
 - 阶段 24：继续查找未脏页面中的纯文本提示卡或小型头部卡；可评估在线脚本文档无 doc_link 提示或安装选择页小型说明块，但避免复杂任务选择 JS。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/online-scripts/install/<id>` 确认页、`/online-scripts/log/<id>`、`/about`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
+
+## 阶段 24：在线脚本文档无链接提示头部卡接入
+
+状态：已完成
+
+目标：
+
+- 继续低风险 UI 组件抽取，优先未脏文件和无副作用小页面。
+- 复用已有 `page_header_card()`，不新增组件 API。
+- 只替换在线脚本文档无 `doc_link` 提示页，不触碰文档下载、渲染和 iframe 逻辑。
+
+已完成：
+
+- 更新 `fls_manager/routes/online_scripts/docs.py`：
+  - 将无 `doc_link` 的提示卡接入 `page_header_card()`。
+  - 保留“返回在线脚本”入口。
+  - 文档下载、Markdown 渲染、网页 iframe 和错误消息逻辑均保持原样。
+- 扩展 `tests/test_ui_route_components.py`：
+  - 覆盖 `/online-scripts/doc/<id>` 无文档链接提示卡渲染。
+  - 断言标题、提示文字、操作区和返回入口存在。
+- 更新 `DEVELOPMENT.md`：
+  - 将 `/online-scripts/doc/<id>` 无文档链接提示卡纳入路由组件覆盖。
+  - 增加阶段 24 开发日志。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_route_components`：通过，25 tests OK。
+- `python -B -m compileall fls_manager/routes/online_scripts/docs.py tests/test_ui_route_components.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，116 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
+- 本阶段只验证无文档链接提示页初始渲染，不真实请求文档地址。
+
+组件策略结论：
+
+- `page_header_card()` 适合带单个返回操作的小型空状态/提示页。
+- 文档正文渲染、iframe 和错误回退仍保持原有结构，不强行组件化。
+- 后续继续优先选择未脏页面的小范围改动；复杂任务选择 JS 和真实安装流程暂缓。
+
+## 下一阶段候选
+
+- 阶段 25：继续查找未脏页面中的纯文本提示卡或小型头部卡；可评估在线脚本安装选择页中的静态说明块，但避免复杂任务选择 JS。
+- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/online-scripts/doc/<id>` 无文档链接页、`/online-scripts/install/<id>` 确认页、`/online-scripts/log/<id>`、`/about`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
+- 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

@@ -583,6 +583,37 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn("文档加载失败：&lt;bad &amp; &quot;x&quot;&gt;", html)
             self.assertNotIn("<bad", html)
 
+    def test_online_script_doc_without_link_renders_header_card(self):
+        with isolated_app() as (app, base_dir):
+            cache_file = base_dir / "data" / "online_scripts_cache.json"
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            cache_file.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "no-doc",
+                            "name": "No Doc",
+                            "type": "raw",
+                            "link": "https://example.invalid/no-doc.py",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            response = app.test_client().get(
+                "/online-scripts/doc/no-doc",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">脚本文档</div>', html)
+            self.assertIn("该脚本未提供 doc_link。", html)
+            self.assertIn('<div class="action-row">', html)
+            self.assertIn('href="/online-scripts"', html)
+
     def test_online_install_invalid_target_renders_header_card(self):
         with isolated_app() as (app, base_dir):
             cache_file = base_dir / "data" / "online_scripts_cache.json"
