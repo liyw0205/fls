@@ -146,7 +146,52 @@ def parse_random_delay_from_form():
     }
 
 
-def task_form(task=None):
+def normalize_task_retry(task):
+    retry = task.get("retry") or {}
+
+    if not isinstance(retry, dict):
+        retry = {}
+
+    try:
+        attempts = int(retry.get("attempts", 0) or 0)
+    except Exception:
+        attempts = 0
+
+    try:
+        interval_seconds = int(retry.get("interval_seconds", 60) or 60)
+    except Exception:
+        interval_seconds = 60
+
+    attempts = max(0, min(5, attempts))
+    interval_seconds = max(5, min(3600, interval_seconds))
+
+    return {
+        "attempts": attempts,
+        "interval_seconds": interval_seconds,
+    }
+
+
+def parse_retry_from_form():
+    try:
+        attempts = int(request.form.get("retry_attempts", "0") or 0)
+    except Exception:
+        attempts = 0
+
+    try:
+        interval_seconds = int(request.form.get("retry_interval_seconds", "60") or 60)
+    except Exception:
+        interval_seconds = 60
+
+    attempts = max(0, min(5, attempts))
+    interval_seconds = max(5, min(3600, interval_seconds))
+
+    return {
+        "attempts": attempts,
+        "interval_seconds": interval_seconds,
+    }
+
+
+def task_form(task=None, back_url="/tasks"):
     if task is None:
         task = {
             "name": "",
@@ -160,6 +205,7 @@ def task_form(task=None):
             "proxy_id": "",
             "notify": {"mode": "default", "ids": []},
             "random_delay": {"mode": "none", "seconds": 0},
+            "retry": {"attempts": 0, "interval_seconds": 60},
         }
 
     checked = "checked" if task.get("enabled", True) else ""
@@ -183,11 +229,18 @@ def task_form(task=None):
     delay_default_checked = "checked" if random_delay_mode == "default" else ""
     delay_custom_checked = "checked" if random_delay_mode == "custom" else ""
 
+    retry = normalize_task_retry(task)
+    retry_attempts = int(retry.get("attempts", 0) or 0)
+    retry_interval_seconds = int(retry.get("interval_seconds", 60) or 60)
+
     env_rows = task_env_rows(task.get("env", {}) or {})
     empty_style = "" if not env_rows else "display:none;"
 
+    back_url = str(back_url or "/tasks")
+
     body = f"""
 <form method="post">
+<input type="hidden" name="back" value="{h(back_url)}">
 <div class="card">
     <div class="card-title">任务信息</div>
     <div class="form-grid">
@@ -306,6 +359,22 @@ def task_form(task=None):
 
     <br>
 
+    <div class="form-grid">
+        <div class="form-item">
+            <label>失败重试次数</label>
+            <input name="retry_attempts" type="number" min="0" max="5" value="{h(retry_attempts)}">
+            <div class="help">任务退出码非 0、启动失败或超时时自动重试。0 表示不重试，最多 5 次。</div>
+        </div>
+
+        <div class="form-item">
+            <label>重试间隔，秒</label>
+            <input name="retry_interval_seconds" type="number" min="5" max="3600" value="{h(retry_interval_seconds)}">
+            <div class="help">每次失败后等待该秒数再重试。范围 5-3600 秒。</div>
+        </div>
+    </div>
+
+    <br>
+
     <label>
         <input type="checkbox" name="enabled" value="1" {checked} style="width:auto;">
         启用任务
@@ -344,7 +413,7 @@ def task_form(task=None):
 
 <div class="card">
     <button class="btn btn-primary" type="submit">保存</button>
-    <a class="btn btn-gray" href="/tasks">返回</a>
+    <a class="btn btn-gray" href="{h(back_url)}">返回</a>
 </div>
 </form>
 

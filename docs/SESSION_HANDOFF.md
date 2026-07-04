@@ -1,40 +1,38 @@
 # FLS 会话交接文档
 
-生成时间：2026-07-05
-当前阶段：阶段 41，在线脚本首页头部卡接入
+生成时间：2026-07-04
+当前阶段：阶段 36，单项任务运行停止缺失边界
 
 ## 本阶段完成进度
 
-完成度：阶段 41 已完成，准备进入阶段 42。
+完成度：阶段 36 已完成，准备进入阶段 37。
 
 已经完成：
 
-- 已提交阶段 40：`e4de431 Stage 40 about code cards`。
-- 更新 `fls_manager/ui/components.py`：
-  - 扩展 `page_header_card(..., content_style="")` 可选参数。
-  - 内容区样式属性会做 HTML 转义。
-  - 默认值不影响既有调用。
-- 更新 `fls_manager/routes/online_scripts/pages.py`：
-  - 将在线脚本首页顶部说明接入 `page_header_card()`。
-  - 通过 `content_style` 保留原说明区 `min-width:0;flex:1 1 360px;` 响应式约束。
-  - 保留脚本源地址展示。
-  - 保留刷新远程脚本源表单、代理选择、按钮 ID、打开源地址、脚本源 JSON 和修改源地址入口。
-  - 保留搜索表单、摘要项、消息卡、刷新状态卡、脚本列表和分页。
-- 扩展 `tests/test_ui_components.py`：
-  - 覆盖 `page_header_card()` 内容区样式属性转义。
-- 扩展 `tests/test_ui_route_components.py`：
-  - 覆盖 `/online-scripts` 首页头部卡、说明文本、脚本源展示、刷新表单和入口链接。
+- 继续基于干净 worktree 处理原长期脏文件剩余风险，没有直接修改或清理原工作区。
+- 对照原长期脏 diff 后确认：移除 CSRF、GET 删除日志、恢复旧任务按钮布局、旧 `retry_count` 表单等方向继续不迁入。
+- 本阶段选取任务 API 的更窄边界：单项 run/stop 对缺失任务应返回明确 404。
+- 更新 `fls_manager/routes/api.py`：
+  - 新增 `_task_action_result()`，统一把 `{"ok": false, "msg": "任务不存在"}` 映射为 HTTP 404。
+  - 新增 `_task_exists()`，用于 stop 前区分缺失任务和已存在但未运行任务。
+  - `/api/task/action/run/<id>` 在 `run_task_now()` 返回“任务不存在”时返回 404。
+  - `/api/task/action/stop/<id>` 对缺失任务先返回 404，且不调用 `stop_task_now()`。
+  - `/api/task/action/stop/<id>` 对已存在但未运行任务继续返回 200 + `{"ok": false, "msg": "任务未运行"}`。
+- 扩展 `tests/test_bulk_workflows.py`：
+  - 覆盖 run 缺失任务返回 404 且任务文件不变。
+  - 覆盖 stop 缺失任务返回 404 且不调用停止逻辑。
+  - 覆盖 stop 已存在但未运行保留 200 失败响应。
 - 更新 `DEVELOPMENT.md`：
-  - 将 `/online-scripts` 首页头部卡纳入路由组件覆盖。
-  - 增加阶段 41 开发日志。
+  - 基线推进到阶段 36。
+  - 在 API 开发注意中记录单项 run/stop 缺失任务边界。
+  - 增加阶段 36 开发日志。
 - 更新 `docs/DEVELOPMENT_PROGRESS.md`：
-  - 新增阶段 41 完成块、验证记录、受限验证和组件策略结论。
+  - 新增阶段 36 完成块、验证记录、受限验证和收束结论。
 
 已验证：
 
-- `python -B -m unittest tests.test_ui_components tests.test_ui_route_components.UiRouteComponentTests.test_online_scripts_page_renders_header_card_and_actions` 通过。
-- `python -B -m compileall fls_manager/ui/components.py fls_manager/routes/online_scripts/pages.py tests/test_ui_components.py tests/test_ui_route_components.py` 通过。
-- `python -B -m unittest discover -s tests` 通过，142 tests OK。
+- `python -B -m unittest tests.test_bulk_workflows` 通过，15 tests OK。
+- `python -B -m unittest discover -s tests` 通过，137 tests OK。
 - `python -B tools/responsive_smoke.py` 通过。
 - `python -B -m compileall fls-manager.py fls_manager tests tools` 通过。
 - `git diff --check` 通过。
@@ -42,43 +40,35 @@
 未完成或受限：
 
 - 当前环境没有 Playwright/Chromium，仍未做真实浏览器截图检查。
-- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
-- 本阶段只验证在线脚本首页 GET 初始渲染，没有触发远程脚本源刷新、文档加载、安装或任务导入流程。
+- 原工作区 `/data/data/com.termux/files/home/fls` 仍有长期脏文件，且本地 `main` 落后远端；不要直接 reset 或 checkout 清理，除非用户明确确认。
+- 本阶段没有改变任务运行、停止、批量操作或前端交互语义。
 
 ## 协作情况
 
-- 本阶段未使用额外技能或子代理，按交接文档在主线内完成小范围实现、测试、验证和文档更新。
-- 当前工作区仍存在长期阶段外改动，阶段提交必须精确暂存。
+- 本阶段未使用额外技能或子代理。
+- 用户继续要求开发；本阶段继续把剩余脏 diff 周边的 API 风险转化为实现修正和测试约束。
 
 ## 下阶段实现目标
 
-阶段 42 建议目标：继续低风险 UI 组件抽取，或在具备环境时补真实响应式验收。
+阶段 37 建议目标：继续低风险收束原长期脏 diff 中尚未覆盖的其它任务 API 兼容边界、UI 边界或更多错误提示渲染。
 
 具体任务：
 
-1. 先运行 `git -c safe.directory=/data/data/com.termux/files/home/fls status --short`，确认长期阶段外改动仍不被误提交。
-2. 可选方向 A：继续查找未脏页面纯文本提示卡、小型头部卡、代码卡或稳定表格卡。
-   - 避开复杂 JS `innerHTML` 状态、富文本结果、嵌套卡片和带真实安装/启停/恢复副作用的流程。
-   - 优先复用已有 `message_card()`、`page_header_card()`、`table_card()`、`pagination_card()`、`summary_item()`、`code_card()`。
-   - 备份页列表表格依赖 `backupListTbody`，不宜直接用 `table_card()` 替换，除非先扩展组件 API 并补充回归测试。
-   - 备份导入早期错误/失败提示当前是纯文本响应，接入 HTML 组件前需确认是否接受响应形态变化。
-   - 任务列表、日志分页、认证/API 和 `ui/tables.py` 等脏文件继续暂缓。
-3. 可选方向 B：如果环境具备浏览器自动化，补真实响应式截图验收。
-   - 重点宽度：390px、768px、1024px、1440px。
-   - 重点页面：`/online-scripts`、`/about`、`/pull`、`/online-scripts/source`、`/pull/fetch`、`/pull/import`、`/config`、`/pull/new`、`/scripts/view`、`/scripts/rename`、`/proxy/new`、`/proxy/edit/<id>`、`/env/view`、`/env/new`、`/env/edit/<key>`、`/env/import`、`/deps/uninstall`、`/deps/refresh`、`/deps/install-log/<id>`、`/scripts/debug-log/<id>`、`/backup`、备份导入完成页、`/about` 版本失败页、`/online-scripts/install-select/<id>`、`/online-scripts/doc/<id>`、`/online-scripts/install/<id>`、`/online-scripts/log/<id>`、`/`、`/notify`、`/deps`、`/panel/status`、`/tasks`、`/logs`。
-4. 阶段 42 验证：
-   - `python -B -m unittest discover -s tests`。
-   - `python -B tools/responsive_smoke.py`。
-   - `python -B -m compileall fls-manager.py fls_manager tests tools`。
-   - `git diff --check`。
-5. 阶段 42 结束时继续更新 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`、`docs/SESSION_HANDOFF.md`，提交时只纳入本阶段相关文件。
+1. 先运行 `git -c safe.directory=/data/data/com.termux/files/home/fls status --short --branch`，确认原工作区长期脏文件状态，不要 destructive 清理。
+2. 如果继续处理脏文件，优先在干净 worktree 基于 `origin/main` 对比原脏 diff；旧 `retry_count` 表单、GET 删除/置顶/取出/停止、移除 CSRF、移除任务运行历史、移除 back 清洗和合集锚点的方向不要迁入。
+3. 可继续补其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染测试。
+4. 如环境具备浏览器自动化，补真实响应式截图验收：
+   - 宽度：390px、768px、1024px、1440px。
+   - 页面：`/tasks`、`/collections`、`/logs`、`/online-scripts`、`/pull`、`/config`、`/deps`、`/panel/status`。
+5. 阶段 37 结束时继续更新 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`、`docs/SESSION_HANDOFF.md`，并提交推送。
 
 ## 后续候选
 
-- 等任务/日志相关阶段外改动收束后，把 `pagination_card()` 接入任务和日志分页。
+- 在确认原脏功能完全被远端吸收后，再由用户确认是否清理原工作区。
 - 继续拆分过长路由中的业务逻辑到 helper/service。
+- 为错误提示渲染、兼容边界和其它长期脏文件剩余 UI 边界增加更细的回归测试。
 - 评估配置、任务、代理、通知 JSON 写入备份或回滚机制。
 
 ## 下一会话启动提示
 
-请从 `docs/SESSION_HANDOFF.md` 开始，继续阶段 42。先读取 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`、`fls_manager/ui/components.py`、候选页面路由，并使用 `git -c safe.directory=/data/data/com.termux/files/home/fls status --short` 查看工作区，不要还原阶段外既有修改。优先查找未脏页面纯文本提示卡、小型头部卡、代码卡或稳定表格卡，或在有浏览器环境时补真实响应式验收，保持 Flask + 原生 CSS/JS 和无 npm 构建链。
+请从 `docs/SESSION_HANDOFF.md` 开始，继续阶段 37。优先确认远端和原工作区状态；如继续处理脏文件，只在干净 worktree 中实现并提交，不要直接还原原工作区长期修改。

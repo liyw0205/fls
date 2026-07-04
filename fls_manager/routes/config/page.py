@@ -215,7 +215,7 @@ def config_page():
     <div class="card-title">登录配置</div>
     <div class="form-item">
         <label>登录 Token</label>
-        <input name="admin_token" value="{h(cfg.get('admin_token', ''))}">
+        <input name="admin_token" type="password" value="{h(cfg.get('admin_token', ''))}" autocomplete="new-password">
         <div class="help">
             Token 为空时，面板会进入首次设置引导 /setup。<br>
             不建议在公网环境关闭或清空 Token。<br>
@@ -305,7 +305,7 @@ def config_page():
                 <div style="min-width:260px;flex:1;">
                     <div class="form-item">
                         <label>2FA 密钥</label>
-                        <input value="{h(totp_secret)}" readonly>
+                        <input value="{h(mask_secret_value(totp_secret))}" readonly>
                     </div>
 
                     <br>

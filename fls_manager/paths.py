@@ -36,6 +36,7 @@ SCRIPT_DIR = BASE_DIR / "scripts"
 
 CONFIG_FILE = DATA_DIR / "config.json"
 TASK_FILE = DATA_DIR / "tasks.json"
+TASK_HISTORY_FILE = DATA_DIR / "task_history.json"
 GLOBAL_ENV_FILE = DATA_DIR / "global_env.json"
 PROXY_FILE = DATA_DIR / "proxies.json"
 COLLECTION_FILE = DATA_DIR / "collections.json"

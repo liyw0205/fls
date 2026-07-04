@@ -1,6 +1,6 @@
 # FLS 开发进度
 
-更新时间：2026-07-05
+更新时间：2026-07-04
 
 本文记录阶段开发进度。每个阶段结束前必须更新本文件，并生成或更新 `docs/SESSION_HANDOFF.md`。
 
@@ -140,7 +140,7 @@
 
 - 新增 `docs/DATA_SCHEMA.md`，记录 `tasks.json`、`config.json`、`global_env.json`、`proxies.json`、`collections.json` 的规范字段和读取迁移规则。
 - 在 `fls_manager/models.py` 新增任务、全局变量、代理、合集归一化函数。
-- `load_tasks()` / `save_tasks()` 现在会统一清洗任务结构，迁移旧 `notify_ids`，归一化 `random_delay`、`retry_count`、`run_count`、`enabled`、`pinned` 和任务环境变量。
+- `load_tasks()` / `save_tasks()` 现在会统一清洗任务结构，迁移旧 `notify_ids` 和旧 `retry_count`，归一化 `notify`、`random_delay`、`retry`、`run_count`、`enabled`、`pinned` 和任务环境变量。
 - `load_global_env()` / `save_global_env()` 会清洗空键并把值转成字符串。
 - `load_proxies()` / `save_proxies()` 会清洗代理类型、布尔状态、缺失 ID 和文本字段。
 - `load_collections()` / `save_collections()` 保留原有缺失 ID 丢弃策略，并把文本字段统一归一。
@@ -185,7 +185,7 @@
 - 新增 `tests/test_task_runtime.py`，使用临时 `FLS_BASE_DIR` 和 `sys.modules` 清理隔离真实数据。
 - 覆盖 `increase_run_count()` 对 `run_count`、`last_run_at`、`updated_at` 的持久化更新。
 - 覆盖 `task_random_delay_seconds()` 的 none/default/custom/坏类型分支，并 mock `random.randint()`。
-- 覆盖 `task_retry_count()` 的坏类型、负数、超上限和正常字符串值。
+- 覆盖 `task_retry_config()` 的坏类型、负数、超上限和正常字符串值。
 - 覆盖 `run_task_now()` 的任务不存在、已运行、命令解析失败和正常提交启动状态。
 - 覆盖 `stop_task_now()` 的运行状态清理、手动停止标记和日志追加。
 - 覆盖 `_start_task_worker()` 的环境合并顺序：系统环境、全局变量、任务变量、代理变量和 `FLS_TASK_*`。
@@ -731,6 +731,9 @@
 - 扩展 `tests/test_ui_route_components.py`：
   - mock `pip_cmd()` 覆盖 `/deps` 依赖列表渲染和包名/版本转义。
   - mock `runtime_items()` 覆盖 `/panel/status` 表格 ID 保留和运行时字段转义。
+- 更新 `tests/test_task_runtime.py`：
+  - 合并远端任务运行历史改动后，测试改为覆盖当前 `task_retry_config()` 和 `schedule_task_retry()`。
+  - 启动链路测试改为直接覆盖 `_start_task_worker()` 内的环境合并、`subprocess.Popen()` 参数和 watcher 线程提交。
 - 更新 `DEVELOPMENT.md`：
   - 将 `table_card()` 可选结构测试纳入已覆盖项。
   - 将 `/deps`、`/deps/refresh`、`/panel/status` 表格卡接入纳入路由组件覆盖。
@@ -739,7 +742,7 @@
 验证记录：
 
 - `python -B -m unittest tests.test_ui_components tests.test_ui_route_components`：通过，23 tests OK。
-- `python -B -m unittest discover -s tests`：通过，101 tests OK。
+- `python -B -m unittest discover -s tests`：通过，100 tests OK。
 - `python -B tools/responsive_smoke.py`：通过。
 - `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
 - `git diff --check`：通过。
@@ -756,41 +759,37 @@
 - 页面已有 CSS/JS 依赖的表格 ID 必须通过 `table_id` 保留。
 - 后续可继续在未脏页面接入 `table_card()`，但任务/日志分页仍等相关长期改动收束后再处理。
 
-## 下一阶段候选
-
-- 阶段 17：继续查找未脏页面中的纯文本提示卡或稳定表格卡，避免复杂 JS 状态、富文本结果和带按钮的完整错误页。
-- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/online-scripts` 的摘要项和脚本拉取页面。
-- 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
-
-## 阶段 17：仪表盘环境表格卡接入
+## 阶段 17：脏文件功能收束与批量操作回归测试
 
 状态：已完成
 
 目标：
 
-- 继续低风险 UI 组件抽取，优先未脏文件和稳定表格结构。
-- 复用已有 `table_card()`，不新增组件 API。
-- 避开任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外改动。
+- 按用户要求优先处理长期脏文件方向，确认远端基线已承接的功能，不重复搬运旧实现。
+- 修正旧 `retry_count` 与当前 `retry` 配置的读取迁移缺口。
+- 为任务复制、任务批量操作、合集批量加入和日志分组删除补回归测试。
 
 已完成：
 
-- 更新 `fls_manager/routes/dashboard.py`：
-  - 导入 `table_card()`。
-  - 将仪表盘“环境状态”表格接入 `table_card()`。
-  - 保留峰值 CPU 自动重置说明和当前峰值统计周期说明。
-  - 保留原有 `env_rows` 数据构造和字段转义逻辑。
-- 扩展 `tests/test_ui_route_components.py`：
-  - 覆盖 `/` 仪表盘环境状态表格卡渲染。
-  - 断言表格标题、表头、说明文案和关键环境行存在。
-- 更新 `DEVELOPMENT.md`：
-  - 将 `/` 仪表盘环境状态表格卡纳入路由组件覆盖。
-  - 增加阶段 17 开发日志。
+- 更新 `fls_manager/models.py`：
+  - 新增 `normalize_task_retry()`。
+  - 读取旧 `retry_count` 时迁移到 `retry.attempts`，默认 `retry.interval_seconds=60`。
+  - 保存归一化任务时移除旧 `retry_count`，保持和任务表单、运行器的当前 `retry` 结构一致。
+- 新增 `tests/test_bulk_workflows.py`：
+  - 覆盖 `/api/task/action/copy/<id>` 复制任务时重置 `run_count`、`pinned`、`last_run_at`，并保留 `retry` 配置。
+  - 覆盖 `/api/task/bulk-action` 的去重禁用、批量取出合集、批量删除和空选择拒绝。
+  - 覆盖 `/collection/add-task/<collection_id>` 一次加入多个任务，并检查合集页存在多选和批量工具栏 UI。
+  - 覆盖 `/api/logs/groups/delete` 删除选中日志分组，以及空选择返回 400。
+- 更新 `tests/test_schema_migration.py`：
+  - 覆盖旧 `retry_count` 到新 `retry` 的读取迁移和写回清理。
+- 更新 `DEVELOPMENT.md` 与 `docs/DATA_SCHEMA.md`：
+  - 将任务重试规范字段改为 `retry`。
+  - 明确 `retry_count` 仅作为旧数据兼容字段。
 
 验证记录：
 
-- `python -B -m unittest tests.test_ui_route_components`：通过，12 tests OK。
-- `python -B -m compileall fls_manager/routes/dashboard.py tests/test_ui_route_components.py`：通过。
-- `python -B -m unittest discover -s tests`：通过，102 tests OK。
+- `python -B -m unittest tests.test_schema_migration tests.test_bulk_workflows`：通过，11 tests OK。
+- `python -B -m unittest discover -s tests`：通过，106 tests OK。
 - `python -B tools/responsive_smoke.py`：通过。
 - `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
 - `git diff --check`：通过。
@@ -798,214 +797,38 @@
 受限验证：
 
 - 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
-- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
-- 仪表盘环境表格没有既有表格 ID 或 JS 选择器依赖，因此未设置 `table_id`。
+- 本阶段没有在原长期脏工作区执行 destructive reset；开发和提交继续基于干净临时 worktree。
 
-组件策略结论：
+收束结论：
 
-- `table_card()` 可以继续接入稳定只读表格；动态 JS 表格、复杂工具栏和特殊折叠结构仍不强行统一。
-- 接入表格卡前需确认是否存在 CSS/JS 依赖的表格 ID；本阶段目标表格无该依赖。
-- 后续仍优先选择未脏页面的小范围组件化，避免与长期业务改动交叉。
+- 原工作区的大部分脏文件能力已经存在于远端基线，本阶段主要补齐可验证的兼容迁移和回归测试。
+- 旧 `retry_count` 不能再作为新实现入口；后续任务重试相关开发统一使用 `retry.attempts` 和 `retry.interval_seconds`。
 
-## 下一阶段候选
-
-- 阶段 18：继续查找未脏页面中的纯文本提示卡或稳定表格卡，例如关于页的只读信息表格，但避免嵌套卡片和折叠更新日志。
-- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/`、`/online-scripts`、`/pull/fetch`、`/pull/import`、`/deps`、`/panel/status`。
-- 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
-
-## 阶段 18：关于页面板信息表格卡接入
+## 阶段 18：CSRF 与破坏性路由安全回归测试
 
 状态：已完成
 
 目标：
 
-- 继续低风险 UI 组件抽取，优先未脏文件和稳定只读表格。
-- 复用已有 `table_card()`，不新增组件 API。
-- 避开关于页折叠更新日志、时间校准嵌套卡片和长期阶段外脏文件。
+- 继续按用户要求处理长期脏文件剩余方向，识别旧实现回退风险。
+- 固化 CSRF、防 GET 破坏性操作和 `X-Token` API 调用边界。
+- 避免后续清理原脏工作区时误把安全约束改回旧状态。
 
 已完成：
 
-- 更新 `fls_manager/routes/about/page.py`：
-  - 导入 `table_card()`。
-  - 将“面板信息”只读表格接入 `table_card()`。
-  - 保留项目仓库链接、主进程名、任务进程标识前缀、目录路径和控制脚本字段。
-  - 保留动态字段和路径字段的 HTML 转义。
-- 扩展 `tests/test_ui_route_components.py`：
-  - 覆盖 `/about` 面板信息表格卡渲染。
-  - 断言表格标题、表头、项目仓库链接和控制脚本字段存在。
-- 更新 `tools/responsive_smoke.py`：
-  - 将 `/about` 纳入页面结构 smoke。
+- 扩展 `tests/test_auth_backup.py`：
+  - 覆盖页面 `layout()` 输出 `<meta name="csrf-token">` 并向 POST 表单注入隐藏 `csrf_token`。
+  - 覆盖普通 session POST 缺少 CSRF token 时返回 400，且不写入任务数据。
+  - 覆盖普通 session POST 携带有效 CSRF token 时可正常创建任务。
+  - 覆盖 `X-Token` 管理请求可绕过 CSRF，继续支持脚本/API 客户端。
+  - 覆盖 `/logfile/delete/<filename>`、`/collection/delete/<id>`、`/task/pin/<id>` 拒绝 GET，并保持原数据不变。
 - 更新 `DEVELOPMENT.md`：
-  - 将 `/about` 面板信息表格卡纳入路由组件覆盖。
-  - 增加阶段 18 开发日志。
+  - 明确 `create_app()` 同时注册 `csrf_before_request` 和 `auth_before_request`。
+  - 记录 CSRF token 注入、fetch 自动带 token、`X-Token` 豁免和破坏性页面路由必须 POST 的约定。
 
 验证记录：
 
-- `python -B -m unittest tests.test_ui_route_components`：通过，13 tests OK。
-- `python -B -m compileall fls_manager/routes/about/page.py tests/test_ui_route_components.py`：通过。
-- `python -B -m unittest discover -s tests`：通过，103 tests OK。
-- `python -B tools/responsive_smoke.py`：通过，包含 `/about`。
-- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
-- `git diff --check`：通过。
-
-受限验证：
-
-- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
-- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
-- 关于页的更新日志折叠表格和时间校准嵌套卡片结构暂不组件化，避免扩大改动面。
-
-组件策略结论：
-
-- `table_card()` 适合只读、稳定、无 JS 选择器依赖的表格。
-- 带链接的单元格可以作为调用方已构造 HTML 传入，但用户输入仍必须在调用前显式转义。
-- 后续继续优先选择未脏页面的小范围改动；复杂折叠、嵌套卡片和动态 JS 区域暂缓。
-
-## 下一阶段候选
-
-- 阶段 19：继续查找未脏页面中的稳定表格卡或纯文本提示卡；可评估后台任务日志页、通知测试结果页等小页面。
-- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/about`、`/`、`/online-scripts`、`/pull/fetch`、`/pull/import`、`/deps`、`/panel/status`。
-- 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
-
-## 阶段 19：通知测试结果表格卡接入
-
-状态：已完成
-
-目标：
-
-- 继续低风险 UI 组件抽取，优先未脏文件和小型稳定页面。
-- 复用已有 `table_card()`，不新增组件 API。
-- 保留通知测试结果的返回操作，不把带动作按钮的页面硬塞进 `message_card()`。
-
-已完成：
-
-- 更新 `fls_manager/routes/notify/test.py`：
-  - 导入 `table_card()`。
-  - 将通知测试结果详情接入 `table_card()`。
-  - 使用 badge 展示成功/失败状态。
-  - 通过 `actions_html` 保留“返回通知管理”按钮。
-  - 保留通知名称、渠道名称和返回消息的 HTML 转义。
-- 扩展 `tests/test_ui_route_components.py`：
-  - 覆盖 `/notify/test/<id>` 通知测试结果表格卡渲染。
-  - mock `send_one()`，避免真实发送通知。
-  - 断言通知名称、渠道、失败 badge、返回消息转义和返回按钮存在。
-- 更新 `DEVELOPMENT.md`：
-  - 将 `/notify/test/<id>` 通知测试结果表格卡纳入路由组件覆盖。
-  - 增加阶段 19 开发日志。
-
-验证记录：
-
-- `python -B -m unittest tests.test_ui_route_components`：通过，14 tests OK。
-- `python -B -m compileall fls_manager/routes/notify/test.py tests/test_ui_route_components.py`：通过。
-- `python -B -m unittest discover -s tests`：通过，104 tests OK。
-- `python -B tools/responsive_smoke.py`：通过。
-- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
-- `git diff --check`：通过。
-
-受限验证：
-
-- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
-- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
-- 本阶段只 mock 通知发送出口，不真实调用任何通知渠道。
-
-组件策略结论：
-
-- 带短操作区的稳定结果详情页适合 `table_card(actions_html=...)`。
-- `message_card()` 仍只用于纯文本提示，不承载带字段列表和动作按钮的结果页。
-- 后续继续优先选择未脏页面的小范围改动；动态日志和复杂 JS 区域暂缓。
-
-## 下一阶段候选
-
-- 阶段 20：继续查找未脏页面中的稳定表格卡或纯文本提示卡；可评估后台任务日志不存在页等小页面，但避免实时日志主体。
-- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/about`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
-- 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
-
-## 阶段 20：后台任务日志头部卡接入
-
-状态：已完成
-
-目标：
-
-- 继续低风险 UI 组件抽取，优先未脏文件和小型稳定页面。
-- 复用已有 `page_header_card()`，不新增组件 API。
-- 只替换后台任务日志页头部卡，不触碰实时日志主体和自动刷新脚本。
-
-已完成：
-
-- 更新 `fls_manager/routes/about/jobs.py`：
-  - 导入 `page_header_card()`。
-  - 将后台任务记录不存在提示接入头部卡，保留“返回”和“查看日志管理”入口。
-  - 将存在记录时的任务状态头部接入头部卡，保留状态、日志文件、更新时间和三个操作按钮。
-  - 保留实时日志 `<pre id="log">`、日志控制条和 `loadAboutJobLog()` 自动刷新逻辑。
-  - 保留动态标题、状态、日志文件和返回地址的 HTML 转义。
-- 扩展 `tests/test_ui_components.py`：
-  - 覆盖 `page_header_card()` 的标题转义、说明区和操作区渲染。
-- 扩展 `tests/test_ui_route_components.py`：
-  - 覆盖 `/about/job-log/<id>` 不存在记录提示卡渲染。
-  - 覆盖 `/about/job-log/<id>` 存在记录头部卡渲染、动态字段转义、操作按钮和实时日志主体保留。
-- 更新 `DEVELOPMENT.md`：
-  - 将 `/about/job-log/<id>` 后台任务日志头部卡纳入路由组件覆盖。
-  - 增加阶段 20 开发日志。
-
-验证记录：
-
-- `python -B -m unittest tests.test_ui_components`：通过，13 tests OK。
-- `python -B -m unittest tests.test_ui_route_components`：通过，16 tests OK。
-- `python -B -m compileall fls_manager/routes/about/jobs.py tests/test_ui_components.py tests/test_ui_route_components.py`：通过。
-- `python -B -m unittest discover -s tests`：通过，107 tests OK。
-- `python -B tools/responsive_smoke.py`：通过。
-- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
-- `git diff --check`：通过。
-
-受限验证：
-
-- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
-- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
-- 本阶段只验证页面初始渲染和静态日志 shell，不通过真实浏览器执行后台任务日志自动刷新脚本。
-
-组件策略结论：
-
-- `page_header_card()` 适合小型说明加操作按钮的页面头部。
-- 实时日志主体、自动滚动和轮询脚本保持原样，不强行组件化。
-- 后续继续优先选择未脏页面的小范围改动；复杂 JS 状态和嵌套卡片暂缓。
-
-## 下一阶段候选
-
-- 阶段 21：继续查找未脏页面中的纯文本提示卡或小型头部卡；可评估关于页面板控制结果页，但避免影响真实启停行为。
-- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/about`、`/about/job-log/<id>`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
-- 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
-
-## 阶段 21：面板控制结果头部卡接入
-
-状态：已完成
-
-目标：
-
-- 继续低风险 UI 组件抽取，优先未脏文件和小型结果页。
-- 复用已有 `page_header_card()`，不新增组件 API。
-- 只替换面板重启/停止结果页渲染外壳，不改变真实重启/停止行为。
-
-已完成：
-
-- 更新 `fls_manager/routes/about/panel_control.py`：
-  - 导入 `page_header_card()`。
-  - 将重启失败、正在重启、停止失败、正在停止四个结果卡接入头部卡。
-  - 保留控制脚本缺失时的红色强调提示和平台路径说明。
-  - 保留成功分支中的系统类型、当前 PID、控制脚本路径、返回/日志入口。
-  - 保留重启成功页 10 秒后返回仪表盘的 `setTimeout()` 脚本，并修正普通字符串中的 JS 单花括号。
-  - 保留所有动态路径字段 HTML 转义。
-- 扩展 `tests/test_ui_route_components.py`：
-  - 覆盖 `/about/restart-panel` 控制脚本缺失提示卡渲染与路径转义。
-  - 覆盖 `/about/restart-panel` 成功结果卡渲染，并 mock `threading.Thread`，避免真实重启。
-  - 覆盖 `/about/stop-panel` 控制脚本缺失提示卡渲染与路径转义。
-  - 覆盖 `/about/stop-panel` 成功结果卡渲染，并 mock `threading.Thread`，避免真实停止。
-- 更新 `DEVELOPMENT.md`：
-  - 将 `/about/restart-panel`、`/about/stop-panel` 面板控制结果头部卡纳入路由组件覆盖。
-  - 增加阶段 21 开发日志。
-
-验证记录：
-
-- `python -B -m unittest tests.test_ui_route_components`：通过，20 tests OK。
-- `python -B -m compileall fls_manager/routes/about/panel_control.py tests/test_ui_route_components.py`：通过。
+- `python -B -m unittest tests.test_auth_backup`：通过，20 tests OK。
 - `python -B -m unittest discover -s tests`：通过，111 tests OK。
 - `python -B tools/responsive_smoke.py`：通过。
 - `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
@@ -1014,51 +837,36 @@
 受限验证：
 
 - 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
-- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
-- 本阶段通过 mock 验证重启/停止结果页渲染，没有执行真实面板重启或停止。
+- 本阶段只补安全回归测试和开发文档，没有改动路由实现。
 
-组件策略结论：
+收束结论：
 
-- `page_header_card()` 适合小型结果页和说明加操作按钮的控制结果页。
-- 带真实副作用的路由测试必须 mock 外部动作出口，只验证渲染和调度提交，不触发真实启停。
-- 后续继续优先选择未脏页面的小范围改动；复杂 JS 状态、认证/API 和任务/日志脏文件暂缓。
+- 原脏 diff 中移除 CSRF、把删除/置顶改回 GET、回退 POST 表单的方向不应继续迁入。
+- 后续处理原工作区时，可以优先丢弃这些旧实现回退，只保留已经在远端基线中通过测试覆盖的功能。
 
-## 下一阶段候选
-
-- 阶段 22：继续查找未脏页面中的纯文本提示卡或小型头部卡；可评估在线脚本安装确认页、安装日志页等，但避开复杂安装状态和富文本结果。
-- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/about`、`/about/job-log/<id>`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
-- 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
-
-## 阶段 22：在线脚本安装日志头部卡接入
+## 阶段 19：任务表单返回路径与 retry 回归测试
 
 状态：已完成
 
 目标：
 
-- 继续低风险 UI 组件抽取，优先未脏文件和小型日志页。
-- 复用已有 `page_header_card()`，不新增组件 API。
-- 只替换在线脚本安装日志页头部卡，不触碰实时日志主体、自动刷新脚本和安装状态逻辑。
+- 继续收束原长期脏文件中任务表单相关的旧实现回退。
+- 固化当前任务编辑页的 `back` 返回路径、外部 URL 清洗和新 `retry` 表单结构。
+- 防止后续把旧 `retry_count` 表单和固定返回 `/tasks` 的行为重新迁入。
 
 已完成：
 
-- 更新 `fls_manager/routes/online_scripts/_common.py`：
-  - 导入 `page_header_card()`，供在线脚本子路由通配导入复用。
-- 更新 `fls_manager/routes/online_scripts/logs.py`：
-  - 将安装记录不存在提示接入头部卡，保留“返回”和“查看日志管理”入口。
-  - 将存在记录时的安装状态头部接入头部卡，保留状态、日志文件、返回、脚本管理、任务管理和停止安装按钮。
-  - 保留实时日志 `<pre id="log">`、日志控制条和 `loadLog()` 自动刷新逻辑。
-  - 保留动态脚本名称、状态、日志文件、安装 ID 和返回地址的 HTML 转义。
 - 扩展 `tests/test_ui_route_components.py`：
-  - 覆盖 `/online-scripts/log/<id>` 不存在记录提示卡渲染。
-  - 覆盖 `/online-scripts/log/<id>` 存在且运行中记录头部卡渲染、动态字段转义、停止安装按钮和实时日志主体保留。
+  - 覆盖 `/task/edit/<id>?back=...` 渲染隐藏 `back` 字段，并保留返回按钮链接。
+  - 覆盖任务编辑表单渲染 `retry_attempts` 和 `retry_interval_seconds`，并不渲染旧 `retry_count`。
+  - 覆盖提交任务编辑时保存当前 `retry` 结构。
+  - 覆盖外部 `back` URL 被清洗，合集任务默认回到 `/collections#collection-<id>`。
 - 更新 `DEVELOPMENT.md`：
-  - 将 `/online-scripts/log/<id>` 在线脚本安装日志头部卡纳入路由组件覆盖。
-  - 增加阶段 22 开发日志。
+  - 记录阶段 19 对任务表单返回路径和 retry 结构的回归测试。
 
 验证记录：
 
-- `python -B -m unittest tests.test_ui_route_components`：通过，22 tests OK。
-- `python -B -m compileall fls_manager/routes/online_scripts/_common.py fls_manager/routes/online_scripts/logs.py tests/test_ui_route_components.py`：通过。
+- `python -B -m unittest tests.test_ui_route_components`：通过，13 tests OK。
 - `python -B -m unittest discover -s tests`：通过，113 tests OK。
 - `python -B tools/responsive_smoke.py`：通过。
 - `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
@@ -1067,50 +875,76 @@
 受限验证：
 
 - 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
-- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
-- 本阶段只验证在线脚本安装日志页初始渲染和静态日志 shell，不通过真实浏览器执行自动刷新脚本，也不执行真实在线脚本安装。
+- 本阶段只补路由回归测试和开发文档，没有改动路由实现。
 
-组件策略结论：
+收束结论：
 
-- `page_header_card()` 适合小型日志页头部，动态日志主体和轮询脚本保持原样。
-- 运行中任务的停止按钮可以作为调用方构造的 `actions_html` 传入，但安装 ID 必须在调用方先转义。
-- 后续继续优先选择未脏页面的小范围改动；涉及真实安装、下载或复杂 JS 状态的流程暂缓。
+- 旧 `retry_count` 表单和提交后固定返回 `/tasks` 的方向不应继续迁入。
+- 任务编辑页需要保留安全清洗后的 `back`，尤其是从合集进入任务编辑后回到对应合集锚点。
 
-## 下一阶段候选
-
-- 阶段 23：继续查找未脏页面中的纯文本提示卡或小型头部卡；可评估在线脚本安装目标已存在确认页，但避免改变实际安装提交逻辑。
-- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/online-scripts/log/<id>`、`/about`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
-- 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
-
-## 阶段 23：在线脚本安装确认头部卡接入
+## 阶段 20：合集页任务卡片回归测试
 
 状态：已完成
 
 目标：
 
-- 继续低风险 UI 组件抽取，优先未脏文件和小型确认页。
-- 复用已有 `page_header_card()`，不新增组件 API。
-- 只替换在线脚本安装目标路径非法和目标已存在确认页头部，不改变实际安装提交逻辑。
+- 继续收束原长期脏文件中合集页任务卡片相关的旧实现回退。
+- 固化合集页任务卡片的长命令折叠、POST 破坏性操作表单和带合集锚点的 `back` 参数。
+- 防止后续把合集页任务操作退回 GET 链接或丢失合集锚点。
 
 已完成：
 
-- 更新 `fls_manager/routes/online_scripts/install.py`：
-  - 将目标路径非法错误页接入 `page_header_card()`，保留返回在线脚本入口。
-  - 将目标已存在确认页的说明头部接入 `page_header_card()`。
-  - 保留继续安装表单、`force=1` 隐藏字段、导入任务隐藏字段、代理选择和确认继续按钮。
-  - 保留目标路径、错误消息和脚本 ID 的 HTML 转义。
-- 扩展 `tests/test_ui_route_components.py`：
-  - 覆盖 `/online-scripts/install/<id>` 目标路径非法提示卡渲染。
-  - 覆盖 `/online-scripts/install/<id>` 目标已存在确认页渲染、目标路径转义、继续安装表单和隐藏字段保留。
-  - 测试只写入本地缓存和本地目标文件，不触发真实下载、安装线程或网络请求。
+- 扩展 `tests/test_bulk_workflows.py`：
+  - 覆盖合集页长命令渲染为 `fls-collapsible-code` 折叠代码块。
+  - 覆盖任务配置、编辑链接携带 `/collections?...#collection-<id>` 的编码后 `back` 参数。
+  - 覆盖停止、置顶、取出任务继续使用 POST 表单。
+  - 覆盖添加任务到合集和删除合集的表单 action 保留当前查询参数与合集锚点。
+  - 覆盖停止、置顶、取出任务、删除合集没有回退成 GET 链接。
 - 更新 `DEVELOPMENT.md`：
-  - 将 `/online-scripts/install/<id>` 在线脚本安装确认头部卡纳入路由组件覆盖。
-  - 增加阶段 23 开发日志。
+  - 记录阶段 20 对合集页任务卡片行为的回归测试。
 
 验证记录：
 
-- `python -B -m unittest tests.test_ui_route_components`：通过，24 tests OK。
-- `python -B -m compileall fls_manager/routes/online_scripts/install.py tests/test_ui_route_components.py`：通过。
+- `python -B -m unittest tests.test_bulk_workflows`：通过，7 tests OK。
+- `python -B -m unittest discover -s tests`：通过，114 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段只补合集页渲染回归测试和开发文档，没有改动路由实现。
+
+收束结论：
+
+- 合集页任务卡片不应回退到未折叠长命令和 GET 破坏性链接。
+- 合集页任务操作需要保留带锚点的 back 参数，确保操作或编辑后能回到对应合集位置。
+
+## 阶段 21：普通任务列表动作回归测试
+
+状态：已完成
+
+目标：
+
+- 继续收束原长期脏文件中普通任务列表相关的旧实现回退。
+- 固化 `/tasks` 页面长命令折叠、批量工具栏、更多菜单和 AJAX 单任务动作。
+- 防止后续把普通任务列表回退成 GET 停止/置顶/删除链接，或丢失编辑、配置入口的 `/tasks` 返回参数。
+
+已完成：
+
+- 扩展 `tests/test_ui_route_components.py`：
+  - 覆盖普通任务列表长命令渲染为 `fls-collapsible-code` 折叠代码块，并保留 `fls-value-preview` 预览。
+  - 覆盖批量工具栏和批量按钮继续渲染，并保留 `taskBulkAction('enable')`、`taskBulkAction('delete')` 调用。
+  - 覆盖单任务更多菜单继续渲染，并保留复制、置顶、停止等 `taskAjaxAction(...)` 动作。
+  - 覆盖编辑和配置链接继续携带 `/tasks` back 参数。
+  - 覆盖任务列表没有回退成 `/task/pin/<id>`、`/stop/<id>`、`/task/delete/<id>` 这类 GET 链接。
+- 更新 `DEVELOPMENT.md`：
+  - 记录阶段 21 对普通任务列表当前行为的回归测试。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_route_components`：通过，14 tests OK。
 - `python -B -m unittest discover -s tests`：通过，115 tests OK。
 - `python -B tools/responsive_smoke.py`：通过。
 - `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
@@ -1119,48 +953,37 @@
 受限验证：
 
 - 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
-- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
-- 本阶段只验证确认页初始渲染，不执行真实在线脚本下载、Git 拉取、任务导入或后台安装线程。
+- 本阶段只补普通任务列表路由回归测试和开发文档，没有改动页面实现。
 
-组件策略结论：
+收束结论：
 
-- `page_header_card()` 适合小型错误/确认页头部，实际业务表单继续由原路由保留。
-- 带副作用的确认页测试应停在确认页面渲染，不提交 `force=1` 进入真实安装流程。
-- 后续继续优先选择未脏页面的小范围改动；真实安装、下载和复杂 JS 状态流程暂缓。
+- 普通任务列表不应回退到未折叠长命令、GET 破坏性链接或丢失 `/tasks` back 参数。
+- 当前批量和单任务动作入口应继续走 AJAX POST/API 流程，便于刷新局部任务块并保留 CSRF 边界。
 
-## 下一阶段候选
-
-- 阶段 24：继续查找未脏页面中的纯文本提示卡或小型头部卡；可评估在线脚本文档无 doc_link 提示或安装选择页小型说明块，但避免复杂任务选择 JS。
-- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/online-scripts/install/<id>` 确认页、`/online-scripts/log/<id>`、`/about`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
-- 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
-
-## 阶段 24：在线脚本文档无链接提示头部卡接入
+## 阶段 22：日志管理页分组动作回归测试
 
 状态：已完成
 
 目标：
 
-- 继续低风险 UI 组件抽取，优先未脏文件和无副作用小页面。
-- 复用已有 `page_header_card()`，不新增组件 API。
-- 只替换在线脚本文档无 `doc_link` 提示页，不触碰文档下载、渲染和 iframe 逻辑。
+- 继续收束原长期脏文件中日志管理页相关的旧实现回退。
+- 固化 `/logs` 页面分组批量选择、分组批量删除、单组删除入口和单文件 POST 删除表单。
+- 防止后续把日志删除入口回退成 GET 链接，或丢失日志分组名 HTML 转义。
 
 已完成：
 
-- 更新 `fls_manager/routes/online_scripts/docs.py`：
-  - 将无 `doc_link` 的提示卡接入 `page_header_card()`。
-  - 保留“返回在线脚本”入口。
-  - 文档下载、Markdown 渲染、网页 iframe 和错误消息逻辑均保持原样。
 - 扩展 `tests/test_ui_route_components.py`：
-  - 覆盖 `/online-scripts/doc/<id>` 无文档链接提示卡渲染。
-  - 断言标题、提示文字、操作区和返回入口存在。
+  - 覆盖日志管理页继续渲染 `log-bulk-toolbar`、分组选框、全选控件和删除选中分组按钮。
+  - 覆盖页面脚本继续调用 `/api/logs/groups/delete` 执行分组删除。
+  - 覆盖单组删除按钮继续调用 `flsLogsDeleteGroups([this.dataset.group])`。
+  - 覆盖日志分组名在 `data-log-group`、`value` 和标题中正确 HTML 转义。
+  - 覆盖单文件删除继续使用 POST 表单，且没有回退成 `/logfile/delete/<file>` 的 GET 链接。
 - 更新 `DEVELOPMENT.md`：
-  - 将 `/online-scripts/doc/<id>` 无文档链接提示卡纳入路由组件覆盖。
-  - 增加阶段 24 开发日志。
+  - 记录阶段 22 对日志管理页当前行为的回归测试。
 
 验证记录：
 
-- `python -B -m unittest tests.test_ui_route_components`：通过，25 tests OK。
-- `python -B -m compileall fls_manager/routes/online_scripts/docs.py tests/test_ui_route_components.py`：通过。
+- `python -B -m unittest tests.test_ui_route_components`：通过，15 tests OK。
 - `python -B -m unittest discover -s tests`：通过，116 tests OK。
 - `python -B tools/responsive_smoke.py`：通过。
 - `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
@@ -1169,49 +992,37 @@
 受限验证：
 
 - 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
-- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
-- 本阶段只验证无文档链接提示页初始渲染，不真实请求文档地址。
+- 本阶段只补日志管理页路由回归测试和开发文档，没有改动页面实现。
 
-组件策略结论：
+收束结论：
 
-- `page_header_card()` 适合带单个返回操作的小型空状态/提示页。
-- 文档正文渲染、iframe 和错误回退仍保持原有结构，不强行组件化。
-- 后续继续优先选择未脏页面的小范围改动；复杂任务选择 JS 和真实安装流程暂缓。
+- 日志管理页不应回退到 GET 删除链接或丢失分组批量删除 UI。
+- 分组名来自日志内容，页面属性和值与标题都需要继续 HTML 转义。
 
-## 下一阶段候选
-
-- 阶段 25：继续查找未脏页面中的纯文本提示卡或小型头部卡；可评估在线脚本安装选择页中的静态说明块，但避免复杂任务选择 JS。
-- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/online-scripts/doc/<id>` 无文档链接页、`/online-scripts/install/<id>` 确认页、`/online-scripts/log/<id>`、`/about`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
-- 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
-
-## 阶段 25：在线脚本安装选择页头部卡接入
+## 阶段 23：日志文件详情页返回路径回归测试
 
 状态：已完成
 
 目标：
 
-- 继续低风险 UI 组件抽取，优先未脏文件和静态说明块。
-- 复用已有 `page_header_card()`，不新增组件 API。
-- 只替换在线脚本安装选择页顶部说明卡，不触碰任务选择列表、分页和 JS 状态逻辑。
+- 继续收束原长期脏文件中日志查看页相关的返回路径和删除入口风险。
+- 固化 `/logfile/<filename>` 页面合法站内 `back`、外部 `back` 清洗、日志删除 POST 表单和日志 API 拉取路径。
+- 防止后续把日志文件删除入口回退成 GET 链接，或让外部 URL 进入返回按钮和删除表单。
 
 已完成：
 
-- 更新 `fls_manager/routes/online_scripts/install_select.py`：
-  - 将顶部“选择任务并安装”说明卡接入 `page_header_card()`。
-  - 保留脚本 ID、脚本类型、保存名、任务总数和 `selectedTaskCount` 动态计数节点。
-  - 保留返回在线脚本入口。
-  - 保留安装选项、搜索任务、任务选择列表、分页、底部提交按钮和全部任务选择 JS。
 - 扩展 `tests/test_ui_route_components.py`：
-  - 覆盖 `/online-scripts/install-select/<id>` 顶部头部卡渲染。
-  - 断言脚本名称和保存名 HTML 转义、`selectedTaskCount`、表单 ID、`select_mode=all` 隐藏字段、任务选择区和分页 JS 保留。
+  - 覆盖 `/logfile/live.log?back=/history` 渲染返回按钮到 `/history`。
+  - 覆盖日志文件删除表单继续使用 POST，并保留安全 `back=/history`。
+  - 覆盖日志详情页前端继续从 `/api/logfile/live.log?lines=1500` 拉取内容。
+  - 覆盖外部 `back=https://example.invalid/evil` 被清洗回 `/logs`。
+  - 覆盖页面没有回退成 `/logfile/delete/<file>` 的 GET 删除链接。
 - 更新 `DEVELOPMENT.md`：
-  - 将 `/online-scripts/install-select/<id>` 安装选择页头部卡纳入路由组件覆盖。
-  - 增加阶段 25 开发日志。
+  - 记录阶段 23 对日志文件详情页返回路径和 POST 删除入口的回归测试。
 
 验证记录：
 
-- `python -B -m unittest tests.test_ui_route_components`：通过，26 tests OK。
-- `python -B -m compileall fls_manager/routes/online_scripts/install_select.py tests/test_ui_route_components.py`：通过。
+- `python -B -m unittest tests.test_ui_route_components`：通过，16 tests OK。
 - `python -B -m unittest discover -s tests`：通过，117 tests OK。
 - `python -B tools/responsive_smoke.py`：通过。
 - `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
@@ -1220,52 +1031,121 @@
 受限验证：
 
 - 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
-- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
-- 本阶段只验证安装选择页初始渲染，不通过真实浏览器执行任务选择 JS，也不提交安装或导入任务表单。
+- 本阶段只补日志文件详情页路由回归测试和开发文档，没有改动页面实现。
 
-组件策略结论：
+收束结论：
 
-- `page_header_card()` 可以承载带动态计数节点的静态头部，但调用方必须保留已有元素 ID。
-- 复杂任务选择 JS、分页和批量选择工具栏保持原有结构，不强行组件化。
-- 后续继续优先选择未脏页面的小范围改动；真实安装、下载和复杂 JS 状态流程暂缓。
+- 日志文件详情页必须继续清洗外部 `back`，并将删除操作限制在 POST 表单。
+- 日志查看页的实时拉取 API 路径应继续使用当前日志文件名，不依赖用户可控外部地址。
 
-## 下一阶段候选
-
-- 阶段 26：继续查找未脏页面中的纯文本提示卡或小型头部卡；可评估在线脚本安装选择页中“搜索任务”静态表单外壳，但避免改任务列表和选择 JS。
-- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/online-scripts/install-select/<id>`、`/online-scripts/doc/<id>` 无文档链接页、`/online-scripts/install/<id>` 确认页、`/online-scripts/log/<id>`、`/about`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
-- 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
-
-## 阶段 26：关于页版本失败结果头部卡接入
+## 阶段 24：任务日志页历史表格回归测试
 
 状态：已完成
 
 目标：
 
-- 继续低风险 UI 组件抽取，优先未脏文件和失败结果页。
-- 复用已有 `page_header_card()`，不新增组件 API。
-- 只替换刷新更新日志和更新版本的失败结果页，不触发真实 Git 后台任务。
+- 继续收束原长期脏文件中任务运行历史和任务日志详情页相关的旧实现回退。
+- 固化 `/log/<task_id>` 页面最近运行历史表格、状态徽标、日志链接、操作入口和安全 `back` 行为。
+- 防止后续移除任务运行历史、把停止操作回退成 GET 链接，或让外部 `back` 进入任务日志页操作入口。
 
 已完成：
 
-- 更新 `fls_manager/routes/about/version.py`：
-  - 导入 `page_header_card()`。
-  - 将刷新更新日志时未安装 Git、非 Git 仓库两个失败页接入头部卡。
-  - 将更新版本时版本号非法、未安装 Git、非 Git 仓库三个失败页接入头部卡。
-  - 保留返回关于页入口。
-  - 保留版本号、工作目录等动态字段 HTML 转义。
 - 扩展 `tests/test_ui_route_components.py`：
-  - 覆盖 `/about/refresh-log` 未安装 Git 失败页渲染。
-  - 覆盖 `/about/refresh-log` 非 Git 仓库失败页渲染。
-  - 覆盖 `/about/update-version` 非法版本号失败页渲染和输入转义。
-  - 通过 mock Git 可用性/仓库状态避免启动真实后台任务。
+  - 覆盖任务日志页展示 `最近运行历史` 表格。
+  - 覆盖历史记录状态徽标、来源、说明和日志链接渲染，并对任务名、命令和说明做 HTML 转义。
+  - 覆盖运行、停止、配置和返回入口继续携带安全站内 `back=/history`。
+  - 覆盖停止任务继续使用 POST 表单，且没有回退成 `/stop/<id>` 的 GET 链接。
+  - 覆盖外部 `back=https://example.invalid/evil` 被清洗回 `/tasks`。
+  - 覆盖任务日志页前端继续从 `/api/log/<task_id>?lines=1200` 拉取内容。
 - 更新 `DEVELOPMENT.md`：
-  - 将 `/about/refresh-log`、`/about/update-version` 版本失败头部卡纳入路由组件覆盖。
-  - 增加阶段 26 开发日志。
+  - 记录阶段 24 对任务日志页历史表格和安全 back 行为的回归测试。
 
 验证记录：
 
-- `python -B -m unittest tests.test_ui_route_components`：通过，29 tests OK。
-- `python -B -m compileall fls_manager/routes/about/version.py tests/test_ui_route_components.py`：通过。
+- `python -B -m unittest tests.test_ui_route_components`：通过，17 tests OK。
+- `python -B -m unittest discover -s tests`：通过，118 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段只补任务日志页路由回归测试和开发文档，没有改动页面实现。
+
+收束结论：
+
+- 任务运行历史不应从任务日志页退化移除，历史记录中的用户可控文本必须继续转义。
+- 任务日志页的停止操作和返回路径需要继续保留当前安全边界。
+
+## 阶段 25：全局运行历史页筛选回归测试
+
+状态：已完成
+
+目标：
+
+- 继续收束原长期脏文件中全局运行历史页相关的旧实现回退。
+- 固化 `/history` 页关键词筛选、状态筛选、历史表格字段、日志链接和 HTML 转义。
+- 防止后续移除运行历史入口、弱化筛选能力，或让任务名、命令、说明等历史字段未转义进入页面。
+
+已完成：
+
+- 扩展 `tests/test_ui_route_components.py`：
+  - 覆盖 `/history?q=...&status=success` 只显示匹配关键词和状态的历史记录。
+  - 覆盖关键词输入框保留转义后的查询值。
+  - 覆盖状态筛选下拉框保留选中的 `success` 状态。
+  - 覆盖全局历史表格继续展示任务、命令、状态徽标、来源、重试、说明和日志链接。
+  - 覆盖未匹配的历史记录不会出现在页面中。
+  - 覆盖任务名、命令和说明等用户可控历史字段继续 HTML 转义。
+- 更新 `DEVELOPMENT.md`：
+  - 记录阶段 25 对全局运行历史页筛选和历史字段转义的回归测试。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_route_components`：通过，18 tests OK。
+- `python -B -m unittest discover -s tests`：通过，119 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段只补全局运行历史页路由回归测试和开发文档，没有改动页面实现。
+
+收束结论：
+
+- 全局运行历史页不应退化为无筛选或无历史表格的静态列表。
+- 历史记录来自运行过程和用户任务配置，所有展示字段都需要继续 HTML 转义。
+
+## 阶段 26：任务运行历史数据模型回归测试
+
+状态：已完成
+
+目标：
+
+- 继续收束原长期脏文件中任务运行历史数据模型相关的旧实现回退。
+- 固化 `task_history.json` 读取过滤、按任务筛选、按 ID 更新、新记录置顶和历史上限裁剪行为。
+- 防止后续移除任务运行历史或让坏数据破坏历史页、任务日志页和仪表盘历史摘要。
+
+已完成：
+
+- 扩展 `tests/test_schema_migration.py`：
+  - 覆盖 `load_task_history()` 过滤非对象历史记录。
+  - 覆盖 `task_history_for_task()` 按 `task_id` 筛选并遵守 limit。
+  - 覆盖 `update_task_history()` 按历史 ID 更新并写回文件。
+  - 覆盖空 ID 和不存在 ID 更新返回 `False`。
+  - 覆盖 `add_task_history()` 把新记录插入顶部，并通过 `TASK_HISTORY_LIMIT` 裁剪旧记录。
+- 更新 `docs/DATA_SCHEMA.md`：
+  - 新增 `data/task_history.json` 字段、读取规则和写入裁剪规则。
+  - 通用规则补充 `task_history.json` 由 `models.py` 规范化读取。
+- 更新 `DEVELOPMENT.md`：
+  - 记录 `data/task_history.json` 为主要数据文件。
+  - 记录阶段 26 对任务运行历史数据模型和 schema 文档的回归测试。
+
+验证记录：
+
+- `python -B -m unittest tests.test_schema_migration`：通过，6 tests OK。
 - `python -B -m unittest discover -s tests`：通过，120 tests OK。
 - `python -B tools/responsive_smoke.py`：通过。
 - `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
@@ -1274,51 +1154,37 @@
 受限验证：
 
 - 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
-- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
-- 本阶段只验证失败结果页初始渲染，没有执行真实 Git refresh/update 后台任务。
+- 本阶段只补任务运行历史数据模型回归测试和文档，没有改动模型实现。
 
-组件策略结论：
+收束结论：
 
-- `page_header_card()` 适合带单个返回操作的小型失败结果页。
-- 带后台任务副作用的路由测试应停在失败分支，或 mock 外部条件，不进入真实任务启动。
-- 后续继续优先选择未脏页面的小范围改动；真实更新、安装、下载和复杂 JS 状态流程暂缓。
+- `task_history.json` 是运行历史、任务日志页和仪表盘历史摘要的共同数据源，不应被后续旧实现回退移除。
+- 历史文件读取需要容忍坏行，写入需要保持最新记录在前并控制文件规模。
 
-## 下一阶段候选
-
-- 阶段 27：继续查找未脏页面中的纯文本提示卡或小型头部卡；可评估备份导入完成页或备份导入失败页，但避免执行真实大范围恢复。
-- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/about` 版本失败页、`/online-scripts/install-select/<id>`、`/online-scripts/doc/<id>`、`/online-scripts/install/<id>`、`/online-scripts/log/<id>`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
-- 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
-
-## 阶段 27：备份导入完成页头部卡接入
+## 阶段 27：仪表盘历史摘要回归测试
 
 状态：已完成
 
 目标：
 
-- 继续低风险 UI 组件抽取，优先未脏文件和小型结果页。
-- 复用已有 `page_header_card()`，不新增组件 API。
-- 只替换备份导入成功结果页，不改变上传、解压、安全检查、恢复和依赖安装逻辑。
+- 继续收束原长期脏文件中任务运行历史展示相关的旧实现回退。
+- 固化仪表盘 `/` 的最近运行和最近异常摘要，避免后续改动移除任务历史入口。
+- 覆盖历史摘要中的状态徽标、说明、日志链接和用户可控文本 HTML 转义。
 
 已完成：
 
-- 更新 `fls_manager/routes/backup/restore.py`：
-  - 导入 `page_header_card()`。
-  - 将 `/backup/import` 成功结果页接入头部卡。
-  - 保留已恢复内容、依赖恢复状态、依赖日志路径、返回备份恢复和查看日志入口。
-  - 保留恢复内容、依赖消息和日志路径的 HTML 转义。
-  - 未改动未上传文件、未选择恢复内容和失败分支的既有响应形态。
 - 扩展 `tests/test_ui_route_components.py`：
-  - 覆盖 `/backup/import` 导入小型 tar.gz 后的成功结果页渲染。
-  - 测试使用临时 `FLS_BASE_DIR` 和内存归档，只恢复测试目录内的 `data/config.json`。
-  - mock `reload_scheduler()`，避免触发真实调度器刷新副作用。
+  - 覆盖仪表盘最近运行区继续展示 `task_history.json` 中的成功历史。
+  - 覆盖仪表盘最近异常区继续展示失败历史。
+  - 覆盖成功/失败状态徽标、说明列和日志文件详情链接。
+  - 覆盖任务名和历史消息中的 HTML 特殊字符被转义。
 - 更新 `DEVELOPMENT.md`：
-  - 将 `/backup/import` 备份导入完成页头部卡纳入路由组件覆盖。
-  - 增加阶段 27 开发日志。
+  - 基线推进到阶段 27。
+  - 记录阶段 27 对仪表盘历史摘要当前行为的回归测试。
 
 验证记录：
 
-- `python -B -m unittest tests.test_ui_route_components`：通过，30 tests OK。
-- `python -B -m compileall fls_manager/routes/backup/restore.py tests/test_ui_route_components.py`：通过。
+- `python -B -m unittest tests.test_ui_route_components`：通过，19 tests OK。
 - `python -B -m unittest discover -s tests`：通过，121 tests OK。
 - `python -B tools/responsive_smoke.py`：通过。
 - `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
@@ -1327,50 +1193,85 @@
 受限验证：
 
 - 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
-- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
-- 本阶段只验证小型隔离备份的 `data` 恢复成功路径，没有执行真实大范围恢复、脚本目录恢复或依赖安装。
+- 本阶段只补仪表盘历史摘要回归测试，没有改动仪表盘运行时代码。
 
-组件策略结论：
+收束结论：
 
-- `page_header_card()` 适合备份导入完成这类简短结果页，恢复详情作为 `help_html` 保留即可。
-- 对有文件系统副作用的路由测试必须使用临时 `FLS_BASE_DIR`，并优先构造最小归档。
-- 备份失败和早期参数错误分支仍保持现状，避免一次阶段同时改变 HTTP 状态和响应形态。
+- 仪表盘应继续把 `task_history.json` 的最近运行和异常历史作为首页可见摘要。
+- 历史摘要中的任务名、说明和日志入口属于用户可见数据，必须持续保持转义与安全站内链接。
 
-## 下一阶段候选
-
-- 阶段 28：继续查找未脏页面中的纯文本提示卡或小型头部卡；可评估备份导入早期错误/失败提示是否适合接入组件，但需确认是否接受从纯文本改为 HTML。
-- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/backup`、备份导入完成页、`/about` 版本失败页、`/online-scripts/install-select/<id>`、`/online-scripts/doc/<id>`、`/online-scripts/install/<id>`、`/online-scripts/log/<id>`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
-- 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
-
-## 阶段 28：脚本调试日志头部卡接入
+## 阶段 28：批量任务 API 状态字段
 
 状态：已完成
 
 目标：
 
-- 继续低风险 UI 组件抽取，优先未脏文件和小型日志页。
-- 复用已有 `page_header_card()`，不新增组件 API。
-- 只替换脚本调试日志页头部卡，不触碰真实调试启动、停止、日志轮询和 API 逻辑。
+- 继续收束原长期脏文件中批量任务操作相关的 API 行为。
+- 让 `/api/task/bulk-action` 在保留 `ok` / `msg` 兼容字段的同时，返回脚本客户端和前端可直接使用的结构化状态字段。
+- 覆盖批量启用/禁用、取出合集、删除、运行和停止时的计数、跳过和失败明细。
 
 已完成：
 
-- 更新 `fls_manager/routes/scripts/debug.py`：
-  - 导入 `page_header_card()`。
-  - 将 `/scripts/debug-log/<id>` 调试记录不存在提示接入头部卡，保留返回和日志管理入口。
-  - 将存在记录时的状态头部接入头部卡，保留运行状态、PID、脚本路径、日志文件、停止调试按钮、返回和脚本管理入口。
-  - 保留实时日志 `<pre id="log">`、日志浮动控制和 `loadScriptDebugLog()` 自动刷新逻辑。
-  - 保留动态 PID、脚本路径、日志文件、调试 ID 和返回地址的 HTML 转义。
-- 扩展 `tests/test_ui_route_components.py`：
-  - 覆盖 `/scripts/debug-log/<id>` 不存在记录提示卡渲染。
-  - 覆盖 `/scripts/debug-log/<id>` 存在且运行中记录头部卡渲染、动态字段转义、停止调试按钮和实时日志主体保留。
+- 更新 `fls_manager/routes/api.py`：
+  - 新增 `_bulk_payload()`，统一批量成功响应的 `action`、`count` 和扩展字段。
+  - 批量启用/禁用、取出合集返回 `updated_count`。
+  - 批量删除返回 `deleted_count`。
+  - 批量运行返回 `submitted_count`、`failed_count` 和 `failures`。
+  - 批量停止返回 `stopped_count`、`skipped_count`、`failed_count` 和 `failures`。
+  - 未知操作、空选择和任务缺失错误也返回 `action` / `count`，任务缺失时额外返回 `missing_count` / `missing_ids`。
+- 扩展 `tests/test_bulk_workflows.py`：
+  - 覆盖重复任务 ID 去重后的 `count`。
+  - 覆盖批量禁用、取出合集、删除的结构化计数字段。
+  - 覆盖批量运行的提交成功数、失败数和失败明细。
+  - 覆盖批量停止的结束数、跳过数、失败数和失败明细。
+  - 覆盖空选择错误仍返回 `action` 和 `count`。
 - 更新 `DEVELOPMENT.md`：
-  - 将 `/scripts/debug-log/<id>` 脚本调试日志头部卡纳入路由组件覆盖。
-  - 增加阶段 28 开发日志。
+  - 基线推进到阶段 28。
+  - 记录批量任务 API 响应字段约定和阶段 28 开发日志。
 
 验证记录：
 
-- `python -B -m unittest tests.test_ui_route_components`：通过，32 tests OK。
-- `python -B -m compileall fls_manager/routes/scripts/debug.py tests/test_ui_route_components.py`：通过。
+- `python -B -m unittest tests.test_bulk_workflows`：通过，8 tests OK。
+- `python -B -m unittest discover -s tests`：通过，122 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段只扩展批量任务 API 的 JSON 字段，没有调整任务列表或合集页前端交互。
+
+收束结论：
+
+- 批量任务 API 客户端不应解析中文 `msg` 来判断局部成功、跳过或失败。
+- 后续改动需要继续保留 `ok` / `msg` 兼容字段，并维护新增结构化字段的稳定性。
+
+## 阶段 29：任务启动失败历史收尾回归测试
+
+状态：已完成
+
+目标：
+
+- 继续收束原长期脏文件中任务运行历史相关的旧实现回退。
+- 固化 `_start_task_worker()` 在启动进程失败时的历史收尾行为。
+- 防止任务启动失败后卡在 `starting`、缺失 `start_failed` 历史或遗留打开的日志句柄。
+
+已完成：
+
+- 扩展 `tests/test_task_runtime.py`：
+  - 模拟 `subprocess.Popen()` 抛出 `OSError`。
+  - 覆盖 `_start_task_worker()` 把历史记录更新为 `start_failed`。
+  - 覆盖启动失败消息、结束时间和日志文件路径写入 `task_history.json`。
+  - 覆盖启动失败日志写入任务日志文件。
+  - 覆盖日志句柄关闭、`RUNNING` 运行态清理和失败重试调度入口调用。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 29。
+  - 记录阶段 29 对任务启动失败历史收尾的回归测试。
+
+验证记录：
+
+- `python -B -m unittest tests.test_task_runtime`：通过，20 tests OK。
 - `python -B -m unittest discover -s tests`：通过，123 tests OK。
 - `python -B tools/responsive_smoke.py`：通过。
 - `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
@@ -1379,51 +1280,85 @@
 受限验证：
 
 - 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
-- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
-- 本阶段只验证脚本调试日志页初始渲染和静态日志 shell，不启动真实脚本调试进程，也不通过真实浏览器执行自动刷新脚本。
+- 本阶段只补任务启动失败历史收尾回归测试，没有改动任务运行时代码。
 
-组件策略结论：
+收束结论：
 
-- `page_header_card()` 适合小型实时日志页头部，动态日志主体、浮动日志控制和轮询脚本保持原样。
-- 运行中调试记录的停止按钮可以作为调用方构造的 `actions_html` 传入，但调试 ID 和返回地址必须在调用方先转义。
-- 后续继续优先选择未脏页面的小范围改动；真实调试启动、安装、下载和复杂 JS 状态流程暂缓。
+- 任务启动失败应作为完整运行历史收尾，不应停留在 `starting`。
+- 启动失败路径需要同时维护历史记录、任务日志、日志句柄和 `RUNNING` 状态清理。
 
-## 下一阶段候选
-
-- 阶段 29：继续查找未脏页面中的纯文本提示卡或小型头部卡；可评估依赖安装日志页头部卡，但避免真实 pip 安装。
-- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/scripts/debug-log/<id>`、`/backup`、备份导入完成页、`/about` 版本失败页、`/online-scripts/install-select/<id>`、`/online-scripts/doc/<id>`、`/online-scripts/install/<id>`、`/online-scripts/log/<id>`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
-- 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
-
-## 阶段 29：依赖安装日志头部卡接入
+## 阶段 30：任务失败不重试通知边界回归测试
 
 状态：已完成
 
 目标：
 
-- 继续低风险 UI 组件抽取，优先未脏文件和小型日志页。
-- 复用已有 `page_header_card()`，不新增组件 API。
-- 只替换依赖安装日志页头部卡，不触碰真实 pip 安装、日志轮询和 API 逻辑。
+- 继续收束原长期脏文件中任务运行失败、历史记录和通知出口相关的旧实现回退。
+- 固化 `task_finish_watcher()` 在任务失败且未计划重试时的收尾行为。
+- 防止失败任务跳过通知、缺失 `failed` 历史、丢失退出码或仍被误判为待重试。
 
 已完成：
 
-- 更新 `fls_manager/routes/deps.py`：
-  - 导入 `page_header_card()`。
-  - 将 `/deps/install-log/<id>` 状态头部接入头部卡。
-  - 保留安装中/已结束状态、日志文件、返回依赖管理和刷新依赖入口。
-  - 保留实时日志 `<pre id="log">` 和 `loadLog()` 自动刷新逻辑。
-  - 保留包名、日志文件、安装 ID 和返回地址的 HTML 转义。
-- 扩展 `tests/test_ui_route_components.py`：
-  - 覆盖 `/deps/install-log/<id>` 不存在记录时的头部卡和日志 shell 渲染。
-  - 覆盖 `/deps/install-log/<id>` 运行中假记录的头部卡渲染、动态字段转义和实时日志主体保留。
-  - 测试直接写入假 `DEPS_RUNNING` 记录，不提交 `/deps/install`，避免真实 pip 安装。
+- 扩展 `tests/test_task_runtime.py`：
+  - 模拟任务进程返回非零退出码且 `schedule_task_retry()` 不计划重试。
+  - 覆盖 `task_history.json` 写入 `failed` 状态、退出码、结束时间、日志路径和失败消息。
+  - 覆盖失败任务仍使用用户脚本日志内容发送通知。
+  - 覆盖 `RUNNING` 运行态清理，以及任务日志继续记录退出码和通知结果。
 - 更新 `DEVELOPMENT.md`：
-  - 将 `/deps/install-log/<id>` 依赖安装日志头部卡纳入路由组件覆盖。
-  - 增加阶段 29 开发日志。
+  - 基线推进到阶段 30。
+  - 记录阶段 30 对任务失败不重试通知边界的回归测试。
 
 验证记录：
 
-- `python -B -m unittest tests.test_ui_route_components`：通过，34 tests OK。
-- `python -B -m compileall fls_manager/routes/deps.py tests/test_ui_route_components.py`：通过。
+- `python -B -m unittest tests.test_task_runtime`：通过，21 tests OK。
+- `python -B -m unittest discover -s tests`：通过，124 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段只补任务失败不重试通知边界回归测试，没有改动任务运行时代码或通知实现。
+
+收束结论：
+
+- 失败任务只有在已经计划重试时才应跳过完成通知。
+- 未计划重试的失败任务需要完整收尾历史和日志，并继续按任务通知配置发送结果。
+
+## 阶段 31：批量 API 前端消费回归测试
+
+状态：已完成
+
+目标：
+
+- 继续收束阶段 28 批量任务 API 结构化字段的前端消费闭环。
+- 让普通任务列表和合集页批量操作优先使用结构化计数字段生成提示，而不是只展示后端 `msg`。
+- 防止后续前端回退到解析或透传中文消息，丢失局部成功、跳过和失败明细。
+
+已完成：
+
+- 更新 `fls_manager/static/fls.js`：
+  - 新增 `flsBulkActionMessage()`，根据 `action`、`count`、`updated_count`、`deleted_count`、`submitted_count`、`stopped_count`、`skipped_count`、`failed_count` 和 `failures` 生成批量操作提示。
+  - 新增计数和失败明细辅助函数，失败明细最多展示前三条并保留总失败数。
+- 更新 `fls_manager/ui/tables.py`：
+  - 普通任务列表批量操作成功/失败提示改用 `flsBulkActionMessage()`。
+- 更新 `fls_manager/routes/tasks/collections.py`：
+  - 合集页任务批量操作成功/失败提示改用 `flsBulkActionMessage()`。
+- 更新 `fls_manager/ui/layout.py`：
+  - 静态资源版本提升到 `20260704-31`，确保浏览器加载新的 `fls.js`。
+- 扩展测试：
+  - `tests/test_ui_route_components.py` 覆盖静态 JS 中存在结构化批量消息函数和普通任务页调用。
+  - `tests/test_bulk_workflows.py` 覆盖合集页批量入口调用结构化消息函数。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 31。
+  - 记录阶段 31 对批量 API 前端消费的接入。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_route_components`：通过，20 tests OK。
+- `python -B -m unittest tests.test_bulk_workflows`：通过，8 tests OK。
+- `node --check fls_manager/static/fls.js`：通过。
 - `python -B -m unittest discover -s tests`：通过，125 tests OK。
 - `python -B tools/responsive_smoke.py`：通过。
 - `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
@@ -1432,102 +1367,40 @@
 受限验证：
 
 - 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
-- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
-- 本阶段只验证依赖安装日志页初始渲染和静态日志 shell，不启动真实 pip 安装进程，也不通过真实浏览器执行自动刷新脚本。
+- 本阶段只接入前端提示格式化，没有改变批量 API 的字段或操作语义。
 
-组件策略结论：
+收束结论：
 
-- `page_header_card()` 适合依赖安装日志这类短状态头部，实时日志主体和轮询脚本保持原样。
-- 带外部安装副作用的路由测试应绕开提交入口，直接构造进程状态假记录。
-- 后续继续优先选择未脏页面的小范围改动；真实安装、下载和复杂 JS 状态流程暂缓。
+- 批量任务 API 的结构化字段现在已有普通任务页和合集页前端消费路径。
+- 后续如果新增批量动作，应同步扩展 `flsBulkActionMessage()` 和对应 API 字段测试。
 
-## 下一阶段候选
-
-- 阶段 30：继续查找未脏页面中的纯文本提示卡或小型头部卡；可评估依赖刷新完成页头部卡或依赖卸载结果页，但避免真实 pip 卸载。
-- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/deps/install-log/<id>`、`/scripts/debug-log/<id>`、`/backup`、备份导入完成页、`/about` 版本失败页、`/online-scripts/install-select/<id>`、`/online-scripts/doc/<id>`、`/online-scripts/install/<id>`、`/online-scripts/log/<id>`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
-- 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
-
-## 阶段 30：依赖刷新完成页头部卡接入
+## 阶段 32：任务表单错误提示渲染
 
 状态：已完成
 
 目标：
 
-- 继续低风险 UI 组件抽取，优先未脏文件和小型结果页。
-- 复用已有 `page_header_card()`，不新增组件 API。
-- 只替换依赖刷新完成页头部卡，不改变依赖检测逻辑和核心依赖结果表格。
+- 继续收束原长期脏文件中错误提示渲染相关的 UI 边界。
+- 让新建/编辑任务校验失败时仍显示完整任务表单，而不是返回纯文本错误。
+- 保留用户已填写内容和安全 `back`，同时确保用户输入继续 HTML 转义。
 
 已完成：
 
-- 更新 `fls_manager/routes/deps.py`：
-  - 将 `/deps/refresh` 刷新完成提示接入 `page_header_card()`。
-  - 保留刷新时间说明。
-  - 保留核心依赖检测 `table_card()`、状态 badge 和返回依赖管理入口。
-  - 保留依赖名、版本/错误和刷新时间的 HTML 转义。
+- 更新 `fls_manager/routes/tasks/pages.py`：
+  - 新增 `_task_from_post()`，统一从 POST 表单构建任务草稿。
+  - 新增 `_task_form_error()`，使用 `message_card()` 渲染错误提示并返回任务表单。
+  - 新建任务和编辑任务的必填、Cron、合集校验失败改为返回错误卡片页面，HTTP 状态码仍为 400。
+  - 编辑任务校验失败不会写回 `tasks.json`。
 - 扩展 `tests/test_ui_route_components.py`：
-  - 覆盖 `/deps/refresh` 头部卡和核心依赖检测表格渲染。
-  - 通过 mock `refresh_dependency_cache()` 固定刷新时间、依赖名称和错误消息，避免依赖真实运行环境状态。
-  - 断言动态字段 HTML 转义和异常 badge 保留。
+  - 覆盖新建任务命令为空时渲染错误卡片、保留安全 `back` 和转义任务名。
+  - 覆盖编辑任务 Cron 错误时渲染错误卡片、外部 `back` 清洗回 `/tasks`、保留表单值且不保存。
 - 更新 `DEVELOPMENT.md`：
-  - 将 `/deps/refresh` 依赖刷新完成页头部卡纳入路由组件覆盖。
-  - 增加阶段 30 开发日志。
+  - 基线推进到阶段 32。
+  - 记录阶段 32 对任务表单错误提示渲染的改进。
 
 验证记录：
 
-- `python -B -m unittest tests.test_ui_route_components`：通过，35 tests OK。
-- `python -B -m compileall fls_manager/routes/deps.py tests/test_ui_route_components.py`：通过。
-- `python -B -m unittest discover -s tests`：通过，126 tests OK。
-- `python -B tools/responsive_smoke.py`：通过。
-- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
-- `git diff --check`：通过。
-
-受限验证：
-
-- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
-- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
-- 本阶段只验证依赖刷新完成页初始渲染，没有依赖真实包版本或真实浏览器执行。
-
-组件策略结论：
-
-- `page_header_card()` 适合短结果提示，详细检测结果继续由 `table_card()` 承载。
-- 环境状态类页面测试应 mock 检测函数，避免本机依赖差异导致测试不稳定。
-- 后续继续优先选择未脏页面的小范围改动；真实安装、卸载、下载和复杂 JS 状态流程暂缓。
-
-## 下一阶段候选
-
-- 阶段 31：继续查找未脏页面中的纯文本提示卡或小型头部卡；可评估依赖卸载结果页，但测试必须 mock `pip_cmd()`，避免真实 pip 卸载。
-- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/deps/refresh`、`/deps/install-log/<id>`、`/scripts/debug-log/<id>`、`/backup`、备份导入完成页、`/about` 版本失败页、`/online-scripts/install-select/<id>`、`/online-scripts/doc/<id>`、`/online-scripts/install/<id>`、`/online-scripts/log/<id>`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
-- 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
-
-## 阶段 31：依赖卸载结果页头部卡接入
-
-状态：已完成
-
-目标：
-
-- 继续低风险 UI 组件抽取，优先未脏文件和小型结果页。
-- 复用已有 `page_header_card()`，不新增组件 API。
-- 只替换依赖卸载结果页头部卡，不改变 pip 卸载调用、输出展示和错误捕获逻辑。
-
-已完成：
-
-- 更新 `fls_manager/routes/deps.py`：
-  - 将 `/deps/uninstall` 卸载结果提示接入 `page_header_card()`。
-  - 保留返回依赖管理入口。
-  - 保留卸载输出 `<pre class="log">` 和输出内容 HTML 转义。
-  - 未改动依赖名为空时的既有纯文本 400 响应。
-- 扩展 `tests/test_ui_route_components.py`：
-  - 覆盖 `/deps/uninstall` 卸载结果页头部卡和日志输出渲染。
-  - 通过 mock `pip_cmd()` 避免真实 pip 卸载。
-  - 断言传给 `pip_cmd()` 的卸载参数、返回入口和输出 HTML 转义。
-- 更新 `DEVELOPMENT.md`：
-  - 将 `/deps/uninstall` 依赖卸载结果页头部卡纳入路由组件覆盖。
-  - 增加阶段 31 开发日志。
-
-验证记录：
-
-- `python -B -m unittest tests.test_ui_route_components`：通过，36 tests OK。
-- `python -B -m compileall fls_manager/routes/deps.py tests/test_ui_route_components.py`：通过。
+- `python -B -m unittest tests.test_ui_route_components`：通过，22 tests OK。
 - `python -B -m unittest discover -s tests`：通过，127 tests OK。
 - `python -B tools/responsive_smoke.py`：通过。
 - `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
@@ -1536,197 +1409,127 @@
 受限验证：
 
 - 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
-- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
-- 本阶段只验证依赖卸载结果页初始渲染，没有执行真实 pip 卸载。
+- 本阶段只改任务新建/编辑表单的校验错误渲染，没有调整任务保存字段语义。
 
-组件策略结论：
+收束结论：
 
-- `page_header_card()` 适合短结果页头部，命令输出仍保留在独立日志块中。
-- 有破坏性或外部环境副作用的路由测试必须 mock 执行出口，只验证渲染和参数。
-- 早期参数错误分支仍保持纯文本响应，避免一次阶段同时改变响应形态。
+- 任务表单错误不应脱离后台布局直接返回纯文本。
+- 校验失败路径应保留用户输入、保留安全返回路径，并继续对用户可控字段做 HTML 转义。
 
-## 下一阶段候选
-
-- 阶段 32：继续查找未脏页面中的纯文本提示卡或小型头部卡；可评估运行环境安装错误/跳转前结果页，但避免真实系统包安装。
-- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/deps/uninstall`、`/deps/refresh`、`/deps/install-log/<id>`、`/scripts/debug-log/<id>`、`/backup`、备份导入完成页、`/about` 版本失败页、`/online-scripts/install-select/<id>`、`/online-scripts/doc/<id>`、`/online-scripts/install/<id>`、`/online-scripts/log/<id>`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
-- 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
-
-## 阶段 32：任务变量导入页头部和表格卡接入
+## 阶段 33：脚本操作失败提示渲染
 
 状态：已完成
 
 目标：
 
-- 继续低风险 UI 组件抽取，优先未脏文件和 GET 渲染无副作用页面。
-- 复用已有 `page_header_card()` 和 `table_card()`，不新增组件 API。
-- 只替换从任务变量导入到全局变量页的顶部说明和可导入变量表格，不改变导入提交逻辑。
-
-已完成：
-
-- 更新 `fls_manager/routes/env/actions.py`：
-  - 导入 `page_header_card()` 和 `table_card()`。
-  - 将 `/env/import` 顶部说明接入头部卡。
-  - 保留“允许覆盖已有全局变量”复选框。
-  - 将可导入变量表格接入 `table_card()`。
-  - 保留底部“导入所选变量”和返回入口。
-  - 保留任务名、变量名、变量值和导入状态的 HTML 转义。
-- 扩展 `tests/test_ui_route_components.py`：
-  - 覆盖 `/env/import` 头部卡和可导入变量表格渲染。
-  - 使用临时 `FLS_BASE_DIR` 写入测试任务和全局变量数据。
-  - 断言覆盖/新增状态 badge、覆盖复选框、提交按钮和动态字段转义。
-- 更新 `DEVELOPMENT.md`：
-  - 将 `/env/import` 任务变量导入页头部卡和表格卡纳入路由组件覆盖。
-  - 增加阶段 32 开发日志。
-
-验证记录：
-
-- `python -B -m unittest tests.test_ui_route_components`：通过，37 tests OK。
-- `python -B -m compileall fls_manager/routes/env/actions.py tests/test_ui_route_components.py`：通过。
-- `python -B -m unittest discover -s tests`：通过，128 tests OK。
-- `python -B tools/responsive_smoke.py`：通过。
-- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
-- `git diff --check`：通过。
-
-受限验证：
-
-- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
-- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
-- 本阶段只验证任务变量导入页 GET 初始渲染，没有提交导入表单。
-- 运行环境安装入口当前没有独立 HTML 结果页，安装失败会写日志并跳转到已组件化的依赖安装日志页，因此本阶段改选 `/env/import`。
-
-组件策略结论：
-
-- `page_header_card()` 可以承载说明文字中的轻量复选框，但提交按钮仍应留在原表单底部。
-- `table_card()` 适合带复选框列和 badge 的简单服务端表格，行内容继续由领域 helper 生成。
-- 后续继续优先选择未脏页面的小范围改动；真实提交、安装、卸载、下载和复杂 JS 状态流程暂缓。
-
-## 阶段 33：全局变量表单页头部卡接入
-
-状态：已完成
-
-目标：
-
-- 继续低风险 UI 组件抽取，优先未脏文件和 GET 渲染无副作用页面。
-- 复用已有 `page_header_card()`，不新增组件 API。
-- 只替换全局变量查看全部、新增和编辑页面的说明头部，不改变保存逻辑和 POST 校验纯文本响应。
-
-已完成：
-
-- 更新 `fls_manager/routes/env/pages.py`：
-  - 将 `/env/view` 顶部说明接入 `page_header_card()`。
-  - 将 `/env/new` 新增变量说明接入 `page_header_card()`。
-  - 将 `/env/edit/<key>` 编辑变量说明接入 `page_header_card()`。
-  - 表单字段、textarea、保存/返回按钮继续保留原有普通卡片结构。
-  - 保留全文变量内容、变量名和变量值的 HTML 转义。
-  - 保留 `/env/new`、`/env/edit/<key>` POST 空变量名纯文本 400 响应。
-- 扩展 `tests/test_ui_route_components.py`：
-  - 覆盖 `/env/view` 头部卡、textarea 内容转义和保存/返回入口。
-  - 覆盖 `/env/new` 头部卡、表单字段、保存/返回入口和空变量名校验响应。
-  - 覆盖 `/env/edit/<key>` 头部卡、动态变量名/变量值转义和保存/返回入口。
-- 更新 `DEVELOPMENT.md`：
-  - 将 `/env/view`、`/env/new`、`/env/edit/<key>` 全局变量页面头部卡纳入路由组件覆盖。
-  - 增加阶段 33 开发日志。
-
-验证记录：
-
-- `python -B -m unittest tests.test_ui_route_components`：通过，40 tests OK。
-- `python -B -m compileall fls_manager/routes/env/pages.py tests/test_ui_route_components.py`：通过。
-- `python -B -m unittest discover -s tests`：通过，131 tests OK。
-- `python -B tools/responsive_smoke.py`：通过。
-- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
-- `git diff --check`：通过。
-
-受限验证：
-
-- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
-- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
-- 本阶段只验证全局变量表单页 GET 初始渲染和 `/env/new` 空变量名校验，没有提交真实保存成功流程。
-
-组件策略结论：
-
-- `page_header_card()` 适合承载表单页标题和轻量说明；具体输入控件仍留在独立表单卡片，避免组件承担过多表单布局职责。
-- 对仍返回纯文本的历史校验分支，当前阶段保持响应形态不变，避免扩大兼容影响。
-- 后续继续优先选择未脏页面的小范围头部卡或提示卡；复杂表单整卡抽取可等模板化方案明确后再处理。
-
-## 阶段 34：代理表单页头部卡接入
-
-状态：已完成
-
-目标：
-
-- 继续低风险 UI 组件抽取，优先未脏文件和 GET 渲染无副作用页面。
-- 复用已有 `page_header_card()`，不新增组件 API。
-- 只替换代理新增和编辑页面的说明头部，不改变保存逻辑、实时测试 JS 和代理质量检测流程。
-
-已完成：
-
-- 更新 `fls_manager/routes/proxy/_common.py`：
-  - 导入 `page_header_card()`。
-  - 将 `/proxy/new` 顶部说明接入头部卡。
-  - 将 `/proxy/edit/<id>` 顶部说明接入头部卡，并转义当前代理名。
-  - 保留代理字段卡、自定义质量检测地址、保存/测试/质量检测按钮和返回入口。
-  - 保留实时测试/质量检测结果卡与前端 JS。
-  - 保留代理名称、Host、用户名、密码、GitHub 代理 URL 等字段的 HTML 转义。
-- 扩展 `tests/test_ui_route_components.py`：
-  - 覆盖 `/proxy/new` 头部卡、表单字段、实时检测壳和返回入口。
-  - 覆盖 `/proxy/edit/<id>` 头部卡、动态代理名/字段值转义、选中类型和实时检测壳。
-- 更新 `DEVELOPMENT.md`：
-  - 将 `/proxy/new`、`/proxy/edit/<id>` 代理表单头部卡纳入路由组件覆盖。
-  - 增加阶段 34 开发日志。
-
-验证记录：
-
-- `python -B -m unittest tests.test_ui_route_components`：通过，42 tests OK。
-- `python -B -m compileall fls_manager/routes/proxy/_common.py tests/test_ui_route_components.py`：通过。
-- `python -B -m unittest discover -s tests`：通过，133 tests OK。
-- `python -B tools/responsive_smoke.py`：通过。
-- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
-- `git diff --check`：通过。
-
-受限验证：
-
-- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
-- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
-- 本阶段只验证代理表单页 GET 初始渲染，没有提交保存代理或触发真实代理检测请求。
-
-组件策略结论：
-
-- `page_header_card()` 适合承载代理表单的标题和上下文说明；字段卡、质量检测配置和实时结果卡仍由页面自身管理。
-- 对带 JS 实时结果的页面，本阶段只移动静态头部，避免改动 `innerHTML` 状态更新和请求流程。
-- 后续继续优先选择未脏页面的小范围头部卡或纯文本提示卡；涉及真实网络检测或复杂表单提交的流程保持原状。
-
-## 阶段 35：脚本文件表单页头部卡接入
-
-状态：已完成
-
-目标：
-
-- 继续低风险 UI 组件抽取，优先未脏文件和 GET 渲染无副作用页面。
-- 复用已有 `page_header_card()`，不新增组件 API。
-- 只替换脚本新建、查看/编辑和改名页面的说明头部，不改变文件创建、保存和改名流程。
+- 继续收束原长期脏文件中脚本管理相关的 UI 边界。
+- 让脚本新建、编辑保存和改名失败时使用明确的错误提示样式。
+- 失败后保留用户刚提交的名称或内容，并继续转义异常文本和表单内容。
 
 已完成：
 
 - 更新 `fls_manager/routes/scripts/files.py`：
-  - 导入 `page_header_card()`。
-  - 将 `/pull/new` 顶部说明接入头部卡。
-  - 将 `/scripts/view` 文件查看/编辑头部接入头部卡，并保留保存文件、调试运行、改名和返回按钮。
-  - 将 `/scripts/rename` 顶部说明接入头部卡。
-  - 保留 CodeMirror textarea、文件内容、输入字段和 `message_card()` 提示卡。
-  - 保留脚本路径、文件名和文件内容的 HTML 转义。
+  - `/pull/new` 失败时使用 `message_card(..., "error", strong=True)`，并保留新建类型、名称和文件内容。
+  - `/scripts/view` 保存成功时使用成功卡片，保存失败时使用错误卡片并保留本次提交的编辑内容。
+  - `/scripts/rename` 失败时使用错误卡片，并在输入框保留用户提交的新名称。
 - 扩展 `tests/test_ui_route_components.py`：
-  - 覆盖 `/pull/new` 头部卡和空操作提示卡。
-  - 覆盖 `/scripts/view` 头部卡、操作按钮、CodeMirror textarea、文件内容转义和提示卡。
-  - 覆盖 `/scripts/rename` 头部卡、动态路径/文件名转义和提示卡。
+  - 覆盖脚本新建失败时错误卡片、异常文本转义、名称/内容回填和不落盘。
+  - 覆盖脚本编辑保存失败时错误卡片、异常文本转义、保留本次提交内容且原文件不变。
+  - 覆盖脚本改名失败时错误卡片、异常文本转义、保留提交的新名称且原文件不变。
 - 更新 `DEVELOPMENT.md`：
-  - 将 `/pull/new`、`/scripts/view`、`/scripts/rename` 脚本文件表单页头部卡纳入路由组件覆盖。
+  - 基线推进到阶段 33。
+  - 记录阶段 33 对脚本操作失败提示渲染的改进。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_route_components`：通过，25 tests OK。
+- `python -B -m unittest discover -s tests`：通过，130 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有改变脚本路径校验、保存路径、改名路径或删除下载语义，只调整失败提示和失败回填。
+
+收束结论：
+
+- 脚本操作失败路径现在和其它表单页一致，使用明显错误卡片而不是普通灰色提示。
+- 写入或改名异常不会让用户刚输入的内容从页面上丢失。
+
+## 阶段 34：合集加入任务兼容边界
+
+状态：已完成
+
+目标：
+
+- 继续收束原长期脏文件中合集任务操作相关的兼容边界。
+- 固化合集“放入任务”对多选 `task_ids` 和旧单选 `task_id` 的兼容行为。
+- 保证重复选择会去重，混入不存在任务时不会部分写入。
+
+已完成：
+
+- 更新 `fls_manager/routes/tasks/collections.py`：
+  - 新增 `_collection_task_ids_from_form()`，集中解析加入合集表单中的任务 ID。
+  - 同时接受 `task_ids` 多选字段和旧版 `task_id` 单选字段。
+  - 去除空值和重复 ID，保持空选择重定向行为。
+  - 保留所有选择 ID 必须存在的校验，缺失任务时返回 404 且不进入写入循环。
+- 扩展 `tests/test_bulk_workflows.py`：
+  - 覆盖 `task_ids` 与 `task_id` 同时存在时去重并正确加入合集。
+  - 覆盖仅提交旧版 `task_id` 字段时仍能加入合集。
+  - 覆盖选择中包含不存在任务时返回 404，且已有任务不会被部分加入合集。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 34。
+  - 记录阶段 34 对合集加入任务兼容边界的固化。
+
+验证记录：
+
+- `python -B -m unittest tests.test_bulk_workflows`：通过，10 tests OK。
+- `python -B -m unittest discover -s tests`：通过，132 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有改变合集批量操作 API、合集页批量工具栏或任务排序语义，只固化加入任务表单解析和异常边界。
+
+收束结论：
+
+- 合集加入任务入口现在对旧表单和新多选表单都有明确测试约束。
+- 混入无效任务 ID 时不会出现一部分任务已被加入、一部分失败的状态。
+
+## 阶段 35：单项任务删除 API 缺失边界
+
+状态：已完成
+
+目标：
+
+- 继续收束原长期脏文件中任务操作 API 相关的边界风险。
+- 让单项任务删除 API 与复制、置顶、切换和批量任务 API 一样，对不存在任务返回明确失败。
+- 保证缺失任务删除请求不会停止任务、写回任务文件或重载调度器。
+
+已完成：
+
+- 更新 `fls_manager/routes/api.py`：
+  - `/api/task/action/delete/<id>` 先读取任务列表并确认目标存在。
+  - 目标不存在时返回 `404` 和 `{"ok": false, "msg": "任务不存在"}`。
+  - 目标存在时复用已读取任务列表删除目标，避免删除路径重复读取。
+  - 保持成功删除时停止任务、保存任务列表、重载调度器和返回 `{"ok": true, "msg": "已删除"}` 的原有行为。
+- 扩展 `tests/test_bulk_workflows.py`：
+  - 覆盖单项删除存在任务时会调用 `stop_task_now()`、删除目标并重载调度器。
+  - 覆盖单项删除不存在任务时返回 404，且不调用 `stop_task_now()`、`save_tasks()`、`reload_scheduler()`，任务文件保持不变。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 35。
+  - 在 API 开发注意中记录单项删除缺失任务的 404 和无副作用约定。
   - 增加阶段 35 开发日志。
 
 验证记录：
 
-- `python -B -m unittest tests.test_ui_route_components`：通过，44 tests OK。
-- `python -B -m compileall fls_manager/routes/scripts/files.py tests/test_ui_route_components.py`：通过。
-- `python -B -m unittest discover -s tests`：通过，135 tests OK。
+- `python -B -m unittest tests.test_bulk_workflows`：通过，12 tests OK。
+- `python -B -m unittest discover -s tests`：通过，134 tests OK。
 - `python -B tools/responsive_smoke.py`：通过。
 - `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
 - `git diff --check`：通过。
@@ -1734,46 +1537,44 @@
 受限验证：
 
 - 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
-- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
-- 本阶段只验证脚本文件表单页 GET 初始渲染，没有提交创建、保存或改名操作。
+- 本阶段只改单项任务删除 API 的缺失任务边界，没有调整任务列表前端、批量任务 API、任务停止语义或调度器行为。
 
-组件策略结论：
+收束结论：
 
-- `page_header_card()` 可以承载表单页标题、路径说明和少量操作按钮；编辑器主体和消息卡继续由页面局部管理。
-- 文件内容和路径仍必须在路由层传入组件前明确转义；组件只转义标题，不转义 `help_html` 和 `actions_html`。
-- 后续继续优先选择未脏页面的小范围头部卡或纯文本提示卡；涉及真实文件写入的 POST 流程保持原状。
+- 单项删除任务 API 不再对不存在任务返回“已删除”的成功假象。
+- 删除缺失任务不会产生无意义的文件写入或调度器重载。
 
-## 阶段 36：配置脚本类型表格卡接入
+## 阶段 36：单项任务运行停止缺失边界
 
 状态：已完成
 
 目标：
 
-- 继续低风险 UI 组件抽取，优先未脏文件和稳定表格结构。
-- 复用已有 `table_card()`，不新增组件 API。
-- 只替换配置页“task 可执行脚本类型”表格外壳，不改变配置保存逻辑、安全验证 JS 和表单字段。
+- 继续收束任务操作 API 的缺失任务状态边界。
+- 让单项 `run` / `stop` API 与其它单项任务操作及批量 API 一样，对不存在任务返回明确 404。
+- 保留“任务存在但未运行”这个 stop 业务失败场景的原有 200 + `ok:false` 行为。
 
 已完成：
 
-- 更新 `fls_manager/routes/config/page.py`：
-  - 导入 `table_card()`。
-  - 将 `/config` 页面“task 可执行脚本类型”表格接入 `table_card()`。
-  - 保留脚本类型行内 checkbox 名称、值和选中状态。
-  - 保留登录配置、安全验证、在线脚本源、日志清理、任务运行控制和保存按钮原有结构。
-  - 保留 `flsToggleSecurityBox()` 安全验证显示切换脚本。
-- 扩展 `tests/test_ui_route_components.py`：
-  - 覆盖 `/config` 脚本类型表格卡标题、表头和 Python 行。
-  - 使用临时 `FLS_BASE_DIR` 写入测试配置，断言启用/未启用 checkbox 状态。
-  - 断言保存配置按钮和安全验证 JS 保留。
+- 更新 `fls_manager/routes/api.py`：
+  - 新增 `_task_action_result()`，统一把 `{"ok": false, "msg": "任务不存在"}` 映射为 HTTP 404。
+  - 新增 `_task_exists()`，用于 stop 前区分缺失任务和已存在但未运行任务。
+  - `/api/task/action/run/<id>` 在 `run_task_now()` 返回“任务不存在”时返回 404。
+  - `/api/task/action/stop/<id>` 对缺失任务先返回 404，且不调用 `stop_task_now()`。
+  - `/api/task/action/stop/<id>` 对已存在但未运行任务继续返回 200 + `{"ok": false, "msg": "任务未运行"}`。
+- 扩展 `tests/test_bulk_workflows.py`：
+  - 覆盖 run 缺失任务返回 404 且任务文件不变。
+  - 覆盖 stop 缺失任务返回 404 且不调用停止逻辑。
+  - 覆盖 stop 已存在但未运行保留 200 失败响应。
 - 更新 `DEVELOPMENT.md`：
-  - 将 `/config` 脚本类型表格卡纳入路由组件覆盖。
+  - 基线推进到阶段 36。
+  - 在 API 开发注意中记录单项 run/stop 缺失任务边界。
   - 增加阶段 36 开发日志。
 
 验证记录：
 
-- `python -B -m unittest tests.test_ui_route_components`：通过，45 tests OK。
-- `python -B -m compileall fls_manager/routes/config/page.py tests/test_ui_route_components.py`：通过。
-- `python -B -m unittest discover -s tests`：通过，136 tests OK。
+- `python -B -m unittest tests.test_bulk_workflows`：通过，15 tests OK。
+- `python -B -m unittest discover -s tests`：通过，137 tests OK。
 - `python -B tools/responsive_smoke.py`：通过。
 - `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
 - `git diff --check`：通过。
@@ -1781,260 +1582,15 @@
 受限验证：
 
 - 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
-- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
-- 本阶段只验证配置页 GET 初始渲染，没有提交保存配置表单。
+- 本阶段只改单项 run/stop API 的缺失任务 HTTP 状态边界，没有调整任务运行、停止、批量操作或前端交互语义。
 
-组件策略结论：
+收束结论：
 
-- `table_card()` 适合承载表单内的稳定 checkbox 表格；行 HTML 继续由配置页生成，避免组件感知表单语义。
-- 配置页包含安全验证嵌套卡和 JS 切换状态，本阶段只移动最底部稳定表格，避免扩大影响面。
-- 后续继续优先选择未脏页面的小范围表格卡、头部卡或纯文本提示卡；复杂配置表单整体组件化暂缓。
-
-## 阶段 37：脚本拉取导入表单页头部卡接入
-
-状态：已完成
-
-目标：
-
-- 继续低风险 UI 组件抽取，优先未脏文件和 GET 渲染无副作用页面。
-- 复用已有 `page_header_card()`，不新增组件 API。
-- 只替换脚本拉取和脚本导入表单页的说明头部，不改变拉取、导入、代理选择和结果消息逻辑。
-
-已完成：
-
-- 更新 `fls_manager/routes/scripts/pull.py`：
-  - 导入 `page_header_card()`。
-  - 将 `/pull/fetch` 顶部说明接入头部卡。
-  - 将 `/pull/import` 顶部说明接入头部卡。
-  - 保留拉取类型、URL、保存名、代理选择、文件上传和保存路径字段。
-  - 保留开始拉取、开始导入、返回脚本管理入口。
-  - 保留 `pull_result_card()` 和 POST 成功/失败结果消息渲染。
-  - 保留当前目录的 HTML 转义。
-- 扩展 `tests/test_ui_route_components.py`：
-  - 覆盖 `/pull/fetch` GET 头部卡、表单字段、返回入口、空结果提示和目录转义。
-  - 覆盖 `/pull/import` GET 头部卡、multipart 表单、文件/保存名字段、返回入口、空结果提示和目录转义。
-- 更新 `DEVELOPMENT.md`：
-  - 将 `/pull/fetch`、`/pull/import` 表单头部卡纳入路由组件覆盖。
-  - 增加阶段 37 开发日志。
-
-验证记录：
-
-- `python -B -m unittest tests.test_ui_route_components`：通过，47 tests OK。
-- `python -B -m compileall fls_manager/routes/scripts/pull.py tests/test_ui_route_components.py`：通过。
-- `python -B -m unittest discover -s tests`：通过，138 tests OK。
-- `python -B tools/responsive_smoke.py`：通过。
-- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
-- `git diff --check`：通过。
-
-受限验证：
-
-- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
-- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
-- 本阶段只验证脚本拉取/导入表单页 GET 初始渲染，没有触发真实网络拉取、Git 克隆或文件上传导入。
-
-组件策略结论：
-
-- `page_header_card()` 适合承载脚本操作表单页的标题和当前目录说明；具体表单字段与结果消息仍由页面自身管理。
-- 对带真实网络、Git 和文件上传副作用的 POST 分支，本阶段只覆盖既有 mock/空输入路径，不扩大运行面。
-- 后续继续优先选择未脏页面的小范围头部卡、表格卡或纯文本提示卡；复杂 JS/上传/网络流程保持原状。
-
-## 阶段 38：在线脚本源 JSON 页头部卡接入
-
-状态：已完成
-
-目标：
-
-- 继续低风险 UI 组件抽取，优先未脏文件和 GET 渲染无副作用页面。
-- 复用已有 `page_header_card()`，不新增组件 API。
-- 只替换在线脚本源 JSON 页面顶部说明，不改变缓存 JSON 编辑、保存和成功/失败消息逻辑。
-
-已完成：
-
-- 更新 `fls_manager/routes/online_scripts/source_json.py`：
-  - 将 `/online-scripts/source` 顶部说明接入 `page_header_card()`。
-  - 保留返回在线脚本入口。
-  - 保留 `message_card()` 成功/失败提示。
-  - 保留查看/修改缓存 JSON textarea 和保存按钮。
-  - 保留缓存 JSON 内容的 HTML 转义。
-- 扩展 `tests/test_ui_route_components.py`：
-  - 覆盖 `/online-scripts/source` 头部卡、字段说明和返回入口。
-  - 使用临时 `FLS_BASE_DIR` 写入缓存 JSON，断言 textarea 内容转义。
-  - 断言保存脚本源 JSON 表单保留。
-- 更新 `DEVELOPMENT.md`：
-  - 将 `/online-scripts/source` 脚本源 JSON 头部卡纳入路由组件覆盖。
-  - 增加阶段 38 开发日志。
-
-验证记录：
-
-- `python -B -m unittest tests.test_ui_route_components`：通过，48 tests OK。
-- `python -B -m compileall fls_manager/routes/online_scripts/source_json.py tests/test_ui_route_components.py`：通过。
-- `python -B -m unittest discover -s tests`：通过，139 tests OK。
-- `python -B tools/responsive_smoke.py`：通过。
-- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
-- `git diff --check`：通过。
-
-受限验证：
-
-- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
-- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
-- 本阶段只验证在线脚本源 JSON 页 GET 初始渲染，没有提交保存 JSON 表单。
-
-组件策略结论：
-
-- `page_header_card()` 适合承载在线脚本源 JSON 页的说明和返回操作；JSON textarea 和保存动作仍由原页面管理。
-- 带 HTML 说明的 `help_html` 必须由路由侧传入受控文本，动态缓存内容继续只放在已转义的 textarea 内。
-- 后续继续优先选择未脏页面的小范围头部卡、表格卡或纯文本提示卡；涉及数据保存的 POST 流程保持原状。
-
-## 阶段 39：代码示例卡组件与脚本命令示例接入
-
-状态：已完成
-
-目标：
-
-- 继续低风险 UI 组件抽取，优先未脏文件和纯静态只读说明块。
-- 新增 `code_card()` 小组件，承载重复的标题 + 代码块结构。
-- 先只替换 `/pull` 脚本管理页“任务命令示例”代码块，不改变脚本列表、路径导航和文件操作入口。
-
-已完成：
-
-- 更新 `fls_manager/ui/components.py`：
-  - 新增 `code_card(title, code_html, help_html="", actions_html="")`。
-  - 组件负责转义标题。
-  - 支持可选说明区和操作区。
-  - 代码内容保持调用方传入的受控 HTML。
-- 更新 `fls_manager/routes/scripts/pages.py`：
-  - 导入 `code_card()`。
-  - 将 `/pull` 页“任务命令示例”接入 `code_card()`。
-  - 保留脚本管理头部、文件列表 `table_card()`、操作入口和示例命令内容。
-- 扩展 `tests/test_ui_components.py`：
-  - 覆盖 `code_card()` 标题转义、代码 HTML、说明区和操作区。
-- 扩展 `tests/test_ui_route_components.py`：
-  - 覆盖 `/pull` 页脚本管理头部、文件列表和任务命令示例代码卡渲染。
-- 更新 `DEVELOPMENT.md`：
-  - 将 `code_card()` 纳入组件测试覆盖。
-  - 将 `/pull` 任务命令示例代码卡纳入路由组件覆盖。
-  - 增加阶段 39 开发日志。
-
-验证记录：
-
-- `python -B -m unittest tests.test_ui_components tests.test_ui_route_components`：通过，63 tests OK。
-- `python -B -m compileall fls_manager/ui/components.py fls_manager/routes/scripts/pages.py tests/test_ui_components.py tests/test_ui_route_components.py`：通过。
-- `python -B -m unittest discover -s tests`：通过，141 tests OK。
-- `python -B tools/responsive_smoke.py`：通过。
-- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
-- `git diff --check`：通过。
-
-受限验证：
-
-- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
-- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
-- 本阶段只验证脚本管理页 GET 初始渲染，没有触发脚本文件操作。
-
-组件策略结论：
-
-- `code_card()` 只负责稳定外壳、标题转义和可选说明/操作区；代码块内容由调用方提供受控 HTML。
-- 首次接入选择静态示例块，避免把动态日志、富文本或未转义用户内容直接塞进代码组件。
-- 后续可逐步评估关于页 Cron/命令说明等静态代码块，但暂缓复杂嵌套卡片和带行为的块。
-
-## 阶段 40：关于页只读代码说明卡接入
-
-状态：已完成
-
-目标：
-
-- 继续低风险 UI 组件抽取，优先静态只读说明块。
-- 复用阶段 39 新增的 `code_card()`，不新增组件 API。
-- 只替换 `/about` 页任务命令规则、Cron 说明、进程查看示例三个代码说明块，不改变时间校准、版本更新和面板启停流程。
-
-已完成：
-
-- 更新 `fls_manager/ui/components.py`：
-  - 保留 `code_card()` 说明区和代码块之间的显式间距，不改变组件 API。
-- 更新 `fls_manager/routes/about/page.py`：
-  - 导入 `code_card()`。
-  - 将“任务命令规则”接入 `code_card()`，保留 `task` 说明和脚本类型示例。
-  - 将“Cron 说明”接入 `code_card()`，保留 5 位和 6 位 Cron 示例。
-  - 将“进程查看示例”接入 `code_card()`，保留进程查看命令。
-  - 保留关于页原有面板信息表格、版本卡、时间校准表单和面板控制按钮。
-- 扩展 `tests/test_ui_route_components.py`：
-  - 在 `/about` 渲染测试中覆盖三个代码卡标题、说明文本和关键命令内容。
-- 更新 `DEVELOPMENT.md`：
-  - 将 `/about` 只读代码说明卡纳入路由组件覆盖。
-  - 增加阶段 40 开发日志。
-
-验证记录：
-
-- `python -B -m unittest tests.test_ui_components tests.test_ui_route_components.UiRouteComponentTests.test_about_page_renders_panel_info_table_card`：通过，15 tests OK。
-- `python -B -m compileall fls_manager/ui/components.py fls_manager/routes/about/page.py tests/test_ui_components.py tests/test_ui_route_components.py`：通过。
-- `python -B -m unittest discover -s tests`：通过，141 tests OK。
-- `python -B tools/responsive_smoke.py`：通过。
-- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
-- `git diff --check`：通过。
-
-受限验证：
-
-- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
-- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
-- 本阶段只验证关于页 GET 初始渲染，没有触发时间校准、版本更新、重启或停止面板等 POST 流程。
-
-组件策略结论：
-
-- `code_card()` 适合承载关于页静态说明和命令示例；动态日志、用户输入和执行结果仍不直接迁移到代码卡。
-- 关于页剩余复杂区域包含表单切换、版本日志和面板控制，继续保持原状，避免把可交互流程混入本阶段。
-
-## 阶段 41：在线脚本首页头部卡接入
-
-状态：已完成
-
-目标：
-
-- 继续低风险 UI 组件抽取，优先 GET 初始渲染的说明区域。
-- 复用 `page_header_card()`，不新增组件 API。
-- 只替换 `/online-scripts` 首页顶部说明卡，不改变缓存列表、搜索、分页、刷新轮询 JS 和后台刷新提交逻辑。
-
-已完成：
-
-- 更新 `fls_manager/ui/components.py`：
-  - 扩展 `page_header_card(..., content_style="")` 可选参数。
-  - 内容区样式属性会做 HTML 转义。
-  - 默认值不影响既有调用。
-- 更新 `fls_manager/routes/online_scripts/pages.py`：
-  - 将在线脚本首页顶部说明接入 `page_header_card()`。
-  - 通过 `content_style` 保留原说明区 `min-width:0;flex:1 1 360px;` 响应式约束。
-  - 保留脚本源地址展示。
-  - 保留刷新远程脚本源表单、代理选择、按钮 ID、打开源地址、脚本源 JSON 和修改源地址入口。
-  - 保留搜索表单、摘要项、消息卡、刷新状态卡、脚本列表和分页。
-- 扩展 `tests/test_ui_components.py`：
-  - 覆盖 `page_header_card()` 内容区样式属性转义。
-- 扩展 `tests/test_ui_route_components.py`：
-  - 覆盖 `/online-scripts` 首页头部卡、说明文本、脚本源展示、刷新表单和入口链接。
-- 更新 `DEVELOPMENT.md`：
-  - 将 `/online-scripts` 首页头部卡纳入路由组件覆盖。
-  - 增加阶段 41 开发日志。
-
-验证记录：
-
-- `python -B -m unittest tests.test_ui_components tests.test_ui_route_components.UiRouteComponentTests.test_online_scripts_page_renders_header_card_and_actions`：通过。
-- `python -B -m compileall fls_manager/ui/components.py fls_manager/routes/online_scripts/pages.py tests/test_ui_components.py tests/test_ui_route_components.py`：通过。
-- `python -B -m unittest discover -s tests`：通过，142 tests OK。
-- `python -B tools/responsive_smoke.py`：通过。
-- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
-- `git diff --check`：通过。
-
-受限验证：
-
-- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
-- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
-- 本阶段只验证在线脚本首页 GET 初始渲染，没有触发远程脚本源刷新、文档加载、安装或任务导入流程。
-
-组件策略结论：
-
-- `page_header_card()` 可以承载在线脚本首页的说明、源地址和入口操作；动态刷新状态卡和轮询 JS 继续保留在页面自身逻辑中。
-- `content_style` 只用于保留原页面必要布局约束，不作为复杂样式扩展入口。
-- 带表单的 `actions_html` 仍由路由侧提供受控 HTML，按钮 ID 和表单 action 必须保留以兼容现有 JS。
+- 单项任务操作 API 对缺失任务的状态码现在更一致：run、stop、delete、copy、toggle、pin 都能返回明确 404。
+- 前端仍可把已存在但未运行的 stop 当作普通业务失败处理，不会被误判为资源缺失。
 
 ## 下一阶段候选
 
-- 阶段 42：继续查找未脏页面中的纯文本提示卡、小型头部卡、代码卡或稳定表格卡；优先避开复杂 JS 状态、后台任务副作用和 POST 纯文本错误响应形态变化。
-- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/online-scripts`、`/about`、`/pull`、`/online-scripts/source`、`/pull/fetch`、`/pull/import`、`/config`、`/pull/new`、`/scripts/view`、`/scripts/rename`、`/proxy/new`、`/proxy/edit/<id>`、`/env/view`、`/env/new`、`/env/edit/<key>`、`/env/import`、`/deps/uninstall`、`/deps/refresh`、`/deps/install-log/<id>`、`/scripts/debug-log/<id>`、`/backup`、`/about` 版本失败页、`/online-scripts/install-select/<id>`、`/online-scripts/doc/<id>`、`/online-scripts/install/<id>`、`/online-scripts/log/<id>`、`/`、`/notify`、`/deps`、`/panel/status`。
+- 阶段 37：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
+- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

@@ -1,6 +1,8 @@
 import contextlib
 import io
+import json
 import os
+import re
 import sys
 import tarfile
 import tempfile
@@ -82,6 +84,34 @@ def add_tar_member(tar, name, member_type, linkname=""):
     tar.addfile(info)
 
 
+def write_json(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def read_json(path):
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def login_client(client, token="unit-token"):
+    response = client.get(f"/tasks?token={token}")
+    if response.status_code == 302:
+        client.get(response.headers["Location"])
+
+
+def csrf_token_from_html(html):
+    meta = re.search(r'<meta name="csrf-token" content="([^"]+)">', html)
+    hidden = re.search(r'name="csrf_token" value="([^"]+)"', html)
+
+    if not meta or not hidden:
+        raise AssertionError("CSRF token not found in rendered HTML")
+
+    if meta.group(1) != hidden.group(1):
+        raise AssertionError("CSRF meta and hidden input tokens differ")
+
+    return hidden.group(1)
+
+
 class AuthFlowTests(unittest.TestCase):
     def test_api_requires_setup_when_token_missing(self):
         with isolated_fls_env(token=None):
@@ -124,6 +154,139 @@ class AuthFlowTests(unittest.TestCase):
             self.assertEqual(response.status_code, 302)
             self.assertEqual(response.headers.get("Location"), "/tasks?q=abc")
             self.assertIn("session=", response.headers.get("Set-Cookie", ""))
+
+
+class CsrfSafetyTests(unittest.TestCase):
+    def test_layout_injects_csrf_meta_and_post_form_hidden_input(self):
+        with isolated_fls_env(token="unit-token"):
+            client = load_app().test_client()
+            login_client(client)
+
+            response = client.get("/task/new")
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            token = csrf_token_from_html(html)
+            self.assertGreater(len(token), 20)
+
+    def test_session_post_requires_csrf_token(self):
+        with isolated_fls_env(token="unit-token") as base_dir:
+            client = load_app().test_client()
+            login_client(client)
+
+            response = client.post(
+                "/task/new",
+                data={
+                    "name": "csrf-task",
+                    "command": "task demo.py",
+                    "enabled": "1",
+                },
+            )
+
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("CSRF token", response.get_data(as_text=True))
+            self.assertFalse((base_dir / "data" / "tasks.json").exists())
+
+    def test_session_post_accepts_valid_csrf_token(self):
+        with isolated_fls_env(token="unit-token") as base_dir:
+            client = load_app().test_client()
+            login_client(client)
+
+            page = client.get("/task/new")
+            token = csrf_token_from_html(page.get_data(as_text=True))
+
+            response = client.post(
+                "/task/new",
+                data={
+                    "csrf_token": token,
+                    "name": "csrf-task",
+                    "command": "task demo.py",
+                    "enabled": "1",
+                },
+            )
+
+            self.assertEqual(response.status_code, 302)
+
+            tasks = read_json(base_dir / "data" / "tasks.json")
+            self.assertEqual(len(tasks), 1)
+            self.assertEqual(tasks[0]["name"], "csrf-task")
+
+    def test_x_token_post_bypasses_csrf_for_api_clients(self):
+        with isolated_fls_env(token="unit-token") as base_dir:
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    {
+                        "id": "t1",
+                        "name": "copy-source",
+                        "command": "task demo.py",
+                        "enabled": True,
+                        "notify": {"mode": "none", "ids": []},
+                        "random_delay": {"mode": "none", "seconds": 0},
+                        "retry": {"attempts": 0, "interval_seconds": 60},
+                    }
+                ],
+            )
+
+            response = load_app().test_client().post(
+                "/api/task/action/copy/t1",
+                headers={"X-Token": "unit-token"},
+            )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.get_json()["ok"])
+            self.assertEqual(len(read_json(base_dir / "data" / "tasks.json")), 2)
+
+    def test_destructive_routes_reject_get_requests(self):
+        with isolated_fls_env(token="unit-token") as base_dir:
+            from fls_manager import paths
+
+            log_file = base_dir / "log" / "demo.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_file.write_text("demo", encoding="utf-8")
+
+            write_json(
+                paths.COLLECTION_FILE,
+                [
+                    {
+                        "id": "c1",
+                        "name": "合集",
+                        "remark": "",
+                        "created_at": "",
+                        "updated_at": "",
+                    }
+                ],
+            )
+            write_json(
+                paths.TASK_FILE,
+                [
+                    {
+                        "id": "t1",
+                        "name": "task",
+                        "command": "task demo.py",
+                        "collection_id": "c1",
+                        "enabled": True,
+                        "pinned": False,
+                    }
+                ],
+            )
+
+            client = load_app().test_client()
+
+            for url in (
+                "/logfile/delete/demo.log",
+                "/collection/delete/c1",
+                "/task/pin/t1",
+            ):
+                with self.subTest(url=url):
+                    response = client.get(url, headers={"X-Token": "unit-token"})
+                    self.assertEqual(response.status_code, 405)
+
+            self.assertTrue(log_file.exists())
+            self.assertEqual(read_json(base_dir / "data" / "collections.json")[0]["id"], "c1")
+            self.assertFalse(read_json(base_dir / "data" / "tasks.json")[0]["pinned"])
 
 
 class BackupSafetyTests(unittest.TestCase):

@@ -1,7 +1,7 @@
 # FLS 开发文档
 
-更新时间：2026-07-05
-基线：`main` / `b8762aa`
+更新时间：2026-07-04
+基线：`main` / 阶段 36
 
 本文用于后续开发协作。每次完成开发后，都要同步更新本文的“开发日志”和“后续方向”，必要时同步调整架构、数据模型、接口和验证清单。
 
@@ -124,7 +124,7 @@ sh fls.sh log
 - `fls_manager/routes/runtime.py`：Node 等运行时安装。
 - `fls_manager/routes/status.py`：环境状态页。
 - `fls_manager/routes/about/`：版本、更新、面板控制、时间同步。
-- `fls_manager/routes/api.py`：任务状态、调度器状态、任务动作 API。
+- `fls_manager/routes/api.py`：任务状态、调度器状态、任务动作和批量任务 API。
 
 Blueprint 约定：
 
@@ -148,6 +148,7 @@ Blueprint 约定：
 
 - `data/config.json`：系统配置、通知配置、线上脚本源等。
 - `data/tasks.json`：任务列表。
+- `data/task_history.json`：任务运行历史。
 - `data/global_env.json`：全局环境变量。
 - `data/proxies.json`：代理配置。
 - `data/collections.json`：任务合集。
@@ -159,7 +160,7 @@ Blueprint 约定：
 
 - JSON 读写统一走 `fls_manager/storage.py`。
 - 业务数据访问优先走 `fls_manager/models.py`。
-- `tasks.json`、`global_env.json`、`proxies.json`、`collections.json` 读取时会通过 `models.py` 做归一化。
+- `tasks.json`、`task_history.json`、`global_env.json`、`proxies.json`、`collections.json` 读取时会通过 `models.py` 做归一化。
 - `config.json` 读取时会通过 `config.normalize_config_data()` 合并默认值、转换类型并钳制数值范围。
 - 写文件使用临时文件替换，减少半写入文件。
 - 当前锁是进程内 `threading.RLock`，不能保证多进程事务一致性。
@@ -179,14 +180,15 @@ Blueprint 约定：
 - `proxy_id`：代理 ID。
 - `notify`：任务结束通知配置，形如 `{"mode": "default|none|custom", "ids": []}`。
 - `random_delay`：随机延迟配置，形如 `{"mode": "none|default|custom", "seconds": 0}`。
-- `retry_count`：失败重试次数，范围 `0-20`。
+- `retry`：失败重试配置，形如 `{"attempts": 0, "interval_seconds": 60}`；`attempts` 范围 `0-5`，`interval_seconds` 范围 `5-3600`。
 - `run_count`：运行次数。
 - `pinned`：列表置顶。
 - `created_at` / `updated_at` / `last_run_at`：面板时间字符串。
 
 兼容字段：
 
-- 旧版任务可能包含 `notify_ids`，`routes/tasks/forms.py` 会归一化为新的 `notify` 结构。
+- 旧版任务可能包含 `notify_ids`，`models.py` 会读取迁移为新的 `notify` 结构。
+- 旧版任务可能包含 `retry_count`，`models.py` 会读取迁移为新的 `retry` 结构并在写回时移除旧字段。
 
 ## 5. 请求、鉴权与安全流程
 
@@ -196,7 +198,16 @@ Blueprint 约定：
 - `PERMANENT_SESSION_LIFETIME`。
 - `SESSION_COOKIE_HTTPONLY=True`。
 - `SESSION_COOKIE_SAMESITE="Lax"`。
+- `app.before_request(csrf_before_request)`。
 - `app.before_request(auth_before_request)`。
+
+CSRF 约定：
+
+- 统一 `layout()` 会为 POST 表单注入隐藏字段 `csrf_token`，并在页面 `<meta name="csrf-token">` 输出同一个 token。
+- `fls_manager/static/fls.js` 会为同源非 GET `fetch()` 自动补 `X-CSRF-Token`。
+- 普通 session POST 必须通过 CSRF 校验。
+- `X-Token` 命中管理 Token 的机器请求会跳过 CSRF，便于 API 和脚本调用。
+- 破坏性页面路由必须优先使用 POST，不应通过 GET 删除、置顶、取出或停止资源。
 
 鉴权优先级：
 
@@ -216,7 +227,11 @@ Blueprint 约定：
 开发注意：
 
 - 新增 API 应让错误响应保持 JSON。
+- `/api/task/action/run/<id>` 和 `/api/task/action/stop/<id>` 对不存在任务应返回 404；已存在但未运行的 stop 仍返回 200 和 `ok:false`。
+- `/api/task/action/delete/<id>` 删除不存在任务时应返回 404，不应停止任务、写回任务文件或重载调度器。
+- `/api/task/bulk-action` 应保持 `ok` / `msg` 兼容字段，并返回 `action`、`count` 及对应动作的结构化计数字段，便于前端和脚本客户端判断局部成功、跳过和失败。
 - 新增页面应走统一 `layout()`，避免绕过鉴权流程。
+- 新增 POST 表单应使用 `method="post"` 并让 `layout()` 自动注入 CSRF；不要手写 GET 破坏性链接。
 - 返回跳转 URL 时优先使用 `utils.get_back_url()` 或等价校验，避免开放重定向。
 
 ## 6. 任务执行链路
@@ -392,15 +407,13 @@ python -B -m compileall fls-manager.py fls_manager tests tools
 - `logs.py` 的 `latest_log_for_task()`、`cleanup_logs()` keep=0、非法配置、无启动头分组和 unlink 异常吞掉边界。
 - `auth.py` 的 API 与页面鉴权分支。
 - `backup/_common.py` 的备份文件名归一、zip/tar 路径穿越拒绝、安全 tar 解压 filter 兼容、tar 特殊成员拒绝和 DeprecationWarning 回归测试。
-- `ui.components.page_header_card()` 的可选说明区、操作区、内容区样式、标题和样式属性 HTML 转义。
 - `ui.components.table_card()` 的可选说明区、操作区、表格 ID、标题和表头 HTML 转义。
 - `ui.components.pagination_card()` 的链接分页、按钮分页、禁用态、省略号和 HTML 转义。
 - `ui.components.message_card()` 的空/空白消息、成功/错误/普通提示、未知类型回退、加粗样式、可选标题和 HTML 转义。
-- `ui.components.code_card()` 的代码块结构、可选说明区、操作区和标题 HTML 转义。
 - `ui.components.summary_item()` 的统计项结构、数字 value 和 HTML 转义。
-- 路由层 UI 组件接入：`/pull` 任务命令示例代码卡、`/pull/new` 脚本新建头部卡和普通提示卡、`/pull/fetch` 和 `/pull/import` 表单头部卡、普通/结果提示卡，以及 `/online-scripts` 首页头部卡、`/online-scripts/source` 脚本源 JSON 头部卡、`/online-scripts/doc/<id>` 文档加载失败卡、无文档链接提示卡的渲染与转义。
+- 路由层 UI 组件接入：`/pull/new`、`/pull/fetch`、`/pull/import` 普通/结果提示卡和 `/online-scripts/doc/<id>` 文档加载失败卡的渲染与转义。
 - 路由层 UI 组件接入：`/task/config/<id>` 保存成功/失败提示卡的渲染与转义。
-- 路由层 UI 组件接入：`/env/import` 任务变量导入页头部卡和表格卡、`/env/view` 全局变量全文编辑页头部卡、`/env/new` 和 `/env/edit/<key>` 全局变量表单头部卡、`/proxy/new` 和 `/proxy/edit/<id>` 代理表单头部卡、`/scripts/view` 和 `/scripts/rename` 脚本文件表单头部卡、`/config` 脚本类型表格卡、`/deps` 依赖列表、`/deps/refresh` 依赖刷新完成页头部卡、`/deps/install-log/<id>` 依赖安装日志头部卡、`/deps/uninstall` 依赖卸载结果页头部卡、`/panel/status`、`/` 仪表盘环境状态、`/about` 面板信息和只读代码说明卡、`/notify/test/<id>` 通知测试结果、`/about/job-log/<id>` 后台任务日志头部卡、`/about/restart-panel`、`/about/stop-panel` 面板控制结果头部卡、`/about/refresh-log`、`/about/update-version` 版本失败头部卡、`/online-scripts/log/<id>` 在线脚本安装日志头部卡、`/online-scripts/install/<id>` 安装确认头部卡、`/online-scripts/install-select/<id>` 安装选择页头部卡、`/backup/import` 备份导入完成页头部卡和 `/scripts/debug-log/<id>` 脚本调试日志头部卡渲染、响应式表格 ID 保留与 HTML 转义。
+- 路由层 UI 组件接入：`/deps`、`/deps/refresh` 和 `/panel/status` 表格卡渲染、响应式表格 ID 保留与 HTML 转义。
 
 后续优先补充：
 
@@ -442,39 +455,32 @@ python -B -m compileall fls-manager.py fls_manager tests tools
 
 ## 13. 开发日志
 
-### 2026-07-05
-
-- 阶段 41 扩展 `page_header_card()` 可选内容区样式，用于保留响应式布局约束；将 `/online-scripts` 首页顶部说明接入该组件，保留脚本源地址展示、刷新远程脚本源表单、打开源地址、脚本源 JSON 和配置入口，并补充组件与首页头部卡渲染测试。
-- 阶段 40 将 `/about` 页任务命令规则、Cron 说明、进程查看示例三个只读说明块接入 `code_card()`，保留说明文本、说明区间距和示例命令内容，并扩展 `/about` 路由渲染测试覆盖关键代码卡内容。
-- 阶段 39 新增 `code_card()` 组件，用于稳定只读代码示例块；先将 `/pull` 页“任务命令示例”接入该组件，保留脚本管理头部、文件列表表格和示例命令内容，并补充组件单测与 `/pull` 路由渲染测试。
-- 阶段 38 将在线脚本源 JSON 页面顶部说明接入 `page_header_card()`，保留缓存 JSON textarea、保存脚本源 JSON 表单、返回入口和成功/失败消息卡，并补充 `/online-scripts/source` 路由渲染与缓存内容转义测试。
-- 阶段 37 将脚本拉取和导入表单页接入 `page_header_card()`，保留拉取类型、代理选择、文件上传、返回入口和结果消息卡，并补充 `/pull/fetch`、`/pull/import` GET 路由渲染与目录转义测试。
-- 阶段 36 将配置页“task 可执行脚本类型”表格接入 `table_card()`，保留表单内 checkbox、保存配置按钮和安全验证 JS，并补充 `/config` 路由渲染与启用状态测试。
-- 阶段 35 将脚本新建、查看/编辑和改名页面接入 `page_header_card()`，保留 CodeMirror textarea、保存/调试/改名/返回按钮和提示消息卡，并补充 `/pull/new`、`/scripts/view`、`/scripts/rename` 路由渲染与转义测试。
-- 阶段 34 将代理新增和编辑表单页接入 `page_header_card()`，保留代理字段卡、自定义质量检测地址、实时测试/质量检测 JS 和保存逻辑，并补充 `/proxy/new`、`/proxy/edit/<id>` 路由渲染与转义测试。
-- 阶段 33 将全局变量查看全部、新增和编辑页面接入 `page_header_card()`，表单字段继续留在普通卡片内，POST 空变量名纯文本 400 响应保持不变，并补充 `/env/view`、`/env/new`、`/env/edit/<key>` 路由渲染与转义测试。
-- 阶段 32 将从任务变量导入到全局变量页接入 `page_header_card()` 和 `table_card()`，保留允许覆盖复选框、导入状态 badge 和底部提交区，并通过临时任务/全局变量数据补充 `/env/import` 路由渲染与转义测试。
-- 阶段 31 将依赖卸载结果页接入 `page_header_card()`，保留卸载输出日志块和返回依赖管理入口，并通过 mock `pip_cmd()` 补充 `/deps/uninstall` 路由渲染与输出转义测试，避免执行真实 pip 卸载。
-- 阶段 30 将依赖刷新完成页头部接入 `page_header_card()`，保留核心依赖检测表格和返回依赖管理入口，并通过 mock `refresh_dependency_cache()` 补充 `/deps/refresh` 路由渲染与转义测试，避免依赖真实运行环境状态。
-- 阶段 29 将依赖安装日志页接入 `page_header_card()`，保留安装状态、日志文件、返回/刷新入口和实时日志脚本，并通过假 `DEPS_RUNNING` 记录补充 `/deps/install-log/<id>` 缺失/运行中记录路由渲染与转义测试，避免触发真实 pip 安装。
-- 阶段 28 将脚本调试日志页接入 `page_header_card()`，保留调试记录缺失提示、运行状态、停止调试按钮、返回入口、日志浮动控制和实时日志脚本，并补充 `/scripts/debug-log/<id>` 缺失/存在记录路由渲染与转义测试。
-- 阶段 27 将备份导入完成页接入 `page_header_card()`，保留已恢复内容、依赖恢复、日志信息和返回/日志入口，并通过临时 `FLS_BASE_DIR` 内的小型 tar.gz 备份补充 `/backup/import` 成功渲染测试，避免触碰真实数据。
-- 阶段 26 将关于页刷新更新日志和更新版本的失败结果页接入 `page_header_card()`，保留返回关于页入口，并通过 mock Git 可用性/仓库状态补充失败分支路由测试。
-- 阶段 25 将在线脚本安装选择页顶部说明接入 `page_header_card()`，保留任务选择表单、隐藏字段、分页和任务选择 JS，并补充 `/online-scripts/install-select/<id>` 路由渲染、字段转义和任务选择 shell 保留测试。
-- 阶段 24 将在线脚本文档无 `doc_link` 提示接入 `page_header_card()`，保留返回在线脚本入口，并补充 `/online-scripts/doc/<id>` 无文档链接路由渲染测试。
-- 阶段 23 将在线脚本安装目标路径非法和目标已存在确认页接入 `page_header_card()`，保留继续安装表单和隐藏字段，并补充 `/online-scripts/install/<id>` 路由渲染、路径转义和不触发真实安装的确认页测试。
-- 阶段 22 将在线脚本安装日志页头部接入 `page_header_card()`，保留安装记录缺失提示、停止安装按钮和实时日志主体，并补充 `/online-scripts/log/<id>` 路由渲染与动态字段转义测试。
-- 阶段 21 将面板重启/停止结果页接入 `page_header_card()`，保留控制脚本缺失提示、成功后的跳转脚本和面板日志入口，并通过 mock 控制脚本与线程补充路由渲染测试，避免触发真实启停。
-- 阶段 20 将后台任务日志页头部接入 `page_header_card()`，保留不存在记录提示、返回/日志入口和实时日志主体，并补充 `page_header_card()` 与 `/about/job-log/<id>` 路由渲染测试。
-- 阶段 19 将通知测试结果页接入 `table_card()`，用状态 badge 展示成功/失败，保留返回通知管理操作区，并补充通知测试路由渲染与返回消息转义测试。
-- 阶段 18 将关于页“面板信息”只读表格接入 `table_card()`，保留项目仓库链接和路径字段转义，同时补充 `/about` 路由渲染测试并把 `/about` 纳入响应式 smoke。
-- 阶段 17 将仪表盘“环境状态”接入 `table_card()`，保留峰值 CPU 说明和现有环境行渲染，同时补充 `/` 路由渲染测试覆盖表格标题、表头和关键行。
-
 ### 2026-07-04
 
 - 阶段 16 扩展 `table_card()`，支持可选说明区、操作区和 `table_id`，同时保持标题和表头转义以及旧调用兼容。
 - 阶段 16 将依赖管理页、依赖刷新结果页和运行环境页接入 `table_card()`；运行环境页保留 `runtimeTable` ID，避免破坏移动端响应式表格 CSS。
 - 阶段 16 扩展组件与路由测试，覆盖 `table_card()` 可选结构、`/deps` 依赖列表转义，以及 `/panel/status` 运行环境表格 ID 和运行时字段转义。
+- 阶段 16 推送前合并远端任务运行历史改动，更新 `tests/test_task_runtime.py` 以覆盖当前 `task_retry_config()`、`schedule_task_retry()` 和 `_start_task_worker()` 行为。
+- 阶段 17 优先收束长期脏文件方向：补齐旧 `retry_count` 到新 `retry` 的读取迁移，并新增任务复制/批量操作、合集批量加入、日志分组删除的回归测试。
+- 阶段 18 继续处理长期脏文件剩余风险：补充 CSRF 注入、session POST 校验、`X-Token` API 豁免，以及日志删除、合集删除、任务置顶拒绝 GET 的安全回归测试。
+- 阶段 19 固化任务表单当前行为：编辑页保留清洗后的 `back` 返回路径，表单使用 `retry_attempts` / `retry_interval_seconds`，提交后保存新 `retry` 结构并拒绝外部 back 跳转。
+- 阶段 20 固化合集页任务卡片当前行为：长命令使用折叠代码块，停止、置顶、取出、删除合集等破坏性操作继续使用 POST 表单，任务操作 back 参数保留合集锚点。
+- 阶段 21 固化普通任务列表当前行为：长命令使用折叠代码块，批量工具栏保留 AJAX 批量操作，单任务更多菜单保留复制、置顶、停止等 POST API 动作，编辑和配置链接继续携带 `/tasks` back 参数。
+- 阶段 22 固化日志管理页当前行为：分组批量选择和批量删除入口继续渲染，单组删除走 `/api/logs/groups/delete`，单文件删除继续使用 POST 表单，并覆盖日志分组名 HTML 转义。
+- 阶段 23 固化日志文件详情页返回路径：合法站内 `back` 继续用于返回按钮和删除表单，外部 `back` 会清洗回 `/logs`，日志删除入口继续保持 POST 表单。
+- 阶段 24 固化任务日志页历史表格：最近运行历史继续展示状态、来源、说明和日志链接，运行、停止、配置、返回入口保留安全 `back`，外部 `back` 清洗回 `/tasks`。
+- 阶段 25 固化全局运行历史页：关键词和状态筛选继续生效，历史表格展示状态、来源、重试、说明和日志链接，用户可控历史字段继续 HTML 转义。
+- 阶段 26 固化任务运行历史数据模型：历史读取过滤坏行，更新按 ID 写回，新增记录插入顶部并按上限裁剪，按任务筛选继续可用；同步补充 `task_history.json` schema 文档。
+- 阶段 27 固化仪表盘历史摘要：最近运行和最近异常继续展示任务历史、状态徽标、说明和日志链接，历史记录中的用户可控文本继续 HTML 转义。
+- 阶段 28 增强批量任务 API 状态字段：`/api/task/bulk-action` 保留 `ok/msg`，新增 `action/count` 以及启用、禁用、取出、删除、运行、停止对应的结构化计数和失败明细。
+- 阶段 29 固化任务启动失败历史收尾：`_start_task_worker()` 在 `Popen` 启动失败时继续写入 `start_failed` 历史、记录失败日志、关闭日志句柄并清理运行态。
+- 阶段 30 固化任务失败不重试通知边界：`task_finish_watcher()` 在失败且未计划重试时继续写入 `failed` 历史、保留退出码和消息，并发送任务完成通知。
+- 阶段 31 接入批量 API 前端消费：`fls.js` 新增 `flsBulkActionMessage()`，普通任务列表和合集页批量操作优先使用结构化计数字段生成提示，并提升静态资源版本。
+- 阶段 32 改善任务表单错误提示：新建/编辑任务校验失败时返回带错误卡片的任务表单页，保留并转义用户输入，状态码继续保持 400。
+- 阶段 33 改善脚本操作失败提示：脚本新建、编辑保存和改名失败时使用加粗错误卡片，失败后保留用户输入并继续转义错误消息和表单内容。
+- 阶段 34 固化合集加入任务兼容边界：抽取表单任务 ID 解析，`task_ids` 多选和旧 `task_id` 单选共同兼容并去重，缺失任务时拒绝且不部分加入合集。
+- 阶段 35 固化单项任务删除 API 缺失任务边界：`/api/task/action/delete/<id>` 仅在任务存在时停止、删除和重载调度器，缺失任务返回 404 且不产生写入副作用。
+- 阶段 36 固化单项任务运行/停止 API 缺失任务边界：`run` 缺失任务返回 404，`stop` 缺失任务返回 404 且不调用停止逻辑，已存在但未运行仍保留 200 + `ok:false`。
 - 阶段 15 继续低风险消息卡接入：`fls_manager/routes/tasks/config_file.py` 的任务配置保存结果统一使用 `message_card()`，保留成功/失败加粗色彩和空消息不渲染行为。
 - 阶段 15 扩展 `tests/test_ui_route_components.py`，覆盖 `/task/config/<id>` 保存成功提示、写入失败提示和错误消息 HTML 转义。
 - 阶段 15 避开已有长期脏改动的任务列表、日志、认证/API 和 `ui/tables.py`，只触碰未脏的任务配置文件路由。

@@ -23,6 +23,11 @@ from ...ui.layout import layout
 def scripts_new():
     current_rel = request.args.get("p", "").strip().strip("/")
     msg = ""
+    msg_kind = "info"
+    msg_strong = False
+    item_type = "file"
+    name = ""
+    content = ""
 
     if request.method == "POST":
         current_rel = request.form.get("current_rel", "").strip().strip("/")
@@ -49,6 +54,11 @@ def scripts_new():
             return redirect(script_url(current_rel))
         except Exception as e:
             msg = f"新建失败：{e}"
+            msg_kind = "error"
+            msg_strong = True
+
+    file_selected = " selected" if item_type != "dir" else ""
+    dir_selected = " selected" if item_type == "dir" else ""
 
     header = page_header_card(
         "新建文件 / 文件夹",
@@ -64,13 +74,13 @@ def scripts_new():
         <div class="form-item">
             <label>类型</label>
             <select name="item_type">
-                <option value="file">文件</option>
-                <option value="dir">文件夹</option>
+                <option value="file"{file_selected}>文件</option>
+                <option value="dir"{dir_selected}>文件夹</option>
             </select>
         </div>
         <div class="form-item">
             <label>名称</label>
-            <input name="name" required placeholder="test.py 或 demo">
+            <input name="name" required value="{h(name)}" placeholder="test.py 或 demo">
         </div>
     </div>
 </div>
@@ -80,13 +90,13 @@ def scripts_new():
         name="content"
         class="fls-code-editor"
         data-filename=""
-    ></textarea>
+    >{h(content)}</textarea>
 </div>
 <div class="card">
     <button class="btn btn-primary" type="submit">保存新建</button>
     <a class="btn btn-gray" href="{h(script_url(current_rel))}">返回</a>
 </div>
-{message_card(msg or "暂无操作")}
+{message_card(msg or "暂无操作", msg_kind, strong=msg_strong)}
 </form>
 """
     return layout("新建脚本", "pull", body)
@@ -101,15 +111,28 @@ def scripts_view():
         abort(404)
 
     msg = ""
+    msg_kind = "info"
+    msg_strong = False
+    content_override = None
 
     if request.method == "POST":
+        posted_content = request.form.get("content", "")
         try:
-            target.write_text(request.form.get("content", ""), encoding="utf-8")
+            target.write_text(posted_content, encoding="utf-8")
             msg = "保存成功"
+            msg_kind = "success"
+            msg_strong = True
         except Exception as e:
             msg = f"保存失败：{e}"
+            msg_kind = "error"
+            msg_strong = True
+            content_override = posted_content
 
-    content = target.read_text(encoding="utf-8", errors="replace")
+    content = (
+        content_override
+        if content_override is not None
+        else target.read_text(encoding="utf-8", errors="replace")
+    )
     rel = script_rel_path(target)
     parent_rel = (
         str(target.parent.relative_to(SCRIPT_DIR))
@@ -138,7 +161,7 @@ def scripts_view():
         style="min-height:680px;"
     >{h(content)}</textarea>
 </div>
-{message_card(msg or "暂无保存操作")}
+{message_card(msg or "暂无保存操作", msg_kind, strong=msg_strong)}
 </form>
 """
     return layout("查看 / 编辑文件", "pull", body)
@@ -153,6 +176,9 @@ def scripts_rename():
         abort(404)
 
     msg = ""
+    msg_kind = "info"
+    msg_strong = False
+    new_name = target.name
 
     if request.method == "POST":
         try:
@@ -173,6 +199,8 @@ def scripts_rename():
             return redirect(script_url(parent_rel))
         except Exception as e:
             msg = f"改名失败：{e}"
+            msg_kind = "error"
+            msg_strong = True
 
     header = page_header_card(
         "改名",
@@ -185,14 +213,14 @@ def scripts_rename():
 <div class="card">
     <div class="form-item">
         <label>新名称</label>
-        <input name="new_name" required value="{h(target.name)}">
+        <input name="new_name" required value="{h(new_name)}">
     </div>
 </div>
 <div class="card">
     <button class="btn btn-primary" type="submit">保存改名</button>
     <a class="btn btn-gray" href="/pull">返回</a>
 </div>
-{message_card(msg or "暂无操作")}
+{message_card(msg or "暂无操作", msg_kind, strong=msg_strong)}
 </form>
 """
     return layout("改名", "pull", body)
@@ -220,7 +248,7 @@ def scripts_download(rel_path):
     )
 
 
-@bp.route("/scripts/delete/<path:rel_path>")
+@bp.route("/scripts/delete/<path:rel_path>", methods=["POST"])
 def scripts_delete(rel_path):
     target = script_safe_path(rel_path)
 

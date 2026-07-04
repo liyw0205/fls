@@ -4,10 +4,12 @@ import time
 import shutil
 import platform
 from datetime import datetime
+from math import ceil
+from urllib.parse import quote
 
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 
-from ..models import load_tasks
+from ..models import load_tasks, load_task_history
 from ..task_runner import is_running
 from ..ui.layout import layout
 from ..ui.components import table_card
@@ -79,6 +81,147 @@ def fmt_duration(seconds):
         parts.append(f"{seconds} 秒")
 
     return " ".join(parts)
+
+
+def dashboard_history_badge(status):
+    status = str(status or "")
+    mapping = {
+        "success": ("green", "成功"),
+        "failed": ("red", "失败"),
+        "timeout": ("red", "超时"),
+        "stopped": ("gray", "手动停止"),
+        "running": ("blue", "运行中"),
+        "starting": ("blue", "启动中"),
+        "delaying": ("orange", "延迟中"),
+        "start_failed": ("red", "启动失败"),
+    }
+    cls, text = mapping.get(status, ("gray", status or "-"))
+    return f'<span class="badge {cls}">{h(text)}</span>'
+
+
+def dashboard_history_rows(items, empty_text):
+    rows = ""
+
+    for item in items:
+        log_file = str(item.get("log_file") or "")
+        log_btn = ""
+
+        if log_file:
+            filename = log_file.split("/")[-1].split("\\")[-1]
+            log_btn = f'<a class="btn btn-orange" href="/logfile/{h(filename)}?back=/">日志</a>'
+
+        rows += f"""
+<tr>
+    <td><b>{h(item.get("task_name") or item.get("task_id") or "-")}</b></td>
+    <td>{dashboard_history_badge(item.get("status"))}</td>
+    <td>{h(item.get("start_at") or "-")}</td>
+    <td>{h(item.get("duration_seconds", 0))} 秒</td>
+    <td>{h(item.get("message") or "-")}</td>
+    <td>{log_btn}</td>
+</tr>
+"""
+
+    if not rows:
+        rows = f'<tr><td colspan="6">{h(empty_text)}</td></tr>'
+
+    return rows
+
+
+HISTORY_STATUS_OPTIONS = [
+    ("", "全部状态"),
+    ("success", "成功"),
+    ("failed", "失败"),
+    ("timeout", "超时"),
+    ("start_failed", "启动失败"),
+    ("stopped", "手动停止"),
+    ("running", "运行中"),
+    ("starting", "启动中"),
+    ("delaying", "延迟中"),
+]
+
+
+def history_page_links(q, status, page, pages):
+    if pages <= 1:
+        return ""
+
+    def url_for_page(p):
+        url = f"/history?page={int(p)}"
+
+        if q:
+            url += "&q=" + quote(q)
+
+        if status:
+            url += "&status=" + quote(status)
+
+        return url
+
+    def item(p, text=None, active=False, disabled=False):
+        text = text if text is not None else str(p)
+
+        if disabled:
+            return f'<span class="btn btn-gray" style="opacity:.45;cursor:not-allowed;">{h(text)}</span>'
+
+        cls = "btn-primary" if active else "btn-gray"
+        return f'<a class="btn {cls}" href="{h(url_for_page(p))}">{h(text)}</a>'
+
+    page = max(1, min(int(page), int(pages)))
+    show = {1, pages}
+
+    for p in range(page - 2, page + 3):
+        if 1 <= p <= pages:
+            show.add(p)
+
+    buttons = [item(page - 1, "上一页", disabled=page <= 1)]
+    last = 0
+
+    for p in sorted(show):
+        if last and p - last > 1:
+            buttons.append('<span class="btn btn-gray" style="opacity:.75;cursor:default;">...</span>')
+        buttons.append(item(p, active=p == page))
+        last = p
+
+    buttons.append(item(page + 1, "下一页", disabled=page >= pages))
+
+    return f"""
+<div class="card">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <div class="help">第 <b>{page}</b> / <b>{pages}</b> 页</div>
+        <div class="action-row">{''.join(buttons)}</div>
+    </div>
+</div>
+"""
+
+
+def history_table_rows(items):
+    rows = ""
+
+    for item in items:
+        log_file = str(item.get("log_file") or "")
+        log_btn = ""
+
+        if log_file:
+            filename = log_file.split("/")[-1].split("\\")[-1]
+            log_btn = f'<a class="btn btn-orange" href="/logfile/{h(filename)}?back=/history">日志</a>'
+
+        rows += f"""
+<tr>
+    <td><b>{h(item.get("task_name") or item.get("task_id") or "-")}</b><div class="help">{h(item.get("command") or "")}</div></td>
+    <td>{dashboard_history_badge(item.get("status"))}</td>
+    <td>{h(item.get("start_at") or "-")}</td>
+    <td>{h(item.get("end_at") or "-")}</td>
+    <td>{h(item.get("duration_seconds", 0))} 秒</td>
+    <td>{h(item.get("return_code") if item.get("return_code") is not None else "-")}</td>
+    <td>{h(item.get("source") or "-")}</td>
+    <td>{h(item.get("retry_attempt", 0))}/{h(item.get("max_retries", 0))}</td>
+    <td>{h(item.get("message") or "-")}</td>
+    <td>{log_btn}</td>
+</tr>
+"""
+
+    if not rows:
+        rows = '<tr><td colspan="10">暂无匹配历史</td></tr>'
+
+    return rows
 
 def panel_cpu_peak_slot():
     """
@@ -389,12 +532,101 @@ def api_dashboard_runtime():
 
     return jsonify({
         "ok": True,
-        "current_time": panel_now().strftime("%Y %m-%d %H:%M:%S"),
+        "current_time": panel_now().strftime("%Y-%m-%d %H:%M:%S"),
         "timezone": get_panel_timezone_text(),
         "panel_uptime": fmt_duration(time.time() - PANEL_START_TIME),
         "panel_cpu_current": panel_cpu_current,
         "panel_cpu_peak": panel_cpu_peak,
     })
+
+
+@bp.route("/history")
+def history_page():
+    q = request.args.get("q", "").strip()
+    status = request.args.get("status", "").strip()
+    page = max(1, int(request.args.get("page", "1") or 1))
+    per_page = 30
+
+    allowed_statuses = {item[0] for item in HISTORY_STATUS_OPTIONS}
+    if status not in allowed_statuses:
+        status = ""
+
+    items = load_task_history()
+
+    if q:
+        q_lower = q.lower()
+        items = [
+            item for item in items
+            if q_lower in str(item.get("task_name") or "").lower()
+            or q_lower in str(item.get("command") or "").lower()
+            or q_lower in str(item.get("message") or "").lower()
+            or q_lower in str(item.get("source") or "").lower()
+        ]
+
+    if status:
+        items = [
+            item for item in items
+            if str(item.get("status") or "") == status
+        ]
+
+    total = len(items)
+    pages = max(1, ceil(total / per_page))
+    page = min(page, pages)
+    show = items[(page - 1) * per_page: page * per_page]
+
+    status_options = ""
+
+    for value, text in HISTORY_STATUS_OPTIONS:
+        selected = "selected" if value == status else ""
+        status_options += f'<option value="{h(value)}" {selected}>{h(text)}</option>'
+
+    body = f"""
+<form method="get">
+<div class="card">
+    <div class="card-title">运行历史</div>
+    <div class="help">记录任务每次运行、重试、失败和耗时。当前匹配 <b>{total}</b> 条。</div>
+    <br>
+    <div class="form-grid">
+        <div class="form-item">
+            <label>关键词</label>
+            <input name="q" value="{h(q)}" placeholder="任务名 / 命令 / 说明 / 来源">
+        </div>
+        <div class="form-item">
+            <label>状态</label>
+            <select name="status">{status_options}</select>
+        </div>
+    </div>
+    <br>
+    <button class="btn btn-primary" type="submit">筛选</button>
+    <a class="btn btn-gray" href="/history">重置</a>
+</div>
+</form>
+
+<div class="card">
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>任务</th>
+                    <th>状态</th>
+                    <th>开始时间</th>
+                    <th>结束时间</th>
+                    <th>耗时</th>
+                    <th>退出码</th>
+                    <th>来源</th>
+                    <th>重试</th>
+                    <th>说明</th>
+                    <th>日志</th>
+                </tr>
+            </thead>
+            <tbody>{history_table_rows(show)}</tbody>
+        </table>
+    </div>
+</div>
+
+{history_page_links(q, status, page, pages)}
+"""
+    return layout("运行历史", "history", body)
 
 
 @bp.route("/")
@@ -407,7 +639,7 @@ def dashboard():
     cron_count = sum(1 for t in tasks if str(t.get("cron", "")).strip())
     run_total = sum(int(t.get("run_count", 0)) for t in tasks)
 
-    current_time_text = panel_now().strftime("%Y %m-%d %H:%M:%S")
+    current_time_text = panel_now().strftime("%Y-%m-%d %H:%M:%S")
     timezone_text = get_panel_timezone_text()
 
     ram = get_ram_status()
@@ -417,6 +649,12 @@ def dashboard():
     panel_cpu_current, panel_cpu_peak = get_panel_cpu_status()
     panel_cpu_peak_period = panel_cpu_peak_slot_text()
     panel_uptime = fmt_duration(time.time() - PANEL_START_TIME)
+    history = load_task_history()
+    recent_history = history[:8]
+    abnormal_history = [
+        item for item in history
+        if str(item.get("status") or "") in ("failed", "timeout", "start_failed")
+    ][:8]
 
     try:
         disk = shutil.disk_usage(str(BASE_DIR))
@@ -566,10 +804,66 @@ def dashboard():
     </div>
 </div>
 
-{env_table}
+<div class="card">
+    <div class="card-title">最近运行</div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>任务</th>
+                    <th>状态</th>
+                    <th>开始时间</th>
+                    <th>耗时</th>
+                    <th>说明</th>
+                    <th>日志</th>
+                </tr>
+            </thead>
+            <tbody>{dashboard_history_rows(recent_history, "暂无运行历史")}</tbody>
+        </table>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">最近异常</div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>任务</th>
+                    <th>状态</th>
+                    <th>开始时间</th>
+                    <th>耗时</th>
+                    <th>说明</th>
+                    <th>日志</th>
+                </tr>
+            </thead>
+            <tbody>{dashboard_history_rows(abnormal_history, "暂无异常记录")}</tbody>
+        </table>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-title">环境状态</div>
+    <div class="help">
+        面板峰值 CPU 每天 00:00 和 12:00 自动重置。<br>
+        当前峰值统计周期：{h(panel_cpu_peak_period)}
+    </div>
+    <br>
+    <div class="table-wrap">
+        <table>
+            <tbody>{env_rows}</tbody>
+        </table>
+    </div>
+</div>
 
 <script>
+const FLS_DASHBOARD_RUNTIME_INTERVAL_MS = 3000;
+
 async function flsDashboardRefreshRuntime(){{
+    if(document.hidden){{
+        return;
+    }}
+
     try {{
         const nowEl = document.getElementById("flsDashboardNow");
         const uptimeEl = document.getElementById("flsDashboardUptime");
@@ -596,13 +890,45 @@ async function flsDashboardRefreshRuntime(){{
     }} catch(e) {{}}
 }}
 
+function flsDashboardStartRuntimeTimer(){{
+    if(window.__FLS_DASHBOARD_RUNTIME_INTERVAL__){{
+        clearInterval(window.__FLS_DASHBOARD_RUNTIME_INTERVAL__);
+        window.__FLS_DASHBOARD_RUNTIME_INTERVAL__ = null;
+    }}
+
+    if(!document.hidden){{
+        window.__FLS_DASHBOARD_RUNTIME_INTERVAL__ = setInterval(
+            flsDashboardRefreshRuntime,
+            FLS_DASHBOARD_RUNTIME_INTERVAL_MS
+        );
+    }}
+}}
+
 if(window.__FLS_DASHBOARD_RUNTIME_INTERVAL__){{
     clearInterval(window.__FLS_DASHBOARD_RUNTIME_INTERVAL__);
     window.__FLS_DASHBOARD_RUNTIME_INTERVAL__ = null;
 }}
 
+if(window.__FLS_DASHBOARD_VISIBILITY_HANDLER__){{
+    document.removeEventListener("visibilitychange", window.__FLS_DASHBOARD_VISIBILITY_HANDLER__);
+}}
+
+window.__FLS_DASHBOARD_VISIBILITY_HANDLER__ = function(){{
+    if(document.hidden){{
+        if(window.__FLS_DASHBOARD_RUNTIME_INTERVAL__){{
+            clearInterval(window.__FLS_DASHBOARD_RUNTIME_INTERVAL__);
+            window.__FLS_DASHBOARD_RUNTIME_INTERVAL__ = null;
+        }}
+    }}else{{
+        flsDashboardRefreshRuntime();
+        flsDashboardStartRuntimeTimer();
+    }}
+}};
+
+document.addEventListener("visibilitychange", window.__FLS_DASHBOARD_VISIBILITY_HANDLER__);
+
 flsDashboardRefreshRuntime();
-window.__FLS_DASHBOARD_RUNTIME_INTERVAL__ = setInterval(flsDashboardRefreshRuntime, 500);
+flsDashboardStartRuntimeTimer();
 </script>
 """
     return layout("仪表盘", "dashboard", body)

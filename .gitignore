@@ -1,19 +1,29 @@
-# Python runtime artifacts
 __pycache__/
 *.py[cod]
+*.pyo
 *$py.class
 
-# Virtual environments
+/.venv/
+/venv/
+/env/
 .venv/
 venv/
 /env/
 
-# Local FLS runtime data
+/data/
+/log/
+/logs/
+/scripts/
 data/
 log/
 
-# OS/editor noise
+*.bak
+*.tmp
+*.pid
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
+
+split_backup_routes.py
+split_backup_routes.py.bak

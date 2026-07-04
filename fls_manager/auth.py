@@ -1,5 +1,4 @@
 import time
-from datetime import timedelta
 from urllib.parse import quote, urlencode
 
 from flask import request, redirect, url_for, session, jsonify, current_app
@@ -8,7 +7,7 @@ from .config import fls_get_admin_token
 from .security import security_enabled
 
 FLS_AUTH_SHORT_SECONDS = 3600
-FLS_AUTH_REMEMBER_SECONDS = 7 * 24 * 3600
+FLS_AUTH_REMEMBER_SECONDS = 14 * 24 * 3600
 
 
 def _is_api_request():
@@ -33,8 +32,6 @@ def auth_set_session(app, token, remember=False, security_verified=True):
     session["remember_login"] = bool(remember)
     session["security_verified"] = bool(security_verified)
     session.permanent = bool(remember)
-
-    app.permanent_session_lifetime = timedelta(seconds=max_age)
 
 
 def auth_clear_session():
@@ -69,6 +66,9 @@ def auth_security_verified():
 
 def auth_before_request():
     endpoint = request.endpoint or ""
+
+    if endpoint == "static" or request.path.startswith("/static/"):
+        return None
 
     if endpoint in (
         "auth.login",

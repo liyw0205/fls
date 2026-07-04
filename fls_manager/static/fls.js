@@ -2,6 +2,168 @@
    FLS layout extracted scripts
    ============================================================ */
 
+function flsGetCsrfToken(){
+    const meta = document.querySelector('meta[name="csrf-token"]');
+    return meta ? (meta.getAttribute("content") || "") : "";
+}
+
+function flsFetchNeedsCsrf(input, init){
+    try {
+        const method = String(
+            (init && init.method) ||
+            (input && input.method) ||
+            "GET"
+        ).toUpperCase();
+
+        if(["GET", "HEAD", "OPTIONS", "TRACE"].indexOf(method) >= 0) {
+            return false;
+        }
+
+        const rawUrl = typeof input === "string" ? input : (input && input.url);
+        const url = new URL(rawUrl || location.href, location.href);
+
+        return url.origin === location.origin;
+    } catch(e) {
+        return false;
+    }
+}
+
+function flsInitCsrfFetchPatch(){
+    if(window.__FLS_CSRF_FETCH_PATCHED__) return;
+    if(typeof window.fetch !== "function") return;
+
+    const originalFetch = window.fetch.bind(window);
+
+    window.fetch = function(input, init){
+        init = init || {};
+
+        if(flsFetchNeedsCsrf(input, init)){
+            const token = flsGetCsrfToken();
+
+            if(token){
+                const headers = new Headers(init.headers || (input && input.headers) || {});
+                if(!headers.has("X-CSRF-Token")){
+                    headers.set("X-CSRF-Token", token);
+                }
+                init.headers = headers;
+            }
+        }
+
+        return originalFetch(input, init);
+    };
+
+    window.__FLS_CSRF_FETCH_PATCHED__ = true;
+}
+
+flsInitCsrfFetchPatch();
+
+function flsToast(message, type, timeout){
+    message = String(message || "");
+    type = type || "info";
+    timeout = timeout || 3200;
+
+    if(!message) return;
+
+    let box = document.getElementById("flsToastBox");
+
+    if(!box){
+        box = document.createElement("div");
+        box.id = "flsToastBox";
+        box.className = "fls-toast-box";
+        document.body.appendChild(box);
+    }
+
+    const item = document.createElement("div");
+    item.className = "fls-toast " + type;
+    item.textContent = message;
+    item.addEventListener("click", function(){
+        item.remove();
+    });
+
+    box.appendChild(item);
+
+    setTimeout(function(){
+        item.remove();
+    }, timeout);
+}
+
+if(!window.__FLS_ALERT_PATCHED__){
+    window.__FLS_ORIGINAL_ALERT__ = window.alert;
+    window.alert = function(message){
+        flsToast(message, "info");
+    };
+    window.__FLS_ALERT_PATCHED__ = true;
+}
+
+function flsNumberValue(value){
+    const numberValue = Number(value || 0);
+
+    if(!Number.isFinite(numberValue) || numberValue < 0) return 0;
+
+    return Math.floor(numberValue);
+}
+
+function flsFailureSummary(failures, failedCount, prefix){
+    if(!Array.isArray(failures) || !failures.length || !failedCount) return "";
+
+    const first = failures.slice(0, 3).map(function(item){
+        return String(item || "");
+    }).filter(Boolean);
+
+    if(!first.length) return "";
+
+    let text = failedCount + " 个" + prefix + "：" + first.join("；");
+
+    if(failedCount > first.length){
+        text += " 等 " + failedCount + " 个";
+    }
+
+    return text;
+}
+
+function flsBulkActionMessage(json, fallback){
+    json = json || {};
+
+    const action = String(json.action || "");
+    const fallbackText = String(fallback || json.msg || "");
+
+    if(!json.ok){
+        return String(json.msg || fallbackText || "操作失败");
+    }
+
+    const count = flsNumberValue(json.count);
+    const updatedCount = flsNumberValue(json.updated_count);
+    const deletedCount = flsNumberValue(json.deleted_count);
+    const submittedCount = flsNumberValue(json.submitted_count);
+    const stoppedCount = flsNumberValue(json.stopped_count);
+    const skippedCount = flsNumberValue(json.skipped_count);
+    const failedCount = flsNumberValue(json.failed_count);
+    const parts = [];
+
+    if(action === "enable"){
+        parts.push("已启用 " + (updatedCount || count) + " 个任务");
+    } else if(action === "disable"){
+        parts.push("已禁用 " + (updatedCount || count) + " 个任务");
+    } else if(action === "clear_collection"){
+        parts.push("已取出 " + (updatedCount || count) + " 个任务");
+    } else if(action === "delete"){
+        parts.push("已删除 " + (deletedCount || count) + " 个任务");
+    } else if(action === "run"){
+        parts.push("已提交运行 " + submittedCount + " 个任务");
+        const failureText = flsFailureSummary(json.failures, failedCount, "未运行");
+        if(failureText) parts.push(failureText);
+    } else if(action === "stop"){
+        parts.push("已结束 " + stoppedCount + " 个任务");
+        if(skippedCount) parts.push("跳过 " + skippedCount + " 个未运行任务");
+        const failureText = flsFailureSummary(json.failures, failedCount, "结束失败");
+        if(failureText) parts.push(failureText);
+    }
+
+    if(parts.length) return parts.join("；");
+
+    return fallbackText;
+}
+
 function flsViewportWidth(){
     var w = window.innerWidth || document.documentElement.clientWidth || 0;
     var sw = window.screen ? window.screen.width : 0;
@@ -471,15 +633,119 @@ function flsShouldUseCodeMirror(){
     }
 }
 
-function flsInitCodeEditors(root){
+window.__FLS_ASSET_PROMISES__ = window.__FLS_ASSET_PROMISES__ || {};
+
+function flsLoadStyleOnce(href){
+    href = String(href || "");
+    if(!href) return;
+
+    if(document.querySelector('link[data-fls-href="' + href + '"]')) {
+        return;
+    }
+
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = href;
+    link.setAttribute("data-fls-href", href);
+    document.head.appendChild(link);
+}
+
+function flsLoadScriptOnce(src){
+    src = String(src || "");
+    if(!src) return Promise.resolve();
+
+    const key = "script:" + src;
+
+    if(window.__FLS_ASSET_PROMISES__[key]){
+        return window.__FLS_ASSET_PROMISES__[key];
+    }
+
+    window.__FLS_ASSET_PROMISES__[key] = new Promise(function(resolve, reject){
+        const existing = document.querySelector('script[data-fls-src="' + src + '"]');
+
+        if(existing && existing.dataset.loaded === "1"){
+            resolve();
+            return;
+        }
+
+        const script = existing || document.createElement("script");
+
+        script.src = src;
+        script.async = false;
+        script.setAttribute("data-fls-src", src);
+
+        script.addEventListener("load", function(){
+            script.dataset.loaded = "1";
+            resolve();
+        }, {once:true});
+
+        script.addEventListener("error", function(){
+            delete window.__FLS_ASSET_PROMISES__[key];
+            reject(new Error("资源加载失败：" + src));
+        }, {once:true});
+
+        if(!existing){
+            document.head.appendChild(script);
+        }
+    });
+
+    return window.__FLS_ASSET_PROMISES__[key];
+}
+
+async function flsEnsureCodeMirrorLoaded(){
+    if(typeof CodeMirror !== "undefined") {
+        return true;
+    }
+
+    const base = "https://cdn.jsdelivr.net/npm/codemirror@5.65.16/";
+
+    flsLoadStyleOnce(base + "lib/codemirror.min.css");
+    flsLoadStyleOnce(base + "theme/material-darker.min.css");
+
+    try {
+        await flsLoadScriptOnce(base + "lib/codemirror.min.js");
+
+        const modes = [
+            "mode/python/python.min.js",
+            "mode/shell/shell.min.js",
+            "mode/javascript/javascript.min.js",
+            "mode/yaml/yaml.min.js",
+            "mode/xml/xml.min.js",
+            "mode/css/css.min.js",
+            "mode/htmlmixed/htmlmixed.min.js",
+            "mode/php/php.min.js",
+            "mode/ruby/ruby.min.js",
+            "mode/perl/perl.min.js",
+            "mode/lua/lua.min.js",
+            "mode/clike/clike.min.js",
+            "mode/markdown/markdown.min.js"
+        ];
+
+        for(const mode of modes){
+            await flsLoadScriptOnce(base + mode);
+        }
+
+        return typeof CodeMirror !== "undefined";
+    } catch(e) {
+        return false;
+    }
+}
+
+async function flsInitCodeEditors(root){
     root = root || document;
+
+    const textareas = Array.from(root.querySelectorAll("textarea.fls-code-editor"));
+
+    if(!textareas.length){
+        return;
+    }
 
     /*
        手机端直接使用原生 textarea。
        注意：不要设置 cmInited，否则从手机切到桌面后无法初始化。
     */
     if(!flsShouldUseCodeMirror()){
-        root.querySelectorAll("textarea.fls-code-editor").forEach(function(textarea){
+        textareas.forEach(function(textarea){
             textarea.classList.add("fls-code-editor-native");
             textarea.style.minHeight = textarea.style.minHeight || "520px";
             textarea.style.fontFamily = "Consolas, Menlo, monospace";
@@ -497,11 +763,14 @@ function flsInitCodeEditors(root){
         return;
     }
 
-    if(typeof CodeMirror === "undefined") {
+    const loaded = await flsEnsureCodeMirrorLoaded();
+
+    if(!loaded || typeof CodeMirror === "undefined") {
         return;
     }
 
-    root.querySelectorAll("textarea.fls-code-editor").forEach(function(textarea){
+    textareas.forEach(function(textarea){
+        if(!document.body.contains(textarea)) return;
         if(textarea.dataset.cmInited === "1") return;
 
         textarea.dataset.cmInited = "1";
@@ -799,6 +1068,11 @@ if (document.readyState === "loading") {
         if (window.__FLS_ACTIVE_LOG_INTERVAL__) {
             clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
             window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
+        }
+
+        if (window.__FLS_DASHBOARD_RUNTIME_INTERVAL__) {
+            clearInterval(window.__FLS_DASHBOARD_RUNTIME_INTERVAL__);
+            window.__FLS_DASHBOARD_RUNTIME_INTERVAL__ = null;
         }
 
         oldContent.innerHTML = newContent.innerHTML;

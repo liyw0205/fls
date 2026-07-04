@@ -24,7 +24,7 @@ DEFAULT_CONFIG = {
 
     # 全局随机延迟，单位秒；0 表示不启用；启用范围 1-120
     "random_delay_seconds": 0,
-    
+
     # 面板虚拟时区，默认 UTC+8
     "timezone_offset_hours": 8,
 
@@ -32,7 +32,7 @@ DEFAULT_CONFIG = {
     # panel_now = 系统当前时间 + panel_time_offset_seconds
     # 用于校准 Cron。
     "panel_time_offset_seconds": 0,
-    
+
     "online_script_source": "https://raw.githubusercontent.com/liyw0205/fls-scripts/main/index.json",
 
     "task_types": {

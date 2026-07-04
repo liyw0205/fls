@@ -2,7 +2,7 @@ from ._common import *
 from ...ui.components import page_header_card, table_card
 
 
-@bp.route("/env/delete/<key>")
+@bp.route("/env/delete/<key>", methods=["POST"])
 def env_delete(key):
     env = load_global_env()
 

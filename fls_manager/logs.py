@@ -5,6 +5,7 @@ from datetime import datetime
 from .paths import LOG_DIR
 from .utils import safe_name
 from .config import load_config
+from .sensitive import mask_sensitive_text
 
 def log_file_for_task(task):
     display_name = task.get("name") or Path(task.get("command", "task")).stem or "未命名任务"
@@ -38,7 +39,7 @@ def tail_file(file_path, lines=800):
                 f.seek(size)
                 data = f.read(step) + data
             text = data.decode("utf-8", errors="replace")
-            return "\n".join(text.splitlines()[-lines:])
+            return mask_sensitive_text("\n".join(text.splitlines()[-lines:]))
     except Exception as e:
         return f"读取日志失败: {e}"
 

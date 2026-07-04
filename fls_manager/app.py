@@ -1,11 +1,13 @@
 import os
 import uuid
+from datetime import timedelta
 
 from flask import Flask
 
 from .paths import DATA_DIR
 
-from .auth import auth_before_request
+from .csrf import csrf_before_request
+from .auth import auth_before_request, FLS_AUTH_REMEMBER_SECONDS
 from .routes.auth_routes import bp as auth_bp
 from .routes.dashboard import bp as dashboard_bp
 from .routes.tasks import bp as tasks_bp
@@ -74,12 +76,15 @@ def create_app():
     app.secret_key = get_persistent_secret_key()
 
     # Cookie 基础配置。
-    # remember 登录时，auth.py 会设置 session.permanent 和有效期。
+    # remember 登录时，auth.py 会设置 session.permanent；
+    # 这里固定长期 Cookie 有效期，避免不同登录请求互相改写全局有效期。
     app.config.update(
+        PERMANENT_SESSION_LIFETIME=timedelta(seconds=FLS_AUTH_REMEMBER_SECONDS),
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
     )
 
+    app.before_request(csrf_before_request)
     app.before_request(auth_before_request)
 
     app.register_blueprint(auth_bp)

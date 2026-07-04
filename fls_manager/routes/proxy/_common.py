@@ -88,7 +88,7 @@ def proxy_form(proxy=None, mode="new"):
 
         <div class="form-item">
             <label>密码，可空</label>
-            <input name="password" value="{h(proxy.get('password', ''))}">
+            <input name="password" type="password" value="{h(proxy.get('password', ''))}" autocomplete="new-password">
         </div>
     </div>
 

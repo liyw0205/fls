@@ -119,7 +119,11 @@ class SchemaMigrationTests(unittest.TestCase):
                 first["random_delay"],
                 {"mode": "custom", "seconds": 120},
             )
-            self.assertEqual(first["retry_count"], 20)
+            self.assertEqual(
+                first["retry"],
+                {"attempts": 5, "interval_seconds": 60},
+            )
+            self.assertNotIn("retry_count", first)
             self.assertEqual(first["run_count"], 0)
             self.assertTrue(first["pinned"])
             self.assertEqual(first["remark"], "")
@@ -136,6 +140,10 @@ class SchemaMigrationTests(unittest.TestCase):
                 second["random_delay"],
                 {"mode": "none", "seconds": 0},
             )
+            self.assertEqual(
+                second["retry"],
+                {"attempts": 0, "interval_seconds": 60},
+            )
             self.assertTrue(second["enabled"])
 
             direct = models.normalize_task(
@@ -149,6 +157,10 @@ class SchemaMigrationTests(unittest.TestCase):
                         "mode": "default",
                         "seconds": 88,
                     },
+                    "retry": {
+                        "attempts": "3",
+                        "interval_seconds": "30",
+                    },
                 }
             )
             self.assertEqual(direct["notify"], {"mode": "default", "ids": []})
@@ -156,8 +168,87 @@ class SchemaMigrationTests(unittest.TestCase):
                 direct["random_delay"],
                 {"mode": "default", "seconds": 0},
             )
+            self.assertEqual(
+                direct["retry"],
+                {"attempts": 3, "interval_seconds": 30},
+            )
 
             self.assertEqual(read_json(paths.TASK_FILE), tasks)
+
+    def test_task_history_helpers_filter_update_prepend_and_trim_records(self):
+        with isolated_fls_modules():
+            from fls_manager import models, paths
+
+            models.TASK_HISTORY_LIMIT = 3
+            write_json(
+                paths.TASK_HISTORY_FILE,
+                [
+                    {
+                        "id": "h1",
+                        "task_id": "t1",
+                        "status": "success",
+                    },
+                    "bad row",
+                    {
+                        "id": "h2",
+                        "task_id": "t2",
+                        "status": "failed",
+                    },
+                    {
+                        "id": "h3",
+                        "task_id": "t1",
+                        "status": "running",
+                    },
+                ],
+            )
+
+            history = models.load_task_history()
+
+            self.assertEqual(
+                [item["id"] for item in history],
+                ["h1", "h2", "h3"],
+            )
+            self.assertEqual(
+                [item["id"] for item in models.task_history_for_task("t1", 1)],
+                ["h1"],
+            )
+            self.assertEqual(models.task_history_for_task("missing"), [])
+
+            self.assertTrue(
+                models.update_task_history(
+                    "h2",
+                    {
+                        "status": "success",
+                        "message": "fixed",
+                    },
+                )
+            )
+            self.assertFalse(models.update_task_history("", {"status": "failed"}))
+            self.assertFalse(models.update_task_history("missing", {"status": "failed"}))
+
+            persisted = read_json(paths.TASK_HISTORY_FILE)
+            self.assertEqual(
+                [item["id"] for item in persisted],
+                ["h1", "h2", "h3"],
+            )
+            self.assertEqual(persisted[1]["status"], "success")
+            self.assertEqual(persisted[1]["message"], "fixed")
+
+            models.add_task_history(
+                {
+                    "id": "h0",
+                    "task_id": "t0",
+                    "status": "starting",
+                }
+            )
+
+            trimmed = read_json(paths.TASK_HISTORY_FILE)
+
+            self.assertEqual(
+                [item["id"] for item in trimmed],
+                ["h0", "h1", "h2"],
+            )
+            self.assertNotIn("h3", [item["id"] for item in trimmed])
 
     def test_load_global_env_normalizes_keys_and_values(self):
         with isolated_fls_modules():

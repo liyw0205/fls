@@ -2,13 +2,58 @@ from flask import request, abort, Response
 
 from . import bp
 
-from ...models import get_task
+from ...models import get_task, task_history_for_task
 from ...utils import h, get_back_url
 from ...ui.layout import layout
 from ...ui.log_controls import log_controls
 from ...task_runner import run_task_now, stop_task_now, is_running
 from ...logs import latest_log_for_task, tail_file
 from ...state import RUNNING
+
+
+def history_status_badge(status):
+    status = str(status or "")
+    mapping = {
+        "success": ("green", "成功"),
+        "failed": ("red", "失败"),
+        "timeout": ("red", "超时"),
+        "stopped": ("gray", "手动停止"),
+        "running": ("blue", "运行中"),
+        "starting": ("blue", "启动中"),
+        "delaying": ("orange", "延迟中"),
+        "start_failed": ("red", "启动失败"),
+    }
+    cls, text = mapping.get(status, ("gray", status or "-"))
+    return f'<span class="badge {cls}">{h(text)}</span>'
+
+
+def render_task_history_rows(task_id):
+    rows = ""
+
+    for item in task_history_for_task(task_id, 10):
+        log_file = str(item.get("log_file") or "")
+        log_btn = ""
+
+        if log_file:
+            filename = log_file.split("/")[-1].split("\\")[-1]
+            log_btn = f'<a class="btn btn-orange" href="/logfile/{h(filename)}?back=/log/{h(task_id)}">日志</a>'
+
+        rows += f"""
+<tr>
+    <td>{h(item.get("start_at") or "-")}</td>
+    <td>{history_status_badge(item.get("status"))}</td>
+    <td>{h(item.get("duration_seconds", 0))} 秒</td>
+    <td>{h(item.get("return_code") if item.get("return_code") is not None else "-")}</td>
+    <td>{h(item.get("source") or "-")}</td>
+    <td>{h(item.get("message") or "-")}</td>
+    <td>{log_btn}</td>
+</tr>
+"""
+
+    if not rows:
+        rows = '<tr><td colspan="7">暂无运行历史</td></tr>'
+
+    return rows
 
 
 @bp.route("/log/<task_id>")
@@ -43,9 +88,31 @@ def log_view(task_id):
     </div>
     <br>
     <a class="btn btn-primary" href="/run/{h(task_id)}?back={h(back_url)}">运行</a>
-    <a class="btn btn-red" href="/stop/{h(task_id)}?back={h(back_url)}" onclick="return confirm('确定结束该任务吗？')">结束</a>
+    <form class="inline-form" method="post" action="/stop/{h(task_id)}?back={h(back_url)}">
+        <button class="btn btn-red" type="submit" onclick="return confirm('确定结束该任务吗？')">结束</button>
+    </form>
     {config_btn}
     <a class="btn btn-gray" href="{h(back_url)}">返回</a>
+</div>
+
+<div class="card">
+    <div class="card-title">最近运行历史</div>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>开始时间</th>
+                    <th>状态</th>
+                    <th>耗时</th>
+                    <th>退出码</th>
+                    <th>来源</th>
+                    <th>说明</th>
+                    <th>日志</th>
+                </tr>
+            </thead>
+            <tbody>{render_task_history_rows(task_id)}</tbody>
+        </table>
+    </div>
 </div>
 
 <pre class="log" id="log">加载中...</pre>

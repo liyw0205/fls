@@ -7,6 +7,7 @@ from ...logs import cleanup_logs
 from ...utils import h
 from ...ui.layout import layout
 from ...auth import auth_clear_session
+from ...sensitive import mask_secret_value
 from ...security import (
     generate_totp_secret,
     verify_totp,

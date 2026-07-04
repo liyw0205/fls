@@ -34,7 +34,6 @@ PAGES = (
     ("/proxy", "page-proxy"),
     ("/config", "page-config"),
     ("/panel/status", "page-status"),
-    ("/about", "page-about"),
 )
 
 

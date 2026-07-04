@@ -12,7 +12,7 @@ from ..state import DEPS_RUNNING
 from ..utils import h, now_str, safe_name, get_back_url
 from ..logs import tail_file
 from ..ui.layout import layout
-from ..ui.components import page_header_card, table_card
+from ..ui.components import table_card
 
 bp = Blueprint("deps", __name__)
 
@@ -136,7 +136,10 @@ def deps_page():
     <td>{h(name)}</td>
     <td>{h(version)}</td>
     <td>
-        <a class="btn btn-red" href="/deps/uninstall?name={h(name)}" onclick="return confirm('确定卸载 {h(name)} 吗？')">卸载</a>
+        <form class="inline-form" method="post" action="/deps/uninstall">
+            <input type="hidden" name="name" value="{h(name)}">
+            <button class="btn btn-red" type="submit" onclick="return confirm('确定卸载 {h(name)} 吗？')">卸载</button>
+        </form>
     </td>
 </tr>
 """
@@ -323,21 +326,20 @@ def deps_refresh():
         actions_html='<a class="btn btn-gray" href="/deps">返回依赖管理</a>',
     )
 
-    header_card = page_header_card(
-        "刷新依赖完成",
-        help_html=f'刷新时间：{h(result["time"])}',
-    )
-
     body = f"""
-{header_card}
+<div class="card">
+    <div class="card-title">刷新依赖完成</div>
+    <div class="help">刷新时间：{h(result["time"])}</div>
+</div>
+
 {core_table}
 """
     return layout("刷新依赖", "deps", body)
 
 
-@bp.route("/deps/uninstall")
+@bp.route("/deps/uninstall", methods=["POST"])
 def deps_uninstall():
-    name = request.args.get("name", "").strip()
+    name = request.form.get("name", "").strip()
 
     if not name:
         return "依赖名不能为空", 400

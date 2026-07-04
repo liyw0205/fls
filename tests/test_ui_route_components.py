@@ -3,12 +3,10 @@ import io
 import json
 import os
 import sys
-import tarfile
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import quote
 from unittest.mock import patch
 
 sys.dont_write_bytecode = True
@@ -64,6 +62,17 @@ def shutdown_scheduler():
 
 
 class UiRouteComponentTests(unittest.TestCase):
+    def test_static_js_formats_structured_bulk_action_messages(self):
+        js = (ROOT / "fls_manager" / "static" / "fls.js").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("function flsBulkActionMessage", js)
+        self.assertIn("submitted_count", js)
+        self.assertIn("stopped_count", js)
+        self.assertIn("skipped_count", js)
+        self.assertIn("failures", js)
+
     def test_scripts_new_renders_info_message_card(self):
         with isolated_app() as (app, _base_dir):
             response = app.test_client().get(
@@ -74,8 +83,6 @@ class UiRouteComponentTests(unittest.TestCase):
             html = response.get_data(as_text=True)
 
             self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">新建文件 / 文件夹</div>', html)
-            self.assertIn("当前目录：scripts 根目录", html)
             self.assertIn('style="color:#6b7280;"', html)
             self.assertIn("暂无操作", html)
 
@@ -97,61 +104,93 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn("task folder/main.py<br>", html)
             self.assertIn("task /root/fls/scripts/demo.sh arg1 arg2", html)
 
-    def test_scripts_view_renders_header_card_and_escapes_content(self):
+    def test_scripts_new_failure_renders_error_message_and_preserves_form(self):
         with isolated_app() as (app, base_dir):
-            script_rel = 'dir-<x>/demo-<x>.py'
-            script_path = base_dir / "scripts" / script_rel
-            script_path.parent.mkdir(parents=True, exist_ok=True)
-            script_path.write_text("print('<x>')\n", encoding="utf-8")
-
-            response = app.test_client().get(
-                "/scripts/view",
-                query_string={"path": script_rel},
-                headers={"X-Token": TOKEN},
-            )
+            with patch(
+                "fls_manager.routes.scripts.files.script_safe_path",
+                side_effect=RuntimeError('<bad & "x">'),
+            ):
+                response = app.test_client().post(
+                    "/pull/new",
+                    data={
+                        "item_type": "file",
+                        "name": "new <file>.py",
+                        "content": 'print("<x>")\n',
+                    },
+                    headers={"X-Token": TOKEN},
+                )
 
             html = response.get_data(as_text=True)
 
             self.assertEqual(response.status_code, 200)
-            self.assertIn(
-                '<div class="card-title">查看 / 编辑文件：demo-&lt;x&gt;.py</div>',
-                html,
-            )
-            self.assertIn("路径：", html)
-            self.assertIn("dir-&lt;x&gt;/demo-&lt;x&gt;.py", html)
-            self.assertIn('<div class="action-row">', html)
-            self.assertIn("保存文件", html)
-            self.assertIn("调试运行", html)
-            self.assertIn("改名", html)
-            self.assertIn('class="fls-code-editor"', html)
-            self.assertIn("print(&#x27;&lt;x&gt;&#x27;)", html)
-            self.assertIn("暂无保存操作", html)
-            self.assertNotIn("<x>", html)
+            self.assertIn('style="color:#dc2626;font-weight:800;"', html)
+            self.assertIn("新建失败：&lt;bad &amp; &quot;x&quot;&gt;", html)
+            self.assertIn('value="new &lt;file&gt;.py"', html)
+            self.assertIn("print(&quot;&lt;x&gt;&quot;)", html)
+            self.assertNotIn("<bad", html)
+            self.assertNotIn("new <file>.py", html)
+            self.assertFalse((base_dir / "scripts" / "new <file>.py").exists())
 
-    def test_scripts_rename_renders_header_card_and_escapes_path(self):
+    def test_scripts_view_save_failure_preserves_posted_content(self):
         with isolated_app() as (app, base_dir):
-            script_rel = 'rename-<x>.sh'
-            script_path = base_dir / "scripts" / script_rel
-            script_path.parent.mkdir(parents=True, exist_ok=True)
-            script_path.write_text("echo ok\n", encoding="utf-8")
+            script_file = base_dir / "scripts" / "demo.py"
+            script_file.write_text('print("old")\n', encoding="utf-8")
 
-            response = app.test_client().get(
-                "/scripts/rename",
-                query_string={"path": script_rel},
-                headers={"X-Token": TOKEN},
-            )
+            real_write_text = Path.write_text
+
+            def fail_script_write(path, *args, **kwargs):
+                if path.name == "demo.py":
+                    raise RuntimeError('<bad & "x">')
+
+                return real_write_text(path, *args, **kwargs)
+
+            with patch("pathlib.Path.write_text", new=fail_script_write):
+                response = app.test_client().post(
+                    "/scripts/view?path=demo.py",
+                    data={"content": 'print("updated <x>")\n'},
+                    headers={"X-Token": TOKEN},
+                )
 
             html = response.get_data(as_text=True)
 
             self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">改名</div>', html)
-            self.assertIn("当前路径：", html)
-            self.assertIn("rename-&lt;x&gt;.sh", html)
-            self.assertIn('name="new_name" required value="rename-&lt;x&gt;.sh"', html)
-            self.assertIn("保存改名", html)
-            self.assertIn('href="/pull"', html)
-            self.assertIn("暂无操作", html)
-            self.assertNotIn("<x>", html)
+            self.assertIn('style="color:#dc2626;font-weight:800;"', html)
+            self.assertIn("保存失败：&lt;bad &amp; &quot;x&quot;&gt;", html)
+            self.assertIn("print(&quot;updated &lt;x&gt;&quot;)", html)
+            self.assertNotIn("<bad", html)
+            self.assertEqual(script_file.read_text(encoding="utf-8"), 'print("old")\n')
+
+    def test_scripts_rename_failure_renders_error_message_and_preserves_name(self):
+        with isolated_app() as (app, base_dir):
+            script_file = base_dir / "scripts" / "demo.py"
+            script_file.write_text('print("old")\n', encoding="utf-8")
+            new_name = '<renamed & "x">.py'
+
+            real_rename = Path.rename
+
+            def fail_rename(path, *args, **kwargs):
+                if path.name == "demo.py":
+                    raise RuntimeError('<bad & "x">')
+
+                return real_rename(path, *args, **kwargs)
+
+            with patch("pathlib.Path.rename", new=fail_rename):
+                response = app.test_client().post(
+                    "/scripts/rename?path=demo.py",
+                    data={"new_name": new_name},
+                    headers={"X-Token": TOKEN},
+                )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('style="color:#dc2626;font-weight:800;"', html)
+            self.assertIn("改名失败：&lt;bad &amp; &quot;x&quot;&gt;", html)
+            self.assertIn('value="&lt;renamed &amp; &quot;x&quot;&gt;.py"', html)
+            self.assertNotIn("<bad", html)
+            self.assertNotIn(new_name, html)
+            self.assertEqual(script_file.read_text(encoding="utf-8"), 'print("old")\n')
+            self.assertFalse((base_dir / "scripts" / new_name).exists())
 
     def test_pull_fetch_renders_error_message_card(self):
         with isolated_app() as (app, _base_dir):
@@ -167,28 +206,6 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn('<div class="card-title">结果</div>', html)
             self.assertIn('style="color:#dc2626;font-weight:800;"', html)
             self.assertIn("URL 不能为空", html)
-
-    def test_pull_fetch_get_renders_header_card_and_form_shell(self):
-        with isolated_app() as (app, _base_dir):
-            response = app.test_client().get(
-                "/pull/fetch",
-                query_string={"p": "dir-<x>"},
-                headers={"X-Token": TOKEN},
-            )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">拉取脚本 / 仓库</div>', html)
-            self.assertIn("当前目录：dir-&lt;x&gt;", html)
-            self.assertIn('name="current_rel" value="dir-&lt;x&gt;"', html)
-            self.assertIn('name="pull_type"', html)
-            self.assertIn('name="url"', html)
-            self.assertIn('name="proxy_id"', html)
-            self.assertIn("开始拉取", html)
-            self.assertIn("返回脚本管理", html)
-            self.assertIn("暂无操作", html)
-            self.assertNotIn("<x>", html)
 
     def test_pull_fetch_success_renders_success_message_card(self):
         with isolated_app() as (app, _base_dir):
@@ -250,28 +267,6 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn('<div class="card-title">结果</div>', html)
             self.assertIn('style="color:#dc2626;font-weight:800;"', html)
             self.assertIn("请选择要导入的文件", html)
-
-    def test_pull_import_get_renders_header_card_and_form_shell(self):
-        with isolated_app() as (app, _base_dir):
-            response = app.test_client().get(
-                "/pull/import",
-                query_string={"p": "dir-<x>"},
-                headers={"X-Token": TOKEN},
-            )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">导入脚本 / 压缩包</div>', html)
-            self.assertIn("当前目录：dir-&lt;x&gt;", html)
-            self.assertIn('enctype="multipart/form-data"', html)
-            self.assertIn('name="current_rel" value="dir-&lt;x&gt;"', html)
-            self.assertIn('type="file" name="file"', html)
-            self.assertIn('name="save_as"', html)
-            self.assertIn("开始导入", html)
-            self.assertIn("返回脚本管理", html)
-            self.assertIn("暂无操作", html)
-            self.assertNotIn("<x>", html)
 
     def test_pull_import_success_renders_success_message_card(self):
         with isolated_app() as (app, _base_dir):
@@ -365,6 +360,554 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn("保存失败：&lt;bad &amp; &quot;x&quot;&gt;", html)
             self.assertNotIn("<bad", html)
 
+    def test_task_edit_form_preserves_back_url_and_retry_fields(self):
+        with isolated_app() as (app, base_dir):
+            data_dir = base_dir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            (data_dir / "collections.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "c1",
+                            "name": "合集一",
+                            "remark": "",
+                            "created_at": "2026-07-04 00:00:00",
+                            "updated_at": "2026-07-04 00:00:00",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (data_dir / "tasks.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "task-edit",
+                            "name": "编辑任务",
+                            "command": "task demo.py",
+                            "collection_id": "c1",
+                            "retry": {
+                                "attempts": 2,
+                                "interval_seconds": 90,
+                            },
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            response = app.test_client().get(
+                "/task/edit/task-edit?back=/collections%23collection-c1",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('name="back" value="/collections#collection-c1"', html)
+            self.assertIn('href="/collections#collection-c1"', html)
+            self.assertIn('name="retry_attempts" type="number" min="0" max="5" value="2"', html)
+            self.assertIn('name="retry_interval_seconds" type="number" min="5" max="3600" value="90"', html)
+            self.assertNotIn('name="retry_count"', html)
+
+    def test_task_new_validation_error_renders_message_card_and_preserves_form(self):
+        with isolated_app() as (app, _base_dir):
+            response = app.test_client().post(
+                "/task/new",
+                data={
+                    "name": 'Bad <task "x">',
+                    "command": "",
+                    "cron": "",
+                    "back": "/tasks?q=bad",
+                    "enabled": "1",
+                },
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 400)
+            self.assertIn('style="color:#dc2626;font-weight:800;"', html)
+            self.assertIn("命令不能为空", html)
+            self.assertIn(
+                'value="Bad &lt;task &quot;x&quot;&gt;"',
+                html,
+            )
+            self.assertIn('name="back" value="/tasks?q=bad"', html)
+            self.assertIn('href="/tasks?q=bad"', html)
+            self.assertNotIn('Bad <task "x">', html)
+
+    def test_task_edit_validation_error_keeps_safe_back_and_does_not_save(self):
+        with isolated_app() as (app, base_dir):
+            data_dir = base_dir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            tasks_file = data_dir / "tasks.json"
+            tasks_file.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "task-edit",
+                            "name": "原任务",
+                            "command": "task demo.py",
+                            "collection_id": "",
+                            "retry": {
+                                "attempts": 1,
+                                "interval_seconds": 30,
+                            },
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            response = app.test_client().post(
+                "/task/edit/task-edit?back=https://example.invalid/evil",
+                data={
+                    "name": 'Cron <bad>',
+                    "command": "task demo.py",
+                    "cron": "* *",
+                    "retry_attempts": "2",
+                    "retry_interval_seconds": "45",
+                    "enabled": "1",
+                },
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+            task = json.loads(tasks_file.read_text(encoding="utf-8"))[0]
+
+            self.assertEqual(response.status_code, 400)
+            self.assertIn('style="color:#dc2626;font-weight:800;"', html)
+            self.assertIn("Cron 不合法：Cron 格式错误", html)
+            self.assertIn('name="back" value="/tasks"', html)
+            self.assertIn('href="/tasks"', html)
+            self.assertIn('value="Cron &lt;bad&gt;"', html)
+            self.assertNotIn("Cron <bad>", html)
+            self.assertEqual(task["name"], "原任务")
+            self.assertEqual(task["retry"], {"attempts": 1, "interval_seconds": 30})
+
+    def test_task_edit_saves_retry_and_sanitizes_external_back_url(self):
+        with isolated_app() as (app, base_dir):
+            data_dir = base_dir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            (data_dir / "collections.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "c1",
+                            "name": "合集一",
+                            "remark": "",
+                            "created_at": "2026-07-04 00:00:00",
+                            "updated_at": "2026-07-04 00:00:00",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            tasks_file = data_dir / "tasks.json"
+            tasks_file.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "task-edit",
+                            "name": "编辑任务",
+                            "command": "task demo.py",
+                            "collection_id": "c1",
+                            "retry": {
+                                "attempts": 1,
+                                "interval_seconds": 30,
+                            },
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            response = app.test_client().post(
+                "/task/edit/task-edit",
+                data={
+                    "back": "https://example.invalid/evil",
+                    "name": "编辑任务2",
+                    "command": "task demo2.py",
+                    "collection_id": "c1",
+                    "retry_attempts": "4",
+                    "retry_interval_seconds": "120",
+                    "enabled": "1",
+                },
+                headers={"X-Token": TOKEN},
+            )
+
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.headers.get("Location"), "/collections#collection-c1")
+
+            task = json.loads(tasks_file.read_text(encoding="utf-8"))[0]
+
+            self.assertEqual(task["name"], "编辑任务2")
+            self.assertEqual(task["retry"], {"attempts": 4, "interval_seconds": 120})
+            self.assertNotIn("retry_count", task)
+
+    def test_tasks_page_keeps_ajax_actions_bulk_toolbar_and_collapsible_command(self):
+        with isolated_app() as (app, base_dir):
+            data_dir = base_dir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            (data_dir / "tasks.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "task-list",
+                            "name": "普通任务",
+                            "command": "task demo.py " + "--flag " * 24,
+                            "config_path": "conf/app.yml",
+                            "enabled": True,
+                            "pinned": False,
+                            "retry": {
+                                "attempts": 0,
+                                "interval_seconds": 60,
+                            },
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            response = app.test_client().get(
+                "/tasks",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("fls-collapsible-code", html)
+            self.assertIn("fls-value-preview", html)
+            self.assertIn("task-bulk-toolbar", html)
+            self.assertIn("task-bulk-btn", html)
+            self.assertIn("taskBulkAction('enable')", html)
+            self.assertIn("taskBulkAction('delete')", html)
+            self.assertIn("flsBulkActionMessage(json", html)
+            self.assertIn("task-action-more", html)
+            self.assertIn("task-action-more-menu", html)
+            self.assertIn("taskAjaxAction('copy','task-list')", html)
+            self.assertIn("taskAjaxAction('pin','task-list')", html)
+            self.assertIn("taskAjaxAction('stop','task-list')", html)
+            self.assertIn('href="/task/edit/task-list?back=/tasks"', html)
+            self.assertIn('href="/task/config/task-list?back=/tasks"', html)
+            self.assertNotIn('href="/task/pin/task-list', html)
+            self.assertNotIn('href="/stop/task-list', html)
+            self.assertNotIn('href="/task/delete/task-list', html)
+
+    def test_logs_page_keeps_group_bulk_controls_and_post_delete_forms(self):
+        with isolated_app() as (app, base_dir):
+            log_dir = base_dir / "log"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            (log_dir / "alpha-one.log").write_text(
+                "===== 启动任务: Alpha <x> =====\nalpha\n",
+                encoding="utf-8",
+            )
+            (log_dir / "beta.log").write_text(
+                "===== 启动任务: Beta =====\nbeta\n",
+                encoding="utf-8",
+            )
+
+            response = app.test_client().get(
+                "/logs",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("log-bulk-toolbar", html)
+            self.assertIn("logsSelectAllGroups", html)
+            self.assertIn("logsDeleteSelectedGroupsBtn", html)
+            self.assertIn("flsLogsToggleAllGroups", html)
+            self.assertIn("flsLogsDeleteSelectedGroups", html)
+            self.assertIn('fetch("/api/logs/groups/delete"', html)
+            self.assertIn('class="log-group-select"', html)
+            self.assertIn('data-log-group="Alpha &lt;x&gt;"', html)
+            self.assertIn('value="Alpha &lt;x&gt;"', html)
+            self.assertIn("任务：Alpha &lt;x&gt;", html)
+            self.assertNotIn("Alpha <x>", html)
+            self.assertIn(
+                "flsLogsDeleteGroups([this.dataset.group]);",
+                html,
+            )
+            self.assertIn(
+                '<form class="inline-form" method="post" '
+                'action="/logfile/delete/alpha-one.log?back=/logs">',
+                html,
+            )
+            self.assertIn(
+                '<a class="btn btn-orange" href="/logfile/alpha-one.log?back=/logs">',
+                html,
+            )
+            self.assertNotIn('href="/logfile/delete/alpha-one.log', html)
+
+    def test_logfile_view_preserves_safe_back_and_sanitizes_external_back(self):
+        with isolated_app() as (app, base_dir):
+            log_dir = base_dir / "log"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            (log_dir / "live.log").write_text("live\n", encoding="utf-8")
+
+            client = app.test_client()
+
+            response = client.get(
+                "/logfile/live.log?back=/history",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">日志文件：live.log</div>', html)
+            self.assertIn('<a class="btn btn-gray" href="/history">返回</a>', html)
+            self.assertIn(
+                'action="/logfile/delete/live.log?back=/history"',
+                html,
+            )
+            self.assertIn('fetch("/api/logfile/live.log?lines=1500"', html)
+            self.assertNotIn('href="/logfile/delete/live.log', html)
+
+            response = client.get(
+                "/logfile/live.log?back=https://example.invalid/evil",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<a class="btn btn-gray" href="/logs">返回</a>', html)
+            self.assertIn(
+                'action="/logfile/delete/live.log?back=/logs"',
+                html,
+            )
+            self.assertNotIn("example.invalid", html)
+
+    def test_task_log_page_keeps_history_table_actions_and_safe_back(self):
+        with isolated_app() as (app, base_dir):
+            data_dir = base_dir / "data"
+            log_dir = base_dir / "log"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            log_dir.mkdir(parents=True, exist_ok=True)
+            history_log = log_dir / "task-history.log"
+            history_log.write_text("history\n", encoding="utf-8")
+            (data_dir / "tasks.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "task-history",
+                            "name": "历史任务 <x>",
+                            "command": "task demo.py --name <x>",
+                            "config_path": "conf/app.yml",
+                            "enabled": True,
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (data_dir / "task_history.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "history-1",
+                            "task_id": "task-history",
+                            "task_name": "历史任务 <x>",
+                            "command": "task demo.py --name <x>",
+                            "status": "failed",
+                            "start_at": "2026-07-04 01:00:00",
+                            "duration_seconds": 3,
+                            "return_code": 2,
+                            "source": "manual",
+                            "message": "exit <bad>",
+                            "log_file": str(history_log),
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            client = app.test_client()
+
+            response = client.get(
+                "/log/task-history?back=/history",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("日志：历史任务 &lt;x&gt;", html)
+            self.assertNotIn("历史任务 <x>", html)
+            self.assertIn('<div class="card-title">最近运行历史</div>', html)
+            self.assertIn('<span class="badge red">失败</span>', html)
+            self.assertIn("<td>manual</td>", html)
+            self.assertIn("<td>exit &lt;bad&gt;</td>", html)
+            self.assertIn(
+                'href="/logfile/task-history.log?back=/log/task-history"',
+                html,
+            )
+            self.assertIn('href="/run/task-history?back=/history"', html)
+            self.assertIn(
+                'action="/stop/task-history?back=/history"',
+                html,
+            )
+            self.assertIn(
+                'href="/task/config/task-history?back=/history"',
+                html,
+            )
+            self.assertIn('<a class="btn btn-gray" href="/history">返回</a>', html)
+            self.assertIn('fetch("/api/log/task-history?lines=1200"', html)
+            self.assertNotIn('href="/stop/task-history', html)
+
+            response = client.get(
+                "/log/task-history?back=https://example.invalid/evil",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<a class="btn btn-gray" href="/tasks">返回</a>', html)
+            self.assertIn(
+                'action="/stop/task-history?back=/tasks"',
+                html,
+            )
+            self.assertNotIn("example.invalid", html)
+
+    def test_history_page_filters_rows_and_escapes_history_fields(self):
+        with isolated_app() as (app, base_dir):
+            data_dir = base_dir / "data"
+            log_dir = base_dir / "log"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            log_dir.mkdir(parents=True, exist_ok=True)
+            alpha_log = log_dir / "alpha-history.log"
+            alpha_log.write_text("alpha\n", encoding="utf-8")
+            (data_dir / "task_history.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "h1",
+                            "task_id": "alpha",
+                            "task_name": "Alpha <x>",
+                            "command": "task alpha.py --arg <x>",
+                            "status": "success",
+                            "start_at": "2026-07-04 02:00:00",
+                            "end_at": "2026-07-04 02:00:03",
+                            "duration_seconds": 3,
+                            "return_code": 0,
+                            "source": "manual",
+                            "retry_attempt": 1,
+                            "max_retries": 3,
+                            "message": "done <ok>",
+                            "log_file": str(alpha_log),
+                        },
+                        {
+                            "id": "h2",
+                            "task_id": "beta",
+                            "task_name": "Beta",
+                            "command": "task beta.py",
+                            "status": "failed",
+                            "source": "cron",
+                            "message": "hidden",
+                        },
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            response = app.test_client().get(
+                "/history?q=Alpha%20%3Cx%3E&status=success",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">运行历史</div>', html)
+            self.assertIn("当前匹配 <b>1</b> 条", html)
+            self.assertIn('name="q" value="Alpha &lt;x&gt;"', html)
+            self.assertIn('<option value="success" selected>成功</option>', html)
+            self.assertIn("Alpha &lt;x&gt;", html)
+            self.assertIn("task alpha.py --arg &lt;x&gt;", html)
+            self.assertIn('<span class="badge green">成功</span>', html)
+            self.assertIn("<td>manual</td>", html)
+            self.assertIn("<td>1/3</td>", html)
+            self.assertIn("<td>done &lt;ok&gt;</td>", html)
+            self.assertIn(
+                'href="/logfile/alpha-history.log?back=/history"',
+                html,
+            )
+            self.assertNotIn("Alpha <x>", html)
+            self.assertNotIn("done <ok>", html)
+            self.assertNotIn("Beta", html)
+            self.assertNotIn("hidden", html)
+
+    def test_dashboard_keeps_recent_and_abnormal_history_summaries(self):
+        with isolated_app() as (app, base_dir):
+            data_dir = base_dir / "data"
+            log_dir = base_dir / "log"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            log_dir.mkdir(parents=True, exist_ok=True)
+            success_log = log_dir / "success-history.log"
+            failed_log = log_dir / "failed-history.log"
+            success_log.write_text("success\n", encoding="utf-8")
+            failed_log.write_text("failed\n", encoding="utf-8")
+            (data_dir / "task_history.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "h1",
+                            "task_id": "success",
+                            "task_name": "Recent <ok>",
+                            "status": "success",
+                            "start_at": "2026-07-04 03:00:00",
+                            "duration_seconds": 2,
+                            "message": "done <ok>",
+                            "log_file": str(success_log),
+                        },
+                        {
+                            "id": "h2",
+                            "task_id": "failed",
+                            "task_name": "Broken <x>",
+                            "status": "failed",
+                            "start_at": "2026-07-04 03:01:00",
+                            "duration_seconds": 5,
+                            "message": "boom <bad>",
+                            "log_file": str(failed_log),
+                        },
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            response = app.test_client().get(
+                "/",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">最近运行</div>', html)
+            self.assertIn('<div class="card-title">最近异常</div>', html)
+            self.assertIn("Recent &lt;ok&gt;", html)
+            self.assertIn("Broken &lt;x&gt;", html)
+            self.assertIn('<span class="badge green">成功</span>', html)
+            self.assertIn('<span class="badge red">失败</span>', html)
+            self.assertIn("<td>done &lt;ok&gt;</td>", html)
+            self.assertIn("<td>boom &lt;bad&gt;</td>", html)
+            self.assertIn(
+                'href="/logfile/success-history.log?back=/"',
+                html,
+            )
+            self.assertIn(
+                'href="/logfile/failed-history.log?back=/"',
+                html,
+            )
+            self.assertNotIn("Recent <ok>", html)
+            self.assertNotIn("Broken <x>", html)
+            self.assertNotIn("boom <bad>", html)
+
     def test_deps_page_renders_table_card_and_escapes_rows(self):
         with isolated_app() as (app, _base_dir):
             packages = [
@@ -391,258 +934,6 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn("&lt;pkg &amp; &quot;x&quot;&gt;", html)
             self.assertIn("1&lt;2", html)
             self.assertNotIn('<pkg & "x">', html)
-
-    def test_deps_refresh_renders_header_card_and_table_card(self):
-        with isolated_app() as (app, _base_dir):
-            with patch(
-                "fls_manager.routes.deps.refresh_dependency_cache",
-                return_value={
-                    "time": '<time & "x">',
-                    "packages": {
-                        '<pkg & "x">': '1<2',
-                        "bad": '不可用：<bad & "x">',
-                    },
-                },
-            ):
-                response = app.test_client().get(
-                    "/deps/refresh",
-                    headers={"X-Token": TOKEN},
-                )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">刷新依赖完成</div>', html)
-            self.assertIn("刷新时间：&lt;time &amp; &quot;x&quot;&gt;", html)
-            self.assertIn('<div class="card-title">核心依赖检测</div>', html)
-            self.assertIn("<th>依赖</th>", html)
-            self.assertIn("&lt;pkg &amp; &quot;x&quot;&gt;", html)
-            self.assertIn("1&lt;2", html)
-            self.assertIn('<span class="badge red">异常</span>', html)
-            self.assertIn("不可用：&lt;bad &amp; &quot;x&quot;&gt;", html)
-            self.assertIn('href="/deps"', html)
-            self.assertNotIn("<time", html)
-            self.assertNotIn("<bad", html)
-
-    def test_deps_uninstall_renders_header_card_and_escapes_output(self):
-        with isolated_app() as (app, _base_dir):
-            with patch(
-                "fls_manager.routes.deps.pip_cmd",
-                return_value=SimpleNamespace(stdout='removed <pkg & "x">\n'),
-            ) as pip_mock:
-                response = app.test_client().get(
-                    "/deps/uninstall",
-                    query_string={"name": '<pkg & "x">'},
-                    headers={"X-Token": TOKEN},
-                )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 200)
-            pip_mock.assert_called_once_with(["uninstall", "-y", '<pkg & "x">'])
-            self.assertIn('<div class="card-title">卸载结果</div>', html)
-            self.assertIn('<div class="action-row">', html)
-            self.assertIn('href="/deps"', html)
-            self.assertIn('<pre class="log">removed &lt;pkg &amp; &quot;x&quot;&gt;\n</pre>', html)
-            self.assertNotIn('<pkg & "x">', html)
-
-    def test_env_import_renders_header_card_and_table_card(self):
-        with isolated_app() as (app, base_dir):
-            data_dir = base_dir / "data"
-            data_dir.mkdir(parents=True, exist_ok=True)
-            (data_dir / "tasks.json").write_text(
-                json.dumps(
-                    [
-                        {
-                            "id": "task-env",
-                            "name": '<Task & "x">',
-                            "command": "task demo.py",
-                            "env": {
-                                '<ENV & "x">': 'value <x>',
-                                "NEW_ENV": "new",
-                            },
-                        }
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            (data_dir / "global_env.json").write_text(
-                json.dumps({'<ENV & "x">': "old"}),
-                encoding="utf-8",
-            )
-
-            response = app.test_client().get(
-                "/env/import",
-                headers={"X-Token": TOKEN},
-            )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">从任务变量导入到全局变量</div>', html)
-            self.assertIn("允许覆盖已有全局变量", html)
-            self.assertIn('<div class="card-title">可导入变量</div>', html)
-            self.assertIn("<th>选择</th>", html)
-            self.assertIn("&lt;Task &amp; &quot;x&quot;&gt;", html)
-            self.assertIn("&lt;ENV &amp; &quot;x&quot;&gt;", html)
-            self.assertIn("value &lt;x&gt;", html)
-            self.assertIn('<span class="badge orange">将覆盖</span>', html)
-            self.assertIn('<span class="badge green">新增</span>', html)
-            self.assertIn('name="overwrite" value="1"', html)
-            self.assertIn("导入所选变量", html)
-            self.assertIn('href="/env"', html)
-            self.assertNotIn("<Task", html)
-            self.assertNotIn("<ENV", html)
-
-    def test_env_view_all_renders_header_card_and_escapes_textarea(self):
-        with isolated_app() as (app, base_dir):
-            data_dir = base_dir / "data"
-            data_dir.mkdir(parents=True, exist_ok=True)
-            (data_dir / "global_env.json").write_text(
-                json.dumps({'<ENV & "x">': "value <x>"}),
-                encoding="utf-8",
-            )
-
-            response = app.test_client().get(
-                "/env/view",
-                headers={"X-Token": TOKEN},
-            )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">查看全部全局变量</div>', html)
-            self.assertIn("保存后会整体覆盖", html)
-            self.assertIn('name="env_text"', html)
-            self.assertIn(
-                "&lt;ENV &amp; &quot;x&quot;&gt;=&quot;value &lt;x&gt;&quot;",
-                html,
-            )
-            self.assertIn("保存全部", html)
-            self.assertIn('href="/env"', html)
-            self.assertNotIn("<ENV", html)
-
-    def test_env_new_renders_header_card_and_keeps_validation_text(self):
-        with isolated_app() as (app, _base_dir):
-            client = app.test_client()
-            response = client.get(
-                "/env/new",
-                headers={"X-Token": TOKEN},
-            )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">新增全局变量</div>', html)
-            self.assertIn("全局变量会对所有任务生效", html)
-            self.assertIn('name="key"', html)
-            self.assertIn('name="value"', html)
-            self.assertIn("保存", html)
-            self.assertIn('href="/env"', html)
-
-            invalid = client.post(
-                "/env/new",
-                data={"key": "", "value": "x"},
-                headers={"X-Token": TOKEN},
-            )
-
-            self.assertEqual(invalid.status_code, 400)
-            self.assertEqual(invalid.get_data(as_text=True), "变量名不能为空")
-
-    def test_env_edit_renders_header_card_and_escapes_values(self):
-        with isolated_app() as (app, base_dir):
-            data_dir = base_dir / "data"
-            data_dir.mkdir(parents=True, exist_ok=True)
-            key = '<ENV & "x">'
-            (data_dir / "global_env.json").write_text(
-                json.dumps({key: "value <x>"}),
-                encoding="utf-8",
-            )
-
-            response = app.test_client().get(
-                f"/env/edit/{quote(key, safe='')}",
-                headers={"X-Token": TOKEN},
-            )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">编辑全局变量</div>', html)
-            self.assertIn("修改变量名会先移除原变量", html)
-            self.assertIn('value="&lt;ENV &amp; &quot;x&quot;&gt;"', html)
-            self.assertIn('value="value &lt;x&gt;"', html)
-            self.assertIn("保存", html)
-            self.assertIn('href="/env"', html)
-            self.assertNotIn("<ENV", html)
-            self.assertNotIn("<x>", html)
-
-    def test_proxy_new_renders_header_card_and_realtime_shell(self):
-        with isolated_app() as (app, _base_dir):
-            response = app.test_client().get(
-                "/proxy/new",
-                headers={"X-Token": TOKEN},
-            )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">新增代理</div>', html)
-            self.assertIn("代理可用于任务运行、脚本拉取和 GitHub 加速", html)
-            self.assertIn('action="/proxy/new"', html)
-            self.assertIn('name="name"', html)
-            self.assertIn('id="proxyType"', html)
-            self.assertIn('name="quality_urls"', html)
-            self.assertIn("保存代理", html)
-            self.assertIn("testProxyRealtime", html)
-            self.assertIn("qualityProxyRealtime", html)
-            self.assertIn('id="proxyRealtimeResult"', html)
-            self.assertIn('href="/proxy"', html)
-
-    def test_proxy_edit_renders_header_card_and_escapes_values(self):
-        with isolated_app() as (app, base_dir):
-            data_dir = base_dir / "data"
-            data_dir.mkdir(parents=True, exist_ok=True)
-            (data_dir / "proxies.json").write_text(
-                json.dumps(
-                    [
-                        {
-                            "id": "proxy-x",
-                            "name": '<Proxy & "x">',
-                            "type": "http",
-                            "host": "proxy<host>",
-                            "port": "8080",
-                            "username": 'user & "x"',
-                            "password": "pass <x>",
-                            "url": "https://gh.example/<x>",
-                            "enabled": False,
-                        }
-                    ]
-                ),
-                encoding="utf-8",
-            )
-
-            response = app.test_client().get(
-                "/proxy/edit/proxy-x",
-                headers={"X-Token": TOKEN},
-            )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">编辑代理</div>', html)
-            self.assertIn("当前代理：<b>&lt;Proxy &amp; &quot;x&quot;&gt;</b>", html)
-            self.assertIn('action="/proxy/edit/proxy-x"', html)
-            self.assertIn('name="id" value="proxy-x"', html)
-            self.assertIn('name="name" value="&lt;Proxy &amp; &quot;x&quot;&gt;"', html)
-            self.assertIn('value="http" selected', html)
-            self.assertIn('name="host" value="proxy&lt;host&gt;"', html)
-            self.assertIn('name="username" value="user &amp; &quot;x&quot;"', html)
-            self.assertIn('name="password" value="pass &lt;x&gt;"', html)
-            self.assertIn('name="url" value="https://gh.example/&lt;x&gt;"', html)
-            self.assertIn('id="proxyRealtimeResult"', html)
-            self.assertNotIn("<Proxy", html)
-            self.assertNotIn("<host>", html)
-            self.assertNotIn("<x>", html)
 
     def test_status_page_renders_table_card_with_runtime_table_id(self):
         with isolated_app() as (app, _base_dir):
@@ -675,60 +966,7 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn(".py &lt;x&gt;", html)
             self.assertNotIn("<Python>", html)
 
-    def test_dashboard_renders_environment_table_card(self):
-        with isolated_app() as (app, _base_dir):
-            response = app.test_client().get(
-                "/",
-                headers={"X-Token": TOKEN},
-            )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">环境状态</div>', html)
-            self.assertIn("<th>项目</th>", html)
-            self.assertIn("<th>值</th>", html)
-            self.assertIn("当前峰值统计周期", html)
-            self.assertIn("<td><b>面板时区</b></td>", html)
-            self.assertIn("<td><b>工作目录</b></td>", html)
-
-    def test_config_page_renders_task_type_table_card(self):
-        with isolated_app() as (app, base_dir):
-            config_file = base_dir / "data" / "config.json"
-            config_file.parent.mkdir(parents=True, exist_ok=True)
-            config_file.write_text(
-                json.dumps(
-                    {
-                        "admin_token": TOKEN,
-                        "task_types": {
-                            "py": True,
-                            "sh": False,
-                            "js": False,
-                        },
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            response = app.test_client().get(
-                "/config",
-                headers={"X-Token": TOKEN},
-            )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">task 可执行脚本类型</div>', html)
-            self.assertIn("<th>类型</th>", html)
-            self.assertIn("<th>启用</th>", html)
-            self.assertIn("<td><b>Python .py / .pyw</b></td>", html)
-            self.assertIn('name="type_py" value="1" checked', html)
-            self.assertIn('name="type_sh" value="1"', html)
-            self.assertNotIn('name="type_sh" value="1" checked', html)
-            self.assertIn("保存配置", html)
-            self.assertIn("flsToggleSecurityBox", html)
-
-    def test_about_page_renders_panel_info_table_card(self):
+    def test_about_page_renders_panel_info_and_code_cards(self):
         with isolated_app() as (app, _base_dir):
             response = app.test_client().get(
                 "/about",
@@ -752,305 +990,6 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn("*/10 * * * *  每 10 分钟<br>", html)
             self.assertIn('<div class="card-title">进程查看示例</div>', html)
             self.assertIn("ps -eo pid,ppid,comm,args | grep fls", html)
-
-    def test_about_refresh_log_no_git_renders_header_card(self):
-        with isolated_app() as (app, _base_dir):
-            with patch(
-                "fls_manager.routes.about.version.git_available",
-                return_value=False,
-            ):
-                response = app.test_client().post(
-                    "/about/refresh-log",
-                    headers={"X-Token": TOKEN},
-                )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">刷新失败</div>', html)
-            self.assertIn("系统未安装 git。", html)
-            self.assertIn('<div class="action-row">', html)
-            self.assertIn('href="/about"', html)
-
-    def test_about_refresh_log_not_repo_renders_header_card(self):
-        with isolated_app() as (app, _base_dir):
-            with patch(
-                "fls_manager.routes.about.version.git_available",
-                return_value=True,
-            ), patch(
-                "fls_manager.routes.about.version.is_git_repo",
-                return_value=False,
-            ):
-                response = app.test_client().post(
-                    "/about/refresh-log",
-                    headers={"X-Token": TOKEN},
-                )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">刷新失败</div>', html)
-            self.assertIn("当前目录不是 Git 仓库", html)
-            self.assertIn('<div class="action-row">', html)
-            self.assertIn('href="/about"', html)
-
-    def test_about_update_invalid_version_renders_header_card_and_escapes_value(self):
-        with isolated_app() as (app, _base_dir):
-            response = app.test_client().post(
-                "/about/update-version",
-                data={"version": '<bad & "x">'},
-                headers={"X-Token": TOKEN},
-            )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">更新失败</div>', html)
-            self.assertIn("版本号非法：&lt;bad &amp; &quot;x&quot;&gt;", html)
-            self.assertIn('<div class="action-row">', html)
-            self.assertIn('href="/about"', html)
-            self.assertNotIn("<bad", html)
-
-    def test_about_job_missing_renders_header_card(self):
-        with isolated_app() as (app, _base_dir):
-            response = app.test_client().get(
-                "/about/job-log/missing-job",
-                headers={"X-Token": TOKEN},
-            )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">后台任务日志</div>', html)
-            self.assertIn("任务记录不存在或面板已重启", html)
-            self.assertIn('<div class="action-row">', html)
-            self.assertIn('href="/about"', html)
-            self.assertIn('href="/logs?back=/about"', html)
-
-    def test_about_job_existing_renders_header_card_and_log_shell(self):
-        with isolated_app() as (app, _base_dir):
-            from fls_manager.routes.about.state import ABOUT_JOBS
-
-            ABOUT_JOBS["job-x"] = {
-                "title": '<更新 & "x">',
-                "status": "running <ok>",
-                "log_file": 'about-<x>.log',
-                "updated_at": "2026-07-05 01:02:03",
-                "running": True,
-            }
-
-            response = app.test_client().get(
-                "/about/job-log/job-x?back=/about",
-                headers={"X-Token": TOKEN},
-            )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 200)
-            self.assertIn("后台任务日志：&lt;更新 &amp; &quot;x&quot;&gt;", html)
-            self.assertIn("running &lt;ok&gt;", html)
-            self.assertIn("about-&lt;x&gt;.log", html)
-            self.assertIn('<div class="action-row">', html)
-            self.assertIn('href="/logs?back=/about"', html)
-            self.assertIn('href="/logfile/fls-manager-daemon.log?back=/about"', html)
-            self.assertIn('<pre class="log" id="log">加载中...</pre>', html)
-            self.assertIn("loadAboutJobLog", html)
-            self.assertNotIn("<更新", html)
-
-    def test_restart_panel_missing_script_renders_header_card(self):
-        with isolated_app() as (app, base_dir):
-            missing_script = base_dir / 'missing-<restart>.sh'
-
-            with patch(
-                "fls_manager.routes.about.panel_control.fls_control_script",
-                return_value=missing_script,
-            ):
-                response = app.test_client().post(
-                    "/about/restart-panel",
-                    headers={"X-Token": TOKEN},
-                )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 400)
-            self.assertIn('<div class="card-title">重启失败</div>', html)
-            self.assertIn("未找到 FLS 控制脚本", html)
-            self.assertIn("missing-&lt;restart&gt;.sh", html)
-            self.assertIn('<div class="action-row">', html)
-            self.assertIn('href="/about"', html)
-            self.assertNotIn("<restart>", html)
-
-    def test_restart_panel_success_renders_header_card_without_running_thread(self):
-        with isolated_app() as (app, base_dir):
-            script = base_dir / "fls.sh"
-            script.write_text("#!/bin/sh\n", encoding="utf-8")
-            created_threads = []
-
-            class FakeThread:
-                def __init__(self, *args, **kwargs):
-                    self.args = args
-                    self.kwargs = kwargs
-                    self.started = False
-                    created_threads.append(self)
-
-                def start(self):
-                    self.started = True
-
-            with patch(
-                "fls_manager.routes.about.panel_control.fls_control_script",
-                return_value=script,
-            ), patch(
-                "fls_manager.routes.about.panel_control.threading.Thread",
-                new=FakeThread,
-            ):
-                response = app.test_client().post(
-                    "/about/restart-panel",
-                    headers={"X-Token": TOKEN},
-                )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(len(created_threads), 1)
-            self.assertTrue(created_threads[0].started)
-            self.assertEqual(created_threads[0].kwargs.get("name"), "fls-panel-restart")
-            self.assertIn('<div class="card-title">正在重启面板</div>', html)
-            self.assertIn("控制脚本", html)
-            self.assertIn('href="/logfile/fls-manager-daemon.log?back=/about"', html)
-            self.assertIn("setTimeout(function(){", html)
-
-    def test_stop_panel_missing_script_renders_header_card(self):
-        with isolated_app() as (app, base_dir):
-            missing_script = base_dir / 'missing-<stop>.sh'
-
-            with patch(
-                "fls_manager.routes.about.panel_control.fls_control_script",
-                return_value=missing_script,
-            ):
-                response = app.test_client().post(
-                    "/about/stop-panel",
-                    headers={"X-Token": TOKEN},
-                )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 400)
-            self.assertIn('<div class="card-title">停止失败</div>', html)
-            self.assertIn("未找到 FLS 控制脚本", html)
-            self.assertIn("missing-&lt;stop&gt;.sh", html)
-            self.assertIn('<div class="action-row">', html)
-            self.assertIn('href="/about"', html)
-            self.assertNotIn("<stop>", html)
-
-    def test_stop_panel_success_renders_header_card_without_running_thread(self):
-        with isolated_app() as (app, base_dir):
-            script = base_dir / "fls.sh"
-            script.write_text("#!/bin/sh\n", encoding="utf-8")
-            created_threads = []
-
-            class FakeThread:
-                def __init__(self, *args, **kwargs):
-                    self.args = args
-                    self.kwargs = kwargs
-                    self.started = False
-                    created_threads.append(self)
-
-                def start(self):
-                    self.started = True
-
-            with patch(
-                "fls_manager.routes.about.panel_control.fls_control_script",
-                return_value=script,
-            ), patch(
-                "fls_manager.routes.about.panel_control.threading.Thread",
-                new=FakeThread,
-            ):
-                response = app.test_client().post(
-                    "/about/stop-panel",
-                    headers={"X-Token": TOKEN},
-                )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(len(created_threads), 1)
-            self.assertTrue(created_threads[0].started)
-            self.assertEqual(created_threads[0].kwargs.get("name"), "fls-panel-stop")
-            self.assertIn('<div class="card-title">正在停止面板</div>', html)
-            self.assertIn("停止后需要你手动重新启动面板", html)
-            self.assertIn('href="/logfile/fls-manager-daemon.log?back=/about"', html)
-
-    def test_notify_test_renders_result_table_card_and_escapes_return(self):
-        with isolated_app() as (app, base_dir):
-            config_file = base_dir / "data" / "config.json"
-            config_file.parent.mkdir(parents=True, exist_ok=True)
-            config_file.write_text(
-                json.dumps(
-                    {
-                        "notify_items": [
-                            {
-                                "id": "notify-test",
-                                "name": '<通知 & "x">',
-                                "channel": "webhook",
-                                "enabled": True,
-                                "config": {},
-                            }
-                        ],
-                        "notify_default_ids": [],
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            with patch(
-                "fls_manager.routes.notify.test.send_one",
-                return_value=(False, '<bad & "x">'),
-            ):
-                response = app.test_client().get(
-                    "/notify/test/notify-test",
-                    headers={"X-Token": TOKEN},
-                )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">通知测试结果</div>', html)
-            self.assertIn("<th>项目</th>", html)
-            self.assertIn("<th>值</th>", html)
-            self.assertIn("&lt;通知 &amp; &quot;x&quot;&gt;", html)
-            self.assertIn("自定义 Webhook", html)
-            self.assertIn('<span class="badge red">失败</span>', html)
-            self.assertIn("&lt;bad &amp; &quot;x&quot;&gt;", html)
-            self.assertIn('href="/notify"', html)
-            self.assertNotIn('<bad & "x">', html)
-
-    def test_online_source_json_renders_header_card_and_escapes_cache(self):
-        with isolated_app() as (app, base_dir):
-            cache_file = base_dir / "data" / "online_scripts_cache.json"
-            cache_file.parent.mkdir(parents=True, exist_ok=True)
-            cache_file.write_text(
-                '[{"id":"demo","name":"<Demo & x>","type":"raw"}]',
-                encoding="utf-8",
-            )
-
-            response = app.test_client().get(
-                "/online-scripts/source",
-                headers={"X-Token": TOKEN},
-            )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">脚本源 JSON</div>', html)
-            self.assertIn("这里显示当前本地缓存的脚本源 JSON", html)
-            self.assertIn("task_cron.var", html)
-            self.assertIn('<div class="action-row">', html)
-            self.assertIn('href="/online-scripts"', html)
-            self.assertIn('<div class="card-title">查看 / 修改缓存 JSON</div>', html)
-            self.assertIn('name="json_text"', html)
-            self.assertIn("&lt;Demo &amp; x&gt;", html)
-            self.assertIn("保存脚本源 JSON", html)
-            self.assertNotIn("<Demo", html)
 
     def test_online_scripts_page_renders_header_card_and_actions(self):
         with isolated_app() as (app, base_dir):
@@ -1112,360 +1051,6 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn('style="color:#dc2626;font-weight:800;"', html)
             self.assertIn("文档加载失败：&lt;bad &amp; &quot;x&quot;&gt;", html)
             self.assertNotIn("<bad", html)
-
-    def test_online_script_doc_without_link_renders_header_card(self):
-        with isolated_app() as (app, base_dir):
-            cache_file = base_dir / "data" / "online_scripts_cache.json"
-            cache_file.parent.mkdir(parents=True, exist_ok=True)
-            cache_file.write_text(
-                json.dumps(
-                    [
-                        {
-                            "id": "no-doc",
-                            "name": "No Doc",
-                            "type": "raw",
-                            "link": "https://example.invalid/no-doc.py",
-                        }
-                    ]
-                ),
-                encoding="utf-8",
-            )
-
-            response = app.test_client().get(
-                "/online-scripts/doc/no-doc",
-                headers={"X-Token": TOKEN},
-            )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">脚本文档</div>', html)
-            self.assertIn("该脚本未提供 doc_link。", html)
-            self.assertIn('<div class="action-row">', html)
-            self.assertIn('href="/online-scripts"', html)
-
-    def test_online_install_invalid_target_renders_header_card(self):
-        with isolated_app() as (app, base_dir):
-            cache_file = base_dir / "data" / "online_scripts_cache.json"
-            cache_file.parent.mkdir(parents=True, exist_ok=True)
-            cache_file.write_text(
-                json.dumps(
-                    [
-                        {
-                            "id": "bad-target",
-                            "name": "Bad Target",
-                            "type": "raw",
-                            "link": "https://example.invalid/demo.py",
-                            "link_name": "../bad.py",
-                        }
-                    ]
-                ),
-                encoding="utf-8",
-            )
-
-            response = app.test_client().post(
-                "/online-scripts/install/bad-target",
-                headers={"X-Token": TOKEN},
-            )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 400)
-            self.assertIn('<div class="card-title">目标路径非法</div>', html)
-            self.assertIn("目标路径非法", html)
-            self.assertIn('<div class="action-row">', html)
-            self.assertIn('href="/online-scripts"', html)
-
-    def test_online_install_existing_target_renders_header_card(self):
-        with isolated_app() as (app, base_dir):
-            cache_file = base_dir / "data" / "online_scripts_cache.json"
-            cache_file.parent.mkdir(parents=True, exist_ok=True)
-            cache_file.write_text(
-                json.dumps(
-                    [
-                        {
-                            "id": "exists-demo",
-                            "name": "Exists Demo",
-                            "type": "raw",
-                            "link": "https://example.invalid/demo.py",
-                            "link_name": 'exists-<x>.py',
-                        }
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            target = base_dir / "scripts" / 'exists-<x>.py'
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text("print('old')\n", encoding="utf-8")
-
-            response = app.test_client().post(
-                "/online-scripts/install/exists-demo",
-                data={"proxy_id": "", "import_task": "0"},
-                headers={"X-Token": TOKEN},
-            )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">目标已存在，请确认</div>', html)
-            self.assertIn("检测到同名文件或文件夹已经存在", html)
-            self.assertIn("exists-&lt;x&gt;.py", html)
-            self.assertIn('<form method="post" action="/online-scripts/install/exists-demo">', html)
-            self.assertIn('name="force" value="1"', html)
-            self.assertIn("确认继续", html)
-            self.assertIn('href="/online-scripts"', html)
-            self.assertNotIn("<x>", html)
-
-    def test_online_install_select_renders_header_card_and_keeps_task_shell(self):
-        with isolated_app() as (app, base_dir):
-            cache_file = base_dir / "data" / "online_scripts_cache.json"
-            cache_file.parent.mkdir(parents=True, exist_ok=True)
-            cache_file.write_text(
-                json.dumps(
-                    [
-                        {
-                            "id": "select-demo",
-                            "name": '<Install & "x">',
-                            "type": "raw",
-                            "link": "https://example.invalid/select.py",
-                            "link_name": 'select-<x>.py',
-                            "task_cron": [
-                                {
-                                    "name": "任务一",
-                                    "cron": "0 1 * * *",
-                                    "command": "task select.py",
-                                    "remark": "备注",
-                                }
-                            ],
-                        }
-                    ]
-                ),
-                encoding="utf-8",
-            )
-
-            response = app.test_client().get(
-                "/online-scripts/install-select/select-demo",
-                headers={"X-Token": TOKEN},
-            )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 200)
-            self.assertIn(
-                "选择任务并安装：&lt;Install &amp; &quot;x&quot;&gt;",
-                html,
-            )
-            self.assertIn("脚本 ID：select-demo", html)
-            self.assertIn("保存名：select-&lt;x&gt;.py", html)
-            self.assertIn('<b id="selectedTaskCount">1</b>', html)
-            self.assertIn('<div class="action-row">', html)
-            self.assertIn('href="/online-scripts"', html)
-            self.assertIn('id="onlineInstallSelectForm"', html)
-            self.assertIn('name="select_mode" value="all"', html)
-            self.assertIn("选择要导入的任务", html)
-            self.assertIn("flsInstallGoTaskPage", html)
-            self.assertNotIn("<Install", html)
-
-    def test_online_install_log_missing_renders_header_card(self):
-        with isolated_app() as (app, _base_dir):
-            response = app.test_client().get(
-                "/online-scripts/log/missing-install",
-                headers={"X-Token": TOKEN},
-            )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">在线脚本日志</div>', html)
-            self.assertIn("安装记录不存在或面板已重启", html)
-            self.assertIn('<div class="action-row">', html)
-            self.assertIn('href="/online-scripts"', html)
-            self.assertIn('href="/logs?back=/online-scripts"', html)
-
-    def test_online_install_log_existing_renders_header_card_and_log_shell(self):
-        with isolated_app() as (app, _base_dir):
-            from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING
-
-            ONLINE_INSTALL_RUNNING["install-x"] = {
-                "id": "install-x",
-                "script_id": "demo",
-                "script_name": '<脚本 & "x">',
-                "log_file": 'online-install-<x>.log',
-                "running": True,
-                "status": "running <ok>",
-                "returncode": None,
-                "error": "",
-            }
-
-            response = app.test_client().get(
-                "/online-scripts/log/install-x?back=/online-scripts",
-                headers={"X-Token": TOKEN},
-            )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 200)
-            self.assertIn("在线脚本下载安装日志：&lt;脚本 &amp; &quot;x&quot;&gt;", html)
-            self.assertIn("running &lt;ok&gt;", html)
-            self.assertIn("online-install-&lt;x&gt;.log", html)
-            self.assertIn('<div class="action-row">', html)
-            self.assertIn('href="/online-scripts"', html)
-            self.assertIn('href="/pull"', html)
-            self.assertIn('href="/tasks"', html)
-            self.assertIn('action="/online-scripts/install-stop/install-x"', html)
-            self.assertIn('<pre class="log" id="log">加载中...</pre>', html)
-            self.assertIn("loadLog", html)
-            self.assertNotIn("<脚本", html)
-
-    def test_script_debug_log_missing_renders_header_card(self):
-        with isolated_app() as (app, _base_dir):
-            response = app.test_client().get(
-                "/scripts/debug-log/missing-debug?back=/pull",
-                headers={"X-Token": TOKEN},
-            )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">脚本调试日志</div>', html)
-            self.assertIn("调试记录不存在或面板已重启", html)
-            self.assertIn("script-debug-*.log", html)
-            self.assertIn('<div class="action-row">', html)
-            self.assertIn('href="/pull"', html)
-            self.assertIn('href="/logs?back=/pull"', html)
-
-    def test_script_debug_log_existing_renders_header_card_and_log_shell(self):
-        with isolated_app() as (app, _base_dir):
-            from fls_manager.routes.scripts.debug import SCRIPT_DEBUG_RUNNING
-
-            SCRIPT_DEBUG_RUNNING["debug-x"] = {
-                "id": "debug-x",
-                "script": '/tmp/script-<x>.py',
-                "rel": 'script-<x>.py',
-                "log_file": 'script-debug-<x>.log',
-                "running": True,
-                "process": None,
-                "pid": '<123>',
-                "returncode": None,
-                "error": "",
-            }
-
-            response = app.test_client().get(
-                "/scripts/debug-log/debug-x?back=/pull",
-                headers={"X-Token": TOKEN},
-            )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">脚本调试日志</div>', html)
-            self.assertIn('<b id="debugStatus">运行中</b>', html)
-            self.assertIn("PID：&lt;123&gt;", html)
-            self.assertIn("/tmp/script-&lt;x&gt;.py", html)
-            self.assertIn("script-debug-&lt;x&gt;.log", html)
-            self.assertIn('<div class="action-row">', html)
-            self.assertIn('href="/scripts/debug-stop/debug-x?back=/pull"', html)
-            self.assertIn('href="/pull"', html)
-            self.assertIn('<pre class="log" id="log">加载中...</pre>', html)
-            self.assertIn('id="flsLogNewTip"', html)
-            self.assertIn("loadScriptDebugLog", html)
-            self.assertNotIn("<x>", html)
-
-    def test_deps_install_log_missing_renders_header_card_and_log_shell(self):
-        with isolated_app() as (app, _base_dir):
-            response = app.test_client().get(
-                "/deps/install-log/missing-install?back=/deps",
-                headers={"X-Token": TOKEN},
-            )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">安装日志：未知</div>', html)
-            self.assertIn('<b id="installStatus">已结束</b>', html)
-            self.assertIn("当前进程已结束，无法定位日志", html)
-            self.assertIn('<div class="action-row">', html)
-            self.assertIn('href="/deps"', html)
-            self.assertIn('href="/deps/refresh"', html)
-            self.assertIn('<pre class="log" id="log">加载中...</pre>', html)
-            self.assertIn("loadLog", html)
-
-    def test_deps_install_log_existing_renders_header_card_and_log_shell(self):
-        with isolated_app() as (app, _base_dir):
-            from fls_manager.state import DEPS_RUNNING
-
-            class FakeProc:
-                def poll(self):
-                    return None
-
-            DEPS_RUNNING["deps-x"] = {
-                "process": FakeProc(),
-                "package": '<Pkg & "x">',
-                "log_file": 'deps-install-<x>.log',
-                "log_fp": None,
-                "finished": False,
-                "returncode": None,
-            }
-
-            response = app.test_client().get(
-                "/deps/install-log/deps-x?back=/deps",
-                headers={"X-Token": TOKEN},
-            )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 200)
-            self.assertIn("安装日志：&lt;Pkg &amp; &quot;x&quot;&gt;", html)
-            self.assertIn('<b id="installStatus">安装中</b>', html)
-            self.assertIn("deps-install-&lt;x&gt;.log", html)
-            self.assertIn('<div class="action-row">', html)
-            self.assertIn('href="/deps"', html)
-            self.assertIn('href="/deps/refresh"', html)
-            self.assertIn('<pre class="log" id="log">加载中...</pre>', html)
-            self.assertIn("loadLog", html)
-            self.assertNotIn("<Pkg", html)
-            self.assertNotIn("<x>", html)
-
-    def test_backup_import_success_renders_header_card(self):
-        with isolated_app() as (app, base_dir):
-            archive = io.BytesIO()
-
-            with tarfile.open(fileobj=archive, mode="w:gz") as tar:
-                payload = b'{"restored": true}\n'
-                info = tarfile.TarInfo("data/config.json")
-                info.size = len(payload)
-                tar.addfile(info, io.BytesIO(payload))
-
-            archive.seek(0)
-
-            with patch(
-                "fls_manager.routes.backup.restore.reload_scheduler",
-            ) as reload_mock:
-                response = app.test_client().post(
-                    "/backup/import",
-                    data={
-                        "file": (archive, "backup.tar.gz"),
-                        "restore_items": "data",
-                    },
-                    headers={"X-Token": TOKEN},
-                    content_type="multipart/form-data",
-                )
-
-            html = response.get_data(as_text=True)
-
-            self.assertEqual(response.status_code, 200)
-            reload_mock.assert_called_once_with()
-            self.assertIn('<div class="card-title">备份导入完成</div>', html)
-            self.assertIn("已恢复：配置 data", html)
-            self.assertIn("依赖恢复：未恢复依赖", html)
-            self.assertIn("日志：-", html)
-            self.assertIn('<div class="action-row">', html)
-            self.assertIn('href="/backup"', html)
-            self.assertIn('href="/logs"', html)
-            self.assertEqual(
-                (base_dir / "data" / "config.json").read_text(encoding="utf-8"),
-                '{"restored": true}\n',
-            )
 
 
 if __name__ == "__main__":

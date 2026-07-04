@@ -15,9 +15,8 @@ def proxy_toggle(proxy_id):
     return redirect(url_for("proxy.proxy_page"))
 
 
-@bp.route("/proxy/delete/<proxy_id>")
+@bp.route("/proxy/delete/<proxy_id>", methods=["POST"])
 def proxy_delete(proxy_id):
     proxies = [p for p in load_proxies() if p.get("id") != proxy_id]
     save_proxies(proxies)
     return redirect(url_for("proxy.proxy_page"))
-

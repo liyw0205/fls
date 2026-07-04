@@ -16,6 +16,7 @@ from ...models import (
 )
 from ...utils import h, now_str, get_back_url
 from ...ui.layout import layout
+from ...ui.tables import collapsible_code
 from ...task_runner import is_running
 from ...state import RUNNING
 
@@ -30,6 +31,10 @@ def _current_back_url(default="/collections"):
         return request.path
     except Exception:
         return default
+
+
+def _back_param(back_url):
+    return h(quote(str(back_url or ""), safe="/"))
 
 
 def _collections_page_links(q, task_q, page, pages):
@@ -94,11 +99,12 @@ def _collections_page_links(q, task_q, page, pages):
 """
 
 
-def _task_card(task, back_url):
+def _task_card(task, back_url, collection_id=""):
     task_id = task.get("id", "")
     name = task.get("name") or task.get("command") or "未命名任务"
     remark = str(task.get("remark", "") or "").strip()
     command = str(task.get("command", "") or "").strip()
+    command_html = collapsible_code(command, limit=90, max_lines=2)
     enabled = task.get("enabled", True)
     pinned = bool(task.get("pinned", False))
     config_path = str(task.get("config_path", "") or "").strip()
@@ -115,12 +121,22 @@ def _task_card(task, back_url):
 
     config_btn = ""
     if config_path:
-        config_btn = f'<a class="btn btn-blue" href="/task/config/{h(task_id)}?back={h(back_url)}">配置</a>'
+        config_btn = f'<a class="btn btn-blue" href="/task/config/{h(task_id)}?back={_back_param(back_url)}">配置</a>'
 
     return f"""
-<div class="fls-fold-card">
+<div class="fls-fold-card collection-task-card" data-collection-id="{h(collection_id)}" data-task-id="{h(task_id)}">
     <div style="padding:14px;">
         <div class="fls-card-head">
+            <div class="collection-task-select-wrap">
+                <input
+                    class="collection-task-select"
+                    type="checkbox"
+                    data-collection-id="{h(collection_id)}"
+                    data-task-id="{h(task_id)}"
+                    onchange="flsCollectionSyncSelection(this)"
+                    aria-label="选择任务 {h(name)}"
+                >
+            </div>
             <div class="fls-card-main">
                 <div class="fls-card-title-main">{h(name)} {pin_badge}</div>
                 <div class="fls-card-sub">
@@ -132,22 +148,352 @@ def _task_card(task, back_url):
         </div>
 
         <div class="fls-card-section">
-            <div class="fls-source-code">{h(command)}</div>
+            <div class="fls-source-code">{command_html}</div>
         </div>
 
         <div class="fls-card-actions">
             <div class="fls-btn-line">
-                <a class="btn btn-primary" href="/run/{h(task_id)}?back={h(back_url)}">运行</a>
-                <a class="btn btn-red" href="/stop/{h(task_id)}?back={h(back_url)}" onclick="return confirm('确定结束该任务吗？')">结束</a>
-                <a class="btn btn-orange" href="/log/{h(task_id)}?back={h(back_url)}">日志</a>
+                <a class="btn btn-primary" href="/run/{h(task_id)}?back={_back_param(back_url)}">运行</a>
+                <form class="inline-form" method="post" action="/stop/{h(task_id)}?back={_back_param(back_url)}">
+                    <button class="btn btn-red" type="submit" onclick="return confirm('确定结束该任务吗？')">结束</button>
+                </form>
+                <a class="btn btn-orange" href="/log/{h(task_id)}?back={_back_param(back_url)}">日志</a>
                 {config_btn}
-                <a class="btn btn-blue" href="/task/edit/{h(task_id)}">编辑</a>
-                <a class="btn {pin_class}" href="/task/pin/{h(task_id)}?back={h(back_url)}">{pin_text}</a>
-                <a class="btn btn-gray" href="/task/collection/clear/{h(task_id)}?back={h(back_url)}">取出</a>
+                <a class="btn btn-blue" href="/task/edit/{h(task_id)}?back={_back_param(back_url)}">编辑</a>
+                <form class="inline-form" method="post" action="/task/pin/{h(task_id)}?back={_back_param(back_url)}">
+                    <button class="btn {pin_class}" type="submit">{pin_text}</button>
+                </form>
+                <form class="inline-form" method="post" action="/task/collection/clear/{h(task_id)}?back={_back_param(back_url)}">
+                    <button class="btn btn-gray" type="submit">取出</button>
+                </form>
             </div>
         </div>
     </div>
 </div>
+"""
+
+
+def _collection_task_bulk_toolbar(collection_id, has_tasks):
+    if not has_tasks:
+        return ""
+
+    cid = h(collection_id)
+
+    return f"""
+<div class="collection-bulk-toolbar" data-collection-id="{cid}">
+    <div class="collection-bulk-left">
+        <label class="collection-bulk-select-all">
+            <input
+                class="collection-select-all"
+                type="checkbox"
+                data-collection-id="{cid}"
+                onchange="flsCollectionToggleAll(this)"
+            >
+            全选本合集
+        </label>
+        <span class="collection-selected-count">已选择 0 个</span>
+    </div>
+    <div class="collection-bulk-actions">
+        <button class="btn btn-primary collection-bulk-btn" type="button" data-collection-id="{cid}" onclick="flsCollectionTaskBulkAction(this.dataset.collectionId, 'enable')" disabled>启用</button>
+        <button class="btn btn-gray collection-bulk-btn" type="button" data-collection-id="{cid}" onclick="flsCollectionTaskBulkAction(this.dataset.collectionId, 'disable')" disabled>禁用</button>
+        <button class="btn btn-blue collection-bulk-btn" type="button" data-collection-id="{cid}" onclick="flsCollectionTaskBulkAction(this.dataset.collectionId, 'run')" disabled>运行</button>
+        <button class="btn btn-red collection-bulk-btn" type="button" data-collection-id="{cid}" onclick="flsCollectionTaskBulkAction(this.dataset.collectionId, 'stop')" disabled>停止</button>
+        <button class="btn btn-gray collection-bulk-btn" type="button" data-collection-id="{cid}" onclick="flsCollectionTaskBulkAction(this.dataset.collectionId, 'clear_collection')" disabled>取出</button>
+        <button class="btn btn-gray collection-bulk-btn" type="button" data-collection-id="{cid}" onclick="flsCollectionTaskBulkAction(this.dataset.collectionId, 'delete')" disabled>删除</button>
+    </div>
+</div>
+"""
+
+
+def _collections_bulk_assets():
+    return r"""
+<style>
+.collection-bulk-toolbar {
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    gap:12px;
+    flex-wrap:wrap;
+    padding:12px;
+    margin-bottom:12px;
+    border:1px solid #e5e7eb;
+    border-radius:12px;
+    background:#f9fafb;
+}
+
+.collection-bulk-left,
+.collection-bulk-actions {
+    display:flex;
+    align-items:center;
+    gap:8px;
+    flex-wrap:wrap;
+}
+
+.collection-bulk-select-all {
+    display:inline-flex;
+    align-items:center;
+    gap:6px;
+    color:#374151;
+    font-size:13px;
+    font-weight:700;
+    white-space:nowrap;
+}
+
+.collection-selected-count {
+    color:#6b7280;
+    font-size:13px;
+    font-weight:700;
+}
+
+.collection-bulk-btn:disabled {
+    opacity:.45;
+    cursor:not-allowed;
+}
+
+.collection-task-select-wrap {
+    flex:0 0 auto;
+    padding-top:2px;
+}
+
+.collection-task-select,
+.collection-select-all {
+    width:16px!important;
+    height:16px!important;
+    min-height:16px;
+    margin:0;
+    padding:0;
+    cursor:pointer;
+}
+
+.collection-task-card.collection-task-selected {
+    border-color:#86efac;
+}
+
+.collection-task-card.collection-task-selected .fls-card-title-main {
+    color:#166534;
+}
+
+@media(max-width:520px) {
+    .collection-bulk-toolbar {
+        align-items:stretch;
+    }
+
+    .collection-bulk-left,
+    .collection-bulk-actions {
+        width:100%;
+    }
+
+    .collection-bulk-actions .btn {
+        flex:1 1 calc(33.333% - 8px);
+        min-width:72px;
+        margin:0;
+    }
+}
+</style>
+
+<script>
+function flsCollectionTaskBoxes(collectionId){
+    return Array.prototype.filter.call(
+        document.querySelectorAll(".collection-task-select"),
+        function(box){
+            return box.dataset.collectionId === collectionId;
+        }
+    );
+}
+
+function flsCollectionTaskCards(collectionId){
+    return Array.prototype.filter.call(
+        document.querySelectorAll(".collection-task-card"),
+        function(card){
+            return card.dataset.collectionId === collectionId;
+        }
+    );
+}
+
+function flsCollectionSelectedIds(collectionId){
+    var ids = [];
+    var seen = {};
+
+    flsCollectionTaskBoxes(collectionId).forEach(function(box){
+        var id = box.dataset.taskId || "";
+
+        if(!box.checked || !id || seen[id]) return;
+
+        seen[id] = true;
+        ids.push(id);
+    });
+
+    return ids;
+}
+
+function flsCollectionUpdateBulkState(collectionId){
+    var boxes = flsCollectionTaskBoxes(collectionId);
+    var selected = flsCollectionSelectedIds(collectionId);
+    var selectedSet = {};
+
+    selected.forEach(function(id){
+        selectedSet[id] = true;
+    });
+
+    document.querySelectorAll(".collection-select-all").forEach(function(box){
+        if(box.dataset.collectionId !== collectionId) return;
+
+        box.disabled = boxes.length === 0;
+        box.checked = boxes.length > 0 && selected.length === boxes.length;
+        box.indeterminate = selected.length > 0 && selected.length < boxes.length;
+    });
+
+    document.querySelectorAll(".collection-bulk-btn").forEach(function(btn){
+        if(btn.dataset.collectionId !== collectionId) return;
+        btn.disabled = selected.length === 0;
+    });
+
+    document.querySelectorAll(".collection-bulk-toolbar").forEach(function(toolbar){
+        if(toolbar.dataset.collectionId !== collectionId) return;
+
+        var countEl = toolbar.querySelector(".collection-selected-count");
+        if(countEl){
+            countEl.textContent = "已选择 " + selected.length + " 个";
+        }
+    });
+
+    flsCollectionTaskCards(collectionId).forEach(function(card){
+        var id = card.dataset.taskId || "";
+        card.classList.toggle("collection-task-selected", !!selectedSet[id]);
+    });
+}
+
+function flsCollectionUpdateAllBulkStates(){
+    var ids = {};
+
+    document.querySelectorAll(".collection-bulk-toolbar, .collection-task-select").forEach(function(el){
+        var collectionId = el.dataset.collectionId || "";
+        if(collectionId) ids[collectionId] = true;
+    });
+
+    Object.keys(ids).forEach(flsCollectionUpdateBulkState);
+}
+
+function flsCollectionToggleAll(source){
+    var collectionId = source.dataset.collectionId || "";
+
+    flsCollectionTaskBoxes(collectionId).forEach(function(box){
+        box.checked = source.checked;
+    });
+
+    flsCollectionUpdateBulkState(collectionId);
+}
+
+function flsCollectionSyncSelection(source){
+    flsCollectionUpdateBulkState(source.dataset.collectionId || "");
+}
+
+async function flsCollectionTaskBulkAction(collectionId, action){
+    var ids = flsCollectionSelectedIds(collectionId);
+
+    if(!ids.length){
+        alert("请选择任务");
+        return;
+    }
+
+    var labels = {
+        enable: "启用",
+        disable: "禁用",
+        run: "运行",
+        stop: "停止",
+        clear_collection: "取出",
+        delete: "删除"
+    };
+
+    var label = labels[action] || "操作";
+
+    if(action === "delete"){
+        if(!confirm("确定删除选中的 " + ids.length + " 个任务吗？")) return;
+    }
+
+    if(action === "stop"){
+        if(!confirm("确定停止选中的 " + ids.length + " 个任务吗？")) return;
+    }
+
+    if(action === "clear_collection"){
+        if(!confirm("确定从当前合集中取出选中的 " + ids.length + " 个任务吗？")) return;
+    }
+
+    flsCollectionTaskCards(collectionId).forEach(function(card){
+        if(ids.indexOf(card.dataset.taskId || "") >= 0){
+            card.style.opacity = "0.55";
+        }
+    });
+
+    try {
+        var res = await fetch("/api/task/bulk-action", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "X-Requested-With": "XMLHttpRequest"
+            },
+            credentials: "same-origin",
+            body: JSON.stringify({action: action, task_ids: ids})
+        });
+
+        var json = await res.json();
+
+        if(!json.ok){
+            alert(flsBulkActionMessage(json, json.msg || (label + "失败")));
+            flsCollectionTaskCards(collectionId).forEach(function(card){
+                card.style.opacity = "1";
+            });
+            return;
+        }
+
+        var bulkMessage = flsBulkActionMessage(json, json.msg || (label + "完成"));
+        if(bulkMessage){
+            alert(bulkMessage);
+        }
+
+        if(typeof flsClearPageCache === "function"){
+            flsClearPageCache();
+        }
+
+        await flsRefreshCollectionsBlockPartial();
+
+    } catch(e) {
+        alert("请求失败：" + e);
+        flsCollectionTaskCards(collectionId).forEach(function(card){
+            card.style.opacity = "1";
+        });
+    }
+}
+
+async function flsRefreshCollectionsBlockPartial(){
+    try {
+        var res = await fetch(window.location.href, {
+            headers: {"X-Requested-With":"XMLHttpRequest"},
+            credentials: "same-origin"
+        });
+
+        var html = await res.text();
+        var doc = new DOMParser().parseFromString(html, "text/html");
+        var newBlock = doc.querySelector("#collectionsPageBlock");
+        var oldBlock = document.querySelector("#collectionsPageBlock");
+
+        if(newBlock && oldBlock){
+            oldBlock.replaceWith(newBlock);
+            flsCollectionUpdateAllBulkStates();
+
+            if(typeof flsInitFloatingFormActions === "function"){
+                flsInitFloatingFormActions(document);
+            }
+        }else{
+            location.reload();
+        }
+    } catch(e) {
+        location.reload();
+    }
+}
+
+flsCollectionUpdateAllBulkStates();
+</script>
 """
 
 
@@ -187,6 +533,28 @@ def _collection_form(item=None):
 </div>
 </form>
 """
+
+
+def _collection_task_ids_from_form():
+    raw_ids = list(request.form.getlist("task_ids"))
+    legacy_id = request.form.get("task_id", "").strip()
+
+    if legacy_id:
+        raw_ids.append(legacy_id)
+
+    task_ids = []
+    seen = set()
+
+    for raw_task_id in raw_ids:
+        task_id = str(raw_task_id or "").strip()
+
+        if not task_id or task_id in seen:
+            continue
+
+        seen.add(task_id)
+        task_ids.append(task_id)
+
+    return task_ids
 
 
 @bp.route("/collections")
@@ -291,12 +659,15 @@ def collections_page():
             task_options = '<option value="" disabled>暂无可加入任务</option>'
 
         task_items = ""
+        collection_back = current_back + "#collection-" + cid
 
         if show_tasks:
             for task in show_tasks:
-                task_items += _task_card(task, current_back)
+                task_items += _task_card(task, collection_back, collection_id=cid)
         else:
             task_items = '<div class="help">该合集暂无任务。</div>'
+
+        bulk_toolbar = _collection_task_bulk_toolbar(cid, bool(show_tasks))
 
         body_cols += f"""
 <div class="card" id="collection-{h(cid)}">
@@ -312,15 +683,17 @@ def collections_page():
 
     <div class="action-row" style="margin-top:12px;">
         <a class="btn btn-orange" href="/collection/edit/{h(cid)}">编辑合集</a>
-        <a class="btn btn-red" href="/collection/delete/{h(cid)}?back={h(current_back)}" onclick="return confirm('确定删除该合集吗？合集内任务会自动取出。')">删除合集</a>
+        <form class="inline-form" method="post" action="/collection/delete/{h(cid)}?back={_back_param(current_back)}">
+            <button class="btn btn-red" type="submit" onclick="return confirm('确定删除该合集吗？合集内任务会自动取出。')">删除合集</button>
+        </form>
     </div>
 
     <hr style="border:0;border-top:1px solid #eef2f7;margin:14px 0;">
 
-    <form method="post" action="/collection/add-task/{h(cid)}?back={h(current_back)}">
+    <form method="post" action="/collection/add-task/{h(cid)}?back={_back_param(current_back + '#collection-' + cid)}">
         <div class="form-item">
             <label>搜索并加入任务</label>
-            <select name="task_id" size="8">{task_options}</select>
+            <select name="task_ids" size="8" multiple>{task_options}</select>
             <div class="help" style="margin-top:6px;">
                 这里会列出当前不在本合集中的任务。可用上方“搜索可加入任务”过滤任务。
             </div>
@@ -330,6 +703,8 @@ def collections_page():
     </form>
 
     <hr style="border:0;border-top:1px solid #eef2f7;margin:14px 0;">
+
+    {bulk_toolbar}
 
     <div class="fls-card-grid">
         {task_items}
@@ -343,6 +718,8 @@ def collections_page():
     <div class="help">暂无匹配合集，请尝试调整搜索条件，或点击“新建合集”创建一个。</div>
 </div>
 """
+
+    bulk_assets = _collections_bulk_assets()
 
     body = f"""
 <div class="card">
@@ -382,9 +759,13 @@ def collections_page():
 </div>
 </form>
 
+<div id="collectionsPageBlock">
 {body_cols}
 
 {page_links_html}
+</div>
+
+{bulk_assets}
 """
     return layout("合集管理", "tasks", body)
 
@@ -441,7 +822,7 @@ def collection_edit(collection_id):
     return layout("编辑合集", "tasks", _collection_form(item))
 
 
-@bp.route("/collection/delete/<collection_id>")
+@bp.route("/collection/delete/<collection_id>", methods=["POST"])
 def collection_delete(collection_id):
     collections = load_collections()
     exists = any(c.get("id") == collection_id for c in collections)
@@ -471,24 +852,26 @@ def collection_add_task(collection_id):
     if not collection:
         abort(404)
 
-    task_id = request.form.get("task_id", "").strip()
-
-    if not task_id:
+    task_ids = _collection_task_ids_from_form()
+    if not task_ids:
         return redirect(get_back_url("/collections"))
 
     tasks = load_tasks()
-    found = False
+    selected = set(task_ids)
+    existing = {
+        str(task.get("id") or "")
+        for task in tasks
+        if str(task.get("id") or "") in selected
+    }
+
+    if existing != selected:
+        abort(404)
 
     for task in tasks:
-        if task.get("id") == task_id:
+        if task.get("id") in selected:
             task["collection_id"] = collection_id
             task["updated_at"] = now_str()
             task["pinned"] = False
-            found = True
-            break
-
-    if not found:
-        abort(404)
 
     save_tasks(tasks)
 
