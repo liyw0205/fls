@@ -1,6 +1,7 @@
 import unittest
 
 from fls_manager.ui.components import (
+    code_card,
     message_card,
     page_header_card,
     pagination_card,
@@ -61,6 +62,22 @@ class UiComponentTests(unittest.TestCase):
 
         self.assertIn("&lt;script data-x=&quot;1&quot;&gt;a &amp; b&lt;/script&gt;", html)
         self.assertNotIn("<script>", html)
+
+    def test_code_card_renders_code_help_actions_and_escapes_title(self):
+        html = code_card(
+            "<命令>",
+            "task demo.py<br>python3 /root/test.py",
+            help_html="说明<br><b>raw</b>",
+            actions_html='<a class="btn" href="/pull">返回</a>',
+        )
+
+        self.assertIn('<div class="card-title">&lt;命令&gt;</div>', html)
+        self.assertIn('<div class="help">说明<br><b>raw</b></div>', html)
+        self.assertIn('<div class="code">', html)
+        self.assertIn("task demo.py<br>python3 /root/test.py", html)
+        self.assertIn('<div class="action-row">', html)
+        self.assertIn('href="/pull"', html)
+        self.assertNotIn("<命令>", html)
 
     def test_summary_item_renders_structure_and_escapes_text(self):
         html = summary_item("<标签>", '7 & "8"')

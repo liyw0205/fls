@@ -6,7 +6,7 @@ from .helpers import script_safe_path, script_url, breadcrumb, render_rows
 from ...paths import SCRIPT_DIR
 from ...utils import h
 from ...ui.layout import layout
-from ...ui.components import page_header_card, table_card
+from ...ui.components import code_card, page_header_card, table_card
 
 
 @bp.route("/pull")
@@ -41,18 +41,18 @@ def scripts_page():
         ("类型", "名称 / 相对路径", "大小", "修改时间", "绝对路径", "操作"),
         render_rows(current_rel),
     )
+    command_example = code_card(
+        "任务命令示例",
+        """
+task 1.py<br>
+task folder/main.py<br>
+task /root/fls/scripts/demo.sh arg1 arg2
+        """,
+    )
 
     body = f"""
 {header}
 {table}
-
-<div class="card">
-    <div class="card-title">任务命令示例</div>
-    <div class="code">
-task 1.py<br>
-task folder/main.py<br>
-task /root/fls/scripts/demo.sh arg1 arg2
-    </div>
-</div>
+{command_example}
 """
     return layout("脚本管理", "pull", body)

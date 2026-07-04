@@ -79,6 +79,24 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn('style="color:#6b7280;"', html)
             self.assertIn("暂无操作", html)
 
+    def test_scripts_page_renders_command_example_code_card(self):
+        with isolated_app() as (app, _base_dir):
+            response = app.test_client().get(
+                "/pull",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">脚本管理</div>', html)
+            self.assertIn('<div class="card-title">文件列表</div>', html)
+            self.assertIn('<div class="card-title">任务命令示例</div>', html)
+            self.assertIn('<div class="code">', html)
+            self.assertIn("task 1.py<br>", html)
+            self.assertIn("task folder/main.py<br>", html)
+            self.assertIn("task /root/fls/scripts/demo.sh arg1 arg2", html)
+
     def test_scripts_view_renders_header_card_and_escapes_content(self):
         with isolated_app() as (app, base_dir):
             script_rel = 'dir-<x>/demo-<x>.py'

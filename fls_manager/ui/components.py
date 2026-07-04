@@ -88,6 +88,29 @@ def message_card(message, kind="info", strong=False, title=""):
 """
 
 
+def code_card(title, code_html, help_html="", actions_html=""):
+    help_block = ""
+    if str(help_html or "").strip():
+        help_block = f'<div class="help">{help_html}</div>'
+
+    actions_block = ""
+    if str(actions_html or "").strip():
+        actions_block = f"""
+    <br>
+    <div class="action-row">{actions_html}</div>"""
+
+    return f"""
+<div class="card">
+    <div class="card-title">{h(title)}</div>
+    {help_block}
+    <div class="code">
+{code_html}
+    </div>
+    {actions_block}
+</div>
+"""
+
+
 def summary_item(label, value):
     return f"""
 <div class="fls-summary-item">
