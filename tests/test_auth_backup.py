@@ -281,6 +281,7 @@ class CsrfSafetyTests(unittest.TestCase):
                 "/task/pin/t1",
                 "/task/toggle/t1",
                 "/run/t1",
+                "/stop/t1",
             ):
                 with self.subTest(url=url):
                     response = client.get(url, headers={"X-Token": "unit-token"})

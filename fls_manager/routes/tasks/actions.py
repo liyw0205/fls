@@ -115,5 +115,8 @@ def run_task_route(task_id):
 
 @bp.route("/stop/<task_id>", methods=["POST"])
 def stop_task_route(task_id):
+    if not any(task.get("id") == task_id for task in load_tasks()):
+        abort(404)
+
     stop_task_now(task_id)
     return redirect(get_back_url("/tasks"))

@@ -475,6 +475,54 @@ class BulkWorkflowTests(unittest.TestCase):
             self.assertEqual(payload["msg"], "任务未运行")
             stop_task_now.assert_called_once_with("t1")
 
+    def test_legacy_stop_route_existing_task_redirects_when_not_running(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1"),
+                ],
+            )
+
+            with patch(
+                "fls_manager.routes.tasks.actions.stop_task_now",
+                return_value=(False, "任务未运行"),
+            ) as stop_task_now:
+                response = app.test_client().post(
+                    "/stop/t1?back=/tasks",
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.headers.get("Location"), "/tasks")
+            stop_task_now.assert_called_once_with("t1")
+
+    def test_legacy_stop_route_missing_task_aborts_without_stop_call(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1"),
+                ],
+            )
+
+            with patch("fls_manager.routes.tasks.actions.stop_task_now") as stop_task_now:
+                response = app.test_client().post(
+                    "/stop/missing?back=/tasks",
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 404)
+            stop_task_now.assert_not_called()
+            self.assertEqual(
+                [task["id"] for task in read_json(base_dir / "data" / "tasks.json")],
+                ["t1"],
+            )
+
     def test_task_action_delete_existing_task_stops_removes_and_reloads(self):
         with isolated_app() as (app, base_dir):
             from fls_manager import paths
