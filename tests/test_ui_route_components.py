@@ -1052,6 +1052,32 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn("保存脚本源 JSON", html)
             self.assertNotIn("<Demo", html)
 
+    def test_online_scripts_page_renders_header_card_and_actions(self):
+        with isolated_app() as (app, base_dir):
+            cache_file = base_dir / "data" / "online_scripts_cache.json"
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            cache_file.write_text("[]", encoding="utf-8")
+
+            response = app.test_client().get(
+                "/online-scripts",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">在线脚本</div>', html)
+            self.assertIn("默认读取本地缓存", html)
+            self.assertIn("task_cron.var", html)
+            self.assertIn('style="min-width:0;flex:1 1 360px;"', html)
+            self.assertIn('<div class="fls-source-code">', html)
+            self.assertIn('<div class="action-row">', html)
+            self.assertIn('action="/online-scripts/refresh"', html)
+            self.assertIn('id="onlineRefreshBtn"', html)
+            self.assertIn('href="/online-scripts/source"', html)
+            self.assertIn('href="/config"', html)
+            self.assertIn('<div class="card-title">脚本列表，本地缓存</div>', html)
+
     def test_online_script_doc_error_renders_escaped_message_card(self):
         with isolated_app() as (app, base_dir):
             cache_file = base_dir / "data" / "online_scripts_cache.json"

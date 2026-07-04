@@ -47,33 +47,30 @@ def online_scripts_page():
         if refresh_running
         else h(refresh_message or refresh_error or "")
     )
+    header = page_header_card(
+        "在线脚本",
+        help_html=f"""
+默认读取本地缓存，不会因为脚本源网络问题卡住。<br>
+点击“刷新远程脚本源”后会后台拉取，页面不会变白，也不影响其它操作。<br>
+脚本源支持 <code>doc_link</code> 字段，可在面板内查看 Markdown 文档或网页文档。<br>
+<code>task_cron.var</code> 可预设任务变量，导入任务时会自动写入任务变量。
+<div class="fls-source-code">{h(source)}</div>
+        """,
+        actions_html=f"""
+<form method="post" action="/online-scripts/refresh" class="action-row">
+    <select name="proxy_id" style="width:auto;min-width:180px;">{proxy_options}</select>
+    <button class="btn btn-primary" type="submit" id="onlineRefreshBtn">刷新远程脚本源</button>
+</form>
+
+<a class="btn btn-blue" href="{h(source)}" target="_blank">打开源地址</a>
+<a class="btn btn-orange" href="/online-scripts/source">脚本源 JSON</a>
+<a class="btn btn-gray" href="/config">修改源地址</a>
+        """,
+        content_style="min-width:0;flex:1 1 360px;",
+    )
 
     body = f"""
-<div class="card">
-    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap;">
-        <div style="min-width:0;flex:1 1 360px;">
-            <div class="card-title">在线脚本</div>
-            <div class="help">
-                默认读取本地缓存，不会因为脚本源网络问题卡住。<br>
-                点击“刷新远程脚本源”后会后台拉取，页面不会变白，也不影响其它操作。<br>
-                脚本源支持 <code>doc_link</code> 字段，可在面板内查看 Markdown 文档或网页文档。<br>
-                <code>task_cron.var</code> 可预设任务变量，导入任务时会自动写入任务变量。
-            </div>
-            <div class="fls-source-code">{h(source)}</div>
-        </div>
-
-        <div class="action-row" style="justify-content:flex-end;">
-            <form method="post" action="/online-scripts/refresh" class="action-row">
-                <select name="proxy_id" style="width:auto;min-width:180px;">{proxy_options}</select>
-                <button class="btn btn-primary" type="submit" id="onlineRefreshBtn">刷新远程脚本源</button>
-            </form>
-
-            <a class="btn btn-blue" href="{h(source)}" target="_blank">打开源地址</a>
-            <a class="btn btn-orange" href="/online-scripts/source">脚本源 JSON</a>
-            <a class="btn btn-gray" href="/config">修改源地址</a>
-        </div>
-    </div>
-</div>
+{header}
 
 <form method="get">
 <div class="card">

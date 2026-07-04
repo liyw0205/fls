@@ -16,10 +16,12 @@ class UiComponentTests(unittest.TestCase):
             "<标题>",
             help_html='说明<br><b>raw</b>',
             actions_html='<a class="btn" href="/x">操作</a>',
+            content_style='min-width:0;flex:1 1 360px;"bad',
         )
 
         self.assertIn('<div class="card-title">&lt;标题&gt;</div>', html)
         self.assertIn('<div class="help">说明<br><b>raw</b></div>', html)
+        self.assertIn('style="min-width:0;flex:1 1 360px;&quot;bad"', html)
         self.assertIn('<div class="action-row">', html)
         self.assertIn('href="/x"', html)
         self.assertNotIn("<标题>", html)

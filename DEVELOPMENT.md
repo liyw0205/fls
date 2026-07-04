@@ -392,12 +392,13 @@ python -B -m compileall fls-manager.py fls_manager tests tools
 - `logs.py` 的 `latest_log_for_task()`、`cleanup_logs()` keep=0、非法配置、无启动头分组和 unlink 异常吞掉边界。
 - `auth.py` 的 API 与页面鉴权分支。
 - `backup/_common.py` 的备份文件名归一、zip/tar 路径穿越拒绝、安全 tar 解压 filter 兼容、tar 特殊成员拒绝和 DeprecationWarning 回归测试。
+- `ui.components.page_header_card()` 的可选说明区、操作区、内容区样式、标题和样式属性 HTML 转义。
 - `ui.components.table_card()` 的可选说明区、操作区、表格 ID、标题和表头 HTML 转义。
 - `ui.components.pagination_card()` 的链接分页、按钮分页、禁用态、省略号和 HTML 转义。
 - `ui.components.message_card()` 的空/空白消息、成功/错误/普通提示、未知类型回退、加粗样式、可选标题和 HTML 转义。
 - `ui.components.code_card()` 的代码块结构、可选说明区、操作区和标题 HTML 转义。
 - `ui.components.summary_item()` 的统计项结构、数字 value 和 HTML 转义。
-- 路由层 UI 组件接入：`/pull` 任务命令示例代码卡、`/pull/new` 脚本新建头部卡和普通提示卡、`/pull/fetch` 和 `/pull/import` 表单头部卡、普通/结果提示卡，以及 `/online-scripts/source` 脚本源 JSON 头部卡、`/online-scripts/doc/<id>` 文档加载失败卡、无文档链接提示卡的渲染与转义。
+- 路由层 UI 组件接入：`/pull` 任务命令示例代码卡、`/pull/new` 脚本新建头部卡和普通提示卡、`/pull/fetch` 和 `/pull/import` 表单头部卡、普通/结果提示卡，以及 `/online-scripts` 首页头部卡、`/online-scripts/source` 脚本源 JSON 头部卡、`/online-scripts/doc/<id>` 文档加载失败卡、无文档链接提示卡的渲染与转义。
 - 路由层 UI 组件接入：`/task/config/<id>` 保存成功/失败提示卡的渲染与转义。
 - 路由层 UI 组件接入：`/env/import` 任务变量导入页头部卡和表格卡、`/env/view` 全局变量全文编辑页头部卡、`/env/new` 和 `/env/edit/<key>` 全局变量表单头部卡、`/proxy/new` 和 `/proxy/edit/<id>` 代理表单头部卡、`/scripts/view` 和 `/scripts/rename` 脚本文件表单头部卡、`/config` 脚本类型表格卡、`/deps` 依赖列表、`/deps/refresh` 依赖刷新完成页头部卡、`/deps/install-log/<id>` 依赖安装日志头部卡、`/deps/uninstall` 依赖卸载结果页头部卡、`/panel/status`、`/` 仪表盘环境状态、`/about` 面板信息和只读代码说明卡、`/notify/test/<id>` 通知测试结果、`/about/job-log/<id>` 后台任务日志头部卡、`/about/restart-panel`、`/about/stop-panel` 面板控制结果头部卡、`/about/refresh-log`、`/about/update-version` 版本失败头部卡、`/online-scripts/log/<id>` 在线脚本安装日志头部卡、`/online-scripts/install/<id>` 安装确认头部卡、`/online-scripts/install-select/<id>` 安装选择页头部卡、`/backup/import` 备份导入完成页头部卡和 `/scripts/debug-log/<id>` 脚本调试日志头部卡渲染、响应式表格 ID 保留与 HTML 转义。
 
@@ -443,6 +444,7 @@ python -B -m compileall fls-manager.py fls_manager tests tools
 
 ### 2026-07-05
 
+- 阶段 41 扩展 `page_header_card()` 可选内容区样式，用于保留响应式布局约束；将 `/online-scripts` 首页顶部说明接入该组件，保留脚本源地址展示、刷新远程脚本源表单、打开源地址、脚本源 JSON 和配置入口，并补充组件与首页头部卡渲染测试。
 - 阶段 40 将 `/about` 页任务命令规则、Cron 说明、进程查看示例三个只读说明块接入 `code_card()`，保留说明文本、说明区间距和示例命令内容，并扩展 `/about` 路由渲染测试覆盖关键代码卡内容。
 - 阶段 39 新增 `code_card()` 组件，用于稳定只读代码示例块；先将 `/pull` 页“任务命令示例”接入该组件，保留脚本管理头部、文件列表表格和示例命令内容，并补充组件单测与 `/pull` 路由渲染测试。
 - 阶段 38 将在线脚本源 JSON 页面顶部说明接入 `page_header_card()`，保留缓存 JSON textarea、保存脚本源 JSON 表单、返回入口和成功/失败消息卡，并补充 `/online-scripts/source` 路由渲染与缓存内容转义测试。

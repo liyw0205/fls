@@ -1,10 +1,14 @@
 from ..utils import h
 
 
-def page_header_card(title, help_html="", actions_html=""):
+def page_header_card(title, help_html="", actions_html="", content_style=""):
     actions_block = ""
     if str(actions_html or "").strip():
         actions_block = f'<div class="action-row">{actions_html}</div>'
+
+    content_style_attr = (
+        f' style="{h(content_style)}"' if str(content_style or "").strip() else ""
+    )
 
     help_block = ""
     if str(help_html or "").strip():
@@ -15,7 +19,7 @@ def page_header_card(title, help_html="", actions_html=""):
     return f"""
 <div class="card">
     <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
-        <div>
+        <div{content_style_attr}>
             <div class="card-title">{h(title)}</div>
             {help_block}
         </div>
