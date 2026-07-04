@@ -1936,8 +1936,54 @@
 - 首次接入选择静态示例块，避免把动态日志、富文本或未转义用户内容直接塞进代码组件。
 - 后续可逐步评估关于页 Cron/命令说明等静态代码块，但暂缓复杂嵌套卡片和带行为的块。
 
+## 阶段 40：关于页只读代码说明卡接入
+
+状态：已完成
+
+目标：
+
+- 继续低风险 UI 组件抽取，优先静态只读说明块。
+- 复用阶段 39 新增的 `code_card()`，不新增组件 API。
+- 只替换 `/about` 页任务命令规则、Cron 说明、进程查看示例三个代码说明块，不改变时间校准、版本更新和面板启停流程。
+
+已完成：
+
+- 更新 `fls_manager/ui/components.py`：
+  - 保留 `code_card()` 说明区和代码块之间的显式间距，不改变组件 API。
+- 更新 `fls_manager/routes/about/page.py`：
+  - 导入 `code_card()`。
+  - 将“任务命令规则”接入 `code_card()`，保留 `task` 说明和脚本类型示例。
+  - 将“Cron 说明”接入 `code_card()`，保留 5 位和 6 位 Cron 示例。
+  - 将“进程查看示例”接入 `code_card()`，保留进程查看命令。
+  - 保留关于页原有面板信息表格、版本卡、时间校准表单和面板控制按钮。
+- 扩展 `tests/test_ui_route_components.py`：
+  - 在 `/about` 渲染测试中覆盖三个代码卡标题、说明文本和关键命令内容。
+- 更新 `DEVELOPMENT.md`：
+  - 将 `/about` 只读代码说明卡纳入路由组件覆盖。
+  - 增加阶段 40 开发日志。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_components tests.test_ui_route_components.UiRouteComponentTests.test_about_page_renders_panel_info_table_card`：通过，15 tests OK。
+- `python -B -m compileall fls_manager/ui/components.py fls_manager/routes/about/page.py tests/test_ui_components.py tests/test_ui_route_components.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，141 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
+- 本阶段只验证关于页 GET 初始渲染，没有触发时间校准、版本更新、重启或停止面板等 POST 流程。
+
+组件策略结论：
+
+- `code_card()` 适合承载关于页静态说明和命令示例；动态日志、用户输入和执行结果仍不直接迁移到代码卡。
+- 关于页剩余复杂区域包含表单切换、版本日志和面板控制，继续保持原状，避免把可交互流程混入本阶段。
+
 ## 下一阶段候选
 
-- 阶段 40：继续查找未脏页面中的纯文本提示卡、小型头部卡、代码卡或稳定表格卡；可评估关于页 Cron/进程查看等只读代码块，但避免复杂 JS 状态和 POST 纯文本错误响应形态变化。
-- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/pull`、`/online-scripts/source`、`/pull/fetch`、`/pull/import`、`/config`、`/pull/new`、`/scripts/view`、`/scripts/rename`、`/proxy/new`、`/proxy/edit/<id>`、`/env/view`、`/env/new`、`/env/edit/<key>`、`/env/import`、`/deps/uninstall`、`/deps/refresh`、`/deps/install-log/<id>`、`/scripts/debug-log/<id>`、`/backup`、`/about` 版本失败页、`/online-scripts/install-select/<id>`、`/online-scripts/doc/<id>`、`/online-scripts/install/<id>`、`/online-scripts/log/<id>`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
+- 阶段 41：继续查找未脏页面中的纯文本提示卡、小型头部卡、代码卡或稳定表格卡；优先避开复杂 JS 状态、后台任务副作用和 POST 纯文本错误响应形态变化。
+- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/about`、`/pull`、`/online-scripts/source`、`/pull/fetch`、`/pull/import`、`/config`、`/pull/new`、`/scripts/view`、`/scripts/rename`、`/proxy/new`、`/proxy/edit/<id>`、`/env/view`、`/env/new`、`/env/edit/<key>`、`/env/import`、`/deps/uninstall`、`/deps/refresh`、`/deps/install-log/<id>`、`/scripts/debug-log/<id>`、`/backup`、`/about` 版本失败页、`/online-scripts/install-select/<id>`、`/online-scripts/doc/<id>`、`/online-scripts/install/<id>`、`/online-scripts/log/<id>`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

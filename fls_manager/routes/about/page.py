@@ -7,7 +7,7 @@ from .helpers import (
     fls_control_script,
 )
 from ...ui.layout import layout
-from ...ui.components import table_card
+from ...ui.components import code_card, table_card
 from ...utils import h
 from ...paths import BASE_DIR, DATA_DIR, LOG_DIR, SCRIPT_DIR
 from ...constants import MAIN_PROCESS_NAME, TASK_PROCESS_PREFIX
@@ -159,6 +159,46 @@ def about():
         "面板信息",
         ["项目", "值"],
         panel_info_rows,
+    )
+    task_command_card = code_card(
+        "任务命令规则",
+        """
+task 1.py<br>
+task a/test.sh<br>
+task demo.js<br>
+task demo.ts<br>
+task script.ps1<br>
+task run.bat<br>
+task demo.php<br>
+task demo.rb<br>
+task demo.pl<br>
+task demo.lua<br>
+task app.jar<br><br>
+不加 task 则作为系统命令执行，例如：<br>
+python3 /root/test.py
+        """,
+        help_html=(
+            "使用 <b>task</b> 开头时，会从脚本目录运行对应文件；"
+            "不使用 <b>task</b> 开头时，会作为系统命令执行。"
+        ),
+    )
+    cron_card = code_card(
+        "Cron 说明",
+        """
+留空：手动任务<br><br>
+5 位：分 时 日 月 周<br>
+0 8 * * *     每天 08:00<br>
+*/10 * * * *  每 10 分钟<br><br>
+6 位：秒 分 时 日 月 周<br>
+0 0 8 * * *   每天 08:00:00
+        """,
+    )
+    process_card = code_card(
+        "进程查看示例",
+        """
+ps -ef | grep fls<br>
+ps -eo pid,ppid,comm,args | grep fls
+        """,
     )
 
     body = f"""
@@ -392,48 +432,11 @@ flsToggleTimeSyncMode();
 
 {panel_info_table}
 
-<div class="card">
-    <div class="card-title">任务命令规则</div>
-    <div class="help">
-        使用 <b>task</b> 开头时，会从脚本目录运行对应文件；不使用 <b>task</b> 开头时，会作为系统命令执行。
-    </div>
-    <br>
-    <div class="code">
-task 1.py<br>
-task a/test.sh<br>
-task demo.js<br>
-task demo.ts<br>
-task script.ps1<br>
-task run.bat<br>
-task demo.php<br>
-task demo.rb<br>
-task demo.pl<br>
-task demo.lua<br>
-task app.jar<br><br>
-不加 task 则作为系统命令执行，例如：<br>
-python3 /root/test.py
-    </div>
-</div>
+{task_command_card}
 
-<div class="card">
-    <div class="card-title">Cron 说明</div>
-    <div class="code">
-留空：手动任务<br><br>
-5 位：分 时 日 月 周<br>
-0 8 * * *     每天 08:00<br>
-*/10 * * * *  每 10 分钟<br><br>
-6 位：秒 分 时 日 月 周<br>
-0 0 8 * * *   每天 08:00:00
-    </div>
-</div>
+{cron_card}
 
-<div class="card">
-    <div class="card-title">进程查看示例</div>
-    <div class="code">
-ps -ef | grep fls<br>
-ps -eo pid,ppid,comm,args | grep fls
-    </div>
-</div>
+{process_card}
 """
 
     return layout("关于", "about", body)

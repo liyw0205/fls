@@ -744,6 +744,14 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn("<td><b>项目仓库</b></td>", html)
             self.assertIn("https://github.com/liyw0205/fls", html)
             self.assertIn("<td><b>控制脚本</b></td>", html)
+            self.assertIn('<div class="card-title">任务命令规则</div>', html)
+            self.assertIn("使用 <b>task</b> 开头时", html)
+            self.assertIn("task demo.ts<br>", html)
+            self.assertIn("python3 /root/test.py", html)
+            self.assertIn('<div class="card-title">Cron 说明</div>', html)
+            self.assertIn("*/10 * * * *  每 10 分钟<br>", html)
+            self.assertIn('<div class="card-title">进程查看示例</div>', html)
+            self.assertIn("ps -eo pid,ppid,comm,args | grep fls", html)
 
     def test_about_refresh_log_no_git_renders_header_card(self):
         with isolated_app() as (app, _base_dir):

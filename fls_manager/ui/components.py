@@ -91,7 +91,9 @@ def message_card(message, kind="info", strong=False, title=""):
 def code_card(title, code_html, help_html="", actions_html=""):
     help_block = ""
     if str(help_html or "").strip():
-        help_block = f'<div class="help">{help_html}</div>'
+        help_block = f"""
+    <div class="help">{help_html}</div>
+    <br>"""
 
     actions_block = ""
     if str(actions_html or "").strip():
