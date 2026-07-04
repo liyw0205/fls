@@ -1,4 +1,5 @@
 from ._common import *
+from ...ui.components import table_card
 
 
 @bp.route("/config", methods=["GET", "POST"])
@@ -202,6 +203,12 @@ def config_page():
         else:
             security_status_text += "，当前方式：随机验证码"
 
+    task_type_table = table_card(
+        "task 可执行脚本类型",
+        ("类型", "启用"),
+        rows,
+    )
+
     body = f"""
 <form method="post">
 <div class="card">
@@ -381,15 +388,7 @@ def config_page():
     </div>
 </div>
 
-<div class="card">
-    <div class="card-title">task 可执行脚本类型</div>
-    <div class="table-wrap">
-        <table>
-            <thead><tr><th>类型</th><th>启用</th></tr></thead>
-            <tbody>{rows}</tbody>
-        </table>
-    </div>
-</div>
+{task_type_table}
 
 <div class="card">
     <button class="btn btn-primary" type="submit">保存配置</button>
@@ -420,4 +419,3 @@ flsToggleSecurityBox();
 """
 
     return layout("配置", "config", body)
-

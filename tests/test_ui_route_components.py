@@ -630,6 +630,42 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn("<td><b>面板时区</b></td>", html)
             self.assertIn("<td><b>工作目录</b></td>", html)
 
+    def test_config_page_renders_task_type_table_card(self):
+        with isolated_app() as (app, base_dir):
+            config_file = base_dir / "data" / "config.json"
+            config_file.parent.mkdir(parents=True, exist_ok=True)
+            config_file.write_text(
+                json.dumps(
+                    {
+                        "admin_token": TOKEN,
+                        "task_types": {
+                            "py": True,
+                            "sh": False,
+                            "js": False,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            response = app.test_client().get(
+                "/config",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">task 可执行脚本类型</div>', html)
+            self.assertIn("<th>类型</th>", html)
+            self.assertIn("<th>启用</th>", html)
+            self.assertIn("<td><b>Python .py / .pyw</b></td>", html)
+            self.assertIn('name="type_py" value="1" checked', html)
+            self.assertIn('name="type_sh" value="1"', html)
+            self.assertNotIn('name="type_sh" value="1" checked', html)
+            self.assertIn("保存配置", html)
+            self.assertIn("flsToggleSecurityBox", html)
+
     def test_about_page_renders_panel_info_table_card(self):
         with isolated_app() as (app, _base_dir):
             response = app.test_client().get(
