@@ -456,6 +456,74 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertNotIn("<ENV", html)
             self.assertNotIn("<x>", html)
 
+    def test_proxy_new_renders_header_card_and_realtime_shell(self):
+        with isolated_app() as (app, _base_dir):
+            response = app.test_client().get(
+                "/proxy/new",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">新增代理</div>', html)
+            self.assertIn("代理可用于任务运行、脚本拉取和 GitHub 加速", html)
+            self.assertIn('action="/proxy/new"', html)
+            self.assertIn('name="name"', html)
+            self.assertIn('id="proxyType"', html)
+            self.assertIn('name="quality_urls"', html)
+            self.assertIn("保存代理", html)
+            self.assertIn("testProxyRealtime", html)
+            self.assertIn("qualityProxyRealtime", html)
+            self.assertIn('id="proxyRealtimeResult"', html)
+            self.assertIn('href="/proxy"', html)
+
+    def test_proxy_edit_renders_header_card_and_escapes_values(self):
+        with isolated_app() as (app, base_dir):
+            data_dir = base_dir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            (data_dir / "proxies.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "proxy-x",
+                            "name": '<Proxy & "x">',
+                            "type": "http",
+                            "host": "proxy<host>",
+                            "port": "8080",
+                            "username": 'user & "x"',
+                            "password": "pass <x>",
+                            "url": "https://gh.example/<x>",
+                            "enabled": False,
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            response = app.test_client().get(
+                "/proxy/edit/proxy-x",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">编辑代理</div>', html)
+            self.assertIn("当前代理：<b>&lt;Proxy &amp; &quot;x&quot;&gt;</b>", html)
+            self.assertIn('action="/proxy/edit/proxy-x"', html)
+            self.assertIn('name="id" value="proxy-x"', html)
+            self.assertIn('name="name" value="&lt;Proxy &amp; &quot;x&quot;&gt;"', html)
+            self.assertIn('value="http" selected', html)
+            self.assertIn('name="host" value="proxy&lt;host&gt;"', html)
+            self.assertIn('name="username" value="user &amp; &quot;x&quot;"', html)
+            self.assertIn('name="password" value="pass &lt;x&gt;"', html)
+            self.assertIn('name="url" value="https://gh.example/&lt;x&gt;"', html)
+            self.assertIn('id="proxyRealtimeResult"', html)
+            self.assertNotIn("<Proxy", html)
+            self.assertNotIn("<host>", html)
+            self.assertNotIn("<x>", html)
+
     def test_status_page_renders_table_card_with_runtime_table_id(self):
         with isolated_app() as (app, _base_dir):
             runtime_items = [

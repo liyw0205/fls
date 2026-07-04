@@ -1648,8 +1648,55 @@
 - 对仍返回纯文本的历史校验分支，当前阶段保持响应形态不变，避免扩大兼容影响。
 - 后续继续优先选择未脏页面的小范围头部卡或提示卡；复杂表单整卡抽取可等模板化方案明确后再处理。
 
+## 阶段 34：代理表单页头部卡接入
+
+状态：已完成
+
+目标：
+
+- 继续低风险 UI 组件抽取，优先未脏文件和 GET 渲染无副作用页面。
+- 复用已有 `page_header_card()`，不新增组件 API。
+- 只替换代理新增和编辑页面的说明头部，不改变保存逻辑、实时测试 JS 和代理质量检测流程。
+
+已完成：
+
+- 更新 `fls_manager/routes/proxy/_common.py`：
+  - 导入 `page_header_card()`。
+  - 将 `/proxy/new` 顶部说明接入头部卡。
+  - 将 `/proxy/edit/<id>` 顶部说明接入头部卡，并转义当前代理名。
+  - 保留代理字段卡、自定义质量检测地址、保存/测试/质量检测按钮和返回入口。
+  - 保留实时测试/质量检测结果卡与前端 JS。
+  - 保留代理名称、Host、用户名、密码、GitHub 代理 URL 等字段的 HTML 转义。
+- 扩展 `tests/test_ui_route_components.py`：
+  - 覆盖 `/proxy/new` 头部卡、表单字段、实时检测壳和返回入口。
+  - 覆盖 `/proxy/edit/<id>` 头部卡、动态代理名/字段值转义、选中类型和实时检测壳。
+- 更新 `DEVELOPMENT.md`：
+  - 将 `/proxy/new`、`/proxy/edit/<id>` 代理表单头部卡纳入路由组件覆盖。
+  - 增加阶段 34 开发日志。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_route_components`：通过，42 tests OK。
+- `python -B -m compileall fls_manager/routes/proxy/_common.py tests/test_ui_route_components.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，133 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
+- 本阶段只验证代理表单页 GET 初始渲染，没有提交保存代理或触发真实代理检测请求。
+
+组件策略结论：
+
+- `page_header_card()` 适合承载代理表单的标题和上下文说明；字段卡、质量检测配置和实时结果卡仍由页面自身管理。
+- 对带 JS 实时结果的页面，本阶段只移动静态头部，避免改动 `innerHTML` 状态更新和请求流程。
+- 后续继续优先选择未脏页面的小范围头部卡或纯文本提示卡；涉及真实网络检测或复杂表单提交的流程保持原状。
+
 ## 下一阶段候选
 
-- 阶段 34：继续查找未脏页面中的纯文本提示卡或小型头部卡；可评估代理、脚本或配置页面中的局部结果提示，但避免复杂 JS 状态和 POST 纯文本错误响应形态变化。
-- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/env/view`、`/env/new`、`/env/edit/<key>`、`/env/import`、`/deps/uninstall`、`/deps/refresh`、`/deps/install-log/<id>`、`/scripts/debug-log/<id>`、`/backup`、`/about` 版本失败页、`/online-scripts/install-select/<id>`、`/online-scripts/doc/<id>`、`/online-scripts/install/<id>`、`/online-scripts/log/<id>`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
+- 阶段 35：继续查找未脏页面中的纯文本提示卡或小型头部卡；可评估脚本查看/改名页面或配置页中的局部头部，但避免复杂 JS 状态和 POST 纯文本错误响应形态变化。
+- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/proxy/new`、`/proxy/edit/<id>`、`/env/view`、`/env/new`、`/env/edit/<key>`、`/env/import`、`/deps/uninstall`、`/deps/refresh`、`/deps/install-log/<id>`、`/scripts/debug-log/<id>`、`/backup`、`/about` 版本失败页、`/online-scripts/install-select/<id>`、`/online-scripts/doc/<id>`、`/online-scripts/install/<id>`、`/online-scripts/log/<id>`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

@@ -4,6 +4,7 @@ from flask import request, redirect, url_for, abort, jsonify
 from ...models import load_proxies, save_proxies
 from ...utils import h, now_str
 from ...ui.layout import layout
+from ...ui.components import page_header_card
 from ...proxy import (
     proxy_from_form,
     build_proxy_url,
@@ -33,12 +34,21 @@ def proxy_form(proxy=None, mode="new"):
         return "selected" if proxy.get("type") == v else ""
 
     action = "/proxy/new" if mode == "new" else f"/proxy/edit/{proxy.get('id')}"
+    title = "新增代理" if mode == "new" else "编辑代理"
+    help_html = (
+        "代理可用于任务运行、脚本拉取和 GitHub 加速。保存前可先使用测试或质量检测。"
+        if mode == "new"
+        else (
+            f'当前代理：<b>{h(proxy.get("name", "") or proxy.get("id", ""))}</b>。'
+            "保存前可先使用测试或质量检测。"
+        )
+    )
+    header = page_header_card(title, help_html)
 
     body = f"""
 <form method="post" id="proxyForm" action="{h(action)}">
+{header}
 <div class="card">
-    <div class="card-title">{"新增代理" if mode == "new" else "编辑代理"}</div>
-
     <input type="hidden" name="id" value="{h(proxy.get('id', ''))}">
 
     <div class="form-grid">
