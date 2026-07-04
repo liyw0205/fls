@@ -1,6 +1,6 @@
 # FLS 开发进度
 
-更新时间：2026-07-04
+更新时间：2026-07-05
 
 本文记录阶段开发进度。每个阶段结束前必须更新本文件，并生成或更新 `docs/SESSION_HANDOFF.md`。
 
@@ -760,4 +760,55 @@
 
 - 阶段 17：继续查找未脏页面中的纯文本提示卡或稳定表格卡，避免复杂 JS 状态、富文本结果和带按钮的完整错误页。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/online-scripts` 的摘要项和脚本拉取页面。
+- 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
+
+## 阶段 17：仪表盘环境表格卡接入
+
+状态：已完成
+
+目标：
+
+- 继续低风险 UI 组件抽取，优先未脏文件和稳定表格结构。
+- 复用已有 `table_card()`，不新增组件 API。
+- 避开任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外改动。
+
+已完成：
+
+- 更新 `fls_manager/routes/dashboard.py`：
+  - 导入 `table_card()`。
+  - 将仪表盘“环境状态”表格接入 `table_card()`。
+  - 保留峰值 CPU 自动重置说明和当前峰值统计周期说明。
+  - 保留原有 `env_rows` 数据构造和字段转义逻辑。
+- 扩展 `tests/test_ui_route_components.py`：
+  - 覆盖 `/` 仪表盘环境状态表格卡渲染。
+  - 断言表格标题、表头、说明文案和关键环境行存在。
+- 更新 `DEVELOPMENT.md`：
+  - 将 `/` 仪表盘环境状态表格卡纳入路由组件覆盖。
+  - 增加阶段 17 开发日志。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_route_components`：通过，12 tests OK。
+- `python -B -m compileall fls_manager/routes/dashboard.py tests/test_ui_route_components.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，102 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
+- 仪表盘环境表格没有既有表格 ID 或 JS 选择器依赖，因此未设置 `table_id`。
+
+组件策略结论：
+
+- `table_card()` 可以继续接入稳定只读表格；动态 JS 表格、复杂工具栏和特殊折叠结构仍不强行统一。
+- 接入表格卡前需确认是否存在 CSS/JS 依赖的表格 ID；本阶段目标表格无该依赖。
+- 后续仍优先选择未脏页面的小范围组件化，避免与长期业务改动交叉。
+
+## 下一阶段候选
+
+- 阶段 18：继续查找未脏页面中的纯文本提示卡或稳定表格卡，例如关于页的只读信息表格，但避免嵌套卡片和折叠更新日志。
+- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/`、`/online-scripts`、`/pull/fetch`、`/pull/import`、`/deps`、`/panel/status`。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

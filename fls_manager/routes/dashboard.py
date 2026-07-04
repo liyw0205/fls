@@ -10,6 +10,7 @@ from flask import Blueprint, jsonify
 from ..models import load_tasks
 from ..task_runner import is_running
 from ..ui.layout import layout
+from ..ui.components import table_card
 from ..utils import h
 from ..paths import BASE_DIR, DATA_DIR, LOG_DIR, SCRIPT_DIR
 from ..config import get_host, get_port, fls_get_admin_token, panel_now, get_panel_timezone_text
@@ -468,6 +469,16 @@ def dashboard():
 </tr>
 """
 
+    env_table = table_card(
+        "环境状态",
+        ["项目", "值"],
+        env_rows,
+        help_html=f"""
+        面板峰值 CPU 每天 00:00 和 12:00 自动重置。<br>
+        当前峰值统计周期：{h(panel_cpu_peak_period)}
+        """,
+    )
+
     body = f"""
 <div class="grid">
     <div class="stat">
@@ -555,19 +566,7 @@ def dashboard():
     </div>
 </div>
 
-<div class="card">
-    <div class="card-title">环境状态</div>
-    <div class="help">
-        面板峰值 CPU 每天 00:00 和 12:00 自动重置。<br>
-        当前峰值统计周期：{h(panel_cpu_peak_period)}
-    </div>
-    <br>
-    <div class="table-wrap">
-        <table>
-            <tbody>{env_rows}</tbody>
-        </table>
-    </div>
-</div>
+{env_table}
 
 <script>
 async function flsDashboardRefreshRuntime(){{

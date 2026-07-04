@@ -1,6 +1,6 @@
 # FLS 开发文档
 
-更新时间：2026-07-04
+更新时间：2026-07-05
 基线：`main` / `b8762aa`
 
 本文用于后续开发协作。每次完成开发后，都要同步更新本文的“开发日志”和“后续方向”，必要时同步调整架构、数据模型、接口和验证清单。
@@ -398,7 +398,7 @@ python -B -m compileall fls-manager.py fls_manager tests tools
 - `ui.components.summary_item()` 的统计项结构、数字 value 和 HTML 转义。
 - 路由层 UI 组件接入：`/pull/new`、`/pull/fetch`、`/pull/import` 普通/结果提示卡和 `/online-scripts/doc/<id>` 文档加载失败卡的渲染与转义。
 - 路由层 UI 组件接入：`/task/config/<id>` 保存成功/失败提示卡的渲染与转义。
-- 路由层 UI 组件接入：`/deps`、`/deps/refresh` 和 `/panel/status` 表格卡渲染、响应式表格 ID 保留与 HTML 转义。
+- 路由层 UI 组件接入：`/deps`、`/deps/refresh`、`/panel/status` 和 `/` 仪表盘环境状态表格卡渲染、响应式表格 ID 保留与 HTML 转义。
 
 后续优先补充：
 
@@ -439,6 +439,10 @@ python -B -m compileall fls-manager.py fls_manager tests tools
 - 增加更细的操作审计日志。
 
 ## 13. 开发日志
+
+### 2026-07-05
+
+- 阶段 17 将仪表盘“环境状态”接入 `table_card()`，保留峰值 CPU 说明和现有环境行渲染，同时补充 `/` 路由渲染测试覆盖表格标题、表头和关键行。
 
 ### 2026-07-04
 
