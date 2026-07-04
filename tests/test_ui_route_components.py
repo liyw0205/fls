@@ -303,6 +303,28 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertNotIn("<time", html)
             self.assertNotIn("<bad", html)
 
+    def test_deps_uninstall_renders_header_card_and_escapes_output(self):
+        with isolated_app() as (app, _base_dir):
+            with patch(
+                "fls_manager.routes.deps.pip_cmd",
+                return_value=SimpleNamespace(stdout='removed <pkg & "x">\n'),
+            ) as pip_mock:
+                response = app.test_client().get(
+                    "/deps/uninstall",
+                    query_string={"name": '<pkg & "x">'},
+                    headers={"X-Token": TOKEN},
+                )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            pip_mock.assert_called_once_with(["uninstall", "-y", '<pkg & "x">'])
+            self.assertIn('<div class="card-title">卸载结果</div>', html)
+            self.assertIn('<div class="action-row">', html)
+            self.assertIn('href="/deps"', html)
+            self.assertIn('<pre class="log">removed &lt;pkg &amp; &quot;x&quot;&gt;\n</pre>', html)
+            self.assertNotIn('<pkg & "x">', html)
+
     def test_status_page_renders_table_card_with_runtime_table_id(self):
         with isolated_app() as (app, _base_dir):
             runtime_items = [

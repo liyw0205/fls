@@ -348,11 +348,13 @@ def deps_uninstall():
     except Exception as e:
         output = str(e)
 
+    header_card = page_header_card(
+        "卸载结果",
+        actions_html='<a class="btn btn-gray" href="/deps">返回</a>',
+    )
+
     body = f"""
-<div class="card">
-    <div class="card-title">卸载结果</div>
-    <pre class="log">{h(output)}</pre>
-    <a class="btn btn-gray" href="/deps">返回</a>
-</div>
+{header_card}
+<pre class="log">{h(output)}</pre>
 """
     return layout("卸载依赖", "deps", body)
