@@ -435,7 +435,10 @@ class BulkWorkflowTests(unittest.TestCase):
                 ],
             )
 
-            with patch("fls_manager.routes.api.stop_task_now") as stop_task_now:
+            with patch(
+                "fls_manager.routes.api.stop_task_now",
+                return_value=(True, "已结束"),
+            ) as stop_task_now:
                 with patch("fls_manager.routes.api.reload_scheduler") as reload_scheduler:
                     response = app.test_client().post(
                         "/api/task/action/delete/t1",
@@ -452,6 +455,76 @@ class BulkWorkflowTests(unittest.TestCase):
             self.assertEqual(
                 [task["id"] for task in read_json(base_dir / "data" / "tasks.json")],
                 ["t2"],
+            )
+
+    def test_task_action_delete_not_running_still_removes_task(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1"),
+                    sample_task("t2"),
+                ],
+            )
+
+            with patch(
+                "fls_manager.routes.api.stop_task_now",
+                return_value=(False, "任务未运行"),
+            ) as stop_task_now:
+                with patch("fls_manager.routes.api.reload_scheduler") as reload_scheduler:
+                    response = app.test_client().post(
+                        "/api/task/action/delete/t1",
+                        headers={"X-Token": TOKEN},
+                    )
+
+            payload = response.get_json()
+
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["msg"], "已删除")
+            stop_task_now.assert_called_once_with("t1")
+            reload_scheduler.assert_called_once()
+            self.assertEqual(
+                [task["id"] for task in read_json(base_dir / "data" / "tasks.json")],
+                ["t2"],
+            )
+
+    def test_task_action_delete_stop_failure_keeps_task_without_reload(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1"),
+                    sample_task("t2"),
+                ],
+            )
+
+            with patch(
+                "fls_manager.routes.api.stop_task_now",
+                return_value=(False, "结束失败：permission denied"),
+            ) as stop_task_now:
+                with patch("fls_manager.routes.api.save_tasks") as save_tasks:
+                    with patch("fls_manager.routes.api.reload_scheduler") as reload_scheduler:
+                        response = app.test_client().post(
+                            "/api/task/action/delete/t1",
+                            headers={"X-Token": TOKEN},
+                        )
+
+            payload = response.get_json()
+
+            self.assertEqual(response.status_code, 409)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["msg"], "删除失败：结束失败：permission denied")
+            stop_task_now.assert_called_once_with("t1")
+            save_tasks.assert_not_called()
+            reload_scheduler.assert_not_called()
+            self.assertEqual(
+                [task["id"] for task in read_json(base_dir / "data" / "tasks.json")],
+                ["t1", "t2"],
             )
 
     def test_task_action_delete_missing_task_returns_404_without_side_effects(self):
@@ -480,6 +553,39 @@ class BulkWorkflowTests(unittest.TestCase):
             self.assertFalse(payload["ok"])
             self.assertEqual(payload["msg"], "任务不存在")
             stop_task_now.assert_not_called()
+            save_tasks.assert_not_called()
+            reload_scheduler.assert_not_called()
+            self.assertEqual(
+                [task["id"] for task in read_json(base_dir / "data" / "tasks.json")],
+                ["t1", "t2"],
+            )
+
+    def test_legacy_task_delete_stop_failure_keeps_task_without_reload(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1"),
+                    sample_task("t2"),
+                ],
+            )
+
+            with patch(
+                "fls_manager.routes.tasks.actions.stop_task_now",
+                return_value=(False, "结束失败：permission denied"),
+            ) as stop_task_now:
+                with patch("fls_manager.routes.tasks.actions.save_tasks") as save_tasks:
+                    with patch("fls_manager.routes.tasks.actions.reload_scheduler") as reload_scheduler:
+                        response = app.test_client().post(
+                            "/task/delete/t1?back=/tasks",
+                            headers={"X-Token": TOKEN},
+                        )
+
+            self.assertEqual(response.status_code, 409)
+            self.assertIn("删除失败：结束失败：permission denied", response.get_data(as_text=True))
+            stop_task_now.assert_called_once_with("t1")
             save_tasks.assert_not_called()
             reload_scheduler.assert_not_called()
             self.assertEqual(

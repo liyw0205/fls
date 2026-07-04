@@ -10,17 +10,28 @@ from ...task_runner import run_task_now, stop_task_now
 
 @bp.route("/task/delete/<task_id>", methods=["POST"])
 def task_delete(task_id):
-    stop_task_now(task_id)
+    tasks = load_tasks()
+    found = any(t.get("id") == task_id for t in tasks)
+
+    if not found:
+        abort(404)
+
+    ok, msg = stop_task_now(task_id)
+
+    if not ok and msg != "任务未运行":
+        back_url = get_back_url("/tasks")
+        error_text = h(f"删除失败：{msg}")
+        return f"{error_text}<br><a href='{h(back_url)}'>返回</a>", 409
 
     tasks = [
-        t for t in load_tasks()
+        t for t in tasks
         if t.get("id") != task_id
     ]
 
     save_tasks(tasks)
     reload_scheduler()
 
-    return redirect(url_for("tasks.tasks_page"))
+    return redirect(get_back_url("/tasks"))
 
 
 @bp.route("/task/toggle/<task_id>")

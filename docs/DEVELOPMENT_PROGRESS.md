@@ -1,6 +1,6 @@
 # FLS 开发进度
 
-更新时间：2026-07-04
+更新时间：2026-07-05
 
 本文记录阶段开发进度。每个阶段结束前必须更新本文件，并生成或更新 `docs/SESSION_HANDOFF.md`。
 
@@ -1639,8 +1639,60 @@
 - 批量删除不再把停止失败的任务从任务配置中移除。
 - 前端批量提示可以展示删除失败摘要，避免用户误以为所有任务都已删除。
 
+## 阶段 38：单项删除停止失败边界
+
+状态：已完成
+
+目标：
+
+- 继续收束任务删除 API 的停止失败边界。
+- 让单项删除与阶段 37 的批量删除保持一致：任务停止失败时不能从 `tasks.json` 删除。
+- 兼容保留的页面 POST 删除入口也应遵守同一边界。
+
+已完成：
+
+- 更新 `fls_manager/routes/api.py`：
+  - 新增 `_delete_stop_failed()`，集中判断停止结果是否阻止删除。
+  - `/api/task/action/delete/<id>` 删除存在任务前检查 `stop_task_now()` 返回值。
+  - 停止成功或返回“任务未运行”时继续删除任务。
+  - 其它停止失败场景返回 `409` 和 `{"ok": false, "msg": "删除失败：..."}`，不写回任务文件、不重载调度器。
+  - 批量删除分支复用同一判断逻辑，减少单项和批量边界漂移。
+- 更新 `fls_manager/routes/tasks/actions.py`：
+  - 兼容页面 POST `/task/delete/<id>` 先确认任务存在。
+  - 停止失败时返回 409 错误文本和安全返回链接，保留任务并避免写入或调度器重载。
+  - 成功删除后使用 `get_back_url("/tasks")` 返回，继续清洗 back 参数。
+- 扩展 `tests/test_bulk_workflows.py`：
+  - 覆盖单项 API 删除停止成功路径。
+  - 覆盖“任务未运行”仍允许删除。
+  - 覆盖单项 API 停止失败时返回 409、不保存、不重载、任务文件不变。
+  - 覆盖兼容页面 POST 删除入口停止失败时同样不保存、不重载、任务文件不变。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 38。
+  - 在 API 开发注意和测试覆盖列表中记录单项删除停止失败边界。
+  - 增加阶段 38 开发日志。
+
+验证记录：
+
+- `python -B -m unittest tests.test_bulk_workflows`：通过，19 tests OK。
+- `python -B -m compileall fls_manager/routes/api.py fls_manager/routes/tasks/actions.py tests/test_bulk_workflows.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，146 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有触发真实任务进程，只通过 mock `stop_task_now()` 验证停止失败、未运行和成功路径。
+- 本阶段没有改变批量删除的 200 + `ok:true` 兼容语义。
+
+收束结论：
+
+- 单项删除和批量删除现在共享同一停止失败删除边界。
+- 停止失败不会再导致任务配置被删除，避免运行态任务失去面板侧配置记录。
+
 ## 下一阶段候选
 
-- 阶段 38：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
+- 阶段 39：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

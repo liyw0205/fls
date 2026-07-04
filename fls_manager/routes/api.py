@@ -68,6 +68,10 @@ def _task_action_result(ok, msg):
     return jsonify(payload)
 
 
+def _delete_stop_failed(ok, msg):
+    return not ok and msg != "任务未运行"
+
+
 def _bulk_payload(action, task_ids, msg, **extra):
     payload = {
         "ok": True,
@@ -210,7 +214,13 @@ def api_task_action(action, task_id):
             if not found:
                 return jsonify({"ok": False, "msg": "任务不存在"}), 404
 
-            stop_task_now(task_id)
+            ok, msg = stop_task_now(task_id)
+
+            if _delete_stop_failed(ok, msg):
+                return jsonify({
+                    "ok": False,
+                    "msg": f"删除失败：{msg}",
+                }), 409
 
             tasks = [
                 t for t in tasks
@@ -359,7 +369,7 @@ def api_task_bulk_action():
             for task_id in task_ids:
                 ok, msg = stop_task_now(task_id)
 
-                if ok or msg == "任务未运行":
+                if not _delete_stop_failed(ok, msg):
                     deleted_ids.append(task_id)
                     continue
 

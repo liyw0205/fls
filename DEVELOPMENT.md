@@ -1,7 +1,7 @@
 # FLS 开发文档
 
-更新时间：2026-07-04
-基线：`main` / 阶段 37
+更新时间：2026-07-05
+基线：`main` / 阶段 38
 
 本文用于后续开发协作。每次完成开发后，都要同步更新本文的“开发日志”和“后续方向”，必要时同步调整架构、数据模型、接口和验证清单。
 
@@ -229,10 +229,12 @@ CSRF 约定：
 - 新增 API 应让错误响应保持 JSON。
 - `/api/task/action/run/<id>` 和 `/api/task/action/stop/<id>` 对不存在任务应返回 404；已存在但未运行的 stop 仍返回 200 和 `ok:false`。
 - `/api/task/action/delete/<id>` 删除不存在任务时应返回 404，不应停止任务、写回任务文件或重载调度器。
+- `/api/task/action/delete/<id>` 删除存在任务前必须先停止任务；停止成功或任务未运行时才删除，停止失败时返回 409 且不写回任务文件或重载调度器。
 - `/api/task/bulk-action` 应保持 `ok` / `msg` 兼容字段，并返回 `action`、`count` 及对应动作的结构化计数字段，便于前端和脚本客户端判断局部成功、跳过和失败。
 - `/api/task/bulk-action` 批量删除前会尝试停止任务；停止失败的任务不能被删除，响应需返回 `failed_count` / `failures`，前端提示也要显示删除失败明细。
 - 新增页面应走统一 `layout()`，避免绕过鉴权流程。
 - 新增 POST 表单应使用 `method="post"` 并让 `layout()` 自动注入 CSRF；不要手写 GET 破坏性链接。
+- 兼容保留的页面 POST 删除任务入口 `/task/delete/<id>` 应与单项删除 API 保持相同停止失败边界。
 - 返回跳转 URL 时优先使用 `utils.get_back_url()` 或等价校验，避免开放重定向。
 
 ## 6. 任务执行链路
@@ -409,6 +411,7 @@ python -B -m compileall fls-manager.py fls_manager tests tools
 - `auth.py` 的 API 与页面鉴权分支。
 - `backup/_common.py` 的备份文件名归一、zip/tar 路径穿越拒绝、安全 tar 解压 filter 兼容、tar 特殊成员拒绝和 DeprecationWarning 回归测试。
 - 批量任务 API 的启用、禁用、取出、删除、运行、停止结构化响应字段，以及批量删除遇到停止失败时保留失败任务的边界。
+- 单项任务删除 API 和兼容页面 POST 删除入口在任务停止失败时保留任务、不写回任务文件、不重载调度器的边界。
 - `ui.components.table_card()` 的可选说明区、操作区、表格 ID、标题和表头 HTML 转义。
 - `ui.components.pagination_card()` 的链接分页、按钮分页、禁用态、省略号和 HTML 转义。
 - `ui.components.message_card()` 的空/空白消息、成功/错误/普通提示、未知类型回退、加粗样式、可选标题和 HTML 转义。
@@ -459,6 +462,7 @@ python -B -m compileall fls-manager.py fls_manager tests tools
 
 ### 2026-07-05
 
+- 阶段 38 固化单项任务删除停止失败边界：`/api/task/action/delete/<id>` 和兼容页面 POST `/task/delete/<id>` 删除前检查 `stop_task_now()` 结果，停止失败时保留任务并避免写入任务文件或重载调度器；任务未运行仍按可删除处理。
 - 阶段 37 固化批量删除停止失败边界：`/api/task/bulk-action` 删除前根据 `stop_task_now()` 结果只删除已停止或未运行的任务，停止失败的任务保留在任务列表中，并返回 `deleted_count`、`failed_count`、`failures`；前端批量提示增加删除失败摘要。
 
 ### 2026-07-04
