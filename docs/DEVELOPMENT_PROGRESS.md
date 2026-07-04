@@ -1446,3 +1446,55 @@
 - 阶段 30：继续查找未脏页面中的纯文本提示卡或小型头部卡；可评估依赖刷新完成页头部卡或依赖卸载结果页，但避免真实 pip 卸载。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/deps/install-log/<id>`、`/scripts/debug-log/<id>`、`/backup`、备份导入完成页、`/about` 版本失败页、`/online-scripts/install-select/<id>`、`/online-scripts/doc/<id>`、`/online-scripts/install/<id>`、`/online-scripts/log/<id>`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
+
+## 阶段 30：依赖刷新完成页头部卡接入
+
+状态：已完成
+
+目标：
+
+- 继续低风险 UI 组件抽取，优先未脏文件和小型结果页。
+- 复用已有 `page_header_card()`，不新增组件 API。
+- 只替换依赖刷新完成页头部卡，不改变依赖检测逻辑和核心依赖结果表格。
+
+已完成：
+
+- 更新 `fls_manager/routes/deps.py`：
+  - 将 `/deps/refresh` 刷新完成提示接入 `page_header_card()`。
+  - 保留刷新时间说明。
+  - 保留核心依赖检测 `table_card()`、状态 badge 和返回依赖管理入口。
+  - 保留依赖名、版本/错误和刷新时间的 HTML 转义。
+- 扩展 `tests/test_ui_route_components.py`：
+  - 覆盖 `/deps/refresh` 头部卡和核心依赖检测表格渲染。
+  - 通过 mock `refresh_dependency_cache()` 固定刷新时间、依赖名称和错误消息，避免依赖真实运行环境状态。
+  - 断言动态字段 HTML 转义和异常 badge 保留。
+- 更新 `DEVELOPMENT.md`：
+  - 将 `/deps/refresh` 依赖刷新完成页头部卡纳入路由组件覆盖。
+  - 增加阶段 30 开发日志。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_route_components`：通过，35 tests OK。
+- `python -B -m compileall fls_manager/routes/deps.py tests/test_ui_route_components.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，126 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有触碰任务列表、日志、认证/API、`ui/tables.py` 等长期阶段外未提交业务修改。
+- 本阶段只验证依赖刷新完成页初始渲染，没有依赖真实包版本或真实浏览器执行。
+
+组件策略结论：
+
+- `page_header_card()` 适合短结果提示，详细检测结果继续由 `table_card()` 承载。
+- 环境状态类页面测试应 mock 检测函数，避免本机依赖差异导致测试不稳定。
+- 后续继续优先选择未脏页面的小范围改动；真实安装、卸载、下载和复杂 JS 状态流程暂缓。
+
+## 下一阶段候选
+
+- 阶段 31：继续查找未脏页面中的纯文本提示卡或小型头部卡；可评估依赖卸载结果页，但测试必须 mock `pip_cmd()`，避免真实 pip 卸载。
+- 有浏览器环境时补真实响应式截图验收，重点覆盖 `/deps/refresh`、`/deps/install-log/<id>`、`/scripts/debug-log/<id>`、`/backup`、备份导入完成页、`/about` 版本失败页、`/online-scripts/install-select/<id>`、`/online-scripts/doc/<id>`、`/online-scripts/install/<id>`、`/online-scripts/log/<id>`、`/`、`/online-scripts`、`/notify`、`/deps`、`/panel/status`。
+- 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

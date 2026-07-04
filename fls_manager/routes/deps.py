@@ -323,12 +323,13 @@ def deps_refresh():
         actions_html='<a class="btn btn-gray" href="/deps">返回依赖管理</a>',
     )
 
-    body = f"""
-<div class="card">
-    <div class="card-title">刷新依赖完成</div>
-    <div class="help">刷新时间：{h(result["time"])}</div>
-</div>
+    header_card = page_header_card(
+        "刷新依赖完成",
+        help_html=f'刷新时间：{h(result["time"])}',
+    )
 
+    body = f"""
+{header_card}
 {core_table}
 """
     return layout("刷新依赖", "deps", body)

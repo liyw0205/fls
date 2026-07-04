@@ -271,6 +271,38 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn("1&lt;2", html)
             self.assertNotIn('<pkg & "x">', html)
 
+    def test_deps_refresh_renders_header_card_and_table_card(self):
+        with isolated_app() as (app, _base_dir):
+            with patch(
+                "fls_manager.routes.deps.refresh_dependency_cache",
+                return_value={
+                    "time": '<time & "x">',
+                    "packages": {
+                        '<pkg & "x">': '1<2',
+                        "bad": '不可用：<bad & "x">',
+                    },
+                },
+            ):
+                response = app.test_client().get(
+                    "/deps/refresh",
+                    headers={"X-Token": TOKEN},
+                )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">刷新依赖完成</div>', html)
+            self.assertIn("刷新时间：&lt;time &amp; &quot;x&quot;&gt;", html)
+            self.assertIn('<div class="card-title">核心依赖检测</div>', html)
+            self.assertIn("<th>依赖</th>", html)
+            self.assertIn("&lt;pkg &amp; &quot;x&quot;&gt;", html)
+            self.assertIn("1&lt;2", html)
+            self.assertIn('<span class="badge red">异常</span>', html)
+            self.assertIn("不可用：&lt;bad &amp; &quot;x&quot;&gt;", html)
+            self.assertIn('href="/deps"', html)
+            self.assertNotIn("<time", html)
+            self.assertNotIn("<bad", html)
+
     def test_status_page_renders_table_card_with_runtime_table_id(self):
         with isolated_app() as (app, _base_dir):
             runtime_items = [
