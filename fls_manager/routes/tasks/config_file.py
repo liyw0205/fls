@@ -87,7 +87,7 @@ def task_config_edit(task_id):
     </div>
     <br>
     <button class="btn btn-primary" type="submit">保存配置</button>
-    <a class="btn btn-blue" href="/run/{h(task_id)}?back={back_param}">运行任务</a>
+    <button class="btn btn-blue" type="submit" formaction="/run/{h(task_id)}?back={back_param}" formmethod="post">运行任务</button>
     <a class="btn btn-orange" href="/task/edit/{h(task_id)}?back={back_param}">编辑任务</a>
     <a class="btn btn-gray" href="{h(back_url)}">返回</a>
 </div>

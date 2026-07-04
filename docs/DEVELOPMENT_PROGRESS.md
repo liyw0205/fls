@@ -1738,8 +1738,67 @@
 - 遗留 `/task/toggle/<id>` 不再允许 GET 修改状态。
 - 兼容页面切换入口与其它破坏性页面动作保持 POST-only 和缺失任务无副作用约束。
 
+## 阶段 40：兼容任务运行入口 POST 边界
+
+状态：已完成
+
+目标：
+
+- 继续收束任务页面遗留动作入口的 HTTP 方法边界。
+- 避免 `/run/<id>` 通过 GET 启动任务。
+- 让日志页、合集页和配置页的运行入口都走 POST，并保留安全 back 返回。
+
+已完成：
+
+- 更新本地 Git 提交身份：
+  - `user.name=liyw0205`
+  - `user.email=2650115317@qq.com`
+- 更新 `fls_manager/routes/tasks/actions.py`：
+  - `/run/<id>` 改为 `methods=["POST"]`，GET 自动返回 405。
+  - 成功运行后继续跳转到任务日志页，并保留清洗后的 `back`。
+  - `run_task_now()` 返回“任务不存在”时映射为 404，其它运行失败仍返回 400。
+- 更新 `fls_manager/routes/tasks/logs.py`：
+  - 任务日志页的“运行”按钮由 GET 链接改为 POST 表单。
+- 更新 `fls_manager/routes/tasks/collections.py`：
+  - 合集任务卡片的“运行”按钮由 GET 链接改为 POST 表单。
+- 更新 `fls_manager/routes/tasks/config_file.py`：
+  - 配置编辑页在外层保存表单内使用 `formaction="/run/<id>..."` 和 `formmethod="post"`，避免嵌套表单。
+- 扩展 `tests/test_auth_backup.py`：
+  - 将 `/run/t1` 纳入破坏性路由拒绝 GET 的回归测试。
+- 扩展 `tests/test_bulk_workflows.py`：
+  - 覆盖兼容 `/run/<id>` POST 成功提交任务并按安全 back 跳转日志页。
+  - 覆盖缺失任务返回 404 且任务文件不变。
+  - 覆盖合集任务卡片运行入口使用 POST 表单，且不再渲染 GET 运行链接。
+- 扩展 `tests/test_ui_route_components.py`：
+  - 覆盖任务配置页使用 `formaction` + POST 运行按钮，不再渲染 GET 运行链接。
+  - 覆盖任务日志页使用 POST 运行表单，不再渲染 GET 运行链接。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 40。
+  - 在 API/页面开发注意和测试覆盖列表中记录 `/run/<id>` POST-only 边界。
+  - 增加阶段 40 开发日志。
+
+验证记录：
+
+- `python -B -m unittest tests.test_auth_backup.CsrfSafetyTests.test_destructive_routes_reject_get_requests tests.test_bulk_workflows.BulkWorkflowTests.test_legacy_run_route_post_submits_task_and_uses_safe_back tests.test_bulk_workflows.BulkWorkflowTests.test_legacy_run_route_missing_task_returns_404_without_write tests.test_bulk_workflows.BulkWorkflowTests.test_collection_task_cards_keep_post_actions_collapsed_command_and_anchor_back tests.test_ui_route_components.UiRouteComponentTests.test_task_config_save_success_renders_message_card tests.test_ui_route_components.UiRouteComponentTests.test_task_log_page_keeps_history_table_actions_and_safe_back`：通过，6 tests OK。
+- `python -B -m compileall fls_manager/routes/tasks/actions.py fls_manager/routes/tasks/logs.py fls_manager/routes/tasks/config_file.py fls_manager/routes/tasks/collections.py tests/test_auth_backup.py tests/test_bulk_workflows.py tests/test_ui_route_components.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，150 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有触发真实任务进程，只通过 mock `run_task_now()` 验证兼容页面运行入口。
+- 本阶段没有改变普通任务列表当前 AJAX API 运行入口，只收紧兼容保留的页面路由和相关页面按钮。
+
+收束结论：
+
+- 遗留 `/run/<id>` 不再允许 GET 启动任务。
+- 日志页、合集页和配置页已经统一改为 POST 运行入口，继续保留安全 `back` 返回。
+
 ## 下一阶段候选
 
-- 阶段 40：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
+- 阶段 41：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

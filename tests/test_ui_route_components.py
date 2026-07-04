@@ -321,6 +321,12 @@ class UiRouteComponentTests(unittest.TestCase):
                 ),
                 "key: value\n",
             )
+            self.assertIn(
+                'formaction="/run/task-config?back=/tasks"',
+                html,
+            )
+            self.assertIn('formmethod="post"', html)
+            self.assertNotIn('href="/run/task-config', html)
 
     def test_task_config_save_failure_escapes_message_card(self):
         with isolated_app() as (app, base_dir):
@@ -748,7 +754,10 @@ class UiRouteComponentTests(unittest.TestCase):
                 'href="/logfile/task-history.log?back=/log/task-history"',
                 html,
             )
-            self.assertIn('href="/run/task-history?back=/history"', html)
+            self.assertIn(
+                'action="/run/task-history?back=/history"',
+                html,
+            )
             self.assertIn(
                 'action="/stop/task-history?back=/history"',
                 html,
@@ -759,6 +768,7 @@ class UiRouteComponentTests(unittest.TestCase):
             )
             self.assertIn('<a class="btn btn-gray" href="/history">返回</a>', html)
             self.assertIn('fetch("/api/log/task-history?lines=1200"', html)
+            self.assertNotIn('href="/run/task-history', html)
             self.assertNotIn('href="/stop/task-history', html)
 
             response = client.get(

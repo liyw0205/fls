@@ -87,7 +87,9 @@ def log_view(task_id):
         日志文件：{h(log_file or "暂无")}
     </div>
     <br>
-    <a class="btn btn-primary" href="/run/{h(task_id)}?back={h(back_url)}">运行</a>
+    <form class="inline-form" method="post" action="/run/{h(task_id)}?back={h(back_url)}">
+        <button class="btn btn-primary" type="submit">运行</button>
+    </form>
     <form class="inline-form" method="post" action="/stop/{h(task_id)}?back={h(back_url)}">
         <button class="btn btn-red" type="submit" onclick="return confirm('确定结束该任务吗？')">结束</button>
     </form>

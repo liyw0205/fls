@@ -372,6 +372,58 @@ class BulkWorkflowTests(unittest.TestCase):
                 ["t1"],
             )
 
+    def test_legacy_run_route_post_submits_task_and_uses_safe_back(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1"),
+                ],
+            )
+
+            with patch(
+                "fls_manager.routes.tasks.actions.run_task_now",
+                return_value=(True, "已提交启动"),
+            ) as run_task_now:
+                response = app.test_client().post(
+                    "/run/t1?back=/tasks",
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.headers.get("Location"), "/log/t1?back=/tasks")
+            run_task_now.assert_called_once_with("t1", source="manual")
+
+    def test_legacy_run_route_missing_task_returns_404_without_write(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1"),
+                ],
+            )
+
+            with patch(
+                "fls_manager.routes.tasks.actions.run_task_now",
+                return_value=(False, "任务不存在"),
+            ) as run_task_now:
+                response = app.test_client().post(
+                    "/run/missing?back=/tasks",
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 404)
+            self.assertIn("任务不存在", response.get_data(as_text=True))
+            run_task_now.assert_called_once_with("missing", source="manual")
+            self.assertEqual(
+                [task["id"] for task in read_json(base_dir / "data" / "tasks.json")],
+                ["t1"],
+            )
+
     def test_task_action_stop_missing_task_returns_404_without_stop_call(self):
         with isolated_app() as (app, _base_dir):
             from fls_manager import paths
@@ -846,6 +898,10 @@ class BulkWorkflowTests(unittest.TestCase):
                 html,
             )
             self.assertIn(
+                f'action="/run/t1?back={encoded_collection_back}"',
+                html,
+            )
+            self.assertIn(
                 f'action="/task/pin/t1?back={encoded_collection_back}"',
                 html,
             )
@@ -864,6 +920,7 @@ class BulkWorkflowTests(unittest.TestCase):
                 html,
             )
 
+            self.assertNotIn('href="/run/t1', html)
             self.assertNotIn('href="/stop/t1', html)
             self.assertNotIn('href="/task/pin/t1', html)
             self.assertNotIn('href="/task/collection/clear/t1', html)

@@ -153,7 +153,9 @@ def _task_card(task, back_url, collection_id=""):
 
         <div class="fls-card-actions">
             <div class="fls-btn-line">
-                <a class="btn btn-primary" href="/run/{h(task_id)}?back={_back_param(back_url)}">运行</a>
+                <form class="inline-form" method="post" action="/run/{h(task_id)}?back={_back_param(back_url)}">
+                    <button class="btn btn-primary" type="submit">运行</button>
+                </form>
                 <form class="inline-form" method="post" action="/stop/{h(task_id)}?back={_back_param(back_url)}">
                     <button class="btn btn-red" type="submit" onclick="return confirm('确定结束该任务吗？')">结束</button>
                 </form>

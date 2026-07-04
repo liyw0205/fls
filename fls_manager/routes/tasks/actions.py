@@ -101,13 +101,14 @@ def task_collection_clear(task_id):
     return redirect(get_back_url("/collections"))
 
 
-@bp.route("/run/<task_id>")
+@bp.route("/run/<task_id>", methods=["POST"])
 def run_task_route(task_id):
     ok, msg = run_task_now(task_id, source="manual")
     back_url = get_back_url("/tasks")
 
     if not ok:
-        return f"{h(msg)}<br><a href='{h(back_url)}'>返回</a>", 400
+        status_code = 404 if msg == "任务不存在" else 400
+        return f"{h(msg)}<br><a href='{h(back_url)}'>返回</a>", status_code
 
     return redirect(url_for("tasks.log_view", task_id=task_id, back=back_url))
 
