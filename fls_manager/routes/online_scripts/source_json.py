@@ -22,19 +22,20 @@ def online_scripts_source():
 
     cache_text = read_cache_text() or "[]"
 
-    body = f"""
-<div class="card">
-    <div class="card-title">脚本源 JSON</div>
-    <div class="help">
+    header = page_header_card(
+        "脚本源 JSON",
+        """
         这里显示当前本地缓存的脚本源 JSON。<br>
         如果服务器无法访问远程源，可以手动复制远程 index.json 内容，粘贴到这里保存。<br>
         保存后“在线脚本”列表会直接使用这份缓存。<br>
         支持字段：<code>doc_link</code>，可用于在线脚本页面查看文档。<br>
         支持字段：<code>task_cron.var</code>，可预设任务变量。
-    </div>
-    <br>
-    <a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>
-</div>
+        """,
+        '<a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>',
+    )
+
+    body = f"""
+{header}
 
 {message_card(msg, "success")}
 {message_card(err, "error")}

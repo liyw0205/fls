@@ -998,6 +998,34 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn('href="/notify"', html)
             self.assertNotIn('<bad & "x">', html)
 
+    def test_online_source_json_renders_header_card_and_escapes_cache(self):
+        with isolated_app() as (app, base_dir):
+            cache_file = base_dir / "data" / "online_scripts_cache.json"
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            cache_file.write_text(
+                '[{"id":"demo","name":"<Demo & x>","type":"raw"}]',
+                encoding="utf-8",
+            )
+
+            response = app.test_client().get(
+                "/online-scripts/source",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">脚本源 JSON</div>', html)
+            self.assertIn("这里显示当前本地缓存的脚本源 JSON", html)
+            self.assertIn("task_cron.var", html)
+            self.assertIn('<div class="action-row">', html)
+            self.assertIn('href="/online-scripts"', html)
+            self.assertIn('<div class="card-title">查看 / 修改缓存 JSON</div>', html)
+            self.assertIn('name="json_text"', html)
+            self.assertIn("&lt;Demo &amp; x&gt;", html)
+            self.assertIn("保存脚本源 JSON", html)
+            self.assertNotIn("<Demo", html)
+
     def test_online_script_doc_error_renders_escaped_message_card(self):
         with isolated_app() as (app, base_dir):
             cache_file = base_dir / "data" / "online_scripts_cache.json"
