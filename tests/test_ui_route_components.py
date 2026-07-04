@@ -71,7 +71,9 @@ class UiRouteComponentTests(unittest.TestCase):
         self.assertIn("submitted_count", js)
         self.assertIn("stopped_count", js)
         self.assertIn("skipped_count", js)
+        self.assertIn("deleted_count", js)
         self.assertIn("failures", js)
+        self.assertIn("删除失败", js)
 
     def test_scripts_new_renders_info_message_card(self):
         with isolated_app() as (app, _base_dir):

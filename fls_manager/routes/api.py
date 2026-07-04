@@ -353,22 +353,44 @@ def api_task_bulk_action():
             ))
 
         if action == "delete":
+            deleted_ids = []
+            failed = []
+
             for task_id in task_ids:
-                stop_task_now(task_id)
+                ok, msg = stop_task_now(task_id)
 
-            tasks = [
-                task for task in tasks
-                if task.get("id") not in selected
-            ]
+                if ok or msg == "任务未运行":
+                    deleted_ids.append(task_id)
+                    continue
 
-            save_tasks(tasks)
-            reload_scheduler()
+                task = task_map.get(task_id) or {}
+                name = task.get("name") or task.get("command") or task_id
+                failed.append(f"{name}: {msg}")
+
+            deleted = set(deleted_ids)
+
+            if deleted:
+                tasks = [
+                    task for task in tasks
+                    if task.get("id") not in deleted
+                ]
+
+                save_tasks(tasks)
+                reload_scheduler()
+
+            parts = [f"已删除 {len(deleted_ids)} 个任务"]
+            if failed:
+                parts.append(f"{len(failed)} 个删除失败：{'；'.join(failed[:3])}")
+                if len(failed) > 3:
+                    parts.append(f"等 {len(failed)} 个")
 
             return jsonify(_bulk_payload(
                 action,
                 task_ids,
-                f"已删除 {len(task_ids)} 个任务",
-                deleted_count=len(task_ids),
+                "；".join(parts),
+                deleted_count=len(deleted_ids),
+                failed_count=len(failed),
+                failures=failed,
             ))
 
         if action == "clear_collection":

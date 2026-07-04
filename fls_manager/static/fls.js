@@ -147,7 +147,9 @@ function flsBulkActionMessage(json, fallback){
     } else if(action === "clear_collection"){
         parts.push("已取出 " + (updatedCount || count) + " 个任务");
     } else if(action === "delete"){
-        parts.push("已删除 " + (deletedCount || count) + " 个任务");
+        parts.push("已删除 " + deletedCount + " 个任务");
+        const failureText = flsFailureSummary(json.failures, failedCount, "删除失败");
+        if(failureText) parts.push(failureText);
     } else if(action === "run"){
         parts.push("已提交运行 " + submittedCount + " 个任务");
         const failureText = flsFailureSummary(json.failures, failedCount, "未运行");

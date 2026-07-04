@@ -181,7 +181,10 @@ class BulkWorkflowTests(unittest.TestCase):
             self.assertEqual(tasks["t2"]["collection_id"], "")
             self.assertEqual(tasks["t3"]["collection_id"], "c1")
 
-            with patch("fls_manager.routes.api.stop_task_now") as stop_task_now:
+            with patch(
+                "fls_manager.routes.api.stop_task_now",
+                return_value=(True, "已结束"),
+            ) as stop_task_now:
                 with patch("fls_manager.routes.api.reload_scheduler") as reload_scheduler:
                     response = client.post(
                         "/api/task/bulk-action",
@@ -195,11 +198,61 @@ class BulkWorkflowTests(unittest.TestCase):
             self.assertEqual(payload["action"], "delete")
             self.assertEqual(payload["count"], 2)
             self.assertEqual(payload["deleted_count"], 2)
+            self.assertEqual(payload["failed_count"], 0)
+            self.assertEqual(payload["failures"], [])
             self.assertEqual(stop_task_now.call_count, 2)
             reload_scheduler.assert_called_once()
             self.assertEqual(
                 [task["id"] for task in read_json(base_dir / "data" / "tasks.json")],
                 ["t3"],
+            )
+
+    def test_task_bulk_delete_keeps_tasks_when_stop_fails(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1"),
+                    sample_task("t2"),
+                    sample_task("t3"),
+                ],
+            )
+
+            def fake_stop_task(task_id):
+                results = {
+                    "t1": (True, "已结束"),
+                    "t2": (False, "停止失败"),
+                    "t3": (False, "任务未运行"),
+                }
+                return results[task_id]
+
+            with patch(
+                "fls_manager.routes.api.stop_task_now",
+                side_effect=fake_stop_task,
+            ) as stop_task_now:
+                with patch("fls_manager.routes.api.reload_scheduler") as reload_scheduler:
+                    response = app.test_client().post(
+                        "/api/task/bulk-action",
+                        json={"action": "delete", "task_ids": ["t1", "t2", "t3"]},
+                        headers={"X-Token": TOKEN},
+                    )
+
+            payload = response.get_json()
+
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["action"], "delete")
+            self.assertEqual(payload["count"], 3)
+            self.assertEqual(payload["deleted_count"], 2)
+            self.assertEqual(payload["failed_count"], 1)
+            self.assertEqual(payload["failures"], ["Task t2: 停止失败"])
+            self.assertEqual(stop_task_now.call_count, 3)
+            reload_scheduler.assert_called_once()
+            self.assertEqual(
+                [task["id"] for task in read_json(base_dir / "data" / "tasks.json")],
+                ["t2"],
             )
 
     def test_task_bulk_run_and_stop_return_structured_status_fields(self):

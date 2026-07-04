@@ -1589,8 +1589,58 @@
 - 单项任务操作 API 对缺失任务的状态码现在更一致：run、stop、delete、copy、toggle、pin 都能返回明确 404。
 - 前端仍可把已存在但未运行的 stop 当作普通业务失败处理，不会被误判为资源缺失。
 
+## 阶段 37：批量删除停止失败边界
+
+状态：已完成
+
+目标：
+
+- 继续收束任务批量 API 的局部失败边界。
+- 避免批量删除在任务停止失败时仍把任务从 `tasks.json` 删除。
+- 保持批量 API 既有 200 + `ok:true` 兼容语义，同时补充结构化失败明细供前端和脚本客户端使用。
+
+已完成：
+
+- 更新 `fls_manager/routes/api.py`：
+  - 批量删除前逐个调用 `stop_task_now()`。
+  - `stop_task_now()` 成功或返回“任务未运行”时，任务允许删除。
+  - 其它停止失败场景会保留对应任务，不写入删除集合。
+  - 响应新增 `failed_count` 和 `failures`，保留 `deleted_count`。
+  - 仅在实际删除了任务时写回任务文件并重载调度器。
+- 更新 `fls_manager/static/fls.js`：
+  - `flsBulkActionMessage()` 的 delete 分支显示删除失败摘要。
+- 扩展 `tests/test_bulk_workflows.py`：
+  - 正常批量删除断言 `failed_count=0`、`failures=[]`。
+  - 覆盖停止失败时只删除已停止/未运行任务，失败任务留在 `tasks.json`。
+- 扩展 `tests/test_ui_route_components.py`：
+  - 固化静态 JS 中删除失败提示字段。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 37。
+  - 在 API 开发注意中记录批量删除停止失败边界。
+  - 增加阶段 37 开发日志。
+
+验证记录：
+
+- `python -B -m unittest tests.test_bulk_workflows tests.test_ui_route_components.UiRouteComponentTests.test_static_js_formats_structured_bulk_action_messages`：通过，17 tests OK。
+- `python -B -m compileall fls_manager/routes/api.py fls_manager/static/fls.js tests/test_bulk_workflows.py tests/test_ui_route_components.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，143 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有改变批量删除的 HTTP 成功状态兼容语义，局部失败仍通过结构化字段表达。
+- 本阶段没有触发真实任务进程，只通过 mock `stop_task_now()` 验证删除边界。
+
+收束结论：
+
+- 批量删除不再把停止失败的任务从任务配置中移除。
+- 前端批量提示可以展示删除失败摘要，避免用户误以为所有任务都已删除。
+
 ## 下一阶段候选
 
-- 阶段 37：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
+- 阶段 38：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
