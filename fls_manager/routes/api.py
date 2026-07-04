@@ -55,6 +55,19 @@ def _copy_task(tasks, task_id):
     return None
 
 
+def _task_exists(task_id):
+    return any(str(task.get("id") or "") == task_id for task in load_tasks())
+
+
+def _task_action_result(ok, msg):
+    payload = {"ok": ok, "msg": msg}
+
+    if not ok and msg == "任务不存在":
+        return jsonify(payload), 404
+
+    return jsonify(payload)
+
+
 def _bulk_payload(action, task_ids, msg, **extra):
     payload = {
         "ok": True,
@@ -120,11 +133,14 @@ def api_task_action(action, task_id):
     try:
         if action == "run":
             ok, msg = run_task_now(task_id, source="manual")
-            return jsonify({"ok": ok, "msg": msg})
+            return _task_action_result(ok, msg)
 
         if action == "stop":
+            if not _task_exists(task_id):
+                return _task_action_result(False, "任务不存在")
+
             ok, msg = stop_task_now(task_id)
-            return jsonify({"ok": ok, "msg": msg})
+            return _task_action_result(ok, msg)
 
         if action == "toggle":
             tasks = load_tasks()

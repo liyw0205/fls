@@ -1544,8 +1544,53 @@
 - 单项删除任务 API 不再对不存在任务返回“已删除”的成功假象。
 - 删除缺失任务不会产生无意义的文件写入或调度器重载。
 
+## 阶段 36：单项任务运行停止缺失边界
+
+状态：已完成
+
+目标：
+
+- 继续收束任务操作 API 的缺失任务状态边界。
+- 让单项 `run` / `stop` API 与其它单项任务操作及批量 API 一样，对不存在任务返回明确 404。
+- 保留“任务存在但未运行”这个 stop 业务失败场景的原有 200 + `ok:false` 行为。
+
+已完成：
+
+- 更新 `fls_manager/routes/api.py`：
+  - 新增 `_task_action_result()`，统一把 `{"ok": false, "msg": "任务不存在"}` 映射为 HTTP 404。
+  - 新增 `_task_exists()`，用于 stop 前区分缺失任务和已存在但未运行任务。
+  - `/api/task/action/run/<id>` 在 `run_task_now()` 返回“任务不存在”时返回 404。
+  - `/api/task/action/stop/<id>` 对缺失任务先返回 404，且不调用 `stop_task_now()`。
+  - `/api/task/action/stop/<id>` 对已存在但未运行任务继续返回 200 + `{"ok": false, "msg": "任务未运行"}`。
+- 扩展 `tests/test_bulk_workflows.py`：
+  - 覆盖 run 缺失任务返回 404 且任务文件不变。
+  - 覆盖 stop 缺失任务返回 404 且不调用停止逻辑。
+  - 覆盖 stop 已存在但未运行保留 200 失败响应。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 36。
+  - 在 API 开发注意中记录单项 run/stop 缺失任务边界。
+  - 增加阶段 36 开发日志。
+
+验证记录：
+
+- `python -B -m unittest tests.test_bulk_workflows`：通过，15 tests OK。
+- `python -B -m unittest discover -s tests`：通过，137 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段只改单项 run/stop API 的缺失任务 HTTP 状态边界，没有调整任务运行、停止、批量操作或前端交互语义。
+
+收束结论：
+
+- 单项任务操作 API 对缺失任务的状态码现在更一致：run、stop、delete、copy、toggle、pin 都能返回明确 404。
+- 前端仍可把已存在但未运行的 stop 当作普通业务失败处理，不会被误判为资源缺失。
+
 ## 下一阶段候选
 
-- 阶段 36：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
+- 阶段 37：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

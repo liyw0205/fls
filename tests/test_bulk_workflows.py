@@ -293,6 +293,83 @@ class BulkWorkflowTests(unittest.TestCase):
             self.assertEqual(payload["action"], "enable")
             self.assertEqual(payload["count"], 0)
 
+    def test_task_action_run_missing_task_returns_404(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1"),
+                ],
+            )
+
+            response = app.test_client().post(
+                "/api/task/action/run/missing",
+                headers={"X-Token": TOKEN},
+            )
+
+            payload = response.get_json()
+
+            self.assertEqual(response.status_code, 404)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["msg"], "任务不存在")
+            self.assertEqual(
+                [task["id"] for task in read_json(base_dir / "data" / "tasks.json")],
+                ["t1"],
+            )
+
+    def test_task_action_stop_missing_task_returns_404_without_stop_call(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1"),
+                ],
+            )
+
+            with patch("fls_manager.routes.api.stop_task_now") as stop_task_now:
+                response = app.test_client().post(
+                    "/api/task/action/stop/missing",
+                    headers={"X-Token": TOKEN},
+                )
+
+            payload = response.get_json()
+
+            self.assertEqual(response.status_code, 404)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["msg"], "任务不存在")
+            stop_task_now.assert_not_called()
+
+    def test_task_action_stop_existing_not_running_keeps_200_failure(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1"),
+                ],
+            )
+
+            with patch(
+                "fls_manager.routes.api.stop_task_now",
+                return_value=(False, "任务未运行"),
+            ) as stop_task_now:
+                response = app.test_client().post(
+                    "/api/task/action/stop/t1",
+                    headers={"X-Token": TOKEN},
+                )
+
+            payload = response.get_json()
+
+            self.assertEqual(response.status_code, 200)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["msg"], "任务未运行")
+            stop_task_now.assert_called_once_with("t1")
+
     def test_task_action_delete_existing_task_stops_removes_and_reloads(self):
         with isolated_app() as (app, base_dir):
             from fls_manager import paths
