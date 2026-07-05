@@ -22,8 +22,13 @@ def task_delete(task_id):
 
     if not ok and msg != "任务未运行":
         back_url = get_back_url("/tasks")
-        error_text = h(f"删除失败：{msg}")
-        return f"{error_text}<br><a href='{h(back_url)}'>返回</a>", 409
+        body = f"""
+{message_card(f"删除失败：{msg}", "error", strong=True, title="删除失败")}
+<div class="card">
+    <a class="btn btn-gray" href="{h(back_url)}">返回</a>
+</div>
+"""
+        return layout("删除任务", "tasks", body), 409
 
     tasks = [
         t for t in tasks

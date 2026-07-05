@@ -674,17 +674,23 @@ class BulkWorkflowTests(unittest.TestCase):
 
             with patch(
                 "fls_manager.routes.tasks.actions.stop_task_now",
-                return_value=(False, "结束失败：permission denied"),
+                return_value=(False, '结束失败：<bad & "x">'),
             ) as stop_task_now:
                 with patch("fls_manager.routes.tasks.actions.save_tasks") as save_tasks:
                     with patch("fls_manager.routes.tasks.actions.reload_scheduler") as reload_scheduler:
                         response = app.test_client().post(
-                            "/task/delete/t1?back=/tasks",
+                            "/task/delete/t1?back=https://example.invalid/out",
                             headers={"X-Token": TOKEN},
                         )
 
+            html = response.get_data(as_text=True)
+
             self.assertEqual(response.status_code, 409)
-            self.assertIn("删除失败：结束失败：permission denied", response.get_data(as_text=True))
+            self.assertIn('<div class="card-title">删除失败</div>', html)
+            self.assertIn('style="color:#dc2626;font-weight:800;"', html)
+            self.assertIn("删除失败：结束失败：&lt;bad &amp; &quot;x&quot;&gt;", html)
+            self.assertIn('href="/tasks"', html)
+            self.assertNotIn("<bad", html)
             stop_task_now.assert_called_once_with("t1")
             save_tasks.assert_not_called()
             reload_scheduler.assert_not_called()
