@@ -2260,8 +2260,53 @@
 - 批量启用/禁用现在避免无实际状态变化时写 `tasks.json` 和重载调度器。
 - 响应中的 `count` 继续表示请求选中数量，`updated_count` 表示实际变更数量。
 
+## 阶段 51：单任务置顶 API 状态字段与边界
+
+状态：已完成
+
+目标：
+
+- 继续低风险收束任务动作 API 边界。
+- 让 `/api/task/action/pin/<id>` 成功响应直接返回置顶后的 `pinned` 状态。
+- 固化缺失任务和置顶上限失败时不写回任务文件的边界。
+
+已完成：
+
+- 更新 `fls_manager/routes/api.py`：
+  - 单任务置顶/取消置顶成功响应新增 `pinned` 布尔字段。
+  - 保持原有 `ok/msg` 字段兼容。
+- 扩展 `tests/test_bulk_workflows.py`：
+  - 覆盖置顶上限失败返回 400、不调用 `save_tasks()`、任务文件不变。
+  - 覆盖置顶成功返回 `pinned: true`，取消置顶返回 `pinned: false`。
+  - 覆盖缺失任务返回 404 且不调用 `save_tasks()`。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 51。
+  - 记录单任务置顶 API 状态字段和边界。
+- 更新 `docs/SESSION_HANDOFF.md`：
+  - 本文件同步到阶段 51。
+
+验证记录：
+
+- `python -B -m unittest tests.test_bulk_workflows.BulkWorkflowTests.test_task_action_pin_returns_state_and_checks_boundaries`：通过，1 test OK。
+- `python -B -m compileall fls_manager/routes/api.py tests/test_bulk_workflows.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，166 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git -c safe.directory=/data/data/com.termux/files/home/fls diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有调整任务列表 AJAX 前端逻辑；新增 `pinned` 字段面向 API 调用方，前端仍按既有局部刷新更新展示。
+- 本阶段没有触发真实任务进程。
+
+收束结论：
+
+- 单任务置顶 API 现在可直接从响应判断操作后的置顶状态。
+- 缺失任务和置顶上限失败路径继续保持无写回副作用。
+
 ## 下一阶段候选
 
-- 阶段 51：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
+- 阶段 52：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

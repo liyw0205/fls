@@ -128,6 +128,86 @@ class BulkWorkflowTests(unittest.TestCase):
             self.assertNotIn("last_run_at", copied)
             self.assertEqual(copied["retry"], {"attempts": 2, "interval_seconds": 30})
 
+    def test_task_action_pin_returns_state_and_checks_boundaries(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1", pinned=False),
+                    *[
+                        sample_task(f"p{i}", pinned=True)
+                        for i in range(1, 6)
+                    ],
+                ],
+            )
+
+            client = app.test_client()
+            with patch("fls_manager.routes.api.save_tasks") as save_tasks:
+                response = client.post(
+                    "/api/task/action/pin/t1",
+                    headers={"X-Token": TOKEN},
+                )
+
+            payload = response.get_json()
+
+            self.assertEqual(response.status_code, 400)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["msg"], "最多只能置顶 5 个任务，请先取消一个置顶任务")
+            save_tasks.assert_not_called()
+            tasks = {task["id"]: task for task in read_json(base_dir / "data" / "tasks.json")}
+            self.assertFalse(tasks["t1"]["pinned"])
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1", pinned=False),
+                    sample_task("t2", pinned=True),
+                ],
+            )
+
+            response = client.post(
+                "/api/task/action/pin/t1",
+                headers={"X-Token": TOKEN},
+            )
+
+            payload = response.get_json()
+
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["msg"], "已置顶")
+            self.assertTrue(payload["pinned"])
+
+            tasks = {task["id"]: task for task in read_json(base_dir / "data" / "tasks.json")}
+            self.assertTrue(tasks["t1"]["pinned"])
+            self.assertTrue(tasks["t2"]["pinned"])
+
+            response = client.post(
+                "/api/task/action/pin/t1",
+                headers={"X-Token": TOKEN},
+            )
+
+            payload = response.get_json()
+
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["msg"], "已取消置顶")
+            self.assertFalse(payload["pinned"])
+
+            with patch("fls_manager.routes.api.save_tasks") as save_tasks:
+                response = client.post(
+                    "/api/task/action/pin/missing",
+                    headers={"X-Token": TOKEN},
+                )
+
+            payload = response.get_json()
+
+            self.assertEqual(response.status_code, 404)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["msg"], "任务不存在")
+            save_tasks.assert_not_called()
+
     def test_task_bulk_disable_clear_collection_and_delete(self):
         with isolated_app() as (app, base_dir):
             from fls_manager import paths

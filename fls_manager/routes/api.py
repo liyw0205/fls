@@ -205,6 +205,7 @@ def api_task_action(action, task_id):
             return jsonify({
                 "ok": True,
                 "msg": "已置顶" if target.get("pinned") else "已取消置顶",
+                "pinned": bool(target.get("pinned")),
             })
 
         if action == "delete":
