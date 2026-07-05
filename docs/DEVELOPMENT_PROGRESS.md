@@ -2076,8 +2076,56 @@
 - 兼容 `/task/delete/<id>` 页面入口的停止失败现在与阶段 45 的置顶失败一样，使用统一后台错误卡片。
 - 删除失败文案保持中文，异常文本继续由 `message_card()` 转义，避免用户可控错误内容直接进入 HTML。
 
+## 阶段 47：兼容任务运行失败提示渲染
+
+状态：已完成
+
+目标：
+
+- 继续低风险收束原长期脏 diff 中尚未覆盖的错误提示渲染边界。
+- 让兼容 `/run/<id>` 页面入口在运行失败时使用统一后台错误卡片，而不是返回纯文本。
+- 保持缺失任务返回 404、普通运行失败返回 400、成功运行跳转日志页的语义不变。
+
+已完成：
+
+- 更新 `fls_manager/routes/tasks/actions.py`：
+  - `/run/<id>` 失败时复用 `message_card(..., "error", strong=True, title="运行失败")`。
+  - 错误页使用现有 `layout()` 渲染，页面标题为“运行任务”。
+  - 返回按钮继续使用 `get_back_url("/tasks")` 清洗回跳。
+  - `run_task_now()` 返回“任务不存在”时仍映射为 404，其它失败仍返回 400。
+- 更新 `tests/test_bulk_workflows.py`：
+  - 扩展缺失任务测试，覆盖错误卡片标题、错误色、中文文案和外部 `back` 清洗。
+  - 新增普通运行失败测试，覆盖 400 状态、错误卡片、HTML 转义和安全返回链接。
+  - 保留成功运行跳转日志页的既有测试不变。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 47。
+  - 在当前行为边界和测试覆盖重点中记录兼容运行入口错误提示。
+- 更新 `docs/SESSION_HANDOFF.md`：
+  - 当前阶段推进到阶段 47。
+  - 记录本阶段验证结果和下一阶段建议。
+
+验证记录：
+
+- `python -B -m unittest tests.test_bulk_workflows.BulkWorkflowTests.test_legacy_run_route_missing_task_returns_404_without_write tests.test_bulk_workflows.BulkWorkflowTests.test_legacy_run_route_failure_renders_error_card`：通过，2 tests OK。
+- `python -B -m compileall fls_manager/routes/tasks/actions.py tests/test_bulk_workflows.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，162 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git -c safe.directory=/data/data/com.termux/files/home/fls diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有触发真实任务进程，只通过 mock `run_task_now()` 验证兼容页面运行失败路径。
+- 本阶段没有调整任务运行 API JSON 响应或普通任务列表 AJAX 运行入口。
+
+收束结论：
+
+- 兼容 `/run/<id>` 页面入口的失败路径现在与删除/置顶失败一样，使用统一后台错误卡片。
+- 运行失败文案保持中文，异常文本继续由 `message_card()` 转义，避免用户可控错误内容直接进入 HTML。
+
 ## 下一阶段候选
 
-- 阶段 47：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
+- 阶段 48：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

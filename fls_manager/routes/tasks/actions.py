@@ -126,7 +126,13 @@ def run_task_route(task_id):
 
     if not ok:
         status_code = 404 if msg == "任务不存在" else 400
-        return f"{h(msg)}<br><a href='{h(back_url)}'>返回</a>", status_code
+        body = f"""
+{message_card(msg, "error", strong=True, title="运行失败")}
+<div class="card">
+    <a class="btn btn-gray" href="{h(back_url)}">返回</a>
+</div>
+"""
+        return layout("运行任务", "tasks", body), status_code
 
     return redirect(url_for("tasks.log_view", task_id=task_id, back=back_url))
 

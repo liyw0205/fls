@@ -412,17 +412,52 @@ class BulkWorkflowTests(unittest.TestCase):
                 return_value=(False, "任务不存在"),
             ) as run_task_now:
                 response = app.test_client().post(
-                    "/run/missing?back=/tasks",
+                    "/run/missing?back=https://example.invalid/out",
                     headers={"X-Token": TOKEN},
                 )
 
+            html = response.get_data(as_text=True)
+
             self.assertEqual(response.status_code, 404)
-            self.assertIn("任务不存在", response.get_data(as_text=True))
+            self.assertIn('<div class="card-title">运行失败</div>', html)
+            self.assertIn('style="color:#dc2626;font-weight:800;"', html)
+            self.assertIn("任务不存在", html)
+            self.assertIn('href="/tasks"', html)
             run_task_now.assert_called_once_with("missing", source="manual")
             self.assertEqual(
                 [task["id"] for task in read_json(base_dir / "data" / "tasks.json")],
                 ["t1"],
             )
+
+    def test_legacy_run_route_failure_renders_error_card(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1"),
+                ],
+            )
+
+            with patch(
+                "fls_manager.routes.tasks.actions.run_task_now",
+                return_value=(False, '命令解析失败：<bad & "x">'),
+            ) as run_task_now:
+                response = app.test_client().post(
+                    "/run/t1?back=/collections",
+                    headers={"X-Token": TOKEN},
+                )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 400)
+            self.assertIn('<div class="card-title">运行失败</div>', html)
+            self.assertIn('style="color:#dc2626;font-weight:800;"', html)
+            self.assertIn("命令解析失败：&lt;bad &amp; &quot;x&quot;&gt;", html)
+            self.assertIn('href="/collections"', html)
+            self.assertNotIn("<bad", html)
+            run_task_now.assert_called_once_with("t1", source="manual")
 
     def test_task_action_stop_missing_task_returns_404_without_stop_call(self):
         with isolated_app() as (app, _base_dir):
