@@ -142,5 +142,16 @@ def stop_task_route(task_id):
     if not any(task.get("id") == task_id for task in load_tasks()):
         abort(404)
 
-    stop_task_now(task_id)
-    return redirect(get_back_url("/tasks"))
+    ok, msg = stop_task_now(task_id)
+    back_url = get_back_url("/tasks")
+
+    if not ok and msg != "任务未运行":
+        body = f"""
+{message_card(msg, "error", strong=True, title="停止失败")}
+<div class="card">
+    <a class="btn btn-gray" href="{h(back_url)}">返回</a>
+</div>
+"""
+        return layout("停止任务", "tasks", body), 409
+
+    return redirect(back_url)

@@ -2124,8 +2124,53 @@
 - 兼容 `/run/<id>` 页面入口的失败路径现在与删除/置顶失败一样，使用统一后台错误卡片。
 - 运行失败文案保持中文，异常文本继续由 `message_card()` 转义，避免用户可控错误内容直接进入 HTML。
 
+## 阶段 48：兼容任务停止失败提示渲染
+
+状态：已完成
+
+目标：
+
+- 继续低风险收束原长期脏 diff 中尚未覆盖的错误提示渲染边界。
+- 让兼容 `/stop/<id>` 页面入口在真实停止失败时使用统一后台错误卡片，而不是静默重定向。
+- 保持缺失任务返回 404、不调用停止逻辑，以及“任务未运行”仍重定向的兼容行为不变。
+
+已完成：
+
+- 更新 `fls_manager/routes/tasks/actions.py`：
+  - `/stop/<id>` 现在读取 `stop_task_now()` 的返回值。
+  - `stop_task_now()` 返回 `False, "任务未运行"` 时仍按兼容行为重定向。
+  - 其它停止失败返回 409，并复用 `message_card(..., "error", strong=True, title="停止失败")`。
+  - 错误页使用现有 `layout()` 渲染，页面标题为“停止任务”。
+  - 返回按钮继续使用 `get_back_url("/tasks")` 清洗回跳。
+- 更新 `tests/test_bulk_workflows.py`：
+  - 保留已存在但未运行任务通过兼容 `/stop/<id>` POST 仍重定向返回。
+  - 新增真实停止失败测试，覆盖 409 状态、错误卡片、HTML 转义、安全返回链接和任务文件不变。
+  - 保留缺失任务返回 404 且不调用 `stop_task_now()` 的断言。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 48。
+  - 在当前行为边界和测试覆盖重点中记录兼容停止入口错误提示。
+- 更新 `docs/SESSION_HANDOFF.md`：
+  - 当前阶段推进到阶段 48。
+  - 记录本阶段验证结果和下一阶段建议。
+
+验证记录：
+
+- `python -B -m unittest tests.test_bulk_workflows.BulkWorkflowTests.test_legacy_stop_route_existing_task_redirects_when_not_running tests.test_bulk_workflows.BulkWorkflowTests.test_legacy_stop_route_failure_renders_error_card tests.test_bulk_workflows.BulkWorkflowTests.test_legacy_stop_route_missing_task_aborts_without_stop_call`：通过，3 tests OK。
+- `python -B -m compileall fls_manager/routes/tasks/actions.py tests/test_bulk_workflows.py`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有触发真实任务进程，只通过 mock `stop_task_now()` 验证兼容页面停止失败路径。
+- 本阶段没有调整任务停止 API JSON 响应或普通任务列表 AJAX 停止入口。
+
+收束结论：
+
+- 兼容 `/stop/<id>` 页面入口现在区分“任务未运行”和真实停止失败。
+- 真实停止失败会返回 409 并显示统一后台错误卡片；未运行任务仍保持原有重定向兼容行为。
+
 ## 下一阶段候选
 
-- 阶段 48：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
+- 阶段 49：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

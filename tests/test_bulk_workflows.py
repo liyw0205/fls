@@ -534,6 +534,40 @@ class BulkWorkflowTests(unittest.TestCase):
             self.assertEqual(response.headers.get("Location"), "/tasks")
             stop_task_now.assert_called_once_with("t1")
 
+    def test_legacy_stop_route_failure_renders_error_card(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1"),
+                ],
+            )
+
+            with patch(
+                "fls_manager.routes.tasks.actions.stop_task_now",
+                return_value=(False, '结束失败：<bad & "x">'),
+            ) as stop_task_now:
+                response = app.test_client().post(
+                    "/stop/t1?back=/collections",
+                    headers={"X-Token": TOKEN},
+                )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 409)
+            self.assertIn('<div class="card-title">停止失败</div>', html)
+            self.assertIn('style="color:#dc2626;font-weight:800;"', html)
+            self.assertIn("结束失败：&lt;bad &amp; &quot;x&quot;&gt;", html)
+            self.assertIn('href="/collections"', html)
+            self.assertNotIn("<bad", html)
+            stop_task_now.assert_called_once_with("t1")
+            self.assertEqual(
+                [task["id"] for task in read_json(base_dir / "data" / "tasks.json")],
+                ["t1"],
+            )
+
     def test_legacy_stop_route_missing_task_aborts_without_stop_call(self):
         with isolated_app() as (app, base_dir):
             from fls_manager import paths
