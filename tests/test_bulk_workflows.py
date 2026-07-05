@@ -208,6 +208,65 @@ class BulkWorkflowTests(unittest.TestCase):
             self.assertEqual(payload["msg"], "任务不存在")
             save_tasks.assert_not_called()
 
+    def test_task_action_toggle_returns_state_and_checks_boundaries(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1", enabled=True),
+                    sample_task("t2", enabled=False),
+                ],
+            )
+
+            client = app.test_client()
+
+            with patch("fls_manager.routes.api.reload_scheduler") as reload_scheduler:
+                response = client.post(
+                    "/api/task/action/toggle/t1",
+                    headers={"X-Token": TOKEN},
+                )
+
+                payload = response.get_json()
+
+                self.assertEqual(response.status_code, 200)
+                self.assertTrue(payload["ok"])
+                self.assertEqual(payload["msg"], "已切换")
+                self.assertFalse(payload["enabled"])
+
+                tasks = {task["id"]: task for task in read_json(base_dir / "data" / "tasks.json")}
+                self.assertFalse(tasks["t1"]["enabled"])
+                self.assertFalse(tasks["t2"]["enabled"])
+
+                response = client.post(
+                    "/api/task/action/toggle/t1",
+                    headers={"X-Token": TOKEN},
+                )
+
+                payload = response.get_json()
+
+                self.assertEqual(response.status_code, 200)
+                self.assertTrue(payload["ok"])
+                self.assertEqual(payload["msg"], "已切换")
+                self.assertTrue(payload["enabled"])
+                self.assertEqual(reload_scheduler.call_count, 2)
+
+            with patch("fls_manager.routes.api.save_tasks") as save_tasks:
+                with patch("fls_manager.routes.api.reload_scheduler") as reload_scheduler:
+                    response = client.post(
+                        "/api/task/action/toggle/missing",
+                        headers={"X-Token": TOKEN},
+                    )
+
+            payload = response.get_json()
+
+            self.assertEqual(response.status_code, 404)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["msg"], "任务不存在")
+            save_tasks.assert_not_called()
+            reload_scheduler.assert_not_called()
+
     def test_task_bulk_disable_clear_collection_and_delete(self):
         with isolated_app() as (app, base_dir):
             from fls_manager import paths

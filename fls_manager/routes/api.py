@@ -163,7 +163,11 @@ def api_task_action(action, task_id):
             save_tasks(tasks)
             reload_scheduler()
 
-            return jsonify({"ok": True, "msg": "已切换"})
+            return jsonify({
+                "ok": True,
+                "msg": "已切换",
+                "enabled": bool(task.get("enabled")),
+            })
 
         if action == "copy":
             tasks = load_tasks()
