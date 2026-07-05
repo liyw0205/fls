@@ -404,18 +404,22 @@ def api_task_bulk_action():
             ))
 
         if action == "clear_collection":
+            changed_count = 0
+
             for task in tasks:
-                if task.get("id") in selected:
+                if task.get("id") in selected and str(task.get("collection_id") or ""):
                     task["collection_id"] = ""
                     task["updated_at"] = now_str()
+                    changed_count += 1
 
-            save_tasks(tasks)
+            if changed_count:
+                save_tasks(tasks)
 
             return jsonify(_bulk_payload(
                 action,
                 task_ids,
-                f"已取出 {len(task_ids)} 个任务",
-                updated_count=len(task_ids),
+                f"已取出 {changed_count} 个任务",
+                updated_count=changed_count,
             ))
 
         return jsonify({"ok": False, "msg": "未知批量操作"}), 400

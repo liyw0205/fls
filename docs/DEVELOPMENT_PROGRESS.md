@@ -2169,8 +2169,54 @@
 - 兼容 `/stop/<id>` 页面入口现在区分“任务未运行”和真实停止失败。
 - 真实停止失败会返回 409 并显示统一后台错误卡片；未运行任务仍保持原有重定向兼容行为。
 
+## 阶段 49：批量取出合集写入边界
+
+状态：已完成
+
+目标：
+
+- 继续低风险收束任务 API 兼容边界。
+- 让 `/api/task/bulk-action` 的 `clear_collection` 只在任务实际有合集归属时写回。
+- 保持批量接口 `ok/msg/action/count/updated_count` 结构化响应兼容。
+
+已完成：
+
+- 先补提交阶段 48 未提交改动：`d48bc90 Stage 48 render legacy stop errors`。
+- 更新 `fls_manager/routes/api.py`：
+  - `clear_collection` 现在只清理 `collection_id` 非空的选中任务。
+  - 无实际变更时不调用 `save_tasks()`。
+  - `updated_count` 和中文提示文案改为反映实际变更数量。
+- 扩展 `tests/test_bulk_workflows.py`：
+  - 新增批量取出合集在选中任务均未归属合集时的无写回断言。
+  - 覆盖 `updated_count=0`、中文文案、`count` 保持选中数量以及任务文件不变。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 49。
+  - 记录批量取出合集写入边界。
+- 更新 `docs/SESSION_HANDOFF.md`：
+  - 本文件同步到阶段 49。
+
+验证记录：
+
+- `python -B -m unittest tests.test_bulk_workflows.BulkWorkflowTests.test_task_bulk_disable_clear_collection_and_delete tests.test_bulk_workflows.BulkWorkflowTests.test_task_bulk_clear_collection_skips_write_when_no_members`：通过，2 tests OK。
+- `python -B -m compileall fls_manager/routes/api.py tests/test_bulk_workflows.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，164 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git -c safe.directory=/data/data/com.termux/files/home/fls diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有触发真实任务进程，只验证批量任务 API 的 JSON 写入边界。
+- 本阶段没有调整页面单任务取出合集入口；该入口已在阶段 43 收束。
+
+收束结论：
+
+- 批量取出合集现在与单任务取出合集一样，避免无实际变更时写 `tasks.json`。
+- 响应中的 `count` 继续表示请求选中数量，`updated_count` 表示实际清理归属数量。
+
 ## 下一阶段候选
 
-- 阶段 49：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
+- 阶段 50：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

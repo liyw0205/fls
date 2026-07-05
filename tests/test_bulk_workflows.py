@@ -255,6 +255,39 @@ class BulkWorkflowTests(unittest.TestCase):
                 ["t2"],
             )
 
+    def test_task_bulk_clear_collection_skips_write_when_no_members(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1"),
+                    sample_task("t2"),
+                ],
+            )
+
+            with patch("fls_manager.routes.api.save_tasks") as save_tasks:
+                response = app.test_client().post(
+                    "/api/task/bulk-action",
+                    json={"action": "clear_collection", "task_ids": ["t1", "t2"]},
+                    headers={"X-Token": TOKEN},
+                )
+
+            payload = response.get_json()
+
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["action"], "clear_collection")
+            self.assertEqual(payload["count"], 2)
+            self.assertEqual(payload["updated_count"], 0)
+            self.assertEqual(payload["msg"], "已取出 0 个任务")
+            save_tasks.assert_not_called()
+            self.assertEqual(
+                [task["collection_id"] for task in read_json(base_dir / "data" / "tasks.json")],
+                ["", ""],
+            )
+
     def test_task_bulk_run_and_stop_return_structured_status_fields(self):
         with isolated_app() as (app, _base_dir):
             from fls_manager import paths
