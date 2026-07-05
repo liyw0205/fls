@@ -2215,8 +2215,53 @@
 - 批量取出合集现在与单任务取出合集一样，避免无实际变更时写 `tasks.json`。
 - 响应中的 `count` 继续表示请求选中数量，`updated_count` 表示实际清理归属数量。
 
+## 阶段 50：批量启用禁用写入边界
+
+状态：已完成
+
+目标：
+
+- 继续低风险收束任务批量 API 写入边界。
+- 让 `/api/task/bulk-action` 的 `enable` / `disable` 只在任务状态实际变化时写回。
+- 保持批量接口 `ok/msg/action/count/updated_count` 结构化响应兼容。
+
+已完成：
+
+- 更新 `fls_manager/routes/api.py`：
+  - 批量启用/禁用现在只更新 `enabled` 状态实际变化的选中任务。
+  - 无实际变更时不调用 `save_tasks()` 或 `reload_scheduler()`。
+  - `updated_count` 和中文提示文案改为反映实际变更数量。
+- 扩展 `tests/test_bulk_workflows.py`：
+  - 新增批量禁用已禁用任务时的无写回、无调度器重载断言。
+  - 覆盖 `updated_count=0`、中文文案、`count` 保持选中数量以及任务文件不变。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 50。
+  - 记录批量启用/禁用写入边界。
+- 更新 `docs/SESSION_HANDOFF.md`：
+  - 本文件同步到阶段 50。
+
+验证记录：
+
+- `python -B -m unittest tests.test_bulk_workflows.BulkWorkflowTests.test_task_bulk_disable_clear_collection_and_delete tests.test_bulk_workflows.BulkWorkflowTests.test_task_bulk_enable_disable_skips_write_when_no_state_changes tests.test_bulk_workflows.BulkWorkflowTests.test_task_bulk_clear_collection_skips_write_when_no_members`：通过，3 tests OK。
+- `python -B -m compileall fls_manager/routes/api.py tests/test_bulk_workflows.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，165 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git -c safe.directory=/data/data/com.termux/files/home/fls diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有触发真实任务进程，只验证批量任务 API 的 JSON 写入与调度器重载边界。
+- 本阶段没有调整任务列表 AJAX 前端逻辑，现有响应字段保持兼容。
+
+收束结论：
+
+- 批量启用/禁用现在避免无实际状态变化时写 `tasks.json` 和重载调度器。
+- 响应中的 `count` 继续表示请求选中数量，`updated_count` 表示实际变更数量。
+
 ## 下一阶段候选
 
-- 阶段 50：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
+- 阶段 51：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

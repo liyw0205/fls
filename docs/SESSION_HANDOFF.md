@@ -1,42 +1,43 @@
 # FLS 会话交接文档
 
 生成时间：2026-07-06
-当前阶段：阶段 49，批量取出合集写入边界
+当前阶段：阶段 50，批量启用禁用写入边界
 
 ## 本阶段完成进度
 
-完成度：阶段 49 已完成，准备进入阶段 50。
+完成度：阶段 50 已完成，准备进入阶段 51。
 
 已经完成：
 
-- 当前阶段开始前发现阶段 48 改动尚未提交，已先补提交：
+- 当前阶段开始前 `main` 已领先 `origin/main` 2 个提交：
   - `d48bc90 Stage 48 render legacy stop errors`
+  - `e53d724 Stage 49 tighten bulk clear collection writes`
 - 本地 Git 提交身份保持为：
   - `user.name=liyw0205`
   - `user.email=2650115317@qq.com`
 - 原长期脏改动仍保存在本地 stash：`stash@{0}: pre-main-merge dirty task-log runtime changes`。
 - 本阶段没有整包恢复 stash。
 - 更新 `fls_manager/routes/api.py`：
-  - `/api/task/bulk-action` 的 `clear_collection` 只清理 `collection_id` 非空的选中任务。
-  - 无实际变更时不再调用 `save_tasks()`。
+  - `/api/task/bulk-action` 的 `enable` / `disable` 只更新状态实际变化的选中任务。
+  - 无实际变更时不再调用 `save_tasks()` 或 `reload_scheduler()`。
   - `updated_count` 和中文提示文案改为实际变更数量。
 - 扩展 `tests/test_bulk_workflows.py`：
-  - 新增批量取出合集在选中任务均未归属合集时的无写回断言。
+  - 新增批量禁用已禁用任务时的无写回、无调度器重载断言。
   - 覆盖 `updated_count=0`、中文文案、`count` 保持选中数量和任务文件不变。
 - 更新 `DEVELOPMENT.md`：
-  - 基线推进到阶段 49。
-  - 记录批量取出合集写入边界。
+  - 基线推进到阶段 50。
+  - 记录批量启用/禁用写入边界。
 - 更新 `docs/DEVELOPMENT_PROGRESS.md`：
-  - 新增阶段 49 完成块、验证记录、受限验证和收束结论。
-  - 下一阶段候选推进到阶段 50。
+  - 新增阶段 50 完成块、验证记录、受限验证和收束结论。
+  - 下一阶段候选推进到阶段 51。
 - 更新 `docs/SESSION_HANDOFF.md`：
-  - 本文件同步到阶段 49。
+  - 本文件同步到阶段 50。
 
 已验证：
 
-- `python -B -m unittest tests.test_bulk_workflows.BulkWorkflowTests.test_task_bulk_disable_clear_collection_and_delete tests.test_bulk_workflows.BulkWorkflowTests.test_task_bulk_clear_collection_skips_write_when_no_members` 通过，2 tests OK。
+- `python -B -m unittest tests.test_bulk_workflows.BulkWorkflowTests.test_task_bulk_disable_clear_collection_and_delete tests.test_bulk_workflows.BulkWorkflowTests.test_task_bulk_enable_disable_skips_write_when_no_state_changes tests.test_bulk_workflows.BulkWorkflowTests.test_task_bulk_clear_collection_skips_write_when_no_members` 通过，3 tests OK。
 - `python -B -m compileall fls_manager/routes/api.py tests/test_bulk_workflows.py` 通过。
-- `python -B -m unittest discover -s tests` 通过，164 tests OK。
+- `python -B -m unittest discover -s tests` 通过，165 tests OK。
 - `python -B tools/responsive_smoke.py` 通过。
 - `python -B -m compileall fls-manager.py fls_manager tests tools` 通过。
 - `git -c safe.directory=/data/data/com.termux/files/home/fls diff --check` 通过。
@@ -44,17 +45,17 @@
 未完成或受限：
 
 - 当前环境没有 Playwright/Chromium，仍未做真实浏览器截图检查。
-- 本阶段没有触发真实任务进程，只验证批量任务 API 的 JSON 写入边界。
-- 本阶段没有调整页面单任务取出合集入口；该入口已在阶段 43 收束。
+- 本阶段没有触发真实任务进程，只验证批量任务 API 的 JSON 写入与调度器重载边界。
+- 本阶段没有调整任务列表 AJAX 前端逻辑，现有响应字段保持兼容。
 
 ## 协作情况
 
 - 本阶段未使用额外技能或子代理。
-- 用户要求继续开发并提交推送；本阶段按交接文档进入阶段 49，选择批量取出合集写入边界作为单一窄边界。
+- 用户要求继续开发；本阶段按交接文档进入阶段 50，选择批量启用/禁用写入边界作为单一窄边界。
 
 ## 下阶段实现目标
 
-阶段 50 建议目标：继续低风险收束原长期脏 diff 中尚未覆盖的其它任务 API 兼容边界、UI 边界或更多错误提示渲染。
+阶段 51 建议目标：继续低风险收束原长期脏 diff 中尚未覆盖的其它任务 API 兼容边界、UI 边界或更多错误提示渲染。
 
 具体任务：
 
@@ -66,7 +67,7 @@
 6. 如环境具备浏览器自动化，补真实响应式截图验收：
    - 宽度：390px、768px、1024px、1440px。
    - 页面：`/tasks`、`/collections`、`/logs`、`/online-scripts`、`/pull`、`/config`、`/deps`、`/panel/status`。
-7. 阶段 50 结束时继续更新 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`、`docs/SESSION_HANDOFF.md`，并提交推送。
+7. 阶段 51 结束时继续更新 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`、`docs/SESSION_HANDOFF.md`，并提交推送。
 
 ## 后续候选
 
@@ -78,4 +79,4 @@
 
 ## 下一会话启动提示
 
-请从 `docs/SESSION_HANDOFF.md` 开始，继续阶段 50。先读取 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`，并使用 `git -c safe.directory=/data/data/com.termux/files/home/fls status --short --branch` 查看工作区。若继续处理 `stash@{0}`，只摘取可验证的窄边界，不要整包恢复；保持 Flask + 原生 CSS/JS 和无 npm 构建链。
+请从 `docs/SESSION_HANDOFF.md` 开始，继续阶段 51。先读取 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`，并使用 `git -c safe.directory=/data/data/com.termux/files/home/fls status --short --branch` 查看工作区。若继续处理 `stash@{0}`，只摘取可验证的窄边界，不要整包恢复；保持 Flask + 原生 CSS/JS 和无 npm 构建链。

@@ -284,20 +284,23 @@ def api_task_bulk_action():
 
         if action in ("enable", "disable"):
             enabled = action == "enable"
+            changed_count = 0
 
             for task in tasks:
-                if task.get("id") in selected:
+                if task.get("id") in selected and bool(task.get("enabled", True)) != enabled:
                     task["enabled"] = enabled
                     task["updated_at"] = now_str()
+                    changed_count += 1
 
-            save_tasks(tasks)
-            reload_scheduler()
+            if changed_count:
+                save_tasks(tasks)
+                reload_scheduler()
 
             return jsonify(_bulk_payload(
                 action,
                 task_ids,
-                f"已{'启用' if enabled else '禁用'} {len(task_ids)} 个任务",
-                updated_count=len(task_ids),
+                f"已{'启用' if enabled else '禁用'} {changed_count} 个任务",
+                updated_count=changed_count,
             ))
 
         if action == "run":

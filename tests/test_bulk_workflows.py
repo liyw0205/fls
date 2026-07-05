@@ -255,6 +255,41 @@ class BulkWorkflowTests(unittest.TestCase):
                 ["t2"],
             )
 
+    def test_task_bulk_enable_disable_skips_write_when_no_state_changes(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1", enabled=False),
+                    sample_task("t2", enabled=False),
+                ],
+            )
+
+            with patch("fls_manager.routes.api.save_tasks") as save_tasks:
+                with patch("fls_manager.routes.api.reload_scheduler") as reload_scheduler:
+                    response = app.test_client().post(
+                        "/api/task/bulk-action",
+                        json={"action": "disable", "task_ids": ["t1", "t2"]},
+                        headers={"X-Token": TOKEN},
+                    )
+
+            payload = response.get_json()
+
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["action"], "disable")
+            self.assertEqual(payload["count"], 2)
+            self.assertEqual(payload["updated_count"], 0)
+            self.assertEqual(payload["msg"], "已禁用 0 个任务")
+            save_tasks.assert_not_called()
+            reload_scheduler.assert_not_called()
+            self.assertEqual(
+                [task["enabled"] for task in read_json(base_dir / "data" / "tasks.json")],
+                [False, False],
+            )
+
     def test_task_bulk_clear_collection_skips_write_when_no_members(self):
         with isolated_app() as (app, base_dir):
             from fls_manager import paths
