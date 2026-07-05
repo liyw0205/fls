@@ -1890,8 +1890,56 @@
 - 合集删除现在只在确实需要清空任务归属时写 `tasks.json`。
 - 缺失合集不会触发任何写回副作用。
 
+## 阶段 43：单任务取出合集写入边界
+
+状态：已完成
+
+目标：
+
+- 继续收束合集相关页面动作的写入边界。
+- 目标任务不存在时不写入任务文件。
+- 目标任务已经不在合集时避免无意义写回 `tasks.json`。
+- 保留已归属合集任务的取出行为。
+
+已完成：
+
+- 更新 `fls_manager/routes/tasks/actions.py`：
+  - `/task/collection/clear/<id>` 增加 `changed` 标记。
+  - 目标任务不存在时继续 `abort(404)`。
+  - 目标任务 `collection_id` 为空时直接按安全 `back` 返回，不调用 `save_tasks()`。
+  - 目标任务存在且归属合集时才清空 `collection_id`、更新 `updated_at` 并写回任务文件。
+- 扩展 `tests/test_auth_backup.py`：
+  - 将 `/task/collection/clear/t1` 纳入破坏性路由拒绝 GET 的回归测试，确认 GET 返回 405。
+- 扩展 `tests/test_bulk_workflows.py`：
+  - 覆盖已归属合集任务通过兼容入口取出并写回。
+  - 覆盖未归属合集任务通过兼容入口返回但不调用 `save_tasks()`。
+  - 覆盖缺失任务返回 404，且不调用 `save_tasks()`，任务文件保持不变。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 43。
+  - 在页面开发注意和测试覆盖列表中记录单任务取出合集写入边界。
+  - 增加阶段 43 开发日志。
+
+验证记录：
+
+- `python -B -m unittest tests.test_auth_backup.CsrfSafetyTests.test_destructive_routes_reject_get_requests tests.test_bulk_workflows.BulkWorkflowTests.test_task_collection_clear_existing_member_writes_task_file tests.test_bulk_workflows.BulkWorkflowTests.test_task_collection_clear_unassigned_task_skips_write tests.test_bulk_workflows.BulkWorkflowTests.test_task_collection_clear_missing_task_aborts_without_write`：通过，4 tests OK。
+- `python -B -m compileall fls_manager/routes/tasks/actions.py tests/test_auth_backup.py tests/test_bulk_workflows.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，158 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有改变单任务取出合集的页面交互，只缩小未归属任务时的写入范围。
+
+收束结论：
+
+- 单任务取出合集现在只在实际清空归属时写 `tasks.json`。
+- 缺失任务或已无归属的任务不会触发写回副作用。
+
 ## 下一阶段候选
 
-- 阶段 43：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
+- 阶段 44：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

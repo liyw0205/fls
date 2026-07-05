@@ -280,6 +280,7 @@ class CsrfSafetyTests(unittest.TestCase):
                 "/collection/delete/c1",
                 "/task/pin/t1",
                 "/task/toggle/t1",
+                "/task/collection/clear/t1",
                 "/run/t1",
                 "/stop/t1",
             ):

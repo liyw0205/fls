@@ -996,6 +996,80 @@ class BulkWorkflowTests(unittest.TestCase):
                 ["c1"],
             )
 
+    def test_task_collection_clear_existing_member_writes_task_file(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1", collection_id="c1"),
+                    sample_task("t2"),
+                ],
+            )
+
+            response = app.test_client().post(
+                "/task/collection/clear/t1?back=/collections",
+                headers={"X-Token": TOKEN},
+            )
+
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.headers.get("Location"), "/collections")
+
+            tasks = {task["id"]: task for task in read_json(base_dir / "data" / "tasks.json")}
+            self.assertEqual(tasks["t1"]["collection_id"], "")
+            self.assertEqual(tasks["t2"]["collection_id"], "")
+
+    def test_task_collection_clear_unassigned_task_skips_write(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1"),
+                    sample_task("t2"),
+                ],
+            )
+
+            with patch("fls_manager.routes.tasks.actions.save_tasks") as save_tasks:
+                response = app.test_client().post(
+                    "/task/collection/clear/t1?back=/collections",
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.headers.get("Location"), "/collections")
+            save_tasks.assert_not_called()
+            self.assertEqual(
+                [task["id"] for task in read_json(base_dir / "data" / "tasks.json")],
+                ["t1", "t2"],
+            )
+
+    def test_task_collection_clear_missing_task_aborts_without_write(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1", collection_id="c1"),
+                ],
+            )
+
+            with patch("fls_manager.routes.tasks.actions.save_tasks") as save_tasks:
+                response = app.test_client().post(
+                    "/task/collection/clear/missing?back=/collections",
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 404)
+            save_tasks.assert_not_called()
+            self.assertEqual(
+                [task["collection_id"] for task in read_json(base_dir / "data" / "tasks.json")],
+                ["c1"],
+            )
+
     def test_collection_task_cards_keep_post_actions_collapsed_command_and_anchor_back(self):
         with isolated_app() as (app, _base_dir):
             from fls_manager import paths

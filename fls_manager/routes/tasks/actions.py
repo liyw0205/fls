@@ -85,18 +85,22 @@ def task_pin(task_id):
 def task_collection_clear(task_id):
     tasks = load_tasks()
     found = False
+    changed = False
 
     for task in tasks:
         if task.get("id") == task_id:
-            task["collection_id"] = ""
-            task["updated_at"] = now_str()
             found = True
+            if str(task.get("collection_id") or ""):
+                task["collection_id"] = ""
+                task["updated_at"] = now_str()
+                changed = True
             break
 
     if not found:
         abort(404)
 
-    save_tasks(tasks)
+    if changed:
+        save_tasks(tasks)
 
     return redirect(get_back_url("/collections"))
 
