@@ -1,9 +1,11 @@
 # FLS 开发文档
 
 更新时间：2026-07-05
-基线：`main` / 阶段 43
+基线：`main` / 阶段 44
 
-本文用于后续开发协作。每次完成开发后，都要同步更新本文的“开发日志”和“后续方向”，必要时同步调整架构、数据模型、接口和验证清单。
+本文是 FLS 当前代码库的开发协作文档。历史阶段流水见
+`docs/DEVELOPMENT_PROGRESS.md`，下一轮接续信息见
+`docs/SESSION_HANDOFF.md`，数据结构细节见 `docs/DATA_SCHEMA.md`。
 
 ## 1. 项目定位
 
@@ -16,30 +18,26 @@ FLS = Flask Lightweight Script Manager，是一个基于 Flask 的轻量级脚�
 - 支持 Python、Shell、Node.js、TypeScript、PowerShell、Batch、PHP、Ruby、Perl、Lua、Jar 等脚本类型。
 - 支持 Linux、Windows、Termux，并提供不同平台的启停脚本。
 
-当前项目不是前后端分离架构。页面主要由 Flask 路由直接拼接 HTML，公共布局在 `fls_manager/ui/layout.py`，静态增强逻辑在 `fls_manager/static/fls.js` 和 `fls_manager/static/fls.css`。
+架构原则：
 
-## 1.1 产品参考对象
+- 保持 Flask + 原生 CSS/JS，不引入 npm 构建链。
+- 页面主要由 Flask 路由拼接 HTML，公共布局在 `fls_manager/ui/layout.py`。
+- 静态增强逻辑在 `fls_manager/static/fls.js` 和 `fls_manager/static/fls.css`。
+- 优先小步改动、标准库测试、运行数据隔离和可回滚边界。
 
-后续产品和交互设计可以参考同类任务面板，但不能照搬实现或引入不适合 FLS 定位的复杂依赖。
+产品参考对象：
 
-参考对象：
+- 青龙面板：任务、脚本、环境变量、日志和通知的信息架构。
+- 呆呆面板：轻量、现代、开箱即用的功能组织。
+- 白虎面板：低资源占用、多运行时、节点互联等后续方向。
 
-- 青龙面板：参考成熟任务管理面板的信息架构、脚本/环境变量/配置/日志/通知/移动端操作等功能组织。
-- 呆呆面板：参考轻量、现代、开箱即用的产品方向，以及订阅、依赖、Open API、通知渠道等功能组织。
-- 白虎面板：参考低资源占用、多运行时管理、节点互联、跨节点环境变量同步等后续演进方向。
+参考只用于产品行为和信息架构，不改变 FLS 当前轻量技术路线。
 
-借鉴边界：
-
-- FLS 继续保持 Flask + 原生 CSS/JS 的轻量架构，不因为参考对象而强制切换 Go、Vue、Node/npm 构建链或数据库。
-- 优先学习信息架构、操作流程、响应式体验和功能取舍。
-- 涉及安全、鉴权、远程命令执行、跨节点互联、开放 API 等能力时，必须先做威胁建模和最小权限设计。
-- 如复用开源代码、图标、样式或协议，需要先确认许可证和维护成本；默认只做产品行为参考。
-
-## 2. 快速启动与运行入口
+## 2. 启动入口
 
 主入口：
 
-- `fls-manager.py`：Python 主入口，负责依赖自检安装、创建 Flask app、加载调度器、清理日志并启动服务。
+- `fls-manager.py`：Python 主入口，负责依赖自检、创建 Flask app、加载调度器、清理日志并启动服务。
 - `fls.sh`：Linux / Termux 启停脚本。
 - `fls.ps1`：Windows PowerShell 启停脚本。
 - `fls.bat`：Windows CMD 入口，转调 `fls.ps1`。
@@ -56,7 +54,7 @@ sh fls.sh status
 sh fls.sh log
 ```
 
-`fls-manager.py` 会自动检查并尝试安装这些依赖：
+自动检查依赖：
 
 - `flask`
 - `apscheduler`
@@ -70,41 +68,40 @@ sh fls.sh log
 - `FLS_PORT`：覆盖监听端口，默认 `5700`。
 - `FLS_TOKEN`：覆盖管理 Token。
 - `FLS_SECRET_KEY`：覆盖 Flask session secret。
-- `FLS_PYTHON`：任务运行时 Python 解释器。
-- `FLS_NODE`：任务运行时 Node.js 解释器。
-- `FLS_BASH`：任务运行时 Bash 解释器。
+- `FLS_PYTHON` / `FLS_NODE` / `FLS_BASH`：覆盖任务运行时解释器。
 
-首次运行如果没有 Token，会跳转到 `/setup` 进行初始化。
+首次运行如果没有 Token，会跳转 `/setup` 初始化。
 
 ## 3. 目录与模块边界
 
 根目录：
 
-- `README.md`：用户使用说明。
+- `README.md`：用户说明。
 - `AI-NOTICE.md`：AI 相关说明。
-- `fls-manager.py`：服务入口。
-- `fls.sh` / `fls.ps1` / `fls.bat` / `fls-a.sh`：平台启动脚本。
+- `DEVELOPMENT.md`：当前开发协作文档。
+- `docs/`：数据 schema、阶段进度、交接文档和参考资料。
 - `fls_manager/`：核心应用代码。
-- `data/`：运行数据，通常不应提交真实本地内容。
-- `log/`：运行和任务日志，通常不应提交。
-- `scripts/`：用户脚本目录。
+- `tests/`：标准库 `unittest` 测试。
+- `tools/responsive_smoke.py`：无浏览器环境下的响应式结构烟测。
+- `data/` / `log/` / `scripts/`：运行数据、日志和用户脚本，通常不提交真实本地内容。
 
 核心模块：
 
 - `fls_manager/paths.py`：工作目录探测和 `data/log/scripts` 路径常量。
 - `fls_manager/app.py`：创建 Flask app、配置 session、注册 Blueprint。
 - `fls_manager/auth.py`：登录态、Token、API 鉴权入口。
+- `fls_manager/csrf.py`：CSRF 校验和 token 注入约定。
 - `fls_manager/security.py`：随机验证码和 TOTP 二次验证。
 - `fls_manager/config.py`：默认配置、配置合并、端口、Token、虚拟时间。
-- `fls_manager/storage.py`：JSON 文件读写和进程内锁。
-- `fls_manager/models.py`：任务、全局变量、代理、合集的数据访问层。
+- `fls_manager/storage.py`：JSON 读写和进程内锁。
+- `fls_manager/models.py`：任务、历史、全局变量、代理、合集的数据访问与归一化。
 - `fls_manager/command.py`：任务命令解析、脚本类型归一、混合命令展开、`fls_kill` 注入。
-- `fls_manager/task_runner.py`：任务启动、停止、超时、重试、日志、通知。
+- `fls_manager/task_runner.py`：任务启动、停止、超时、失败重试、日志和通知。
 - `fls_manager/scheduler.py`：Cron 解析、虚拟时间调度、APScheduler job 重载。
-- `fls_manager/logs.py`：任务日志文件、tail、日志清理。
-- `fls_manager/proxy.py`：HTTP/SOCKS/GitHub 代理配置、测试和任务环境注入。
+- `fls_manager/logs.py`：任务日志文件、tail、任务名解析和日志清理。
+- `fls_manager/proxy.py`：HTTP/SOCKS/GitHub 代理配置、检测和任务环境注入。
 - `fls_manager/notify.py`：通知渠道模型和发送实现。
-- `fls_manager/state.py`：全局运行态，包括 scheduler、运行中任务、依赖安装任务。
+- `fls_manager/state.py`：全局运行态，包括 scheduler、运行中任务和依赖安装任务。
 - `fls_manager/utils.py`：HTML escape、时间、名称清洗、环境变量解析等通用工具。
 
 路由模块：
@@ -130,10 +127,10 @@ Blueprint 约定：
 
 - 单文件功能可直接在 `routes/<name>.py` 中创建 `bp = Blueprint(...)`。
 - 多文件功能使用 `routes/<domain>/bp.py` 暴露 `bp`，在 `routes/<domain>/__init__.py` 导入子模块让 `@bp.route` 生效。
-- 新增功能后在 `fls_manager/app.py` 注册 Blueprint。
+- 新增功能后必须在 `fls_manager/app.py` 注册 Blueprint。
 - 新增导航入口时同步更新 `fls_manager/ui/layout.py`。
 
-## 4. 数据文件与模型
+## 4. 数据模型
 
 所有运行数据默认位于 `BASE_DIR/data`。`BASE_DIR` 来自 `FLS_BASE_DIR`，否则按平台推断：
 
@@ -141,8 +138,6 @@ Blueprint 约定：
 - Termux：`$HOME/fls`
 - Linux root 优先：`/root/fls`
 - 兜底：`$HOME/fls`
-
-核心 JSON schema 和读取迁移规则见 `docs/DATA_SCHEMA.md`。
 
 主要数据文件：
 
@@ -160,37 +155,31 @@ Blueprint 约定：
 
 - JSON 读写统一走 `fls_manager/storage.py`。
 - 业务数据访问优先走 `fls_manager/models.py`。
-- `tasks.json`、`task_history.json`、`global_env.json`、`proxies.json`、`collections.json` 读取时会通过 `models.py` 做归一化。
-- `config.json` 读取时会通过 `config.normalize_config_data()` 合并默认值、转换类型并钳制数值范围。
+- `tasks.json`、`task_history.json`、`global_env.json`、`proxies.json`、`collections.json` 读取时通过 `models.py` 做归一化。
+- `config.json` 读取时通过 `config.normalize_config_data()` 合并默认值、转换类型并钳制范围。
 - 写文件使用临时文件替换，减少半写入文件。
-- 当前锁是进程内 `threading.RLock`，不能保证多进程事务一致性。
+- 当前锁是进程内 `threading.RLock`，不保证多进程事务一致性。
 - 不要在路由中直接读写 `data/*.json`，除非是在补充专门的数据访问函数。
 
-任务字段：
+任务核心字段：
 
 - `id`：任务 ID，`uuid.uuid4().hex`。
-- `name`：任务名。
-- `remark`：备注。
-- `command`：命令，支持单行 `task xxx.py` 或多行 Shell 混合命令。
-- `cron`：Cron 表达式，支持 5 位或 6 位。
-- `config_path`：相对 `scripts/` 的配置文件路径。
-- `collection_id`：所属合集 ID。
-- `enabled`：是否启用调度。
+- `name` / `remark` / `command` / `cron` / `config_path` / `collection_id`。
+- `enabled` / `pinned` / `run_count`。
 - `env`：任务级环境变量。
 - `proxy_id`：代理 ID。
-- `notify`：任务结束通知配置，形如 `{"mode": "default|none|custom", "ids": []}`。
-- `random_delay`：随机延迟配置，形如 `{"mode": "none|default|custom", "seconds": 0}`。
-- `retry`：失败重试配置，形如 `{"attempts": 0, "interval_seconds": 60}`；`attempts` 范围 `0-5`，`interval_seconds` 范围 `5-3600`。
-- `run_count`：运行次数。
-- `pinned`：列表置顶。
-- `created_at` / `updated_at` / `last_run_at`：面板时间字符串。
+- `notify`：`{"mode": "default|none|custom", "ids": []}`。
+- `random_delay`：`{"mode": "none|default|custom", "seconds": 0}`。
+- `retry`：`{"attempts": 0, "interval_seconds": 60}`，`attempts` 范围 `0-5`，`interval_seconds` 范围 `5-3600`。
+- `created_at` / `updated_at` / `last_run_at`。
 
-兼容字段：
+兼容迁移：
 
-- 旧版任务可能包含 `notify_ids`，`models.py` 会读取迁移为新的 `notify` 结构。
-- 旧版任务可能包含 `retry_count`，`models.py` 会读取迁移为新的 `retry` 结构并在写回时移除旧字段。
+- 旧 `notify_ids` 会读取迁移为 `notify`，写回时移除旧字段。
+- 旧 `retry_count` 会读取迁移为 `retry`，写回时移除旧字段。
+- 坏类型、缺失字段和空 ID 在读取时归一化，详细规则见 `docs/DATA_SCHEMA.md`。
 
-## 5. 请求、鉴权与安全流程
+## 5. 请求、鉴权与安全
 
 `create_app()` 在注册路由前设置：
 
@@ -203,17 +192,17 @@ Blueprint 约定：
 
 CSRF 约定：
 
-- 统一 `layout()` 会为 POST 表单注入隐藏字段 `csrf_token`，并在页面 `<meta name="csrf-token">` 输出同一个 token。
+- `layout()` 会为 POST 表单注入隐藏字段 `csrf_token`，并在页面 `<meta name="csrf-token">` 输出同一个 token。
 - `fls_manager/static/fls.js` 会为同源非 GET `fetch()` 自动补 `X-CSRF-Token`。
 - 普通 session POST 必须通过 CSRF 校验。
-- `X-Token` 命中管理 Token 的机器请求会跳过 CSRF，便于 API 和脚本调用。
-- 破坏性页面路由必须优先使用 POST，不应通过 GET 删除、置顶、取出或停止资源。
+- `X-Token` 命中管理 Token 的机器请求跳过 CSRF，便于 API 和脚本调用。
+- 破坏性页面路由必须使用 POST，不允许 GET 删除、置顶、取出、停止、切换或运行任务。
 
 鉴权优先级：
 
 1. 静态资源和认证路由放行。
-2. 如果未配置 Token，API 返回 403，页面跳转 `/setup`。
-3. `X-Token` 请求头命中 Token 时直接放行。
+2. 未配置 Token 时 API 返回 JSON 403，页面跳转 `/setup`。
+3. `X-Token` 命中 Token 时直接放行。
 4. URL `?token=` 命中 Token 时写入 session 并重定向到清理后的 URL。
 5. session Token 有效且二次验证通过时放行。
 6. API 返回 JSON 错误，页面跳转登录页。
@@ -224,29 +213,43 @@ CSRF 约定：
 - 支持随机验证码和 TOTP。
 - 随机验证码默认 300 秒过期。
 
-开发注意：
+## 6. 当前行为边界
 
-- 新增 API 应让错误响应保持 JSON。
-- `/api/task/action/run/<id>` 和 `/api/task/action/stop/<id>` 对不存在任务应返回 404；已存在但未运行的 stop 仍返回 200 和 `ok:false`。
-- `/api/task/action/delete/<id>` 删除不存在任务时应返回 404，不应停止任务、写回任务文件或重载调度器。
-- `/api/task/action/delete/<id>` 删除存在任务前必须先停止任务；停止成功或任务未运行时才删除，停止失败时返回 409 且不写回任务文件或重载调度器。
-- `/api/task/bulk-action` 应保持 `ok` / `msg` 兼容字段，并返回 `action`、`count` 及对应动作的结构化计数字段，便于前端和脚本客户端判断局部成功、跳过和失败。
-- `/api/task/bulk-action` 批量删除前会尝试停止任务；停止失败的任务不能被删除，响应需返回 `failed_count` / `failures`，前端提示也要显示删除失败明细。
-- 新增页面应走统一 `layout()`，避免绕过鉴权流程。
-- 新增 POST 表单应使用 `method="post"` 并让 `layout()` 自动注入 CSRF；不要手写 GET 破坏性链接。
-- 兼容保留的页面 POST 删除任务入口 `/task/delete/<id>` 应与单项删除 API 保持相同停止失败边界。
-- 兼容保留的页面任务启停类状态修改入口也必须使用 POST；`/task/toggle/<id>` 对 GET 返回 405，目标不存在时返回 404 且不写回任务文件或重载调度器。
-- 兼容保留的页面运行入口 `/run/<id>` 必须使用 POST；GET 返回 405，任务不存在时返回 404，日志页、合集页和配置页不能渲染 GET 运行链接。
-- 兼容保留的页面停止入口 `/stop/<id>` 必须使用 POST；GET 返回 405，任务不存在时返回 404 且不调用停止逻辑。
-- `/collection/delete/<id>` 删除不存在合集时应返回 404 且不写入；删除没有成员任务的合集不应写 `tasks.json`。
-- `/task/collection/clear/<id>` 目标任务不存在时应返回 404 且不写入；目标任务已经不在合集时不应写 `tasks.json`。
-- 返回跳转 URL 时优先使用 `utils.get_back_url()` 或等价校验，避免开放重定向。
+任务 API：
 
-## 6. 任务执行链路
+- `/api/task/action/run/<id>` 缺失任务返回 404。
+- `/api/task/action/stop/<id>` 缺失任务返回 404 且不调用停止逻辑；已存在但未运行仍返回 200 + `ok:false`。
+- `/api/task/action/delete/<id>` 缺失任务返回 404；存在任务删除前必须先停止任务，停止成功或任务未运行才删除，停止失败返回 409 且不写回。
+- `/api/task/bulk-action` 保持 `ok/msg` 兼容字段，并返回 `action/count` 及结构化计数。
+- 批量删除前逐个停止任务；停止失败的任务不能被删除，响应包含 `failed_count` / `failures`。
 
-任务创建或编辑：
+兼容页面动作：
 
-1. 路由解析表单并验证必填字段。
+- `/task/delete/<id>` 只接受 POST；停止失败时返回 409，保留任务并避免写回。
+- `/task/toggle/<id>` 只接受 POST；缺失任务返回 404 且不写回任务文件或重载调度器。
+- `/run/<id>` 只接受 POST；缺失任务返回 404；日志页、合集页和配置页不能渲染 GET 运行链接。
+- `/stop/<id>` 只接受 POST；缺失任务返回 404 且不调用停止逻辑。
+- `/task/pin/<id>` 只接受 POST；最多 5 个置顶任务。
+- `/task/collection/clear/<id>` 只接受 POST；缺失任务返回 404；任务已经不在合集时不写 `tasks.json`。
+- `/collection/delete/<id>` 只接受 POST；缺失合集返回 404 且不写入；删除空合集不写 `tasks.json`；删除含任务合集时才清理任务归属。
+- `/collection/add-task/<id>` 只接受 POST；兼容 `task_ids` 多选和旧 `task_id` 单选；混入缺失任务时返回 404 且不部分写入。
+
+日志与备份：
+
+- 单文件日志删除使用 POST。
+- 日志分组批量删除使用 `/api/logs/groups/delete`。
+- 备份解压必须拒绝路径穿越、绝对路径、链接和 tar 特殊成员。
+
+返回路径：
+
+- 返回跳转 URL 优先用 `utils.get_back_url()` 或同等校验。
+- 不允许外部 URL、协议相对 URL 或非站内路径作为回跳目标。
+
+## 7. 任务执行链路
+
+创建或编辑任务：
+
+1. 路由解析表单并校验必填字段。
 2. Cron 不为空时用 `cron_to_trigger()` 校验。
 3. 写入 `data/tasks.json`。
 4. 调用 `reload_scheduler()` 重载定时任务。
@@ -262,282 +265,137 @@ CSRF 约定：
 
 1. `run_task_now(task_id, source)` 读取任务。
 2. `command.build_command()` 解析命令。
-3. 创建任务日志文件。
+3. 创建任务日志文件和任务历史记录。
 4. 写入 `RUNNING` 状态。
 5. 后台线程启动任务。
-6. 合并环境变量：系统环境、全局变量、任务变量、代理变量。
-7. 支持随机延迟、失败重试、超时结束。
-8. 任务结束后写日志、清理状态、发送通知。
+6. worker 合并系统环境、全局变量、任务变量、代理变量和 `FLS_TASK_*`。
+7. watcher 等待进程结束，处理超时、失败重试、历史收尾、通知和运行态清理。
 
 停止：
 
-- `stop_task_now()` 标记手动停止，并结束子进程或进程组。
-- 手动停止不会发送任务完成通知。
+1. `stop_task_now(task_id)` 从 `RUNNING` 查找进程。
+2. 未运行返回 `False, "任务未运行"`。
+3. 存在进程时调用 `force_kill_process()`。
+4. 写停止日志、更新历史、清理运行态。
 
-命令模式：
+## 8. 前端约定
 
-- 单行纯 `task xxx.py arg`：直接构造命令数组，`shell=False`，工作目录为脚本所在目录。
-- 多行或混合命令：展开其中的 `task xxx.py` 行，整体以 Shell 运行，工作目录为 `scripts/`。
-- 使用 `fls_kill` 时会在 Shell 命令前注入内置函数。
+- 继续使用 Flask 字符串拼接 HTML + 原生 CSS/JS。
+- 页面输出用户可控字段必须显式 HTML escape，优先使用 `utils.h()`。
+- 页面应走统一 `layout()`，不要绕过鉴权、CSRF 和静态资源注入。
+- 新增 POST 表单用 `method="post"`，让 `layout()` 自动注入 CSRF。
+- JS 同源非 GET `fetch()` 依赖 `fls.js` 自动补 `X-CSRF-Token`。
+- 不引入 npm、Tailwind、Bootstrap 或其它构建链，除非先评估部署成本。
+- 响应式至少考虑 390px、768px、1024px、1440px。
+- 任务列表和合集页的破坏性操作应保留 POST/API 方案，不能退回 GET 链接。
 
-## 7. 前端与页面约定
+现有 UI 组件：
 
-页面渲染：
+- `fls_manager/ui/components.py`
+  - `page_header_card()`
+  - `table_card()`
+  - `pagination_card()`
+  - `message_card()`
+  - `summary_item()`
+- `fls_manager/ui/tables.py`
+  - 任务表格、移动端任务卡片、批量工具栏和任务操作按钮。
+- `fls_manager/ui/log_controls.py`
+  - 日志页控制按钮。
 
-- 公共布局由 `fls_manager/ui/layout.py` 生成。
-- 页面内容通常由路由函数拼 HTML 字符串。
-- 用户输入输出到 HTML 时必须使用 `utils.h()` 转义。
-- 低风险通用 HTML 外壳优先放到 `fls_manager/ui/components.py`，当前已有 `page_header_card()`、`table_card()`、`message_card()`、`summary_item()` 和 `pagination_card()`。
+## 9. 测试策略
 
-静态资源：
+测试原则：
 
-- `fls_manager/static/fls.css`：全局样式、响应式布局、表格、表单、按钮。
-- `fls_manager/static/fls.js`：移动端菜单、表格字段名补全、长表单悬浮提交按钮等增强逻辑。
+- 使用标准库 `unittest`，不引入 pytest。
+- 测试导入 `fls_manager.*` 前设置临时 `FLS_BASE_DIR`，避免污染真实数据。
+- Flask test client 通过 `X-Token` 进行 API/页面请求。
+- 测试结束后关闭 scheduler，并清理 `sys.modules` 中的 `fls_manager.*`。
+- 网络、SMTP、子进程、线程、通知、代理检测等外部出口必须 mock。
 
-响应式要求：
+当前覆盖重点：
 
-- 前端必须同时支持手机、平板和电脑显示。
-- JS 会按设备和宽度给 `body` 添加 `fls-phone`、`fls-tablet`、`fls-desktop`，并保留历史兼容类 `fls-mobile`。
-- 手机和小平板使用抽屉侧边栏、紧凑卡片、卡片化表格和原生 textarea。
-- 横屏平板和中等宽度桌面使用压缩侧边栏、三列仪表盘网格、两列卡片/表单和可横向滚动表格。
-- 桌面端保持完整侧栏、宽松间距和 CodeMirror 编辑器。
-- `fls-mobile` 是布局语义，不是单纯设备 UA 语义；宽度大于 900px 的横屏平板不应强制进入抽屉移动布局。
-- 新增页面时必须检查 390px、768px、1024px、1440px 四类宽度，不允许按钮、表格、日志、代码块或长任务名横向撑破页面。
+- 鉴权、CSRF、Query Token 清理跳转、破坏性路由 GET 拒绝。
+- 备份 zip/tar 安全解压。
+- 命令解析、Cron、虚拟时间。
+- JSON schema 读取迁移和配置归一化。
+- 任务运行、停止、超时、失败重试、历史、通知和代理环境注入。
+- 存储、通知出口、代理质量检测、日志 tail 和清理。
+- 任务批量 API、任务动作 API、合集批量/单项边界。
+- UI 组件和关键路由渲染、HTML 转义、安全 back。
+- 响应式结构 smoke。
 
-开发约定：
-
-- 新页面优先复用现有 `.card`、`.table-wrap`、`.btn`、`.badge`、`.form-grid` 等样式。
-- 表单页面如果较长，不需要手写悬浮按钮，`fls.js` 会自动处理。
-- 新增危险按钮文案应包含清晰动作名，避免被悬浮提交逻辑误识别为普通提交。
-- UI 文案保持中文，命令、代码、日志和配置键保持原文。
-
-## 8. 日志、备份、线上脚本
-
-日志：
-
-- 任务日志写入 `log/<safe-task-name>-YYYY-mm-dd-HH-MM-SS.log`。
-- `cleanup_logs()` 会删除超过大小限制的日志，并按任务分组保留最近 N 个。
-- 日志分组优先从日志头里的任务名解析。
-
-备份：
-
-- 备份功能位于 `routes/backup/`。
-- 解压导入有路径安全检查，继续开发时不能绕过 `safe_extract_tar()` / `safe_extract_zip()`。
-- 备份依赖文件生成逻辑在 `routes/backup/_common.py`。
-
-线上脚本：
-
-- 源地址默认在 `config.py` 的 `online_script_source`。
-- 源读取、规范化、缓存、刷新在 `fls_manager/online_scripts/source.py`。
-- 安装流程在 `fls_manager/online_scripts/install.py`。
-- 导入任务逻辑在 `fls_manager/online_scripts/tasks.py`。
-- 文档渲染在 `fls_manager/online_scripts/docs.py`。
-
-## 9. 开发流程约定
-
-每次开发建议流程：
-
-1. 先读相关路由、模型、执行链路，不直接改入口。
-2. 修改数据结构时，先补归一化或兼容逻辑，再改页面和 API。
-3. 修改任务、Cron、时间、运行状态相关逻辑时，必须验证手动运行和定时调度。
-4. 修改脚本管理、备份、线上脚本下载时，必须验证路径穿越和归档解压边界。
-5. 修改鉴权、Token、二次验证时，必须验证页面请求和 API 请求的不同响应。
-6. 修改配置项时，同步更新 `DEFAULT_CONFIG`、配置页、文档。
-7. 开发结束后更新本文“开发日志”和“后续方向”。
-
-阶段会话规则：
-
-- 项目开发按阶段推进，避免单个会话上下文过大。
-- 每个阶段默认采用主代理加子代理协作：主代理负责范围控制、实现整合、验证和提交；子代理负责独立审查、方案调研或不重叠文件范围的实现。
-- 子代理必须有明确任务边界，不能还原或覆盖其他参与者的修改。
-- 阶段结束前必须更新：
-  - `DEVELOPMENT.md`
-  - `docs/DEVELOPMENT_PROGRESS.md`
-  - `docs/SESSION_HANDOFF.md`
-- `docs/SESSION_HANDOFF.md` 必须写明本阶段完成进度、受限验证、遗留风险和下一阶段目标。
-- 阶段结束以 git commit 收束；提交时只纳入本阶段相关文件，不能误提交用户或其他阶段的无关改动。
-- 当前工具不能真正自动创建新的聊天线程；下一会话应以最新 `docs/SESSION_HANDOFF.md` 为入口继续。
-- 如果 GitHub、npm 或 Python 生态已有成熟开源方案，优先评估复用；只有在项目开箱即用、离线能力、体积或维护成本更优时才继续本地轻量实现。
-
-代码风格：
-
-- Python 保持标准库优先，沿用当前模块化风格。
-- 新数据读写优先增加 `models.py` 或功能域内 `_common.py` 辅助函数。
-- 页面输出必须显式 HTML escape。
-- 避免在路由函数里写过长业务流程，复杂逻辑下沉到功能模块。
-- 不提交 `__pycache__/`、本地 `data/` 内容、真实日志和本地脚本私密内容。
-
-## 10. 验证清单
-
-轻量检查：
+完整验证：
 
 ```sh
 python -B -m unittest discover -s tests
 python -B tools/responsive_smoke.py
 python -B -m compileall fls-manager.py fls_manager tests tools
+git -c safe.directory=/data/data/com.termux/files/home/fls diff --check
 ```
 
-手动验证：
+受限验证：
 
-- 启动面板后访问 `/`。
-- 分别用手机宽度、平板宽度、桌面宽度检查核心页面布局。
-- 未设置 Token 时能进入 `/setup`。
-- 设置 Token 后登录、退出、过期返回逻辑正常。
-- 新建手动任务，执行 `task xxx.py`。
-- 新建 Cron 任务，确认 `/api/scheduler/jobs` 有对应 job。
-- 修改任务启用状态后调度器刷新。
-- 任务超时、失败重试、手动停止日志符合预期。
-- 代理配置测试、任务代理环境注入符合预期。
-- 通知测试和任务结束通知符合预期。
-- 日志查看、实时刷新、删除符合预期。
-- 备份导出和导入不会越权写出目标目录。
+- 当前环境没有 Playwright/Chromium，真实浏览器截图检查需要在具备浏览器环境后补充。
+- 推荐截图宽度：390px、768px、1024px、1440px。
+- 推荐页面：`/tasks`、`/collections`、`/logs`、`/online-scripts`、`/pull`、`/config`、`/deps`、`/panel/status`。
 
-当前已有 `tests/` 轻量自动化测试目录。新增测试优先使用标准库 `unittest`，并通过临时 `FLS_BASE_DIR` 隔离真实运行数据。
+## 10. 开发流程
 
-已覆盖：
+每轮开发：
 
-- `command.py` 的命令解析。
-- `scheduler.py` 的 Cron 和虚拟时间换算。
-- `config.py` / `models.py` 的核心 JSON 读取归一化和兼容迁移。
-- `task_runner.py` 的任务提交、运行状态、随机延迟、重试次数、停止、watcher 通知/重试分支和环境合并。
-- `proxy.py` 的代理 URL、请求代理字典和任务环境变量注入。
-- `notify.py` 的任务通知 ID 选择、默认通知去重和 `send_by_ids()` mock 发送。
-- `task_runner.py` 的 `_start_task_attempt()` Popen 参数、watcher 线程提交和超时 watcher 分支。
-- `logs.py` 的日志大小清理和按任务分组保留。
-- `notify.py` 的 webhook、Bark、SMTP 三类 `send_one()` 出口 mock。
-- `proxy.py` 的 GitHub 代理可用性缓存。
-- `storage.py` 的缺失文件、损坏 JSON、父目录创建、临时文件替换和替换失败边界。
-- `notify.py` 的 Server 酱、PushPlus、Telegram、企业微信、钉钉、飞书、Ntfy、Gotify、PushDeer `send_one()` 出口 mock。
-- `proxy.py` 的 GitHub URL 改写、Git 临时配置参数、质量检测 URL 解析和普通代理质量检测并发聚合。
-- `logs.py` 的 `tail_file()` 缺失/尾读/坏 UTF-8 和 `parse_task_name_from_log()` 边界。
-- `notify.py` 的通知配置清理、默认通知过滤保存、内容分片、WxPusher 出口 mock 和多分片多通知发送顺序。
-- `proxy.py` 的 GitHub 质量检测拼接请求、无 git、Git insteadOf 成功/失败/超时，以及 Git 命令代理拼接 helper。
-- `logs.py` 的 `latest_log_for_task()`、`cleanup_logs()` keep=0、非法配置、无启动头分组和 unlink 异常吞掉边界。
-- `auth.py` 的 API 与页面鉴权分支。
-- `backup/_common.py` 的备份文件名归一、zip/tar 路径穿越拒绝、安全 tar 解压 filter 兼容、tar 特殊成员拒绝和 DeprecationWarning 回归测试。
-- 批量任务 API 的启用、禁用、取出、删除、运行、停止结构化响应字段，以及批量删除遇到停止失败时保留失败任务的边界。
-- 单项任务删除 API 和兼容页面 POST 删除入口在任务停止失败时保留任务、不写回任务文件、不重载调度器的边界。
-- 兼容页面任务切换入口 `/task/toggle/<id>` 的 POST-only、缺失任务无副作用和安全 back 返回边界。
-- 兼容页面运行入口 `/run/<id>` 的 POST-only、缺失任务 404、安全 back 返回，以及日志页、合集页和配置页不渲染 GET 运行链接的边界。
-- 兼容页面停止入口 `/stop/<id>` 的 POST-only、缺失任务 404 且不调用停止逻辑，以及已存在但未运行仍保持重定向兼容的边界。
-- 合集删除入口 `/collection/delete/<id>` 的缺失合集无副作用、删除空合集不写任务文件、删除含任务合集时才清理并写回任务归属的边界。
-- 单任务取出合集入口 `/task/collection/clear/<id>` 的 POST-only、缺失任务无副作用、未归属合集任务不写任务文件、已归属任务才写回的边界。
-- `ui.components.table_card()` 的可选说明区、操作区、表格 ID、标题和表头 HTML 转义。
-- `ui.components.pagination_card()` 的链接分页、按钮分页、禁用态、省略号和 HTML 转义。
-- `ui.components.message_card()` 的空/空白消息、成功/错误/普通提示、未知类型回退、加粗样式、可选标题和 HTML 转义。
-- `ui.components.summary_item()` 的统计项结构、数字 value 和 HTML 转义。
-- 路由层 UI 组件接入：`/pull/new`、`/pull/fetch`、`/pull/import` 普通/结果提示卡和 `/online-scripts/doc/<id>` 文档加载失败卡的渲染与转义。
-- 路由层 UI 组件接入：`/task/config/<id>` 保存成功/失败提示卡的渲染与转义。
-- 路由层 UI 组件接入：`/deps`、`/deps/refresh` 和 `/panel/status` 表格卡渲染、响应式表格 ID 保留与 HTML 转义。
+1. 读取 `docs/SESSION_HANDOFF.md`。
+2. 执行 `git -c safe.directory=/data/data/com.termux/files/home/fls status --short --branch`。
+3. 确认本地提交身份为 `liyw0205 <2650115317@qq.com>`。
+4. 只选择一个可验证的窄边界开发。
+5. 不整包恢复 `stash@{0}`。
+6. 更新 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`、`docs/SESSION_HANDOFF.md`。
+7. 跑完整验证。
+8. 提交并推送 `origin/main`。
 
-后续优先补充：
+Git 约束：
 
-- 响应式真实浏览器截图验收，重点检查手机、平板、桌面下任务、日志、配置和在线脚本页面。
-- 继续低风险 UI 组件抽取，优先其它未脏页面纯文本提示卡；分页组件后续可逐步接入任务/日志页。
+- 命令使用 `git -c safe.directory=/data/data/com.termux/files/home/fls ...`。
+- 不使用破坏性 reset/checkout 覆盖用户改动。
+- 不 amend 旧提交，除非用户明确要求。
+- 当前长期 stash：`stash@{0}: pre-main-merge dirty task-log runtime changes`。
+- 该 stash 是旧基线工作树快照，不应整包 `pop/apply`；只能从中摘取可证明的窄边界。
+
+不要迁入的旧方向：
+
+- 旧 `retry_count` 表单。
+- GET 删除、置顶、取出、停止、切换、运行。
+- 移除 CSRF。
+- 移除任务运行历史。
+- 移除 back 清洗和合集锚点。
 
 ## 11. 已知约束
 
 - JSON 存储适合轻量单实例部署，不适合多进程高并发写入。
-- APScheduler 使用进程内调度，面板进程退出后不会继续调度。
-- 当前没有数据库迁移层，数据结构演进必须在读取时做兼容归一。
+- APScheduler 是进程内调度，面板进程退出后不会继续调度。
+- 当前没有数据库迁移层，数据结构演进必须在读取时兼容归一。
 - 页面由字符串拼接 HTML，新增复杂页面时要特别注意转义和可维护性。
 - CodeMirror 资源来自 CDN，离线环境下编辑器增强可能不可用。
 - `totp_qr_url()` 使用在线二维码服务，离线环境只能展示密钥或 otpauth 链接。
-- 依赖安装、运行时安装、在线脚本源刷新都依赖外部网络或代理配置。
+- 依赖安装、运行时安装、在线脚本源刷新依赖外部网络或代理配置。
 
 ## 12. 后续方向
 
 优先级高：
 
-- 继续维护 `docs/DATA_SCHEMA.md`，新增或调整 `data/*.json` 字段时同步更新读取迁移函数。
-- 把过长路由里的业务流程逐步下沉到 service/helper 模块。
+- 继续维护 `docs/DATA_SCHEMA.md`，新增或调整数据字段时同步读取迁移函数。
+- 把过长路由中的业务流程逐步下沉到 service/helper。
 - 在具备浏览器环境时补真实截图响应式验收。
 
 优先级中：
 
 - 给配置、任务、代理、通知等 JSON 写入增加备份或回滚机制。
-- 将常用页面组件抽到 `fls_manager/ui/`，减少路由里的 HTML 重复。
-- 增加运行中任务状态 API 的更多字段，例如耗时、attempt、source。
+- 继续抽取可复用 UI 组件，减少路由中的 HTML 重复。
+- 增加运行中任务状态 API 字段，例如耗时、attempt、source。
 - 改善离线环境下 CodeMirror 和 TOTP 二维码资源可用性。
-- 继续抽查各功能页在手机、平板、桌面下的细节间距和复杂表格表现。
-- 对标青龙面板、呆呆面板、白虎面板，整理 FLS 可借鉴的导航结构、任务详情、订阅管理、运行时管理和 Open API 设计。
+- 梳理 Open API、订阅管理、运行时管理和后续跨节点能力。
 
 优先级低：
 
-- 评估是否引入轻量模板引擎组织复杂页面。
+- 评估是否引入轻量模板层组织复杂页面。
 - 评估是否引入 SQLite 作为可选存储后端。
 - 增加更细的操作审计日志。
-
-## 13. 开发日志
-
-### 2026-07-05
-
-- 阶段 43 固化单任务取出合集写入边界：`/task/collection/clear/<id>` 纳入 GET 405 回归测试；缺失任务返回 404 且不写任务文件；已不在合集的任务直接返回，不再无意义写 `tasks.json`。
-- 阶段 42 固化合集删除写入边界：`/collection/delete/<id>` 删除空合集时只写合集文件，不再无意义写 `tasks.json`；删除含任务合集时继续清空成员任务归属；缺失合集返回 404 且不写合集和任务文件。
-- 阶段 41 固化兼容任务停止入口：`/stop/<id>` 保持 POST-only 并纳入 GET 405 回归测试；缺失任务返回 404 且不调用 `stop_task_now()`，已存在但未运行仍保持重定向兼容。
-- 阶段 40 固化兼容任务运行入口：本地 Git 提交身份切为 `liyw0205 <2650115317@qq.com>`；`/run/<id>` 改为 POST-only，GET 返回 405，缺失任务返回 404；日志页、合集页和配置页运行入口改为 POST 表单或 `formaction` 按钮，不再渲染 GET 运行链接。
-- 阶段 39 固化兼容任务切换入口：`/task/toggle/<id>` 改为 POST-only，GET 返回 405；目标不存在时返回 404 且不写入任务文件、不重载调度器；成功后使用安全 `back` 返回。
-- 阶段 38 固化单项任务删除停止失败边界：`/api/task/action/delete/<id>` 和兼容页面 POST `/task/delete/<id>` 删除前检查 `stop_task_now()` 结果，停止失败时保留任务并避免写入任务文件或重载调度器；任务未运行仍按可删除处理。
-- 阶段 37 固化批量删除停止失败边界：`/api/task/bulk-action` 删除前根据 `stop_task_now()` 结果只删除已停止或未运行的任务，停止失败的任务保留在任务列表中，并返回 `deleted_count`、`failed_count`、`failures`；前端批量提示增加删除失败摘要。
-
-### 2026-07-04
-
-- 阶段 16 扩展 `table_card()`，支持可选说明区、操作区和 `table_id`，同时保持标题和表头转义以及旧调用兼容。
-- 阶段 16 将依赖管理页、依赖刷新结果页和运行环境页接入 `table_card()`；运行环境页保留 `runtimeTable` ID，避免破坏移动端响应式表格 CSS。
-- 阶段 16 扩展组件与路由测试，覆盖 `table_card()` 可选结构、`/deps` 依赖列表转义，以及 `/panel/status` 运行环境表格 ID 和运行时字段转义。
-- 阶段 16 推送前合并远端任务运行历史改动，更新 `tests/test_task_runtime.py` 以覆盖当前 `task_retry_config()`、`schedule_task_retry()` 和 `_start_task_worker()` 行为。
-- 阶段 17 优先收束长期脏文件方向：补齐旧 `retry_count` 到新 `retry` 的读取迁移，并新增任务复制/批量操作、合集批量加入、日志分组删除的回归测试。
-- 阶段 18 继续处理长期脏文件剩余风险：补充 CSRF 注入、session POST 校验、`X-Token` API 豁免，以及日志删除、合集删除、任务置顶拒绝 GET 的安全回归测试。
-- 阶段 19 固化任务表单当前行为：编辑页保留清洗后的 `back` 返回路径，表单使用 `retry_attempts` / `retry_interval_seconds`，提交后保存新 `retry` 结构并拒绝外部 back 跳转。
-- 阶段 20 固化合集页任务卡片当前行为：长命令使用折叠代码块，停止、置顶、取出、删除合集等破坏性操作继续使用 POST 表单，任务操作 back 参数保留合集锚点。
-- 阶段 21 固化普通任务列表当前行为：长命令使用折叠代码块，批量工具栏保留 AJAX 批量操作，单任务更多菜单保留复制、置顶、停止等 POST API 动作，编辑和配置链接继续携带 `/tasks` back 参数。
-- 阶段 22 固化日志管理页当前行为：分组批量选择和批量删除入口继续渲染，单组删除走 `/api/logs/groups/delete`，单文件删除继续使用 POST 表单，并覆盖日志分组名 HTML 转义。
-- 阶段 23 固化日志文件详情页返回路径：合法站内 `back` 继续用于返回按钮和删除表单，外部 `back` 会清洗回 `/logs`，日志删除入口继续保持 POST 表单。
-- 阶段 24 固化任务日志页历史表格：最近运行历史继续展示状态、来源、说明和日志链接，运行、停止、配置、返回入口保留安全 `back`，外部 `back` 清洗回 `/tasks`。
-- 阶段 25 固化全局运行历史页：关键词和状态筛选继续生效，历史表格展示状态、来源、重试、说明和日志链接，用户可控历史字段继续 HTML 转义。
-- 阶段 26 固化任务运行历史数据模型：历史读取过滤坏行，更新按 ID 写回，新增记录插入顶部并按上限裁剪，按任务筛选继续可用；同步补充 `task_history.json` schema 文档。
-- 阶段 27 固化仪表盘历史摘要：最近运行和最近异常继续展示任务历史、状态徽标、说明和日志链接，历史记录中的用户可控文本继续 HTML 转义。
-- 阶段 28 增强批量任务 API 状态字段：`/api/task/bulk-action` 保留 `ok/msg`，新增 `action/count` 以及启用、禁用、取出、删除、运行、停止对应的结构化计数和失败明细。
-- 阶段 29 固化任务启动失败历史收尾：`_start_task_worker()` 在 `Popen` 启动失败时继续写入 `start_failed` 历史、记录失败日志、关闭日志句柄并清理运行态。
-- 阶段 30 固化任务失败不重试通知边界：`task_finish_watcher()` 在失败且未计划重试时继续写入 `failed` 历史、保留退出码和消息，并发送任务完成通知。
-- 阶段 31 接入批量 API 前端消费：`fls.js` 新增 `flsBulkActionMessage()`，普通任务列表和合集页批量操作优先使用结构化计数字段生成提示，并提升静态资源版本。
-- 阶段 32 改善任务表单错误提示：新建/编辑任务校验失败时返回带错误卡片的任务表单页，保留并转义用户输入，状态码继续保持 400。
-- 阶段 33 改善脚本操作失败提示：脚本新建、编辑保存和改名失败时使用加粗错误卡片，失败后保留用户输入并继续转义错误消息和表单内容。
-- 阶段 34 固化合集加入任务兼容边界：抽取表单任务 ID 解析，`task_ids` 多选和旧 `task_id` 单选共同兼容并去重，缺失任务时拒绝且不部分加入合集。
-- 阶段 35 固化单项任务删除 API 缺失任务边界：`/api/task/action/delete/<id>` 仅在任务存在时停止、删除和重载调度器，缺失任务返回 404 且不产生写入副作用。
-- 阶段 36 固化单项任务运行/停止 API 缺失任务边界：`run` 缺失任务返回 404，`stop` 缺失任务返回 404 且不调用停止逻辑，已存在但未运行仍保留 200 + `ok:false`。
-- 阶段 15 继续低风险消息卡接入：`fls_manager/routes/tasks/config_file.py` 的任务配置保存结果统一使用 `message_card()`，保留成功/失败加粗色彩和空消息不渲染行为。
-- 阶段 15 扩展 `tests/test_ui_route_components.py`，覆盖 `/task/config/<id>` 保存成功提示、写入失败提示和错误消息 HTML 转义。
-- 阶段 15 避开已有长期脏改动的任务列表、日志、认证/API 和 `ui/tables.py`，只触碰未脏的任务配置文件路由。
-
-### 2026-07-03
-
-- 新增本开发文档，基于当前项目结构、核心模块、路由、任务执行链路和数据文件约定整理。
-- 记录后续开发必须维护本文的规则：每次开发后更新“开发日志”和“后续方向”，涉及架构、配置、数据结构或接口时同步更新对应章节。
-- 补充前端响应式开发要求：手机、小平板、横屏平板和桌面必须分别适配，并要求后续新增页面检查 390px、768px、1024px、1440px 四类宽度。
-- 开始前端响应式开发：增加 `fls-phone`、`fls-tablet`、`fls-desktop` 设备类，补充平板布局规则和手机优先兜底规则。
-- 补充阶段会话规则：每阶段使用主代理加子代理协作，结束前更新开发进度和会话交接文档，并以 git commit 收束。
-- 新增 `.gitignore`，忽略 Python 缓存、虚拟环境和本地运行数据。
-- 根据子代理审查修正横屏平板分类：`fls-mobile` 按布局宽度判断，避免 1024px iPad/Android 平板被强制切到抽屉移动布局。
-- 补充产品参考对象：青龙面板、呆呆面板、白虎面板仅作为信息架构、交互流程和功能演进参考，不改变 FLS 轻量开箱即用定位。
-- 阶段 2 新增轻量响应式烟测工具 `tools/responsive_smoke.py`，用于在没有真实浏览器环境时检查核心页面结构、静态资源版本和响应式关键 token。
-- 阶段 2 新增 `docs/PANEL_REFERENCE.md`，整理青龙面板、呆呆面板、白虎面板参考边界和 FLS 候选需求池。
-- 阶段 2 开始低风险 UI 组件抽取：新增 `fls_manager/ui/components.py`，并在全局变量、通知、代理、脚本管理页面接入 `page_header_card()` 和 `table_card()`。
-- 阶段 3 新增 `tests/test_auth_backup.py`，覆盖 Token 初始化、页面/API 鉴权分支、Query Token 清理跳转，以及备份文件名归一和 zip/tar 路径穿越拒绝。
-- 阶段 3 新增 `tests/test_command_scheduler.py`，覆盖脚本类型归一、命令参数引用、`task` 命令构建、混合命令展开、5/6 位 Cron 和虚拟时间互逆换算。
-- 阶段 3 将 `python -B -m unittest discover -s tests` 纳入常规验证清单，并继续保留 `tools/responsive_smoke.py` 作为无浏览器环境下的响应式结构烟测。
-- 阶段 4 新增 `docs/DATA_SCHEMA.md`，文档化 `tasks.json`、`config.json`、`global_env.json`、`proxies.json`、`collections.json` 的规范字段和读取迁移规则。
-- 阶段 4 在 `models.py` 增加任务、全局变量、代理、合集的读取归一化和保存归一化，迁移旧 `notify_ids` 并清洗坏类型。
-- 阶段 4 在 `config.py` 增加 `normalize_config_data()`，集中处理默认值合并、布尔转换、数值钳制和脚本类型过滤。
-- 阶段 4 根据子代理审查将面板时区偏移范围收紧为 `-23..23`，同步修复时间同步页选项和 helper，避免 `datetime.timezone()` 在 `±24` 边界报错。
-- 阶段 4 新增 `tests/test_schema_migration.py`，覆盖核心 JSON 读取迁移和配置归一化。
-- 阶段 5 新增 `tests/test_task_runtime.py`，覆盖任务提交状态、运行次数更新、随机延迟、重试次数、停止流程、worker 环境合并、watcher 通知/不通知/重试分支、代理环境注入和通知发送 mock。
-- 阶段 6 扩展 `tests/test_task_runtime.py`，覆盖 `_start_task_attempt()` 的 Popen 参数和 watcher 线程提交、watcher 超时强杀、日志清理、GitHub 代理缓存、webhook/Bark/SMTP 通知出口 mock。
-- 阶段 7 新增 `tests/test_storage_notify_proxy.py`，覆盖 storage 异常读写、更多通知渠道出口 mock、GitHub URL/Git 配置参数、普通代理质量检测并发聚合，以及日志 tail/任务名解析边界。
-- 阶段 8 扩展 `tests/test_storage_notify_proxy.py`，覆盖通知配置清理、默认通知保存过滤、内容分片、WxPusher、多分片发送顺序、GitHub 代理质量检测细分分支、Git 命令代理 helper，以及最新日志和日志清理更多边界。
-- 阶段 9 加固 `safe_extract_tar()`，显式使用 tarfile `filter="data"` 并兼容旧 Python；解压前拒绝 tar 特殊成员、链接和跨平台绝对/穿越路径，同时补充 zip 绝对/反斜杠路径测试。
-- 阶段 10 新增通用分页组件 `pagination_card()`，保留 `.card`、`.help`、`.action-row`、`.btn` 响应式结构；先替换在线脚本页和安装选择页两处分页函数，并新增组件单元测试。
-- 阶段 11 新增通用消息卡组件 `message_card()`，集中处理空/空白消息、成功/错误/普通提示颜色、未知类型回退、加粗样式和 HTML 转义；先替换在线脚本列表页和脚本源 JSON 页的成功/失败提示卡，并扩展组件单元测试。
-- 阶段 12 继续 `message_card()` 第二批接入：替换在线脚本文档页的文档加载失败卡，以及脚本新建、编辑、改名页的普通提示卡；新增 `tests/test_ui_route_components.py` 覆盖路由渲染与转义，并把 `/pull/new` 纳入响应式 smoke。
-- 阶段 13 扩展 `message_card()` 支持可选纯文本标题，保留脚本拉取/导入结果卡的“结果”标题；`fls_manager/routes/scripts/pull.py` 使用显式 `msg_kind` / `msg_strong` 接入成功、错误和空状态，并补充 `/pull/fetch`、`/pull/import` 路由测试及响应式 smoke。
-- 阶段 14 新增 `summary_item(label, value)`，只替换在线脚本页 3 个统计项并保留外层 `.fls-summary-grid`；组件内部统一转义 label/value，并补充结构、数字 value 和 HTML 转义单元测试。
