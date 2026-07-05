@@ -835,14 +835,18 @@ def collection_delete(collection_id):
     collections = [c for c in collections if c.get("id") != collection_id]
 
     tasks = load_tasks()
+    tasks_changed = False
 
     for task in tasks:
         if str(task.get("collection_id") or "") == collection_id:
             task["collection_id"] = ""
             task["updated_at"] = now_str()
+            tasks_changed = True
 
     save_collections(collections)
-    save_tasks(tasks)
+
+    if tasks_changed:
+        save_tasks(tasks)
 
     return redirect(get_back_url("/collections"))
 

@@ -1844,8 +1844,54 @@
 - 兼容 `/stop/<id>` 页面入口现在与单项停止 API 的缺失任务边界一致。
 - 缺失任务不会再被当作停止成功后重定向处理。
 
+## 阶段 42：合集删除写入边界
+
+状态：已完成
+
+目标：
+
+- 继续收束任务合集页面动作的写入边界。
+- 删除不存在合集时不写入合集或任务文件。
+- 删除空合集时避免无意义写回 `tasks.json`。
+- 删除含任务合集时仍清空成员任务归属。
+
+已完成：
+
+- 更新 `fls_manager/routes/tasks/collections.py`：
+  - `/collection/delete/<id>` 删除时记录成员任务归属是否实际变更。
+  - 删除空合集时只保存 `collections.json`，不调用 `save_tasks()`。
+  - 删除含任务合集时继续清空成员任务 `collection_id` 并写回任务文件。
+  - 保留缺失合集 `abort(404)` 行为。
+- 扩展 `tests/test_bulk_workflows.py`：
+  - 覆盖删除空合集时跳过 `save_tasks()`，任务文件保持不变。
+  - 覆盖删除含任务合集时清空成员任务归属。
+  - 覆盖删除缺失合集返回 404，且不调用 `save_collections()` / `save_tasks()`，文件保持不变。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 42。
+  - 在页面开发注意和测试覆盖列表中记录合集删除写入边界。
+  - 增加阶段 42 开发日志。
+
+验证记录：
+
+- `python -B -m unittest tests.test_bulk_workflows.BulkWorkflowTests.test_collection_delete_empty_collection_skips_task_write tests.test_bulk_workflows.BulkWorkflowTests.test_collection_delete_clears_member_tasks tests.test_bulk_workflows.BulkWorkflowTests.test_collection_delete_missing_collection_aborts_without_writes`：通过，3 tests OK。
+- `python -B -m compileall fls_manager/routes/tasks/collections.py tests/test_bulk_workflows.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，155 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有改变合集删除的页面交互，只缩小无成员任务时的写入范围。
+
+收束结论：
+
+- 合集删除现在只在确实需要清空任务归属时写 `tasks.json`。
+- 缺失合集不会触发任何写回副作用。
+
 ## 下一阶段候选
 
-- 阶段 42：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
+- 阶段 43：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

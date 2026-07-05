@@ -1,11 +1,11 @@
 # FLS 会话交接文档
 
 生成时间：2026-07-05
-当前阶段：阶段 41，兼容任务停止入口缺失边界
+当前阶段：阶段 42，合集删除写入边界
 
 ## 本阶段完成进度
 
-完成度：阶段 41 已完成，准备进入阶段 42。
+完成度：阶段 42 已完成，准备进入阶段 43。
 
 已经完成：
 
@@ -15,28 +15,27 @@
   - `user.email=2650115317@qq.com`
 - 原长期脏改动仍保存在本地 stash：`stash@{0}: pre-main-merge dirty task-log runtime changes`。
 - 本阶段继续从原长期脏 diff 周边挑窄边界收束，没有整包恢复 stash。
-- 更新 `fls_manager/routes/tasks/actions.py`：
-  - `/stop/<id>` POST 前先检查任务是否存在。
-  - 目标任务不存在时 `abort(404)`。
-  - 缺失任务不调用 `stop_task_now()`。
-  - 目标任务存在时仍调用 `stop_task_now()` 并按安全 `back` 重定向。
-- 扩展 `tests/test_auth_backup.py`：
-  - 将 `/stop/t1` 纳入破坏性路由拒绝 GET 的回归测试，确认 GET 返回 405。
+- 更新 `fls_manager/routes/tasks/collections.py`：
+  - `/collection/delete/<id>` 删除时记录成员任务归属是否实际变更。
+  - 删除空合集时只保存 `collections.json`，不调用 `save_tasks()`。
+  - 删除含任务合集时继续清空成员任务 `collection_id` 并写回任务文件。
+  - 保留缺失合集 `abort(404)` 行为。
 - 扩展 `tests/test_bulk_workflows.py`：
-  - 覆盖已存在但未运行任务通过兼容 `/stop/<id>` POST 仍重定向返回。
-  - 覆盖缺失任务返回 404，且不调用 `stop_task_now()`，任务文件不变。
+  - 覆盖删除空合集时跳过 `save_tasks()`，任务文件保持不变。
+  - 覆盖删除含任务合集时清空成员任务归属。
+  - 覆盖删除缺失合集返回 404，且不调用 `save_collections()` / `save_tasks()`，文件保持不变。
 - 更新 `DEVELOPMENT.md`：
-  - 基线推进到阶段 41。
-  - 在 API/页面开发注意和测试覆盖列表中记录 `/stop/<id>` 缺失任务边界。
-  - 增加阶段 41 开发日志。
+  - 基线推进到阶段 42。
+  - 在页面开发注意和测试覆盖列表中记录合集删除写入边界。
+  - 增加阶段 42 开发日志。
 - 更新 `docs/DEVELOPMENT_PROGRESS.md`：
-  - 新增阶段 41 完成块、验证记录、受限验证和收束结论。
+  - 新增阶段 42 完成块、验证记录、受限验证和收束结论。
 
 已验证：
 
-- `python -B -m unittest tests.test_auth_backup.CsrfSafetyTests.test_destructive_routes_reject_get_requests tests.test_bulk_workflows.BulkWorkflowTests.test_legacy_stop_route_existing_task_redirects_when_not_running tests.test_bulk_workflows.BulkWorkflowTests.test_legacy_stop_route_missing_task_aborts_without_stop_call` 通过，3 tests OK。
-- `python -B -m compileall fls_manager/routes/tasks/actions.py tests/test_auth_backup.py tests/test_bulk_workflows.py` 通过。
-- `python -B -m unittest discover -s tests` 通过，152 tests OK。
+- `python -B -m unittest tests.test_bulk_workflows.BulkWorkflowTests.test_collection_delete_empty_collection_skips_task_write tests.test_bulk_workflows.BulkWorkflowTests.test_collection_delete_clears_member_tasks tests.test_bulk_workflows.BulkWorkflowTests.test_collection_delete_missing_collection_aborts_without_writes` 通过，3 tests OK。
+- `python -B -m compileall fls_manager/routes/tasks/collections.py tests/test_bulk_workflows.py` 通过。
+- `python -B -m unittest discover -s tests` 通过，155 tests OK。
 - `python -B tools/responsive_smoke.py` 通过。
 - `python -B -m compileall fls-manager.py fls_manager tests tools` 通过。
 - `git diff --check` 通过。
@@ -44,8 +43,7 @@
 未完成或受限：
 
 - 当前环境没有 Playwright/Chromium，仍未做真实浏览器截图检查。
-- 本阶段没有触发真实任务进程，只通过 mock `stop_task_now()` 验证兼容页面停止入口。
-- 本阶段没有改变普通任务列表当前 AJAX API 停止入口，只收紧兼容保留的页面路由。
+- 本阶段没有改变合集删除的页面交互，只缩小无成员任务时的写入范围。
 
 ## 协作情况
 
@@ -54,7 +52,7 @@
 
 ## 下阶段实现目标
 
-阶段 42 建议目标：继续低风险收束原长期脏 diff 中尚未覆盖的其它任务 API 兼容边界、UI 边界或更多错误提示渲染。
+阶段 43 建议目标：继续低风险收束原长期脏 diff 中尚未覆盖的其它任务 API 兼容边界、UI 边界或更多错误提示渲染。
 
 具体任务：
 
@@ -66,7 +64,7 @@
 6. 如环境具备浏览器自动化，补真实响应式截图验收：
    - 宽度：390px、768px、1024px、1440px。
    - 页面：`/tasks`、`/collections`、`/logs`、`/online-scripts`、`/pull`、`/config`、`/deps`、`/panel/status`。
-7. 阶段 42 结束时继续更新 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`、`docs/SESSION_HANDOFF.md`，并提交推送。
+7. 阶段 43 结束时继续更新 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`、`docs/SESSION_HANDOFF.md`，并提交推送。
 
 ## 后续候选
 
@@ -77,4 +75,4 @@
 
 ## 下一会话启动提示
 
-请从 `docs/SESSION_HANDOFF.md` 开始，继续阶段 42。先读取 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`，并使用 `git -c safe.directory=/data/data/com.termux/files/home/fls status --short --branch` 查看工作区。若继续处理 `stash@{0}`，只摘取可验证的窄边界，不要整包恢复；保持 Flask + 原生 CSS/JS 和无 npm 构建链。
+请从 `docs/SESSION_HANDOFF.md` 开始，继续阶段 43。先读取 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`，并使用 `git -c safe.directory=/data/data/com.termux/files/home/fls status --short --branch` 查看工作区。若继续处理 `stash@{0}`，只摘取可验证的窄边界，不要整包恢复；保持 Flask + 原生 CSS/JS 和无 npm 构建链。

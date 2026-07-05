@@ -1,7 +1,7 @@
 # FLS 开发文档
 
 更新时间：2026-07-05
-基线：`main` / 阶段 41
+基线：`main` / 阶段 42
 
 本文用于后续开发协作。每次完成开发后，都要同步更新本文的“开发日志”和“后续方向”，必要时同步调整架构、数据模型、接口和验证清单。
 
@@ -238,6 +238,7 @@ CSRF 约定：
 - 兼容保留的页面任务启停类状态修改入口也必须使用 POST；`/task/toggle/<id>` 对 GET 返回 405，目标不存在时返回 404 且不写回任务文件或重载调度器。
 - 兼容保留的页面运行入口 `/run/<id>` 必须使用 POST；GET 返回 405，任务不存在时返回 404，日志页、合集页和配置页不能渲染 GET 运行链接。
 - 兼容保留的页面停止入口 `/stop/<id>` 必须使用 POST；GET 返回 405，任务不存在时返回 404 且不调用停止逻辑。
+- `/collection/delete/<id>` 删除不存在合集时应返回 404 且不写入；删除没有成员任务的合集不应写 `tasks.json`。
 - 返回跳转 URL 时优先使用 `utils.get_back_url()` 或等价校验，避免开放重定向。
 
 ## 6. 任务执行链路
@@ -418,6 +419,7 @@ python -B -m compileall fls-manager.py fls_manager tests tools
 - 兼容页面任务切换入口 `/task/toggle/<id>` 的 POST-only、缺失任务无副作用和安全 back 返回边界。
 - 兼容页面运行入口 `/run/<id>` 的 POST-only、缺失任务 404、安全 back 返回，以及日志页、合集页和配置页不渲染 GET 运行链接的边界。
 - 兼容页面停止入口 `/stop/<id>` 的 POST-only、缺失任务 404 且不调用停止逻辑，以及已存在但未运行仍保持重定向兼容的边界。
+- 合集删除入口 `/collection/delete/<id>` 的缺失合集无副作用、删除空合集不写任务文件、删除含任务合集时才清理并写回任务归属的边界。
 - `ui.components.table_card()` 的可选说明区、操作区、表格 ID、标题和表头 HTML 转义。
 - `ui.components.pagination_card()` 的链接分页、按钮分页、禁用态、省略号和 HTML 转义。
 - `ui.components.message_card()` 的空/空白消息、成功/错误/普通提示、未知类型回退、加粗样式、可选标题和 HTML 转义。
@@ -468,6 +470,7 @@ python -B -m compileall fls-manager.py fls_manager tests tools
 
 ### 2026-07-05
 
+- 阶段 42 固化合集删除写入边界：`/collection/delete/<id>` 删除空合集时只写合集文件，不再无意义写 `tasks.json`；删除含任务合集时继续清空成员任务归属；缺失合集返回 404 且不写合集和任务文件。
 - 阶段 41 固化兼容任务停止入口：`/stop/<id>` 保持 POST-only 并纳入 GET 405 回归测试；缺失任务返回 404 且不调用 `stop_task_now()`，已存在但未运行仍保持重定向兼容。
 - 阶段 40 固化兼容任务运行入口：本地 Git 提交身份切为 `liyw0205 <2650115317@qq.com>`；`/run/<id>` 改为 POST-only，GET 返回 405，缺失任务返回 404；日志页、合集页和配置页运行入口改为 POST 表单或 `formaction` 按钮，不再渲染 GET 运行链接。
 - 阶段 39 固化兼容任务切换入口：`/task/toggle/<id>` 改为 POST-only，GET 返回 405；目标不存在时返回 404 且不写入任务文件、不重载调度器；成功后使用安全 `back` 返回。
