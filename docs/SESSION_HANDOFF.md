@@ -1,54 +1,61 @@
 # FLS 会话交接文档
 
-生成时间：2026-07-05
-当前阶段：阶段 44，重新生成开发文档
+生成时间：2026-07-06
+当前阶段：阶段 45，兼容任务置顶入口边界
 
 ## 本阶段完成进度
 
-完成度：阶段 44 已完成，准备进入阶段 45。
+完成度：阶段 45 已完成，准备进入阶段 46。
 
 已经完成：
 
-- 当前 `main` 开始时与 `origin/main` 对齐；本阶段只修改文档。
+- 当前 `main` 开始时与 `origin/main` 对齐，工作区初始干净。
 - 本地 Git 提交身份保持为：
   - `user.name=liyw0205`
   - `user.email=2650115317@qq.com`
 - 原长期脏改动仍保存在本地 stash：`stash@{0}: pre-main-merge dirty task-log runtime changes`。
-- 本阶段没有整包恢复 stash。
-- 重新生成 `DEVELOPMENT.md`：
-  - 基线推进到阶段 44。
-  - 改为当前状态版协作文档。
-  - 开头明确历史进度、会话交接和数据 schema 的文档入口。
-  - 收敛项目定位、启动入口、目录与模块边界、数据模型、鉴权安全、当前行为边界、任务执行链路、前端约定、测试策略、开发流程、已知约束和后续方向。
-  - 记录当前关键边界：任务动作 API、POST-only 页面动作、合集删除写入边界、单任务取出合集写入边界、日志删除、备份安全和安全 back 返回。
-  - 移除根文档中的冗长阶段开发日志，阶段流水继续保留在 `docs/DEVELOPMENT_PROGRESS.md`。
+- 本阶段只读查看 stash 文件列表和统计，没有整包恢复 stash。
+- 更新 `fls_manager/routes/tasks/actions.py`：
+  - `/task/pin/<id>` 超过 5 个置顶任务时改为渲染后台布局内的错误卡片。
+  - 错误卡片标题为“置顶失败”，使用现有 `message_card()`。
+  - 错误页保留经 `get_back_url()` 清洗后的返回链接。
+  - 置顶上限失败路径不写回 `tasks.json`。
+- 扩展 `tests/test_bulk_workflows.py`：
+  - 覆盖兼容 POST 置顶成功并清洗外部 `back`。
+  - 覆盖缺失任务返回 404 且不调用 `save_tasks()`。
+  - 覆盖置顶上限失败返回 400、渲染错误卡片、保留安全返回链接且不写回。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 45。
+  - 记录兼容置顶入口缺失任务、上限失败和错误提示边界。
 - 更新 `docs/DEVELOPMENT_PROGRESS.md`：
-  - 新增阶段 44 完成块、验证记录、受限验证和收束结论。
-  - 下一阶段候选推进到阶段 45。
+  - 新增阶段 45 完成块、验证记录、受限验证和收束结论。
+  - 下一阶段候选推进到阶段 46。
 - 更新 `docs/SESSION_HANDOFF.md`：
-  - 本文件同步到阶段 44。
-  - 记录下一阶段接续步骤和长期 stash 约束。
+  - 本文件同步到阶段 45。
 
 已验证：
 
-- `python -B -m unittest discover -s tests` 通过，158 tests OK。
+- `python -B -m unittest tests.test_bulk_workflows.BulkWorkflowTests.test_legacy_task_pin_post_updates_task_and_uses_safe_back tests.test_bulk_workflows.BulkWorkflowTests.test_legacy_task_pin_missing_task_aborts_without_write tests.test_bulk_workflows.BulkWorkflowTests.test_legacy_task_pin_limit_renders_error_card_without_write` 通过，3 tests OK。
+- `python -B -m compileall fls_manager/routes/tasks/actions.py tests/test_bulk_workflows.py` 通过。
+- `python -B -m unittest discover -s tests` 通过，161 tests OK。
 - `python -B tools/responsive_smoke.py` 通过。
 - `python -B -m compileall fls-manager.py fls_manager tests tools` 通过。
-- `git diff --check` 通过。
+- `git -c safe.directory=/data/data/com.termux/files/home/fls diff --check` 通过。
 
 未完成或受限：
 
 - 当前环境没有 Playwright/Chromium，仍未做真实浏览器截图检查。
-- 本阶段没有改动运行时代码或测试代码，只重生成开发协作文档。
+- 本阶段没有触发真实任务进程，只验证页面动作和 JSON 写入边界。
+- 本阶段没有调整普通任务列表 AJAX API 置顶入口。
 
 ## 协作情况
 
 - 本阶段未使用额外技能或子代理。
-- 用户要求重新生成开发文档；本阶段聚焦文档重生成和阶段收束。
+- 用户要求根据开发文档继续开发；本阶段按交接文档进入阶段 45，选择 `/task/pin/<id>` 兼容页面入口作为单一窄边界。
 
 ## 下阶段实现目标
 
-阶段 45 建议目标：继续低风险收束原长期脏 diff 中尚未覆盖的其它任务 API 兼容边界、UI 边界或更多错误提示渲染。
+阶段 46 建议目标：继续低风险收束原长期脏 diff 中尚未覆盖的其它任务 API 兼容边界、UI 边界或更多错误提示渲染。
 
 具体任务：
 
@@ -60,7 +67,7 @@
 6. 如环境具备浏览器自动化，补真实响应式截图验收：
    - 宽度：390px、768px、1024px、1440px。
    - 页面：`/tasks`、`/collections`、`/logs`、`/online-scripts`、`/pull`、`/config`、`/deps`、`/panel/status`。
-7. 阶段 45 结束时继续更新 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`、`docs/SESSION_HANDOFF.md`，并提交推送。
+7. 阶段 46 结束时继续更新 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`、`docs/SESSION_HANDOFF.md`，并提交推送。
 
 ## 后续候选
 
@@ -68,7 +75,8 @@
 - 继续拆分过长路由中的业务逻辑到 helper/service。
 - 为错误提示渲染、兼容边界和其它长期脏文件剩余 UI 边界增加更细的回归测试。
 - 评估配置、任务、代理、通知 JSON 写入备份或回滚机制。
+- 等任务/日志相关工作区改动继续收束后，再把 `pagination_card()` 接入任务和日志分页。
 
 ## 下一会话启动提示
 
-请从 `docs/SESSION_HANDOFF.md` 开始，继续阶段 45。先读取 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`，并使用 `git -c safe.directory=/data/data/com.termux/files/home/fls status --short --branch` 查看工作区。若继续处理 `stash@{0}`，只摘取可验证的窄边界，不要整包恢复；保持 Flask + 原生 CSS/JS 和无 npm 构建链。
+请从 `docs/SESSION_HANDOFF.md` 开始，继续阶段 46。先读取 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`，并使用 `git -c safe.directory=/data/data/com.termux/files/home/fls status --short --branch` 查看工作区。若继续处理 `stash@{0}`，只摘取可验证的窄边界，不要整包恢复；保持 Flask + 原生 CSS/JS 和无 npm 构建链。

@@ -6,6 +6,8 @@ from ...models import load_tasks, save_tasks
 from ...utils import h, now_str, get_back_url
 from ...scheduler import reload_scheduler
 from ...task_runner import run_task_now, stop_task_now
+from ...ui.components import message_card
+from ...ui.layout import layout
 
 
 @bp.route("/task/delete/<task_id>", methods=["POST"])
@@ -71,7 +73,14 @@ def task_pin(task_id):
     pinned_count = sum(1 for t in tasks if t.get("pinned"))
 
     if not target.get("pinned") and pinned_count >= 5:
-        return "最多只能置顶 5 个任务，请先取消一个置顶任务", 400
+        back_url = get_back_url("/tasks")
+        body = f"""
+{message_card("最多只能置顶 5 个任务，请先取消一个置顶任务", "error", strong=True, title="置顶失败")}
+<div class="card">
+    <a class="btn btn-gray" href="{h(back_url)}">返回</a>
+</div>
+"""
+        return layout("置顶任务", "tasks", body), 400
 
     target["pinned"] = not target.get("pinned", False)
     target["updated_at"] = now_str()

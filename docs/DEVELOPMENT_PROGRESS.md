@@ -1980,8 +1980,57 @@
 - `DEVELOPMENT.md` 现在是当前状态版开发入口，阶段流水继续由 `docs/DEVELOPMENT_PROGRESS.md` 承载。
 - 下一轮可以直接从 `docs/SESSION_HANDOFF.md` 和根开发文档接续，不需要在根文档中翻长日志。
 
+## 阶段 45：兼容任务置顶入口边界
+
+状态：已完成
+
+目标：
+
+- 继续低风险收束原长期脏 diff 中尚未覆盖的页面动作兼容边界。
+- 固化 `/task/pin/<id>` POST 入口的成功回跳、缺失任务无副作用和置顶上限失败渲染。
+- 保持不整包恢复 `stash@{0}`，只做可验证的窄边界。
+
+已完成：
+
+- 只读查看 `stash@{0}` 涉及文件，未执行 `stash pop` 或 `stash apply`。
+- 更新 `fls_manager/routes/tasks/actions.py`：
+  - `/task/pin/<id>` 超过 5 个置顶任务时不再返回纯文本。
+  - 上限失败改为使用 `message_card(..., "error", strong=True, title="置顶失败")` 渲染错误卡片。
+  - 错误页保留安全 `back` 返回链接，外部回跳继续由 `get_back_url()` 清洗。
+  - 上限失败和缺失任务路径均不写回 `tasks.json`。
+- 扩展 `tests/test_bulk_workflows.py`：
+  - 覆盖兼容页面 POST 置顶成功，并清洗外部 `back` 回 `/tasks`。
+  - 覆盖缺失任务返回 404，且不调用 `save_tasks()`。
+  - 覆盖达到 5 个置顶上限时返回 400、渲染错误卡片、保留安全返回链接且不写回。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 45。
+  - 在当前行为边界和测试覆盖重点中记录兼容置顶入口边界。
+- 更新 `docs/SESSION_HANDOFF.md`：
+  - 当前阶段推进到阶段 45。
+  - 记录本阶段验证结果、stash 约束和下一阶段建议。
+
+验证记录：
+
+- `python -B -m unittest tests.test_bulk_workflows.BulkWorkflowTests.test_legacy_task_pin_post_updates_task_and_uses_safe_back tests.test_bulk_workflows.BulkWorkflowTests.test_legacy_task_pin_missing_task_aborts_without_write tests.test_bulk_workflows.BulkWorkflowTests.test_legacy_task_pin_limit_renders_error_card_without_write`：通过，3 tests OK。
+- `python -B -m compileall fls_manager/routes/tasks/actions.py tests/test_bulk_workflows.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，161 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git -c safe.directory=/data/data/com.termux/files/home/fls diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段没有触发真实任务进程，只验证页面动作和 JSON 写入边界。
+- 本阶段没有调整普通任务列表当前 AJAX API 置顶入口，只收紧兼容保留的页面路由失败渲染和边界测试。
+
+收束结论：
+
+- 兼容 `/task/pin/<id>` 页面入口现在有成功、缺失任务和上限失败回归测试。
+- 置顶超过上限时不会写回任务文件，并会在后台布局内显示统一错误卡片。
+
 ## 下一阶段候选
 
-- 阶段 45：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
+- 阶段 46：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

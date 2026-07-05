@@ -746,6 +746,87 @@ class BulkWorkflowTests(unittest.TestCase):
             self.assertTrue(tasks["t1"]["enabled"])
             self.assertFalse(tasks["t2"]["enabled"])
 
+    def test_legacy_task_pin_post_updates_task_and_uses_safe_back(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1", pinned=False),
+                    sample_task("t2", pinned=False),
+                ],
+            )
+
+            response = app.test_client().post(
+                "/task/pin/t1?back=https://example.invalid/out",
+                headers={"X-Token": TOKEN},
+            )
+
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.headers.get("Location"), "/tasks")
+
+            tasks = {task["id"]: task for task in read_json(base_dir / "data" / "tasks.json")}
+            self.assertTrue(tasks["t1"]["pinned"])
+            self.assertFalse(tasks["t2"]["pinned"])
+
+    def test_legacy_task_pin_missing_task_aborts_without_write(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1", pinned=False),
+                    sample_task("t2", pinned=True),
+                ],
+            )
+
+            with patch("fls_manager.routes.tasks.actions.save_tasks") as save_tasks:
+                response = app.test_client().post(
+                    "/task/pin/missing?back=/tasks",
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 404)
+            save_tasks.assert_not_called()
+
+            tasks = {task["id"]: task for task in read_json(base_dir / "data" / "tasks.json")}
+            self.assertFalse(tasks["t1"]["pinned"])
+            self.assertTrue(tasks["t2"]["pinned"])
+
+    def test_legacy_task_pin_limit_renders_error_card_without_write(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task(f"t{i}", pinned=True)
+                    for i in range(1, 6)
+                ] + [
+                    sample_task("t6", pinned=False),
+                ],
+            )
+
+            with patch("fls_manager.routes.tasks.actions.save_tasks") as save_tasks:
+                response = app.test_client().post(
+                    "/task/pin/t6?back=/collections",
+                    headers={"X-Token": TOKEN},
+                )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 400)
+            self.assertIn('<div class="card-title">置顶失败</div>', html)
+            self.assertIn('style="color:#dc2626;font-weight:800;"', html)
+            self.assertIn("最多只能置顶 5 个任务", html)
+            self.assertIn('href="/collections"', html)
+            save_tasks.assert_not_called()
+
+            tasks = {task["id"]: task for task in read_json(base_dir / "data" / "tasks.json")}
+            self.assertFalse(tasks["t6"]["pinned"])
+
     def test_collection_add_task_accepts_multiple_task_ids(self):
         with isolated_app() as (app, base_dir):
             from fls_manager import paths
