@@ -1,7 +1,7 @@
 # FLS 开发文档
 
 更新时间：2026-07-08
-基线：`main` / 阶段 58
+基线：`main` / 阶段 59
 
 本文是 FLS 当前代码库的开发协作文档。历史阶段流水见
 `docs/DEVELOPMENT_PROGRESS.md`，下一轮接续信息见
@@ -222,7 +222,7 @@ CSRF 约定：
 - `/api/task/action/toggle/<id>` 成功时返回 `enabled` 新状态；缺失任务返回 404 且不写回或重载调度器。
 - `/api/task/action/pin/<id>` 成功时返回 `pinned` 新状态；缺失任务返回 404，超过 5 个置顶任务返回 400 且不写回。
 - `/api/task/action/delete/<id>` 缺失任务返回 404；存在任务删除前必须先停止任务，停止成功或任务未运行才删除，停止失败返回 409 且不写回。
-- `/api/task/bulk-action` 保持 `ok/msg` 兼容字段，并返回 `action/count` 及结构化计数；未知批量操作返回 400 且不读取或写入任务。
+- `/api/task/bulk-action` 保持 `ok/msg` 兼容字段，并返回 `action/count` 及结构化计数；未知批量操作或空选择返回 400 且不读取或写入任务。
 - 批量启用/禁用只写回状态实际变化的任务，`updated_count` 表示实际变更数量。
 - 批量删除前逐个停止任务；停止失败的任务不能被删除，响应包含 `failed_count` / `failures`。
 - 批量取出合集只写回实际有合集归属的任务，`updated_count` 表示实际变更数量。

@@ -541,17 +541,22 @@ class BulkWorkflowTests(unittest.TestCase):
 
     def test_task_bulk_rejects_empty_selection(self):
         with isolated_app() as (app, _base_dir):
-            response = app.test_client().post(
-                "/api/task/bulk-action",
-                json={"action": "enable", "task_ids": []},
-                headers={"X-Token": TOKEN},
-            )
+            with patch("fls_manager.routes.api.load_tasks") as load_tasks:
+                with patch("fls_manager.routes.api.save_tasks") as save_tasks:
+                    response = app.test_client().post(
+                        "/api/task/bulk-action",
+                        json={"action": "enable", "task_ids": []},
+                        headers={"X-Token": TOKEN},
+                    )
 
             self.assertEqual(response.status_code, 400)
             payload = response.get_json()
             self.assertFalse(payload["ok"])
+            self.assertEqual(payload["msg"], "请选择任务")
             self.assertEqual(payload["action"], "enable")
             self.assertEqual(payload["count"], 0)
+            load_tasks.assert_not_called()
+            save_tasks.assert_not_called()
 
     def test_task_bulk_rejects_unknown_action_without_loading_tasks(self):
         with isolated_app() as (app, _base_dir):

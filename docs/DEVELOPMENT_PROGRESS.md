@@ -2600,8 +2600,49 @@
 - `/api/task/bulk-action` 的未知操作路径现在有回归测试固定。
 - 未知操作会在读取或写入任务文件前返回 400，避免无意义副作用。
 
+## 阶段 59：批量任务空选择无副作用回归测试
+
+状态：已完成
+
+目标：
+
+- 继续低风险收束任务批量 API 边界。
+- 固化 `/api/task/bulk-action` 在空选择时返回 400。
+- 确认空选择在读取或写入任务文件前中止。
+
+已完成：
+
+- 扩展 `tests/test_bulk_workflows.py`：
+  - 补强已有空选择测试，覆盖 `msg=请选择任务`。
+  - 断言空选择路径不调用 `load_tasks()` 或 `save_tasks()`。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 59。
+  - 在任务 API 行为边界中记录空选择与未知操作一样不读取或写入任务。
+- 更新 `docs/SESSION_HANDOFF.md`：
+  - 本文件同步到阶段 59。
+
+验证记录：
+
+- `python -B -m unittest tests.test_bulk_workflows.BulkWorkflowTests.test_task_bulk_rejects_empty_selection`：通过，1 test OK。
+- `python -B -m compileall tests/test_bulk_workflows.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，177 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git -c safe.directory=/data/data/com.termux/files/home/fls diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段只补强批量任务空选择边界测试，没有改变路由运行时行为。
+- 本阶段没有触发真实任务进程。
+
+收束结论：
+
+- `/api/task/bulk-action` 的空选择路径现在有无副作用回归断言。
+- 空选择会在读取或写入任务文件前返回 400，避免无意义副作用。
+
 ## 下一阶段候选
 
-- 阶段 59：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
+- 阶段 60：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

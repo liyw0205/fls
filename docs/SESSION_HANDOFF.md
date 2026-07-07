@@ -1,11 +1,11 @@
 # FLS 会话交接文档
 
 生成时间：2026-07-08
-当前阶段：阶段 58，批量任务未知操作无副作用回归测试
+当前阶段：阶段 59，批量任务空选择无副作用回归测试
 
 ## 本阶段完成进度
 
-完成度：阶段 58 已完成，准备进入阶段 59。
+完成度：阶段 59 已完成，准备进入阶段 60。
 
 已经完成：
 
@@ -16,21 +16,20 @@
 - 原长期脏改动仍保存在本地 stash：`stash@{0}: pre-main-merge dirty task-log runtime changes`。
 - 本阶段没有整包恢复 stash。
 - 扩展 `tests/test_bulk_workflows.py`：
-  - 覆盖未知 `action` 返回 400 和 `msg=未知批量操作`。
-  - 覆盖 `task_ids` 去重后的 `count` 仍按结构化响应返回。
-  - 断言未知操作路径不调用 `load_tasks()` 或 `save_tasks()`。
+  - 补强已有空选择测试，覆盖 `msg=请选择任务`。
+  - 断言空选择路径不调用 `load_tasks()` 或 `save_tasks()`。
 - 更新 `DEVELOPMENT.md`：
-  - 基线推进到阶段 58。
-  - 记录批量任务未知操作返回 400 且不读取或写入任务。
+  - 基线推进到阶段 59。
+  - 记录批量任务空选择返回 400 且不读取或写入任务。
 - 更新 `docs/DEVELOPMENT_PROGRESS.md`：
-  - 新增阶段 58 完成块、验证记录、受限验证和收束结论。
-  - 下一阶段候选推进到阶段 59。
+  - 新增阶段 59 完成块、验证记录、受限验证和收束结论。
+  - 下一阶段候选推进到阶段 60。
 - 更新 `docs/SESSION_HANDOFF.md`：
-  - 本文件同步到阶段 58。
+  - 本文件同步到阶段 59。
 
 已验证：
 
-- `python -B -m unittest tests.test_bulk_workflows.BulkWorkflowTests.test_task_bulk_rejects_unknown_action_without_loading_tasks` 通过，1 test OK。
+- `python -B -m unittest tests.test_bulk_workflows.BulkWorkflowTests.test_task_bulk_rejects_empty_selection` 通过，1 test OK。
 - `python -B -m compileall tests/test_bulk_workflows.py` 通过。
 - `python -B -m unittest discover -s tests` 通过，177 tests OK。
 - `python -B tools/responsive_smoke.py` 通过。
@@ -40,17 +39,17 @@
 未完成或受限：
 
 - 当前环境没有 Playwright/Chromium，仍未做真实浏览器截图检查。
-- 本阶段只补批量任务未知操作边界测试，没有改变路由运行时行为。
+- 本阶段只补强批量任务空选择边界测试，没有改变路由运行时行为。
 - 本阶段没有触发真实任务进程。
 
 ## 协作情况
 
 - 本阶段未使用额外技能或子代理。
-- 用户要求继续开发；本阶段按交接文档进入阶段 58，选择批量任务未知操作无副作用回归测试作为单一窄边界。
+- 用户要求继续开发；本阶段按交接文档进入阶段 59，选择批量任务空选择无副作用回归测试作为单一窄边界。
 
 ## 下阶段实现目标
 
-阶段 59 建议目标：继续低风险收束原长期脏 diff 中尚未覆盖的其它任务 API 兼容边界、UI 边界或更多错误提示渲染。
+阶段 60 建议目标：继续低风险收束原长期脏 diff 中尚未覆盖的其它任务 API 兼容边界、UI 边界或更多错误提示渲染。
 
 具体任务：
 
@@ -62,7 +61,7 @@
 6. 如环境具备浏览器自动化，补真实响应式截图验收：
    - 宽度：390px、768px、1024px、1440px。
    - 页面：`/tasks`、`/collections`、`/logs`、`/online-scripts`、`/pull`、`/config`、`/deps`、`/panel/status`。
-7. 阶段 59 结束时继续更新 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`、`docs/SESSION_HANDOFF.md`，并提交推送。
+7. 阶段 60 结束时继续更新 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`、`docs/SESSION_HANDOFF.md`，并提交推送。
 
 ## 后续候选
 
@@ -74,4 +73,4 @@
 
 ## 下一会话启动提示
 
-请从 `docs/SESSION_HANDOFF.md` 开始，继续阶段 59。先读取 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`，并使用 `git -c safe.directory=/data/data/com.termux/files/home/fls status --short --branch` 查看工作区。若继续处理 `stash@{0}`，只摘取可验证的窄边界，不要整包恢复；保持 Flask + 原生 CSS/JS 和无 npm 构建链。
+请从 `docs/SESSION_HANDOFF.md` 开始，继续阶段 60。先读取 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`，并使用 `git -c safe.directory=/data/data/com.termux/files/home/fls status --short --branch` 查看工作区。若继续处理 `stash@{0}`，只摘取可验证的窄边界，不要整包恢复；保持 Flask + 原生 CSS/JS 和无 npm 构建链。
