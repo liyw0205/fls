@@ -1,6 +1,6 @@
 # FLS 开发进度
 
-更新时间：2026-07-05
+更新时间：2026-07-08
 
 本文记录阶段开发进度。每个阶段结束前必须更新本文件，并生成或更新 `docs/SESSION_HANDOFF.md`。
 
@@ -2350,8 +2350,50 @@
 - 单任务切换 API 现在可直接从响应判断操作后的启用状态。
 - 缺失任务路径继续保持无写回、无调度器重载副作用。
 
+## 阶段 53：任务配置文件页边界回归测试
+
+状态：已完成
+
+目标：
+
+- 继续低风险收束长期脏 diff 中尚未覆盖的 UI 边界。
+- 固化 `/task/config/<id>` 的缺失任务、无配置路径和非法路径行为。
+- 确认异常边界不会误写任务配置文件或 `scripts/` 外文件。
+
+已完成：
+
+- 扩展 `tests/test_ui_route_components.py`：
+  - 覆盖缺失任务 POST `/task/config/<id>` 返回 404，且不创建配置文件。
+  - 覆盖任务没有 `config_path` 时渲染提示页，清洗外部 back 为 `/tasks`，并提供编辑任务入口。
+  - 覆盖非法 `config_path` 在 POST 保存时返回 400，保留安全 back，且不写出 `scripts/` 外文件。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 53。
+  - 在当前行为边界和测试覆盖重点中记录任务配置文件页边界。
+- 更新 `docs/SESSION_HANDOFF.md`：
+  - 本文件同步到阶段 53。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_route_components.UiRouteComponentTests.test_task_config_missing_task_returns_404_without_write tests.test_ui_route_components.UiRouteComponentTests.test_task_config_without_config_path_renders_edit_prompt tests.test_ui_route_components.UiRouteComponentTests.test_task_config_illegal_path_renders_error_without_write`：通过，3 tests OK。
+- `python -B -m compileall tests/test_ui_route_components.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，170 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git -c safe.directory=/data/data/com.termux/files/home/fls diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段只补任务配置文件页边界测试，没有改变路由运行时行为。
+- 本阶段没有触发真实任务进程。
+
+收束结论：
+
+- 任务配置文件页的 404、无配置路径和非法路径边界现在有回归测试固定。
+- 保存动作仍只会在任务存在、配置路径非空且安全路径校验通过后写入。
+
 ## 下一阶段候选
 
-- 阶段 53：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
+- 阶段 54：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

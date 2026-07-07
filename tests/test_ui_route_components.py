@@ -368,6 +368,102 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn("保存失败：&lt;bad &amp; &quot;x&quot;&gt;", html)
             self.assertNotIn("<bad", html)
 
+    def test_task_config_missing_task_returns_404_without_write(self):
+        with isolated_app() as (app, base_dir):
+            tasks_file = base_dir / "data" / "tasks.json"
+            tasks_file.parent.mkdir(parents=True, exist_ok=True)
+            tasks_file.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "task-config",
+                            "name": "配置任务",
+                            "command": "task demo.py",
+                            "config_path": "conf/app.yml",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            response = app.test_client().post(
+                "/task/config/missing",
+                data={"content": "key: value\n"},
+                headers={"X-Token": TOKEN},
+            )
+
+            self.assertEqual(response.status_code, 404)
+            self.assertFalse((base_dir / "scripts" / "conf" / "app.yml").exists())
+            self.assertEqual(
+                json.loads(tasks_file.read_text(encoding="utf-8"))[0]["id"],
+                "task-config",
+            )
+
+    def test_task_config_without_config_path_renders_edit_prompt(self):
+        with isolated_app() as (app, base_dir):
+            tasks_file = base_dir / "data" / "tasks.json"
+            tasks_file.parent.mkdir(parents=True, exist_ok=True)
+            tasks_file.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "task-config",
+                            "name": "配置任务",
+                            "command": "task demo.py",
+                            "config_path": "",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            response = app.test_client().get(
+                "/task/config/task-config?back=https://example.invalid/out",
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('<div class="card-title">任务配置文件</div>', html)
+            self.assertIn("该任务没有配置 config_path。", html)
+            self.assertIn('href="/tasks"', html)
+            self.assertIn('href="/task/edit/task-config?back=/tasks"', html)
+            self.assertEqual(list((base_dir / "scripts").iterdir()), [])
+
+    def test_task_config_illegal_path_renders_error_without_write(self):
+        with isolated_app() as (app, base_dir):
+            tasks_file = base_dir / "data" / "tasks.json"
+            tasks_file.parent.mkdir(parents=True, exist_ok=True)
+            tasks_file.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "task-config",
+                            "name": "配置任务",
+                            "command": "task demo.py",
+                            "config_path": "../outside.yml",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            response = app.test_client().post(
+                "/task/config/task-config?back=/collections",
+                data={"content": "key: value\n"},
+                headers={"X-Token": TOKEN},
+            )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 400)
+            self.assertIn('<div class="card-title">配置文件路径非法</div>', html)
+            self.assertIn("配置文件路径非法", html)
+            self.assertIn('href="/collections"', html)
+            self.assertIn('href="/task/edit/task-config?back=/collections"', html)
+            self.assertFalse((base_dir / "outside.yml").exists())
+
     def test_task_edit_form_preserves_back_url_and_retry_fields(self):
         with isolated_app() as (app, base_dir):
             data_dir = base_dir / "data"
