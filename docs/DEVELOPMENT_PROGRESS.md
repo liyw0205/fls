@@ -2474,8 +2474,50 @@
 - 新建和编辑任务的“合集不存在”错误路径现在有回归测试固定。
 - 表单错误路径继续只渲染错误和原表单，不写 `tasks.json` 或重载调度器。
 
+## 阶段 56：合集加入缺失合集无副作用回归测试
+
+状态：已完成
+
+目标：
+
+- 继续低风险收束合集任务操作边界。
+- 固化 `/collection/add-task/<id>` 在合集不存在时返回 404。
+- 确认缺失合集时不读取任务列表、不写 `tasks.json`。
+
+已完成：
+
+- 扩展 `tests/test_bulk_workflows.py`：
+  - 覆盖 POST `/collection/add-task/missing` 返回 404。
+  - 断言缺失合集路径不调用 `load_tasks()` 或 `save_tasks()`。
+  - 断言原任务文件保持不变。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 56。
+  - 在当前行为边界和测试覆盖重点中记录合集加入缺失合集边界。
+- 更新 `docs/SESSION_HANDOFF.md`：
+  - 本文件同步到阶段 56。
+
+验证记录：
+
+- `python -B -m unittest tests.test_bulk_workflows.BulkWorkflowTests.test_collection_add_task_missing_collection_aborts_without_task_write`：通过，1 test OK。
+- `python -B -m compileall tests/test_bulk_workflows.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，175 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git -c safe.directory=/data/data/com.termux/files/home/fls diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段只补合集加入缺失合集边界测试，没有改变路由运行时行为。
+- 本阶段没有触发真实任务进程。
+
+收束结论：
+
+- `/collection/add-task/<id>` 的缺失合集路径现在有回归测试固定。
+- 缺失合集会在读取或写入任务文件前中止，避免无意义副作用。
+
 ## 下一阶段候选
 
-- 阶段 56：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
+- 阶段 57：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
