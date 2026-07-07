@@ -1291,6 +1291,46 @@ class BulkWorkflowTests(unittest.TestCase):
             self.assertEqual(tasks["t1"]["collection_id"], "")
             self.assertEqual(tasks["t2"]["collection_id"], "")
 
+    def test_collection_add_task_empty_selection_redirects_without_task_write(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.COLLECTION_FILE,
+                [
+                    {
+                        "id": "c1",
+                        "name": "合集一",
+                        "remark": "",
+                        "created_at": "2026-07-04 00:00:00",
+                        "updated_at": "2026-07-04 00:00:00",
+                    }
+                ],
+            )
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1"),
+                    sample_task("t2"),
+                ],
+            )
+
+            with patch("fls_manager.routes.tasks.collections.load_tasks") as load_tasks:
+                with patch("fls_manager.routes.tasks.collections.save_tasks") as save_tasks:
+                    response = app.test_client().post(
+                        "/collection/add-task/c1?back=https://example.invalid/out",
+                        data={},
+                        headers={"X-Token": TOKEN},
+                    )
+
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.headers.get("Location"), "/collections")
+            load_tasks.assert_not_called()
+            save_tasks.assert_not_called()
+            tasks = {task["id"]: task for task in read_json(base_dir / "data" / "tasks.json")}
+            self.assertEqual(tasks["t1"]["collection_id"], "")
+            self.assertEqual(tasks["t2"]["collection_id"], "")
+
     def test_collection_delete_empty_collection_skips_task_write(self):
         with isolated_app() as (app, base_dir):
             from fls_manager import paths
