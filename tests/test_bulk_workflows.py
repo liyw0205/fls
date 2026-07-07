@@ -553,6 +553,26 @@ class BulkWorkflowTests(unittest.TestCase):
             self.assertEqual(payload["action"], "enable")
             self.assertEqual(payload["count"], 0)
 
+    def test_task_bulk_rejects_unknown_action_without_loading_tasks(self):
+        with isolated_app() as (app, _base_dir):
+            with patch("fls_manager.routes.api.load_tasks") as load_tasks:
+                with patch("fls_manager.routes.api.save_tasks") as save_tasks:
+                    response = app.test_client().post(
+                        "/api/task/bulk-action",
+                        json={"action": "unknown", "task_ids": ["t1", "t1", "t2"]},
+                        headers={"X-Token": TOKEN},
+                    )
+
+            payload = response.get_json()
+
+            self.assertEqual(response.status_code, 400)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["msg"], "未知批量操作")
+            self.assertEqual(payload["action"], "unknown")
+            self.assertEqual(payload["count"], 2)
+            load_tasks.assert_not_called()
+            save_tasks.assert_not_called()
+
     def test_task_action_run_missing_task_returns_404(self):
         with isolated_app() as (app, base_dir):
             from fls_manager import paths
