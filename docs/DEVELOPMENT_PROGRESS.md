@@ -2433,8 +2433,49 @@
 - 新建任务 Cron 校验失败和编辑缺失任务的无副作用边界现在有回归测试固定。
 - 表单错误路径继续只渲染错误和原表单，不写 `tasks.json` 或重载调度器。
 
+## 阶段 55：任务表单合集校验无副作用回归测试
+
+状态：已完成
+
+目标：
+
+- 继续低风险收束任务表单 UI 边界。
+- 固化 `/task/new` 选择不存在合集时不创建任务、不重载调度器。
+- 固化 `/task/edit/<id>` 改到不存在合集时不写任务文件、不重载调度器，并保留安全 back。
+
+已完成：
+
+- 扩展 `tests/test_ui_route_components.py`：
+  - 覆盖新建任务提交缺失 `collection_id` 时返回 400，提示“合集不存在”，不调用 `save_tasks()` 或 `reload_scheduler()`。
+  - 覆盖编辑任务提交缺失 `collection_id` 时返回 400，外部 back 清洗为原任务所属合集锚点，不调用 `save_tasks()` 或 `reload_scheduler()`，原任务字段保持不变。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 55。
+  - 在当前行为边界中记录 Cron 不合法和合集不存在都属于任务表单校验失败。
+- 更新 `docs/SESSION_HANDOFF.md`：
+  - 本文件同步到阶段 55。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_route_components.UiRouteComponentTests.test_task_new_missing_collection_does_not_save_or_reload tests.test_ui_route_components.UiRouteComponentTests.test_task_edit_missing_collection_keeps_safe_back_and_does_not_save`：通过，2 tests OK。
+- `python -B -m compileall tests/test_ui_route_components.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，174 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git -c safe.directory=/data/data/com.termux/files/home/fls diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段只补任务表单合集校验边界测试，没有改变路由运行时行为。
+- 本阶段没有触发真实任务进程。
+
+收束结论：
+
+- 新建和编辑任务的“合集不存在”错误路径现在有回归测试固定。
+- 表单错误路径继续只渲染错误和原表单，不写 `tasks.json` 或重载调度器。
+
 ## 下一阶段候选
 
-- 阶段 55：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
+- 阶段 56：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

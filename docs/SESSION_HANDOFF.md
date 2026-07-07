@@ -1,11 +1,11 @@
 # FLS 会话交接文档
 
 生成时间：2026-07-08
-当前阶段：阶段 54，任务表单校验无副作用回归测试
+当前阶段：阶段 55，任务表单合集校验无副作用回归测试
 
 ## 本阶段完成进度
 
-完成度：阶段 54 已完成，准备进入阶段 55。
+完成度：阶段 55 已完成，准备进入阶段 56。
 
 已经完成：
 
@@ -16,22 +16,22 @@
 - 原长期脏改动仍保存在本地 stash：`stash@{0}: pre-main-merge dirty task-log runtime changes`。
 - 本阶段没有整包恢复 stash。
 - 扩展 `tests/test_ui_route_components.py`：
-  - 覆盖新建任务 Cron 不合法时返回 400，保留表单与安全 back，不调用 `save_tasks()` 或 `reload_scheduler()`。
-  - 覆盖编辑缺失任务时返回 404，不调用 `save_tasks()` 或 `reload_scheduler()`，原任务文件保持不变。
+  - 覆盖新建任务提交缺失 `collection_id` 时返回 400，提示“合集不存在”，不调用 `save_tasks()` 或 `reload_scheduler()`。
+  - 覆盖编辑任务提交缺失 `collection_id` 时返回 400，外部 back 清洗为原任务所属合集锚点，不调用 `save_tasks()` 或 `reload_scheduler()`，原任务字段保持不变。
 - 更新 `DEVELOPMENT.md`：
-  - 基线推进到阶段 54。
-  - 记录任务表单校验失败和编辑缺失任务的无副作用边界。
+  - 基线推进到阶段 55。
+  - 记录 Cron 不合法和合集不存在都属于任务表单校验失败。
 - 更新 `docs/DEVELOPMENT_PROGRESS.md`：
-  - 新增阶段 54 完成块、验证记录、受限验证和收束结论。
-  - 下一阶段候选推进到阶段 55。
+  - 新增阶段 55 完成块、验证记录、受限验证和收束结论。
+  - 下一阶段候选推进到阶段 56。
 - 更新 `docs/SESSION_HANDOFF.md`：
-  - 本文件同步到阶段 54。
+  - 本文件同步到阶段 55。
 
 已验证：
 
-- `python -B -m unittest tests.test_ui_route_components.UiRouteComponentTests.test_task_new_cron_validation_error_does_not_save_or_reload tests.test_ui_route_components.UiRouteComponentTests.test_task_edit_missing_task_aborts_without_side_effects` 通过，2 tests OK。
+- `python -B -m unittest tests.test_ui_route_components.UiRouteComponentTests.test_task_new_missing_collection_does_not_save_or_reload tests.test_ui_route_components.UiRouteComponentTests.test_task_edit_missing_collection_keeps_safe_back_and_does_not_save` 通过，2 tests OK。
 - `python -B -m compileall tests/test_ui_route_components.py` 通过。
-- `python -B -m unittest discover -s tests` 通过，172 tests OK。
+- `python -B -m unittest discover -s tests` 通过，174 tests OK。
 - `python -B tools/responsive_smoke.py` 通过。
 - `python -B -m compileall fls-manager.py fls_manager tests tools` 通过。
 - `git -c safe.directory=/data/data/com.termux/files/home/fls diff --check` 通过。
@@ -39,17 +39,17 @@
 未完成或受限：
 
 - 当前环境没有 Playwright/Chromium，仍未做真实浏览器截图检查。
-- 本阶段只补任务表单边界测试，没有改变路由运行时行为。
+- 本阶段只补任务表单合集校验边界测试，没有改变路由运行时行为。
 - 本阶段没有触发真实任务进程。
 
 ## 协作情况
 
 - 本阶段未使用额外技能或子代理。
-- 用户要求继续开发；本阶段按交接文档进入阶段 54，选择任务表单校验无副作用回归测试作为单一窄边界。
+- 用户要求继续开发并指定提交信息使用中文；本阶段按交接文档进入阶段 55，选择任务表单合集校验无副作用回归测试作为单一窄边界。
 
 ## 下阶段实现目标
 
-阶段 55 建议目标：继续低风险收束原长期脏 diff 中尚未覆盖的其它任务 API 兼容边界、UI 边界或更多错误提示渲染。
+阶段 56 建议目标：继续低风险收束原长期脏 diff 中尚未覆盖的其它任务 API 兼容边界、UI 边界或更多错误提示渲染。
 
 具体任务：
 
@@ -61,7 +61,7 @@
 6. 如环境具备浏览器自动化，补真实响应式截图验收：
    - 宽度：390px、768px、1024px、1440px。
    - 页面：`/tasks`、`/collections`、`/logs`、`/online-scripts`、`/pull`、`/config`、`/deps`、`/panel/status`。
-7. 阶段 55 结束时继续更新 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`、`docs/SESSION_HANDOFF.md`，并提交推送。
+7. 阶段 56 结束时继续更新 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`、`docs/SESSION_HANDOFF.md`，并提交推送。
 
 ## 后续候选
 
@@ -73,4 +73,4 @@
 
 ## 下一会话启动提示
 
-请从 `docs/SESSION_HANDOFF.md` 开始，继续阶段 55。先读取 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`，并使用 `git -c safe.directory=/data/data/com.termux/files/home/fls status --short --branch` 查看工作区。若继续处理 `stash@{0}`，只摘取可验证的窄边界，不要整包恢复；保持 Flask + 原生 CSS/JS 和无 npm 构建链。
+请从 `docs/SESSION_HANDOFF.md` 开始，继续阶段 56。先读取 `DEVELOPMENT.md`、`docs/DEVELOPMENT_PROGRESS.md`，并使用 `git -c safe.directory=/data/data/com.termux/files/home/fls status --short --branch` 查看工作区。若继续处理 `stash@{0}`，只摘取可验证的窄边界，不要整包恢复；保持 Flask + 原生 CSS/JS 和无 npm 构建链。

@@ -567,6 +567,33 @@ class UiRouteComponentTests(unittest.TestCase):
             reload_scheduler.assert_not_called()
             self.assertFalse((base_dir / "data" / "tasks.json").exists())
 
+    def test_task_new_missing_collection_does_not_save_or_reload(self):
+        with isolated_app() as (app, base_dir):
+            with patch("fls_manager.routes.tasks.pages.save_tasks") as save_tasks:
+                with patch("fls_manager.routes.tasks.pages.reload_scheduler") as reload_scheduler:
+                    response = app.test_client().post(
+                        "/task/new",
+                        data={
+                            "name": "合集任务",
+                            "command": "task demo.py",
+                            "cron": "",
+                            "collection_id": "missing-collection",
+                            "back": "/collections",
+                            "enabled": "1",
+                        },
+                        headers={"X-Token": TOKEN},
+                    )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("合集不存在", html)
+            self.assertIn('name="back" value="/collections"', html)
+            self.assertIn('href="/collections"', html)
+            save_tasks.assert_not_called()
+            reload_scheduler.assert_not_called()
+            self.assertFalse((base_dir / "data" / "tasks.json").exists())
+
     def test_task_edit_validation_error_keeps_safe_back_and_does_not_save(self):
         with isolated_app() as (app, base_dir):
             data_dir = base_dir / "data"
@@ -614,6 +641,73 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn('value="Cron &lt;bad&gt;"', html)
             self.assertNotIn("Cron <bad>", html)
             self.assertEqual(task["name"], "原任务")
+            self.assertEqual(task["retry"], {"attempts": 1, "interval_seconds": 30})
+
+    def test_task_edit_missing_collection_keeps_safe_back_and_does_not_save(self):
+        with isolated_app() as (app, base_dir):
+            data_dir = base_dir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            (data_dir / "collections.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "c1",
+                            "name": "合集一",
+                            "remark": "",
+                            "created_at": "2026-07-04 00:00:00",
+                            "updated_at": "2026-07-04 00:00:00",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            tasks_file = data_dir / "tasks.json"
+            tasks_file.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "task-edit",
+                            "name": "原任务",
+                            "command": "task demo.py",
+                            "collection_id": "c1",
+                            "retry": {
+                                "attempts": 1,
+                                "interval_seconds": 30,
+                            },
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("fls_manager.routes.tasks.pages.save_tasks") as save_tasks:
+                with patch("fls_manager.routes.tasks.pages.reload_scheduler") as reload_scheduler:
+                    response = app.test_client().post(
+                        "/task/edit/task-edit",
+                        data={
+                            "back": "https://example.invalid/evil",
+                            "name": "改名任务",
+                            "command": "task other.py",
+                            "cron": "",
+                            "collection_id": "missing-collection",
+                            "retry_attempts": "3",
+                            "retry_interval_seconds": "90",
+                            "enabled": "1",
+                        },
+                        headers={"X-Token": TOKEN},
+                    )
+
+            html = response.get_data(as_text=True)
+            task = json.loads(tasks_file.read_text(encoding="utf-8"))[0]
+
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("合集不存在", html)
+            self.assertIn('name="back" value="/collections#collection-c1"', html)
+            self.assertIn('href="/collections#collection-c1"', html)
+            save_tasks.assert_not_called()
+            reload_scheduler.assert_not_called()
+            self.assertEqual(task["name"], "原任务")
+            self.assertEqual(task["collection_id"], "c1")
             self.assertEqual(task["retry"], {"attempts": 1, "interval_seconds": 30})
 
     def test_task_edit_missing_task_aborts_without_side_effects(self):

@@ -1,7 +1,7 @@
 # FLS 开发文档
 
 更新时间：2026-07-08
-基线：`main` / 阶段 54
+基线：`main` / 阶段 55
 
 本文是 FLS 当前代码库的开发协作文档。历史阶段流水见
 `docs/DEVELOPMENT_PROGRESS.md`，下一轮接续信息见
@@ -236,7 +236,7 @@ CSRF 约定：
 - `/task/pin/<id>` 只接受 POST；缺失任务返回 404 且不写回；最多 5 个置顶任务，超过上限时渲染错误卡片且不写回。
 - `/task/collection/clear/<id>` 只接受 POST；缺失任务返回 404；任务已经不在合集时不写 `tasks.json`。
 - `/task/config/<id>` 缺失任务返回 404；无 `config_path` 时只渲染提示并不写文件；非法路径返回 400 且不写出 `scripts/` 外文件。
-- `/task/new` 和 `/task/edit/<id>` 表单校验失败返回 400，保留表单和安全 back，不写任务文件或重载调度器；编辑缺失任务返回 404。
+- `/task/new` 和 `/task/edit/<id>` 表单校验失败返回 400，保留表单和安全 back，不写任务文件或重载调度器；Cron 不合法和合集不存在都属于表单校验失败；编辑缺失任务返回 404。
 - `/collection/delete/<id>` 只接受 POST；缺失合集返回 404 且不写入；删除空合集不写 `tasks.json`；删除含任务合集时才清理任务归属。
 - `/collection/add-task/<id>` 只接受 POST；兼容 `task_ids` 多选和旧 `task_id` 单选；混入缺失任务时返回 404 且不部分写入。
 
