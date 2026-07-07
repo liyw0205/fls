@@ -541,6 +541,32 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn('href="/tasks?q=bad"', html)
             self.assertNotIn('Bad <task "x">', html)
 
+    def test_task_new_cron_validation_error_does_not_save_or_reload(self):
+        with isolated_app() as (app, base_dir):
+            with patch("fls_manager.routes.tasks.pages.save_tasks") as save_tasks:
+                with patch("fls_manager.routes.tasks.pages.reload_scheduler") as reload_scheduler:
+                    response = app.test_client().post(
+                        "/task/new",
+                        data={
+                            "name": "定时任务",
+                            "command": "task demo.py",
+                            "cron": "* *",
+                            "back": "/tasks?q=cron",
+                            "enabled": "1",
+                        },
+                        headers={"X-Token": TOKEN},
+                    )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("Cron 不合法：Cron 格式错误", html)
+            self.assertIn('name="back" value="/tasks?q=cron"', html)
+            self.assertIn('href="/tasks?q=cron"', html)
+            save_tasks.assert_not_called()
+            reload_scheduler.assert_not_called()
+            self.assertFalse((base_dir / "data" / "tasks.json").exists())
+
     def test_task_edit_validation_error_keeps_safe_back_and_does_not_save(self):
         with isolated_app() as (app, base_dir):
             data_dir = base_dir / "data"
@@ -589,6 +615,46 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertNotIn("Cron <bad>", html)
             self.assertEqual(task["name"], "原任务")
             self.assertEqual(task["retry"], {"attempts": 1, "interval_seconds": 30})
+
+    def test_task_edit_missing_task_aborts_without_side_effects(self):
+        with isolated_app() as (app, base_dir):
+            data_dir = base_dir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            tasks_file = data_dir / "tasks.json"
+            tasks_file.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "task-edit",
+                            "name": "原任务",
+                            "command": "task demo.py",
+                            "cron": "",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("fls_manager.routes.tasks.pages.save_tasks") as save_tasks:
+                with patch("fls_manager.routes.tasks.pages.reload_scheduler") as reload_scheduler:
+                    response = app.test_client().post(
+                        "/task/edit/missing",
+                        data={
+                            "name": "新任务名",
+                            "command": "task other.py",
+                            "cron": "",
+                            "enabled": "1",
+                        },
+                        headers={"X-Token": TOKEN},
+                    )
+
+            self.assertEqual(response.status_code, 404)
+            save_tasks.assert_not_called()
+            reload_scheduler.assert_not_called()
+            self.assertEqual(
+                json.loads(tasks_file.read_text(encoding="utf-8"))[0]["name"],
+                "原任务",
+            )
 
     def test_task_edit_saves_retry_and_sanitizes_external_back_url(self):
         with isolated_app() as (app, base_dir):

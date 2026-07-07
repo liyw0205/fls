@@ -2392,8 +2392,49 @@
 - 任务配置文件页的 404、无配置路径和非法路径边界现在有回归测试固定。
 - 保存动作仍只会在任务存在、配置路径非空且安全路径校验通过后写入。
 
+## 阶段 54：任务表单校验无副作用回归测试
+
+状态：已完成
+
+目标：
+
+- 继续低风险收束任务表单 UI 边界。
+- 固化 `/task/new` Cron 校验失败时不创建任务、不重载调度器。
+- 固化 `/task/edit/<id>` 缺失任务时不写任务文件、不重载调度器。
+
+已完成：
+
+- 扩展 `tests/test_ui_route_components.py`：
+  - 覆盖新建任务 Cron 不合法时返回 400，保留表单与安全 back，不调用 `save_tasks()` 或 `reload_scheduler()`。
+  - 覆盖编辑缺失任务时返回 404，不调用 `save_tasks()` 或 `reload_scheduler()`，原任务文件保持不变。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 54。
+  - 在当前行为边界和测试覆盖重点中记录任务表单校验边界。
+- 更新 `docs/SESSION_HANDOFF.md`：
+  - 本文件同步到阶段 54。
+
+验证记录：
+
+- `python -B -m unittest tests.test_ui_route_components.UiRouteComponentTests.test_task_new_cron_validation_error_does_not_save_or_reload tests.test_ui_route_components.UiRouteComponentTests.test_task_edit_missing_task_aborts_without_side_effects`：通过，2 tests OK。
+- `python -B -m compileall tests/test_ui_route_components.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，172 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git -c safe.directory=/data/data/com.termux/files/home/fls diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段只补任务表单边界测试，没有改变路由运行时行为。
+- 本阶段没有触发真实任务进程。
+
+收束结论：
+
+- 新建任务 Cron 校验失败和编辑缺失任务的无副作用边界现在有回归测试固定。
+- 表单错误路径继续只渲染错误和原表单，不写 `tasks.json` 或重载调度器。
+
 ## 下一阶段候选
 
-- 阶段 54：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
+- 阶段 55：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
