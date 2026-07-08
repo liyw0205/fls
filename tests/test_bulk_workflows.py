@@ -692,6 +692,28 @@ class BulkWorkflowTests(unittest.TestCase):
                 ["t1"],
             )
 
+    def test_task_action_run_business_failure_keeps_200_without_write_or_reload(self):
+        with isolated_app() as (app, _base_dir):
+            with patch(
+                "fls_manager.routes.api.run_task_now",
+                return_value=(False, "任务已在运行"),
+            ) as run_task_now:
+                with patch("fls_manager.routes.api.save_tasks") as save_tasks:
+                    with patch("fls_manager.routes.api.reload_scheduler") as reload_scheduler:
+                        response = app.test_client().post(
+                            "/api/task/action/run/t1",
+                            headers={"X-Token": TOKEN},
+                        )
+
+            payload = response.get_json()
+
+            self.assertEqual(response.status_code, 200)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["msg"], "任务已在运行")
+            run_task_now.assert_called_once_with("t1", source="manual")
+            save_tasks.assert_not_called()
+            reload_scheduler.assert_not_called()
+
     def test_legacy_run_route_post_submits_task_and_uses_safe_back(self):
         with isolated_app() as (app, _base_dir):
             from fls_manager import paths
