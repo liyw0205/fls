@@ -2724,8 +2724,50 @@
 - `/api/task/action/<unknown>/<id>` 的未知操作路径现在有回归测试固定。
 - 未知单任务操作会在任何任务副作用前返回 400。
 
+## 阶段 62：单任务复制缺失项无副作用回归测试
+
+状态：已完成
+
+目标：
+
+- 继续低风险收束任务动作 API 边界。
+- 固化 `/api/task/action/copy/<id>` 在任务缺失时返回 404。
+- 确认复制缺失任务时不写回任务文件、不重载调度器。
+
+已完成：
+
+- 扩展 `tests/test_bulk_workflows.py`：
+  - 覆盖复制缺失任务返回 404 和 `msg=任务不存在`。
+  - 断言不调用 `save_tasks()` 或 `reload_scheduler()`。
+  - 断言原任务文件只保留既有任务，不产生复制项。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 62。
+  - 在任务 API 行为边界和测试覆盖重点中记录单任务复制缺失项边界。
+- 更新 `docs/SESSION_HANDOFF.md`：
+  - 本文件同步到阶段 62。
+
+验证记录：
+
+- `python -B -m unittest tests.test_bulk_workflows.BulkWorkflowTests.test_task_copy_missing_task_returns_404_without_write_or_reload`：通过，1 test OK。
+- `python -B -m compileall tests/test_bulk_workflows.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，180 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git -c safe.directory=/data/data/com.termux/files/home/fls diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段只补单任务复制缺失项边界测试，没有改变路由运行时行为。
+- 本阶段没有触发真实任务进程。
+
+收束结论：
+
+- `/api/task/action/copy/<id>` 的缺失任务路径现在有无写回、无调度器重载回归断言。
+- 缺失复制不会产生额外任务项或刷新调度器。
+
 ## 下一阶段候选
 
-- 阶段 62：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
+- 阶段 63：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

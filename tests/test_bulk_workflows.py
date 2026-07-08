@@ -128,6 +128,36 @@ class BulkWorkflowTests(unittest.TestCase):
             self.assertNotIn("last_run_at", copied)
             self.assertEqual(copied["retry"], {"attempts": 2, "interval_seconds": 30})
 
+    def test_task_copy_missing_task_returns_404_without_write_or_reload(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1"),
+                ],
+            )
+
+            with patch("fls_manager.routes.api.save_tasks") as save_tasks:
+                with patch("fls_manager.routes.api.reload_scheduler") as reload_scheduler:
+                    response = app.test_client().post(
+                        "/api/task/action/copy/missing",
+                        headers={"X-Token": TOKEN},
+                    )
+
+            payload = response.get_json()
+
+            self.assertEqual(response.status_code, 404)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["msg"], "任务不存在")
+            save_tasks.assert_not_called()
+            reload_scheduler.assert_not_called()
+            self.assertEqual(
+                [task["id"] for task in read_json(base_dir / "data" / "tasks.json")],
+                ["t1"],
+            )
+
     def test_task_action_unknown_action_returns_400_without_side_effects(self):
         with isolated_app() as (app, _base_dir):
             with patch("fls_manager.routes.api.run_task_now") as run_task_now:
