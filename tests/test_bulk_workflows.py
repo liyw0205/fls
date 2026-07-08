@@ -128,6 +128,29 @@ class BulkWorkflowTests(unittest.TestCase):
             self.assertNotIn("last_run_at", copied)
             self.assertEqual(copied["retry"], {"attempts": 2, "interval_seconds": 30})
 
+    def test_task_action_unknown_action_returns_400_without_side_effects(self):
+        with isolated_app() as (app, _base_dir):
+            with patch("fls_manager.routes.api.run_task_now") as run_task_now:
+                with patch("fls_manager.routes.api.stop_task_now") as stop_task_now:
+                    with patch("fls_manager.routes.api.load_tasks") as load_tasks:
+                        with patch("fls_manager.routes.api.save_tasks") as save_tasks:
+                            with patch("fls_manager.routes.api.reload_scheduler") as reload_scheduler:
+                                response = app.test_client().post(
+                                    "/api/task/action/unknown/t1",
+                                    headers={"X-Token": TOKEN},
+                                )
+
+            payload = response.get_json()
+
+            self.assertEqual(response.status_code, 400)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["msg"], "未知操作")
+            run_task_now.assert_not_called()
+            stop_task_now.assert_not_called()
+            load_tasks.assert_not_called()
+            save_tasks.assert_not_called()
+            reload_scheduler.assert_not_called()
+
     def test_task_action_pin_returns_state_and_checks_boundaries(self):
         with isolated_app() as (app, base_dir):
             from fls_manager import paths
