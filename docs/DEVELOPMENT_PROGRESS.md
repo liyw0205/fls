@@ -2808,8 +2808,50 @@
 - `/api/task/action/run/<id>` 的普通业务失败兼容语义现在有回归测试固定。
 - 除“任务不存在”映射为 404 外，其它运行失败继续由 JSON `ok/msg` 表达，避免破坏现有前端兼容。
 
+## 阶段 64：单任务停止业务失败兼容回归测试
+
+状态：已完成
+
+目标：
+
+- 继续低风险收束任务动作 API 边界。
+- 固化 `/api/task/action/stop/<id>` 在普通停止失败时保留 `200 + ok:false`。
+- 确认停止 API 不因业务失败写回任务文件或重载调度器。
+
+已完成：
+
+- 扩展 `tests/test_bulk_workflows.py`：
+  - 覆盖 `stop_task_now()` 返回 `False, "停止失败"` 时接口状态码仍为 200。
+  - 断言响应保留 `ok=false` 和原始 `msg`。
+  - 断言不调用 `save_tasks()` 或 `reload_scheduler()`。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 64。
+  - 在任务 API 行为边界和测试覆盖重点中记录单任务停止业务失败兼容边界。
+- 更新 `docs/SESSION_HANDOFF.md`：
+  - 本文件同步到阶段 64。
+
+验证记录：
+
+- `python -B -m unittest tests.test_bulk_workflows.BulkWorkflowTests.test_task_action_stop_business_failure_keeps_200_without_write_or_reload`：通过，1 test OK。
+- `python -B -m compileall tests/test_bulk_workflows.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，182 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git -c safe.directory=/data/data/com.termux/files/home/fls diff --check`：通过。
+
+受限验证：
+
+- 当前环境仍无 Playwright/Chromium，真实浏览器截图检查继续留到有浏览器环境时执行。
+- 本阶段只补单任务停止业务失败边界测试，没有改变路由运行时行为。
+- 本阶段没有触发真实任务进程。
+
+收束结论：
+
+- `/api/task/action/stop/<id>` 的普通停止失败兼容语义现在有回归测试固定。
+- 除任务缺失映射为 404 外，其它停止失败继续由 JSON `ok/msg` 表达，避免破坏现有前端兼容。
+
 ## 下一阶段候选
 
-- 阶段 64：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
+- 阶段 65：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

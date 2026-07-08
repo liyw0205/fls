@@ -852,6 +852,37 @@ class BulkWorkflowTests(unittest.TestCase):
             self.assertEqual(payload["msg"], "任务未运行")
             stop_task_now.assert_called_once_with("t1")
 
+    def test_task_action_stop_business_failure_keeps_200_without_write_or_reload(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1"),
+                ],
+            )
+
+            with patch(
+                "fls_manager.routes.api.stop_task_now",
+                return_value=(False, "停止失败"),
+            ) as stop_task_now:
+                with patch("fls_manager.routes.api.save_tasks") as save_tasks:
+                    with patch("fls_manager.routes.api.reload_scheduler") as reload_scheduler:
+                        response = app.test_client().post(
+                            "/api/task/action/stop/t1",
+                            headers={"X-Token": TOKEN},
+                        )
+
+            payload = response.get_json()
+
+            self.assertEqual(response.status_code, 200)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["msg"], "停止失败")
+            stop_task_now.assert_called_once_with("t1")
+            save_tasks.assert_not_called()
+            reload_scheduler.assert_not_called()
+
     def test_legacy_stop_route_existing_task_redirects_when_not_running(self):
         with isolated_app() as (app, _base_dir):
             from fls_manager import paths
