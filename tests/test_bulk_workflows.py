@@ -89,6 +89,27 @@ def sample_task(task_id, **updates):
 
 
 class BulkWorkflowTests(unittest.TestCase):
+    def test_api_scheduler_jobs_returns_json_error_when_scheduler_fails(self):
+        with isolated_app() as (app, _base_dir):
+            with patch(
+                "fls_manager.routes.api.scheduler.get_jobs",
+                side_effect=RuntimeError("scheduler unavailable"),
+            ):
+                response = app.test_client().get(
+                    "/api/scheduler/jobs",
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 500)
+            self.assertEqual(
+                response.get_json(),
+                {
+                    "ok": False,
+                    "msg": "scheduler unavailable",
+                    "jobs": [],
+                },
+            )
+
     def test_api_status_returns_stable_running_and_idle_task_fields(self):
         with isolated_app() as (app, _base_dir):
             from fls_manager import paths

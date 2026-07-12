@@ -1,7 +1,7 @@
 # FLS 开发文档
 
 更新时间：2026-07-13
-基线：`main` / 阶段 68
+基线：`main` / 阶段 69
 
 本文是 FLS 当前代码库的开发协作文档。历史阶段流水见
 `docs/DEVELOPMENT_PROGRESS.md`，下一轮接续信息见
@@ -221,6 +221,7 @@ CSRF 约定：
 状态 API：
 
 - `/api/status` 为每个任务返回 `id/name/command/cron/enabled/running/run_count/pid/process_name`；未运行任务的 `pid` 为 `null`，进程名称按安全名称规则推导。
+- `/api/scheduler/jobs` 查询调度器失败时返回 `500` JSON：`ok=false`、错误 `msg` 和空 `jobs` 列表。
 
 任务 API：
 

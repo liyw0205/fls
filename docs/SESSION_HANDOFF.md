@@ -1,11 +1,11 @@
 # FLS 会话交接文档
 
 生成时间：2026-07-13
-当前阶段：阶段 68，运行状态接口 Schema 回归测试
+当前阶段：阶段 69，调度任务查询异常回归测试
 
 ## 本阶段完成进度
 
-完成度：阶段 68 已完成，准备进入阶段 69。
+完成度：阶段 69 已完成，准备进入下一批目标规划。
 
 已经完成：
 
@@ -13,17 +13,17 @@
 - 本地 Git 提交身份保持为 `liyw0205 <2650115317@qq.com>`。
 - 原长期脏改动仍保存在本地 stash：`stash@{0}: pre-main-merge dirty task-log runtime changes`；本阶段没有整包恢复。
 - 扩展 `tests/test_bulk_workflows.py`：
-  - mock 运行态、运行记录和进程名称推导。
-  - 覆盖运行中与未运行任务的完整状态响应，未运行任务 PID 为 `null`。
+  - mock `scheduler.get_jobs()` 查询异常。
+  - 断言 HTTP 500 JSON 保留错误消息和空 `jobs` 列表。
 - 更新 `DEVELOPMENT.md` 和 `docs/DEVELOPMENT_PROGRESS.md`：
-  - 基线推进到阶段 68。
-  - 记录状态接口字段契约。
+  - 基线推进到阶段 69。
+  - 记录调度任务查询异常的响应约定。
 
 已验证：
 
-- `python -B -m unittest tests.test_bulk_workflows.BulkWorkflowTests.test_api_status_returns_stable_running_and_idle_task_fields` 通过，1 test OK。
+- `python -B -m unittest tests.test_bulk_workflows.BulkWorkflowTests.test_api_scheduler_jobs_returns_json_error_when_scheduler_fails` 通过，1 test OK。
 - `python -B -m compileall tests/test_bulk_workflows.py` 通过。
-- `python -B -m unittest discover -s tests` 通过，186 tests OK。
+- `python -B -m unittest discover -s tests` 通过，187 tests OK。
 - `python -B tools/responsive_smoke.py` 通过。
 - `python -B -m compileall fls-manager.py fls_manager tests tools` 通过。
 - `git -c safe.directory=/data/data/com.termux/files/home/fls diff --check` 通过。
@@ -31,14 +31,14 @@
 未完成或受限：
 
 - 当前环境没有 Playwright/Chromium，仍未做真实浏览器截图检查。
-- 本阶段只补状态接口 Schema 回归测试，没有改变路由运行时行为，也没有触发真实任务进程。
+- 本阶段只补调度任务查询异常回归测试，没有改变路由运行时行为，也没有触发真实任务进程。
 
 ## 下阶段实现目标
 
-阶段 69：固定调度任务查询异常时的 JSON 错误响应。
+下一步：生成阶段 70 至阶段 74 的目标文档后，立即从阶段 70 开始执行。
 
-1. 在现有 API 测试中 mock 调度器查询异常。
-2. 验证 HTTP 500 的 JSON 错误响应以及空 `jobs` 列表。
+1. 先基于现有接口和测试缺口生成五个独立、可验收的阶段目标文档。
+2. 每完成一个阶段，更新三份开发文档、全量验证、单独提交并推送，再进入下一个目标。
 3. 完成后更新三份开发文档，执行全量验证，单独提交并推送。
 
 ## 约束与后续候选
@@ -50,4 +50,4 @@
 
 ## 下一会话启动提示
 
-从本文件继续阶段 69；先检查工作区状态和 `docs/goals/stage-069-scheduler-jobs-error.md`，保持 Flask + 原生 CSS/JS 和无 npm 构建链。
+从本文件继续下一批规划；先检查工作区状态，生成 `docs/goals/stage-070-*` 至 `stage-074-*`，保持 Flask + 原生 CSS/JS 和无 npm 构建链。

@@ -2991,8 +2991,43 @@
 
 - 前端轮询可依赖稳定字段区分运行和空闲任务。
 
+## 阶段 69：调度任务查询异常回归
+
+状态：已完成
+
+目标：
+
+- 固定 `/api/scheduler/jobs` 在调度器查询异常时的 JSON 错误协议。
+
+已完成：
+
+- 扩展 `tests/test_bulk_workflows.py`：
+  - mock `scheduler.get_jobs()` 抛出异常。
+  - 断言响应为 `500`，包含 `ok=false`、原始错误消息和空 `jobs` 列表。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 69。
+  - 记录调度任务查询异常的响应约定。
+
+验证记录：
+
+- `python -B -m unittest tests.test_bulk_workflows.BulkWorkflowTests.test_api_scheduler_jobs_returns_json_error_when_scheduler_fails`：通过，1 test OK。
+- `python -B -m compileall tests/test_bulk_workflows.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，187 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git -c safe.directory=/data/data/com.termux/files/home/fls diff --check`：通过。
+
+受限验证：
+
+- 当前环境没有 Playwright/Chromium，未进行真实浏览器截图检查。
+- 本阶段只补错误响应回归测试，没有改变路由运行时行为，也没有触发真实任务进程。
+
+收束结论：
+
+- 状态页和外部调用方在调度器异常时仍可获得可解析的 JSON 响应。
+
 ## 下一阶段候选
 
-- 阶段 69：固定调度任务查询异常时的 JSON 错误响应。
+- 阶段 70：继续收束任务 API 的正常路径和错误结构边界，并先生成下一批五阶段目标文档。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
