@@ -2921,8 +2921,43 @@
 
 - 前端既可使用完整失败列表，也可安全展示有长度上限的失败摘要。
 
+## 阶段 67：批量停止混合结果回归
+
+状态：已完成
+
+目标：
+
+- 固定批量停止任务时成功、未运行和业务失败的独立统计及失败摘要。
+
+已完成：
+
+- 扩展 `tests/test_bulk_workflows.py`：
+  - 覆盖一个成功、一个未运行、四个业务失败的批量停止请求。
+  - 断言 `stopped_count=1`、`skipped_count=1`、`failed_count=4`，失败消息最多展开前三项。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 67。
+  - 记录批量停止的跳过项、失败项和摘要规则。
+
+验证记录：
+
+- `python -B -m unittest tests.test_bulk_workflows.BulkWorkflowTests.test_task_bulk_stop_separates_skipped_and_limits_failure_summary`：通过，1 test OK。
+- `python -B -m compileall tests/test_bulk_workflows.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，185 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git -c safe.directory=/data/data/com.termux/files/home/fls diff --check`：通过。
+
+受限验证：
+
+- 当前环境没有 Playwright/Chromium，未进行真实浏览器截图检查。
+- 本阶段只补 API 兼容边界回归测试，没有改变路由运行时行为，也没有触发真实任务进程。
+
+收束结论：
+
+- 批量停止的“未运行”状态不会混入失败计数，前端可准确展示三类结果。
+
 ## 下一阶段候选
 
-- 阶段 67：固定批量停止任务的混合结果统计和失败摘要。
+- 阶段 68：固定运行状态接口的稳定字段和未运行任务表示。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

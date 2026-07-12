@@ -1,11 +1,11 @@
 # FLS 会话交接文档
 
 生成时间：2026-07-13
-当前阶段：阶段 66，批量运行失败摘要回归测试
+当前阶段：阶段 67，批量停止混合结果回归测试
 
 ## 本阶段完成进度
 
-完成度：阶段 66 已完成，准备进入阶段 67。
+完成度：阶段 67 已完成，准备进入阶段 68。
 
 已经完成：
 
@@ -13,17 +13,17 @@
 - 本地 Git 提交身份保持为 `liyw0205 <2650115317@qq.com>`。
 - 原长期脏改动仍保存在本地 stash：`stash@{0}: pre-main-merge dirty task-log runtime changes`；本阶段没有整包恢复。
 - 扩展 `tests/test_bulk_workflows.py`：
-  - 覆盖五个任务均运行失败的批量请求。
-  - 断言完整失败列表保留五项，而消息摘要最多展示前三项。
+  - 覆盖成功、未运行和四个业务失败的批量停止请求。
+  - 断言跳过项不计入失败，消息摘要最多展示前三项。
 - 更新 `DEVELOPMENT.md` 和 `docs/DEVELOPMENT_PROGRESS.md`：
-  - 基线推进到阶段 66。
-  - 记录批量运行失败字段和消息摘要规则。
+  - 基线推进到阶段 67。
+  - 记录批量停止的跳过项、失败项和消息摘要规则。
 
 已验证：
 
-- `python -B -m unittest tests.test_bulk_workflows.BulkWorkflowTests.test_task_bulk_run_limits_failure_summary_to_first_three_tasks` 通过，1 test OK。
+- `python -B -m unittest tests.test_bulk_workflows.BulkWorkflowTests.test_task_bulk_stop_separates_skipped_and_limits_failure_summary` 通过，1 test OK。
 - `python -B -m compileall tests/test_bulk_workflows.py` 通过。
-- `python -B -m unittest discover -s tests` 通过，184 tests OK。
+- `python -B -m unittest discover -s tests` 通过，185 tests OK。
 - `python -B tools/responsive_smoke.py` 通过。
 - `python -B -m compileall fls-manager.py fls_manager tests tools` 通过。
 - `git -c safe.directory=/data/data/com.termux/files/home/fls diff --check` 通过。
@@ -31,14 +31,14 @@
 未完成或受限：
 
 - 当前环境没有 Playwright/Chromium，仍未做真实浏览器截图检查。
-- 本阶段只补批量运行失败摘要边界测试，没有改变路由运行时行为，也没有触发真实任务进程。
+- 本阶段只补批量停止混合结果边界测试，没有改变路由运行时行为，也没有触发真实任务进程。
 
 ## 下阶段实现目标
 
-阶段 67：固定批量停止任务的混合结果统计和失败摘要。
+阶段 68：固定运行状态接口的稳定字段和未运行任务表示。
 
-1. 继续使用 `tests/test_bulk_workflows.py`，mock 任务停止器，不触发真实进程。
-2. 验证 `stopped_count`、`skipped_count`、`failed_count`、`failures` 和最多三项的消息摘要。
+1. 在现有 API 测试中 mock 运行态与进程名称，不触发真实进程。
+2. 验证运行中和未运行任务的稳定字段、PID 和进程名称。
 3. 完成后更新三份开发文档，执行全量验证，单独提交并推送。
 
 ## 约束与后续候选
@@ -50,4 +50,4 @@
 
 ## 下一会话启动提示
 
-从本文件继续阶段 67；先检查工作区状态和 `docs/goals/stage-067-bulk-stop-failure.md`，保持 Flask + 原生 CSS/JS 和无 npm 构建链。
+从本文件继续阶段 68；先检查工作区状态和 `docs/goals/stage-068-status-schema.md`，保持 Flask + 原生 CSS/JS 和无 npm 构建链。

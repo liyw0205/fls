@@ -694,6 +694,49 @@ class BulkWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(run_task_now.call_count, 5)
 
+    def test_task_bulk_stop_separates_skipped_and_limits_failure_summary(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager import paths
+
+            task_ids = [f"t{i}" for i in range(1, 7)]
+            write_json(paths.TASK_FILE, [sample_task(task_id) for task_id in task_ids])
+
+            results = {
+                "t1": (True, "已结束"),
+                "t2": (False, "任务未运行"),
+                "t3": (False, "停止失败 3"),
+                "t4": (False, "停止失败 4"),
+                "t5": (False, "停止失败 5"),
+                "t6": (False, "停止失败 6"),
+            }
+
+            with patch(
+                "fls_manager.routes.api.stop_task_now",
+                side_effect=lambda task_id: results[task_id],
+            ) as stop_task_now:
+                response = app.test_client().post(
+                    "/api/task/bulk-action",
+                    json={"action": "stop", "task_ids": task_ids},
+                    headers={"X-Token": TOKEN},
+                )
+
+            payload = response.get_json()
+
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["stopped_count"], 1)
+            self.assertEqual(payload["skipped_count"], 1)
+            self.assertEqual(payload["failed_count"], 4)
+            self.assertEqual(
+                payload["failures"],
+                [f"Task t{i}: 停止失败 {i}" for i in range(3, 7)],
+            )
+            self.assertEqual(
+                payload["msg"],
+                "已结束 1 个任务；跳过 1 个未运行任务；4 个结束失败：Task t3: 停止失败 3；Task t4: 停止失败 4；Task t5: 停止失败 5；等 4 个",
+            )
+            self.assertEqual(stop_task_now.call_count, 6)
+
     def test_task_bulk_rejects_empty_selection(self):
         with isolated_app() as (app, _base_dir):
             with patch("fls_manager.routes.api.load_tasks") as load_tasks:
