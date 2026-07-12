@@ -1,11 +1,11 @@
 # FLS 会话交接文档
 
 生成时间：2026-07-13
-当前阶段：阶段 70，调度任务查询 Schema 回归测试
+当前阶段：阶段 71，任务复制响应回归测试
 
 ## 本阶段完成进度
 
-完成度：阶段 70 已完成，准备进入阶段 71。
+完成度：阶段 71 已完成，准备进入阶段 72。
 
 已经完成：
 
@@ -13,15 +13,15 @@
 - 本地 Git 提交身份保持为 `liyw0205 <2650115317@qq.com>`。
 - 原长期脏改动仍保存在本地 stash：`stash@{0}: pre-main-merge dirty task-log runtime changes`；本阶段没有整包恢复。
 - 扩展 `tests/test_bulk_workflows.py`：
-  - mock 正常调度任务列表。
-  - 覆盖任务 ID、下一次执行时间和触发器的 JSON 序列化。
+  - 扩展任务复制成功响应断言。
+  - 固定 `msg=已复制为 Demo-copy`，并保持既有持久化状态验证。
 - 更新 `DEVELOPMENT.md` 和 `docs/DEVELOPMENT_PROGRESS.md`：
-  - 基线推进到阶段 70。
-  - 记录调度任务查询正常响应的字段契约。
+  - 基线推进到阶段 71。
+  - 记录任务复制成功的消息约定。
 
 已验证：
 
-- `python -B -m unittest tests.test_bulk_workflows.BulkWorkflowTests.test_api_scheduler_jobs_serializes_stable_job_fields` 通过，1 test OK。
+- `python -B -m unittest tests.test_bulk_workflows.BulkWorkflowTests.test_task_copy_resets_runtime_fields_and_keeps_retry_config` 通过，1 test OK。
 - `python -B -m compileall tests/test_bulk_workflows.py` 通过。
 - `python -B -m unittest discover -s tests` 通过，188 tests OK。
 - `python -B tools/responsive_smoke.py` 通过。
@@ -35,10 +35,10 @@
 
 ## 下阶段实现目标
 
-下一步：阶段 71，固定任务复制成功时的响应和持久化结果。
+下一步：阶段 72，固定任务置顶写入异常时的错误响应和持久化边界。
 
-1. 继续使用隔离数据目录和任务复制接口，不触发真实任务进程。
-2. 完成后更新三份开发文档、全量验证、单独提交并推送，再进入阶段 72。
+1. mock `save_tasks()` 失败，验证 API 返回 500 JSON。
+2. 完成后更新三份开发文档、全量验证、单独提交并推送，再进入阶段 73。
 
 ## 约束与后续候选
 
@@ -49,4 +49,4 @@
 
 ## 下一会话启动提示
 
-从本文件继续阶段 71；先检查 `docs/goals/stage-071-task-copy-response.md`，保持 Flask + 原生 CSS/JS 和无 npm 构建链。
+从本文件继续阶段 72；先检查 `docs/goals/stage-072-task-pin-write-failure.md`，保持 Flask + 原生 CSS/JS 和无 npm 构建链。

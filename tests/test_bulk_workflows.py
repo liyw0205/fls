@@ -242,6 +242,7 @@ class BulkWorkflowTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             payload = response.get_json()
             self.assertTrue(payload["ok"])
+            self.assertEqual(payload["msg"], "已复制为 Demo-copy")
             reload_scheduler.assert_called_once()
 
             tasks = read_json(base_dir / "data" / "tasks.json")

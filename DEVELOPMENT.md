@@ -1,7 +1,7 @@
 # FLS 开发文档
 
 更新时间：2026-07-13
-基线：`main` / 阶段 70
+基线：`main` / 阶段 71
 
 本文是 FLS 当前代码库的开发协作文档。历史阶段流水见
 `docs/DEVELOPMENT_PROGRESS.md`，下一轮接续信息见
@@ -230,6 +230,7 @@ CSRF 约定：
 - `/api/task/action/stop/<id>` 缺失任务返回 404 且不调用停止逻辑；普通停止失败保留 200 + `ok:false`，由调用方读取 `msg`。
 - `/api/task/action/toggle/<id>` 成功时返回 `enabled` 新状态；缺失任务返回 404 且不写回或重载调度器。
 - `/api/task/action/copy/<id>` 成功复制任务并重置运行态字段；缺失任务返回 404 且不写回或重载调度器。
+- 单任务复制成功返回 `ok=true` 与 `msg=已复制为 <新任务名>`，新任务名沿用 `<原名称>-copy` 规则。
 - `/api/task/action/pin/<id>` 成功时返回 `pinned` 新状态；缺失任务返回 404，超过 5 个置顶任务返回 400 且不写回。
 - `/api/task/action/delete/<id>` 缺失任务返回 404；存在任务删除前必须先停止任务，停止成功或任务未运行才删除，停止失败返回 409 且不写回。
 - `/api/task/action/<unknown>/<id>` 未知单任务操作返回 400 且不运行、停止、读取或写入任务。
