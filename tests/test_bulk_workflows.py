@@ -482,6 +482,40 @@ class BulkWorkflowTests(unittest.TestCase):
                 [False, False],
             )
 
+    def test_task_bulk_form_input_dedupes_and_normalizes_task_ids(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1", enabled=True),
+                    sample_task("t2", enabled=True),
+                ],
+            )
+
+            response = app.test_client().post(
+                "/api/task/bulk-action",
+                data={
+                    "action": "disable",
+                    "task_ids": ["t1", " t2 ", "t1", "", "  "],
+                },
+                headers={"X-Token": TOKEN},
+            )
+
+            payload = response.get_json()
+
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["action"], "disable")
+            self.assertEqual(payload["count"], 2)
+            self.assertEqual(payload["updated_count"], 2)
+            self.assertEqual(payload["msg"], "已禁用 2 个任务")
+            self.assertEqual(
+                [task["enabled"] for task in read_json(base_dir / "data" / "tasks.json")],
+                [False, False],
+            )
+
     def test_task_bulk_missing_task_aborts_without_write_or_reload(self):
         with isolated_app() as (app, base_dir):
             from fls_manager import paths

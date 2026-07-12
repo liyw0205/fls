@@ -2850,8 +2850,44 @@
 - `/api/task/action/stop/<id>` 的普通停止失败兼容语义现在有回归测试固定。
 - 除任务缺失映射为 404 外，其它停止失败继续由 JSON `ok/msg` 表达，避免破坏现有前端兼容。
 
+## 阶段 65：批量任务表单输入兼容回归
+
+状态：已完成
+
+目标：
+
+- 固化 `/api/task/bulk-action` 对传统表单输入的任务 ID 归一化行为。
+- 确认空白和重复 ID 不会导致重复操作或错误计数。
+
+已完成：
+
+- 扩展 `tests/test_bulk_workflows.py`：
+  - 覆盖表单 `task_ids` 含首尾空白、空项和重复项的批量禁用请求。
+  - 断言响应的 `count=2`、`updated_count=2`，以及两个唯一任务都被禁用。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 65。
+  - 记录 JSON 与传统表单输入共用任务 ID 归一化规则。
+
+验证记录：
+
+- `python -B -m unittest tests.test_bulk_workflows.BulkWorkflowTests.test_task_bulk_form_input_dedupes_and_normalizes_task_ids`：通过，1 test OK。
+- `python -B -m compileall tests/test_bulk_workflows.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，183 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git -c safe.directory=/data/data/com.termux/files/home/fls diff --check`：通过。
+
+受限验证：
+
+- 当前环境没有 Playwright/Chromium，未进行真实浏览器截图检查。
+- 本阶段只补兼容边界回归测试，没有改变路由运行时行为，也没有触发真实任务进程。
+
+收束结论：
+
+- 批量接口的传统表单输入路径已有回归保护，计数和副作用只基于归一化后的唯一任务 ID。
+
 ## 下一阶段候选
 
-- 阶段 65：继续把原长期脏 diff 中剩余风险转化为回归测试，优先覆盖其它长期脏文件剩余 UI 边界、任务 API 兼容边界或更多错误提示渲染。
+- 阶段 66：固定批量运行部分失败时的结构化状态字段与失败摘要。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
