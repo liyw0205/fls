@@ -279,6 +279,7 @@ class BulkWorkflowTests(unittest.TestCase):
             self.assertFalse(payload["ok"])
             self.assertEqual(payload["msg"], "任务不存在")
             save_tasks.assert_not_called()
+            save_tasks.assert_not_called()
             reload_scheduler.assert_not_called()
             self.assertEqual(
                 [task["id"] for task in read_json(base_dir / "data" / "tasks.json")],
@@ -386,7 +387,25 @@ class BulkWorkflowTests(unittest.TestCase):
             self.assertEqual(response.status_code, 404)
             self.assertFalse(payload["ok"])
             self.assertEqual(payload["msg"], "任务不存在")
-            save_tasks.assert_not_called()
+
+    def test_task_action_pin_save_failure_returns_500_without_persisting_change(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            write_json(paths.TASK_FILE, [sample_task("t1", pinned=False)])
+
+            with patch(
+                "fls_manager.routes.api.save_tasks",
+                side_effect=OSError("disk full"),
+            ):
+                response = app.test_client().post(
+                    "/api/task/action/pin/t1",
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 500)
+            self.assertEqual(response.get_json(), {"ok": False, "msg": "disk full"})
+            self.assertFalse(read_json(base_dir / "data" / "tasks.json")[0]["pinned"])
 
     def test_task_action_toggle_returns_state_and_checks_boundaries(self):
         with isolated_app() as (app, base_dir):
