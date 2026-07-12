@@ -89,6 +89,66 @@ def sample_task(task_id, **updates):
 
 
 class BulkWorkflowTests(unittest.TestCase):
+    def test_api_status_returns_stable_running_and_idle_task_fields(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1", enabled=True, run_count=3),
+                    sample_task("t2", enabled=False, run_count=7),
+                ],
+            )
+
+            with patch(
+                "fls_manager.routes.api.is_running",
+                side_effect=lambda task_id: task_id == "t1",
+            ) as is_running:
+                with patch(
+                    "fls_manager.routes.api.safe_process_name",
+                    return_value="idle-task-process",
+                ) as safe_process_name:
+                    with patch(
+                        "fls_manager.routes.api.RUNNING",
+                        {"t1": {"pid": 2468, "process_name": "running-task-process"}},
+                    ):
+                        response = app.test_client().get(
+                            "/api/status",
+                            headers={"X-Token": TOKEN},
+                        )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(
+                response.get_json(),
+                [
+                    {
+                        "id": "t1",
+                        "name": "Task t1",
+                        "command": "task t1.py",
+                        "cron": "",
+                        "enabled": True,
+                        "running": True,
+                        "run_count": 3,
+                        "pid": 2468,
+                        "process_name": "running-task-process",
+                    },
+                    {
+                        "id": "t2",
+                        "name": "Task t2",
+                        "command": "task t2.py",
+                        "cron": "",
+                        "enabled": False,
+                        "running": False,
+                        "run_count": 7,
+                        "pid": None,
+                        "process_name": "idle-task-process",
+                    },
+                ],
+            )
+            self.assertEqual(is_running.call_count, 2)
+            safe_process_name.assert_called_once_with("Task t2")
+
     def test_task_copy_resets_runtime_fields_and_keeps_retry_config(self):
         with isolated_app() as (app, base_dir):
             from fls_manager import paths

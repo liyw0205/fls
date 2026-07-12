@@ -2956,8 +2956,43 @@
 
 - 批量停止的“未运行”状态不会混入失败计数，前端可准确展示三类结果。
 
+## 阶段 68：运行状态接口 Schema 回归
+
+状态：已完成
+
+目标：
+
+- 固定 `/api/status` 对运行中和未运行任务的稳定响应字段。
+
+已完成：
+
+- 扩展 `tests/test_bulk_workflows.py`：
+  - mock 运行态、运行记录和进程名称推导。
+  - 覆盖运行中与未运行任务的完整状态响应，验证未运行任务的 `pid=null`。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 68。
+  - 记录状态接口的字段契约。
+
+验证记录：
+
+- `python -B -m unittest tests.test_bulk_workflows.BulkWorkflowTests.test_api_status_returns_stable_running_and_idle_task_fields`：通过，1 test OK。
+- `python -B -m compileall tests/test_bulk_workflows.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，186 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git -c safe.directory=/data/data/com.termux/files/home/fls diff --check`：通过。
+
+受限验证：
+
+- 当前环境没有 Playwright/Chromium，未进行真实浏览器截图检查。
+- 本阶段只补状态接口 Schema 回归测试，没有改变路由运行时行为，也没有触发真实任务进程。
+
+收束结论：
+
+- 前端轮询可依赖稳定字段区分运行和空闲任务。
+
 ## 下一阶段候选
 
-- 阶段 68：固定运行状态接口的稳定字段和未运行任务表示。
+- 阶段 69：固定调度任务查询异常时的 JSON 错误响应。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

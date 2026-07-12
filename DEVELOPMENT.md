@@ -1,7 +1,7 @@
 # FLS 开发文档
 
 更新时间：2026-07-13
-基线：`main` / 阶段 67
+基线：`main` / 阶段 68
 
 本文是 FLS 当前代码库的开发协作文档。历史阶段流水见
 `docs/DEVELOPMENT_PROGRESS.md`，下一轮接续信息见
@@ -217,6 +217,10 @@ CSRF 约定：
 - 随机验证码默认 300 秒过期。
 
 ## 6. 当前行为边界
+
+状态 API：
+
+- `/api/status` 为每个任务返回 `id/name/command/cron/enabled/running/run_count/pid/process_name`；未运行任务的 `pid` 为 `null`，进程名称按安全名称规则推导。
 
 任务 API：
 
