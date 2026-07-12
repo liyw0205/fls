@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.dont_write_bytecode = True
@@ -89,6 +90,50 @@ def sample_task(task_id, **updates):
 
 
 class BulkWorkflowTests(unittest.TestCase):
+    def test_api_scheduler_jobs_serializes_stable_job_fields(self):
+        with isolated_app() as (app, _base_dir):
+            jobs = [
+                SimpleNamespace(
+                    id="task-t1",
+                    next_run_time="2026-07-13 08:00:00+08:00",
+                    trigger="cron[minute='0']",
+                ),
+                SimpleNamespace(
+                    id="task-t2",
+                    next_run_time=None,
+                    trigger="date[2026-07-14 00:00:00]",
+                ),
+            ]
+
+            with patch(
+                "fls_manager.routes.api.scheduler.get_jobs",
+                return_value=jobs,
+            ):
+                response = app.test_client().get(
+                    "/api/scheduler/jobs",
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(
+                response.get_json(),
+                {
+                    "ok": True,
+                    "jobs": [
+                        {
+                            "id": "task-t1",
+                            "next_run_time": "2026-07-13 08:00:00+08:00",
+                            "trigger": "cron[minute='0']",
+                        },
+                        {
+                            "id": "task-t2",
+                            "next_run_time": None,
+                            "trigger": "date[2026-07-14 00:00:00]",
+                        },
+                    ],
+                },
+            )
+
     def test_api_scheduler_jobs_returns_json_error_when_scheduler_fails(self):
         with isolated_app() as (app, _base_dir):
             with patch(
