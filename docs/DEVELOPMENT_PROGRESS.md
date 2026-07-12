@@ -2886,8 +2886,43 @@
 
 - 批量接口的传统表单输入路径已有回归保护，计数和副作用只基于归一化后的唯一任务 ID。
 
+## 阶段 66：批量运行失败摘要回归
+
+状态：已完成
+
+目标：
+
+- 固定批量运行部分或全部失败时的结构化统计和摘要上限。
+
+已完成：
+
+- 扩展 `tests/test_bulk_workflows.py`：
+  - 覆盖五个任务均运行失败的批量请求。
+  - 断言完整 `failures` 保留五项，消息仅展示前三项并带 `等 5 个` 提示。
+- 更新 `DEVELOPMENT.md`：
+  - 基线推进到阶段 66。
+  - 记录批量运行失败字段和消息摘要规则。
+
+验证记录：
+
+- `python -B -m unittest tests.test_bulk_workflows.BulkWorkflowTests.test_task_bulk_run_limits_failure_summary_to_first_three_tasks`：通过，1 test OK。
+- `python -B -m compileall tests/test_bulk_workflows.py`：通过。
+- `python -B -m unittest discover -s tests`：通过，184 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `git -c safe.directory=/data/data/com.termux/files/home/fls diff --check`：通过。
+
+受限验证：
+
+- 当前环境没有 Playwright/Chromium，未进行真实浏览器截图检查。
+- 本阶段只补 API 兼容边界回归测试，没有改变路由运行时行为，也没有触发真实任务进程。
+
+收束结论：
+
+- 前端既可使用完整失败列表，也可安全展示有长度上限的失败摘要。
+
 ## 下一阶段候选
 
-- 阶段 66：固定批量运行部分失败时的结构化状态字段与失败摘要。
+- 阶段 67：固定批量停止任务的混合结果统计和失败摘要。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。

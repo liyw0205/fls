@@ -661,6 +661,39 @@ class BulkWorkflowTests(unittest.TestCase):
             self.assertEqual(payload["failures"], ["Task t3: 停止失败"])
             self.assertEqual(stop_task_now.call_count, 3)
 
+    def test_task_bulk_run_limits_failure_summary_to_first_three_tasks(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager import paths
+
+            task_ids = [f"t{i}" for i in range(1, 6)]
+            write_json(paths.TASK_FILE, [sample_task(task_id) for task_id in task_ids])
+
+            with patch(
+                "fls_manager.routes.api.run_task_now",
+                return_value=(False, "启动失败"),
+            ) as run_task_now:
+                response = app.test_client().post(
+                    "/api/task/bulk-action",
+                    json={"action": "run", "task_ids": task_ids},
+                    headers={"X-Token": TOKEN},
+                )
+
+            payload = response.get_json()
+
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["submitted_count"], 0)
+            self.assertEqual(payload["failed_count"], 5)
+            self.assertEqual(
+                payload["failures"],
+                [f"Task {task_id}: 启动失败" for task_id in task_ids],
+            )
+            self.assertEqual(
+                payload["msg"],
+                "已提交运行 0 个任务；5 个未运行：Task t1: 启动失败；Task t2: 启动失败；Task t3: 启动失败；等 5 个",
+            )
+            self.assertEqual(run_task_now.call_count, 5)
+
     def test_task_bulk_rejects_empty_selection(self):
         with isolated_app() as (app, _base_dir):
             with patch("fls_manager.routes.api.load_tasks") as load_tasks:
