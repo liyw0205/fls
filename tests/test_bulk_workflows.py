@@ -753,6 +753,54 @@ class BulkWorkflowTests(unittest.TestCase):
                 ["failed-1", "failed-2", "failed-3", "failed-4", "untouched"],
             )
 
+    def test_task_bulk_delete_all_stop_failures_skip_write_and_reload(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+            from fls_manager.models import load_tasks
+
+            tasks = [sample_task("t1"), sample_task("t2"), sample_task("untouched")]
+            write_json(paths.TASK_FILE, tasks)
+            load_tasks()
+            persisted_tasks = read_json(base_dir / "data" / "tasks.json")
+
+            stop_results = {
+                "t1": (False, "停止失败 1"),
+                "t2": (False, "停止失败 2"),
+            }
+
+            with patch(
+                "fls_manager.routes.api.stop_task_now",
+                side_effect=lambda task_id: stop_results[task_id],
+            ) as stop_task_now:
+                with patch("fls_manager.routes.api.save_tasks") as save_tasks:
+                    with patch("fls_manager.routes.api.reload_scheduler") as reload_scheduler:
+                        response = app.test_client().post(
+                            "/api/task/bulk-action",
+                            json={"action": "delete", "task_ids": ["t1", "t2"]},
+                            headers={"X-Token": TOKEN},
+                        )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(
+                response.get_json(),
+                {
+                    "ok": True,
+                    "msg": "已删除 0 个任务；2 个删除失败：Task t1: 停止失败 1；Task t2: 停止失败 2",
+                    "action": "delete",
+                    "count": 2,
+                    "deleted_count": 0,
+                    "failed_count": 2,
+                    "failures": ["Task t1: 停止失败 1", "Task t2: 停止失败 2"],
+                },
+            )
+            self.assertEqual(
+                stop_task_now.call_args_list,
+                [unittest.mock.call("t1"), unittest.mock.call("t2")],
+            )
+            save_tasks.assert_not_called()
+            reload_scheduler.assert_not_called()
+            self.assertEqual(read_json(base_dir / "data" / "tasks.json"), persisted_tasks)
+
     def test_task_bulk_enable_disable_skips_write_when_no_state_changes(self):
         with isolated_app() as (app, base_dir):
             from fls_manager import paths
