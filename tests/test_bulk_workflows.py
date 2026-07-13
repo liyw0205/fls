@@ -284,6 +284,28 @@ class BulkWorkflowTests(unittest.TestCase):
                 ],
             )
 
+    def test_api_status_returns_json_error_when_status_collection_fails(self):
+        with isolated_app() as (app, _base_dir):
+            with patch(
+                "fls_manager.routes.api.load_tasks",
+                side_effect=RuntimeError("task storage unavailable"),
+            ):
+                response = app.test_client().get(
+                    "/api/status",
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 500)
+            self.assertEqual(response.content_type, "application/json")
+            self.assertEqual(
+                response.get_json(),
+                {
+                    "ok": False,
+                    "msg": "task storage unavailable",
+                    "tasks": [],
+                },
+            )
+
     def test_task_copy_resets_runtime_fields_and_keeps_retry_config(self):
         with isolated_app() as (app, base_dir):
             from fls_manager import paths

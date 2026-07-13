@@ -88,25 +88,33 @@ def _bulk_payload(action, task_ids, msg, **extra):
 def api_status():
     result = []
 
-    for t in load_tasks():
-        task_id = t["id"]
-        running = is_running(task_id)
-        running_info = RUNNING.get(task_id, {}) if running else {}
-        process_name = running_info.get("process_name") or safe_process_name(
-            t.get("name") or t.get("command")
-        )
+    try:
+        for t in load_tasks():
+            task_id = t["id"]
+            running = is_running(task_id)
+            running_info = RUNNING.get(task_id, {}) if running else {}
+            process_name = running_info.get("process_name") or safe_process_name(
+                t.get("name") or t.get("command")
+            )
 
-        result.append({
-            "id": task_id,
-            "name": t.get("name"),
-            "command": t.get("command"),
-            "cron": t.get("cron"),
-            "enabled": t.get("enabled", True),
-            "running": running,
-            "run_count": int(t.get("run_count", 0)),
-            "pid": running_info.get("pid") if running else None,
-            "process_name": process_name,
-        })
+            result.append({
+                "id": task_id,
+                "name": t.get("name"),
+                "command": t.get("command"),
+                "cron": t.get("cron"),
+                "enabled": t.get("enabled", True),
+                "running": running,
+                "run_count": int(t.get("run_count", 0)),
+                "pid": running_info.get("pid") if running else None,
+                "process_name": process_name,
+            })
+
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "msg": str(e),
+            "tasks": [],
+        }), 500
 
     return jsonify(result)
 
