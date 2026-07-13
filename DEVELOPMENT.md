@@ -1,7 +1,7 @@
 # FLS 开发文档
 
 更新时间：2026-07-14
-基线：`main` / 阶段 86
+基线：`main` / 阶段 87
 
 本文是 FLS 当前代码库的开发协作文档。历史阶段流水见
 `docs/DEVELOPMENT_PROGRESS.md`，下一轮接续信息见
@@ -266,6 +266,7 @@ CSRF 约定：
 日志文件边界：
 
 - 日志查看页和 `/api/logfile/<filename>` 只接受真实路径仍位于 `LOG_DIR` 的普通文件；指向目录外的符号链接返回 404。
+- `/api/logfile/<filename>` 收到非整数 `lines` 时返回 `400 text/plain`，不调用日志读取。
 
 关于页任务 API：
 

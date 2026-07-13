@@ -79,7 +79,14 @@ window.__FLS_ACTIVE_LOG_INTERVAL__ = setInterval(loadLog, 2000);
 def api_logfile(filename):
     file_path = safe_log_file(filename)
 
-    lines = int(request.args.get("lines", "1500"))
+    try:
+        lines = int(request.args.get("lines", "1500"))
+    except (TypeError, ValueError):
+        return Response(
+            "lines 必须为整数",
+            status=400,
+            content_type="text/plain; charset=utf-8",
+        )
 
     return Response(
         tail_file(str(file_path), lines),

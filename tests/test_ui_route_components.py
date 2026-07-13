@@ -971,6 +971,25 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertTrue(outside_file.exists())
             self.assertTrue(symlink_path.is_symlink())
 
+    def test_api_logfile_invalid_lines_returns_text_error_without_reading_file(self):
+        with isolated_app() as (app, base_dir):
+            log_dir = base_dir / "log"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_file = log_dir / "live.log"
+            log_file.write_text("log-content\n", encoding="utf-8")
+
+            with patch("fls_manager.routes.logs.files.tail_file") as tail_file:
+                response = app.test_client().get(
+                    "/api/logfile/live.log?lines=invalid",
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.content_type, "text/plain; charset=utf-8")
+            self.assertEqual(response.get_data(as_text=True), "lines 必须为整数")
+            tail_file.assert_not_called()
+            self.assertEqual(log_file.read_text(encoding="utf-8"), "log-content\n")
+
     def test_task_log_page_keeps_history_table_actions_and_safe_back(self):
         with isolated_app() as (app, base_dir):
             data_dir = base_dir / "data"
