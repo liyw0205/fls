@@ -1610,6 +1610,36 @@ class BulkWorkflowTests(unittest.TestCase):
             self.assertTrue(tasks["t1"]["enabled"])
             self.assertFalse(tasks["t2"]["enabled"])
 
+    def test_task_bulk_load_failure_returns_500_with_request_context(self):
+        with isolated_app() as (app, _base_dir):
+            with patch(
+                "fls_manager.routes.api.load_tasks",
+                side_effect=RuntimeError("task storage unavailable"),
+            ):
+                with patch("fls_manager.routes.api.save_tasks") as save_tasks:
+                    with patch("fls_manager.routes.api.reload_scheduler") as reload_scheduler:
+                        response = app.test_client().post(
+                            "/api/task/bulk-action",
+                            json={
+                                "action": " disable ",
+                                "task_ids": ["t1", " t2 ", "t1", ""],
+                            },
+                            headers={"X-Token": TOKEN},
+                        )
+
+            self.assertEqual(response.status_code, 500)
+            self.assertEqual(
+                response.get_json(),
+                {
+                    "ok": False,
+                    "msg": "task storage unavailable",
+                    "action": "disable",
+                    "count": 2,
+                },
+            )
+            save_tasks.assert_not_called()
+            reload_scheduler.assert_not_called()
+
     def test_legacy_task_pin_post_updates_task_and_uses_safe_back(self):
         with isolated_app() as (app, base_dir):
             from fls_manager import paths

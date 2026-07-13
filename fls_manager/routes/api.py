@@ -257,6 +257,9 @@ def api_task_action(action, task_id):
 
 @bp.route("/api/task/bulk-action", methods=["POST"])
 def api_task_bulk_action():
+    action = ""
+    task_ids = []
+
     try:
         data = request.get_json(silent=True) or {}
         action = str(data.get("action") or request.form.get("action") or "").strip()
@@ -445,4 +448,9 @@ def api_task_bulk_action():
         return jsonify({"ok": False, "msg": "未知批量操作"}), 400
 
     except Exception as e:
-        return jsonify({"ok": False, "msg": str(e)}), 500
+        return jsonify({
+            "ok": False,
+            "msg": str(e),
+            "action": action,
+            "count": len(task_ids),
+        }), 500
