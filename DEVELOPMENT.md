@@ -1,7 +1,7 @@
 # FLS 开发文档
 
 更新时间：2026-07-14
-基线：`main` / 阶段 77
+基线：`main` / 阶段 78
 
 本文是 FLS 当前代码库的开发协作文档。历史阶段流水见
 `docs/DEVELOPMENT_PROGRESS.md`，下一轮接续信息见
@@ -222,6 +222,7 @@ CSRF 约定：
 
 - `/api/status` 为每个任务返回 `id/name/command/cron/enabled/running/run_count/pid/process_name`；未运行任务的 `pid` 为 `null`，进程名称按安全名称规则推导。
 - 运行中任务的运行记录缺少或未提供 `process_name` 时，`/api/status` 应使用任务名称或命令的安全进程名兜底，保持字段完整且不抛异常。
+- 运行记录的 `process_name` 只有在为非空字符串时才直接采用；其它类型和纯空白值按安全名称规则兜底。
 - `/api/status` 收集状态异常时返回 `500` JSON：`ok=false`、错误 `msg` 和空 `tasks` 列表；正常响应继续保持任务数组。
 - `/api/scheduler/jobs` 查询调度器失败时返回 `500` JSON：`ok=false`、错误 `msg` 和空 `jobs` 列表。
 - `/api/scheduler/jobs` 正常时返回 `ok=true` 和 `jobs`；每项包含 `id`、字符串或 `null` 的 `next_run_time`，以及字符串 `trigger`。

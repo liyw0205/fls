@@ -93,9 +93,12 @@ def api_status():
             task_id = t["id"]
             running = is_running(task_id)
             running_info = RUNNING.get(task_id, {}) if running else {}
-            process_name = running_info.get("process_name") or safe_process_name(
-                t.get("name") or t.get("command")
-            )
+            runtime_process_name = running_info.get("process_name")
+
+            if isinstance(runtime_process_name, str) and runtime_process_name.strip():
+                process_name = runtime_process_name
+            else:
+                process_name = safe_process_name(t.get("name") or t.get("command"))
 
             result.append({
                 "id": task_id,

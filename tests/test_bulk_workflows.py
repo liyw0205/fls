@@ -306,6 +306,38 @@ class BulkWorkflowTests(unittest.TestCase):
                 },
             )
 
+    def test_api_status_non_string_process_name_uses_safe_fallback(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [sample_task("t1", name="Typed running task", run_count=5)],
+            )
+
+            with patch("fls_manager.routes.api.is_running", return_value=True):
+                with patch(
+                    "fls_manager.routes.api.safe_process_name",
+                    return_value="safe:Typed running task",
+                ) as safe_process_name:
+                    with patch(
+                        "fls_manager.routes.api.RUNNING",
+                        {"t1": {"pid": 3201, "process_name": 123}},
+                    ):
+                        response = app.test_client().get(
+                            "/api/status",
+                            headers={"X-Token": TOKEN},
+                        )
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(len(payload), 1)
+            self.assertTrue(payload[0]["running"])
+            self.assertEqual(payload[0]["pid"], 3201)
+            self.assertEqual(payload[0]["process_name"], "safe:Typed running task")
+            self.assertIsInstance(payload[0]["process_name"], str)
+            safe_process_name.assert_called_once_with("Typed running task")
+
     def test_task_copy_resets_runtime_fields_and_keeps_retry_config(self):
         with isolated_app() as (app, base_dir):
             from fls_manager import paths
