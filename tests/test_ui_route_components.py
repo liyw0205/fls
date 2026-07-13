@@ -1385,6 +1385,28 @@ class UiRouteComponentTests(unittest.TestCase):
             )
             test_proxy_object.assert_not_called()
 
+    def test_api_proxy_quality_saved_missing_returns_404_json_without_network(self):
+        with isolated_app() as (app, _base_dir):
+            with patch(
+                "fls_manager.routes.proxy.api.quality_proxy_object"
+            ) as quality_proxy_object:
+                response = app.test_client().get(
+                    "/api/proxy/quality/missing-proxy?urls=https://example.invalid",
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 404)
+            self.assertEqual(response.content_type, "application/json")
+            self.assertEqual(
+                response.get_json(),
+                {
+                    "ok": False,
+                    "name": "",
+                    "error": "代理不存在",
+                },
+            )
+            quality_proxy_object.assert_not_called()
+
     def test_online_install_log_api_returns_stable_polling_fields(self):
         with isolated_app() as (app, _base_dir):
             from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING
