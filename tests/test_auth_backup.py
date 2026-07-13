@@ -11,6 +11,7 @@ import unittest
 import warnings
 import zipfile
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 sys.dont_write_bytecode = True
 
@@ -406,6 +407,31 @@ class BackupSafetyTests(unittest.TestCase):
                     item["mtime_text"],
                     datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S"),
                 )
+
+    def test_api_backup_delete_missing_file_is_idempotent(self):
+        with isolated_fls_env(token="unit-token"):
+            missing_target = MagicMock()
+            missing_target.exists.return_value = False
+
+            with patch(
+                "fls_manager.routes.backup.api.backup_safe_file",
+                return_value=missing_target,
+            ) as backup_safe_file:
+                response = load_app().test_client().post(
+                    "/api/backup/delete",
+                    data={"filename": "already-gone.tar.gz"},
+                    headers={"X-Token": "unit-token"},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.content_type, "application/json")
+            self.assertEqual(
+                response.get_json(),
+                {"ok": True, "msg": "已删除"},
+            )
+            backup_safe_file.assert_called_once_with("already-gone.tar.gz")
+            missing_target.exists.assert_called_once_with()
+            missing_target.unlink.assert_not_called()
 
     def test_safe_extract_zip_accepts_regular_paths(self):
         with isolated_fls_env(token="unit-token"):

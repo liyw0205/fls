@@ -1,7 +1,7 @@
 # FLS 开发文档
 
 更新时间：2026-07-14
-基线：`main` / 阶段 87
+基线：`main` / 阶段 88
 
 本文是 FLS 当前代码库的开发协作文档。历史阶段流水见
 `docs/DEVELOPMENT_PROGRESS.md`，下一轮接续信息见
@@ -253,6 +253,7 @@ CSRF 约定：
 
 - `/api/backup/job/<job_id>` 成功时返回 `ok=true` 及任务的 `id/items/type_text/running/status/filename/size/size_text/error/created_at/updated_at`；任务不存在时返回 `404 + ok:false`。
 - `/api/backup/list` 仅返回 `.tar.gz` 普通文件，字段为 `name/size/size_text/mtime/mtime_text`，并按修改时间倒序排列。
+- `/api/backup/delete` 删除已不存在文件时保持幂等成功，返回 `200 + ok:true` 且不调用 `unlink()`。
 
 代理 API：
 
