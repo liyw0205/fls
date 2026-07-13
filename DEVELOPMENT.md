@@ -1,7 +1,7 @@
 # FLS 开发文档
 
 更新时间：2026-07-14
-基线：`main` / 阶段 81
+基线：`main` / 阶段 82
 
 本文是 FLS 当前代码库的开发协作文档。历史阶段流水见
 `docs/DEVELOPMENT_PROGRESS.md`，下一轮接续信息见
@@ -257,6 +257,10 @@ CSRF 约定：
 代理 API：
 
 - `/api/proxy/test/<proxy_id>` 在代理不存在时返回 `404` JSON：`ok=false`、空 `name` 和 `error=代理不存在`，且不执行网络检测。
+
+在线脚本 API：
+
+- `/api/online-scripts/log/<install_id>` 对已有安装记录返回 `running/status/returncode/error/log_file/log`，日志行数由 `lines` 参数控制，内部进程对象不进入响应。
 
 兼容页面动作：
 

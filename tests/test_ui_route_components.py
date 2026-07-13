@@ -1342,6 +1342,49 @@ class UiRouteComponentTests(unittest.TestCase):
             )
             test_proxy_object.assert_not_called()
 
+    def test_online_install_log_api_returns_stable_polling_fields(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING
+
+            ONLINE_INSTALL_RUNNING["install-1"] = {
+                "id": "install-1",
+                "script_id": "demo",
+                "script_name": "Demo",
+                "log_file": "/tmp/online-script-install-demo.log",
+                "running": 1,
+                "status": "安装中",
+                "returncode": None,
+                "error": "",
+                "process": object(),
+            }
+
+            with patch(
+                "fls_manager.routes.online_scripts.logs.tail_file",
+                return_value="clone complete\ninstalling dependencies",
+            ) as tail_file:
+                response = app.test_client().get(
+                    "/api/online-scripts/log/install-1?lines=1600",
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.content_type, "application/json")
+            self.assertEqual(
+                response.get_json(),
+                {
+                    "running": True,
+                    "status": "安装中",
+                    "returncode": None,
+                    "error": "",
+                    "log_file": "/tmp/online-script-install-demo.log",
+                    "log": "clone complete\ninstalling dependencies",
+                },
+            )
+            tail_file.assert_called_once_with(
+                "/tmp/online-script-install-demo.log",
+                1600,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
