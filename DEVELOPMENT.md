@@ -1,7 +1,7 @@
 # FLS 开发文档
 
 更新时间：2026-07-14
-基线：`main` / 阶段 80
+基线：`main` / 阶段 81
 
 本文是 FLS 当前代码库的开发协作文档。历史阶段流水见
 `docs/DEVELOPMENT_PROGRESS.md`，下一轮接续信息见
@@ -253,6 +253,10 @@ CSRF 约定：
 
 - `/api/backup/job/<job_id>` 成功时返回 `ok=true` 及任务的 `id/items/type_text/running/status/filename/size/size_text/error/created_at/updated_at`；任务不存在时返回 `404 + ok:false`。
 - `/api/backup/list` 仅返回 `.tar.gz` 普通文件，字段为 `name/size/size_text/mtime/mtime_text`，并按修改时间倒序排列。
+
+代理 API：
+
+- `/api/proxy/test/<proxy_id>` 在代理不存在时返回 `404` JSON：`ok=false`、空 `name` 和 `error=代理不存在`，且不执行网络检测。
 
 兼容页面动作：
 

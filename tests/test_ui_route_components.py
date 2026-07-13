@@ -1320,6 +1320,28 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn("文档加载失败：&lt;bad &amp; &quot;x&quot;&gt;", html)
             self.assertNotIn("<bad", html)
 
+    def test_api_proxy_test_saved_missing_returns_404_json_without_network(self):
+        with isolated_app() as (app, _base_dir):
+            with patch(
+                "fls_manager.routes.proxy.api.test_proxy_object"
+            ) as test_proxy_object:
+                response = app.test_client().get(
+                    "/api/proxy/test/missing-proxy",
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 404)
+            self.assertEqual(response.content_type, "application/json")
+            self.assertEqual(
+                response.get_json(),
+                {
+                    "ok": False,
+                    "name": "",
+                    "error": "代理不存在",
+                },
+            )
+            test_proxy_object.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
