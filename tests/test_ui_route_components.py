@@ -1409,6 +1409,39 @@ class UiRouteComponentTests(unittest.TestCase):
                 1600,
             )
 
+    def test_online_install_log_api_missing_returns_stable_polling_fields(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING
+
+            self.assertNotIn("missing-install", ONLINE_INSTALL_RUNNING)
+
+            with patch(
+                "fls_manager.routes.online_scripts.logs.tail_file"
+            ) as tail_file:
+                response = app.test_client().get(
+                    "/api/online-scripts/log/missing-install?lines=invalid",
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.content_type, "application/json")
+            self.assertEqual(
+                response.get_json(),
+                {
+                    "running": False,
+                    "status": "记录不存在或面板已重启",
+                    "returncode": None,
+                    "error": "",
+                    "log_file": "",
+                    "log": (
+                        "安装记录不存在或面板已重启。"
+                        "请到日志管理中查找 online-script-install-*.log。"
+                    ),
+                },
+            )
+            tail_file.assert_not_called()
+            self.assertNotIn("missing-install", ONLINE_INSTALL_RUNNING)
+
     def test_about_job_log_invalid_lines_returns_json_error(self):
         with isolated_app() as (app, _base_dir):
             from fls_manager.routes.about.state import ABOUT_JOBS

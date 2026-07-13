@@ -9,6 +9,9 @@ def api_online_install_log(install_id):
         return jsonify({
             "running": False,
             "status": "记录不存在或面板已重启",
+            "returncode": None,
+            "error": "",
+            "log_file": "",
             "log": "安装记录不存在或面板已重启。请到日志管理中查找 online-script-install-*.log。",
         })
 
