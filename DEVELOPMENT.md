@@ -1,7 +1,7 @@
 # FLS 开发文档
 
 更新时间：2026-07-14
-基线：`main` / 阶段 84
+基线：`main` / 阶段 85
 
 本文是 FLS 当前代码库的开发协作文档。历史阶段流水见
 `docs/DEVELOPMENT_PROGRESS.md`，下一轮接续信息见
@@ -269,6 +269,10 @@ CSRF 约定：
 关于页任务 API：
 
 - `/api/about/job-log/<job_id>` 收到非整数 `lines` 时返回 `400` JSON，包含 `ok/msg/running/status/updated_at/log`，且不读取日志或修改任务状态。
+
+依赖安装 API：
+
+- `/api/deps/install-log/<install_id>` 收到非整数 `lines` 时返回 `400` JSON，且在参数校验失败时不检查进程状态、不读取日志。
 
 兼容页面动作：
 

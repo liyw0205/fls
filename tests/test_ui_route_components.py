@@ -1444,6 +1444,43 @@ class UiRouteComponentTests(unittest.TestCase):
             tail_file.assert_not_called()
             self.assertEqual(ABOUT_JOBS["job-1"], info)
 
+    def test_deps_install_log_invalid_lines_returns_json_error(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.state import DEPS_RUNNING
+
+            info = {
+                "package": "demo",
+                "log_file": "/tmp/deps-install-demo.log",
+                "finished": False,
+                "returncode": None,
+                "process": object(),
+            }
+            DEPS_RUNNING["install-1"] = info.copy()
+
+            with patch(
+                "fls_manager.routes.deps.is_deps_install_running"
+            ) as is_deps_install_running:
+                with patch("fls_manager.routes.deps.tail_file") as tail_file:
+                    response = app.test_client().get(
+                        "/api/deps/install-log/install-1?lines=invalid",
+                        headers={"X-Token": TOKEN},
+                    )
+
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.content_type, "application/json")
+            self.assertEqual(
+                response.get_json(),
+                {
+                    "ok": False,
+                    "msg": "lines 必须为整数",
+                    "running": False,
+                    "log": "",
+                },
+            )
+            is_deps_install_running.assert_not_called()
+            tail_file.assert_not_called()
+            self.assertEqual(DEPS_RUNNING["install-1"], info)
+
 
 if __name__ == "__main__":
     unittest.main()

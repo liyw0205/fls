@@ -291,9 +291,18 @@ def api_deps_install_log(install_id):
             "log": "安装进程已结束或面板已重启，无法通过该 ID 继续追踪。请到日志管理查看 deps-install-*.log / system-install-*.log。",
         })
 
+    try:
+        lines = int(request.args.get("lines", "800"))
+    except (TypeError, ValueError):
+        return jsonify({
+            "ok": False,
+            "msg": "lines 必须为整数",
+            "running": False,
+            "log": "",
+        }), 400
+
     running = is_deps_install_running(install_id)
     log_file = info.get("log_file", "")
-    lines = int(request.args.get("lines", "800"))
 
     return jsonify({
         "running": running,
