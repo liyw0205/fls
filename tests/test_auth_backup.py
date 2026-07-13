@@ -317,6 +317,44 @@ class BackupSafetyTests(unittest.TestCase):
             self.assertEqual(target.name, "demo.tar.gz")
             self.assertIn("backups", target.parts)
 
+    def test_api_backup_job_returns_stable_progress_fields(self):
+        with isolated_fls_env(token="unit-token"):
+            from fls_manager.routes.backup._common import BACKUP_JOBS
+
+            info = {
+                "id": "job-1",
+                "items": ["data", "scripts"],
+                "type_text": "配置 + 脚本",
+                "running": False,
+                "status": "已完成",
+                "filename": "fls-backup-all.tar.gz",
+                "size": 2048,
+                "size_text": "2.0 KB",
+                "error": "",
+                "created_at": "2026-07-14 10:00:00",
+                "updated_at": "2026-07-14 10:01:00",
+            }
+            BACKUP_JOBS["job-1"] = info
+
+            client = load_app().test_client()
+            response = client.get(
+                "/api/backup/job/job-1",
+                headers={"X-Token": "unit-token"},
+            )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json(), {"ok": True, **info})
+
+            missing = client.get(
+                "/api/backup/job/missing",
+                headers={"X-Token": "unit-token"},
+            )
+            self.assertEqual(missing.status_code, 404)
+            self.assertEqual(
+                missing.get_json(),
+                {"ok": False, "msg": "任务不存在"},
+            )
+
     def test_safe_extract_zip_accepts_regular_paths(self):
         with isolated_fls_env(token="unit-token"):
             from fls_manager.routes.backup._common import safe_extract_zip

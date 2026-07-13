@@ -1,7 +1,7 @@
 # FLS 开发文档
 
 更新时间：2026-07-14
-基线：`main` / 阶段 78
+基线：`main` / 阶段 79
 
 本文是 FLS 当前代码库的开发协作文档。历史阶段流水见
 `docs/DEVELOPMENT_PROGRESS.md`，下一轮接续信息见
@@ -248,6 +248,10 @@ CSRF 约定：
 - 批量删除前逐个停止任务；停止成功或“任务未运行”的任务可删除，其他停止失败项必须保留。响应固定返回 `deleted_count`、`failed_count` 和完整 `failures`，持久化结果只能移除可删除项。
 - 批量删除没有任何可删除项时不写回任务文件，也不重载调度器。
 - 批量取出合集只写回实际有合集归属的任务，`updated_count` 表示实际变更数量。
+
+备份 API：
+
+- `/api/backup/job/<job_id>` 成功时返回 `ok=true` 及任务的 `id/items/type_text/running/status/filename/size/size_text/error/created_at/updated_at`；任务不存在时返回 `404 + ok:false`。
 
 兼容页面动作：
 
