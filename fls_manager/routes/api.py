@@ -91,6 +91,10 @@ def api_status():
     for t in load_tasks():
         task_id = t["id"]
         running = is_running(task_id)
+        running_info = RUNNING.get(task_id, {}) if running else {}
+        process_name = running_info.get("process_name") or safe_process_name(
+            t.get("name") or t.get("command")
+        )
 
         result.append({
             "id": task_id,
@@ -100,8 +104,8 @@ def api_status():
             "enabled": t.get("enabled", True),
             "running": running,
             "run_count": int(t.get("run_count", 0)),
-            "pid": RUNNING.get(task_id, {}).get("pid") if running else None,
-            "process_name": RUNNING.get(task_id, {}).get("process_name") if running else safe_process_name(t.get("name") or t.get("command")),
+            "pid": running_info.get("pid") if running else None,
+            "process_name": process_name,
         })
 
     return jsonify(result)

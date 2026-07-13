@@ -1,13 +1,13 @@
 # FLS 开发文档
 
-更新时间：2026-07-13
-基线：`main` / 阶段 72
+更新时间：2026-07-14
+基线：`main` / 阶段 74
 
 本文是 FLS 当前代码库的开发协作文档。历史阶段流水见
 `docs/DEVELOPMENT_PROGRESS.md`，下一轮接续信息见
 `docs/SESSION_HANDOFF.md`，数据结构细节见 `docs/DATA_SCHEMA.md`。
 
-当前已排定的五个阶段目标见 `docs/goals/`：阶段 70 至阶段 74。每个阶段完成后都
+阶段 70 至阶段 74 的目标见 `docs/goals/`，现已全部完成。每个后续阶段完成后都
 必须更新本文件、阶段流水和会话交接文档，再单独提交并推送。
 
 ## 1. 项目定位
@@ -221,6 +221,7 @@ CSRF 约定：
 状态 API：
 
 - `/api/status` 为每个任务返回 `id/name/command/cron/enabled/running/run_count/pid/process_name`；未运行任务的 `pid` 为 `null`，进程名称按安全名称规则推导。
+- 运行中任务的运行记录缺少或未提供 `process_name` 时，`/api/status` 应使用任务名称或命令的安全进程名兜底，保持字段完整且不抛异常。
 - `/api/scheduler/jobs` 查询调度器失败时返回 `500` JSON：`ok=false`、错误 `msg` 和空 `jobs` 列表。
 - `/api/scheduler/jobs` 正常时返回 `ok=true` 和 `jobs`；每项包含 `id`、字符串或 `null` 的 `next_run_time`，以及字符串 `trigger`。
 
@@ -241,7 +242,7 @@ CSRF 约定：
 - 批量启用/禁用只写回状态实际变化的任务，`updated_count` 表示实际变更数量。
 - 批量运行会返回 `submitted_count`、`failed_count` 和完整 `failures`；消息正文最多展开前三条失败，超过时保留总数提示。
 - 批量停止将“任务未运行”计入 `skipped_count` 而非失败；其余停止失败通过 `failed_count` 和完整 `failures` 返回，消息摘要最多展开前三项。
-- 批量删除前逐个停止任务；停止失败的任务不能被删除，响应包含 `failed_count` / `failures`。
+- 批量删除前逐个停止任务；停止成功或“任务未运行”的任务可删除，其他停止失败项必须保留。响应固定返回 `deleted_count`、`failed_count` 和完整 `failures`，持久化结果只能移除可删除项。
 - 批量取出合集只写回实际有合集归属的任务，`updated_count` 表示实际变更数量。
 
 兼容页面动作：

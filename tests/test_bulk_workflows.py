@@ -215,6 +215,75 @@ class BulkWorkflowTests(unittest.TestCase):
             self.assertEqual(is_running.call_count, 2)
             safe_process_name.assert_called_once_with("Task t2")
 
+    def test_api_status_running_record_without_process_name_uses_safe_fallback(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager import paths
+
+            write_json(
+                paths.TASK_FILE,
+                [
+                    sample_task("t1", name="Named running task", run_count=4),
+                    sample_task("t2", name="", command="python fallback.py", run_count=9),
+                ],
+            )
+
+            with patch(
+                "fls_manager.routes.api.is_running",
+                return_value=True,
+            ) as is_running:
+                with patch(
+                    "fls_manager.routes.api.safe_process_name",
+                    side_effect=lambda value: f"safe:{value}",
+                ) as safe_process_name:
+                    with patch(
+                        "fls_manager.routes.api.RUNNING",
+                        {
+                            "t1": {"pid": 3101, "status": "starting"},
+                            "t2": {"pid": 3102, "status": "starting"},
+                        },
+                    ):
+                        response = app.test_client().get(
+                            "/api/status",
+                            headers={"X-Token": TOKEN},
+                        )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(
+                response.get_json(),
+                [
+                    {
+                        "id": "t1",
+                        "name": "Named running task",
+                        "command": "task t1.py",
+                        "cron": "",
+                        "enabled": True,
+                        "running": True,
+                        "run_count": 4,
+                        "pid": 3101,
+                        "process_name": "safe:Named running task",
+                    },
+                    {
+                        "id": "t2",
+                        "name": "python fallback.py",
+                        "command": "python fallback.py",
+                        "cron": "",
+                        "enabled": True,
+                        "running": True,
+                        "run_count": 9,
+                        "pid": 3102,
+                        "process_name": "safe:python fallback.py",
+                    },
+                ],
+            )
+            self.assertEqual(is_running.call_count, 2)
+            self.assertEqual(
+                safe_process_name.call_args_list,
+                [
+                    unittest.mock.call("Named running task"),
+                    unittest.mock.call("python fallback.py"),
+                ],
+            )
+
     def test_task_copy_resets_runtime_fields_and_keeps_retry_config(self):
         with isolated_app() as (app, base_dir):
             from fls_manager import paths
@@ -591,6 +660,75 @@ class BulkWorkflowTests(unittest.TestCase):
             self.assertEqual(
                 [task["id"] for task in read_json(base_dir / "data" / "tasks.json")],
                 ["t2"],
+            )
+
+    def test_task_bulk_delete_reports_complete_failures_and_truncates_summary(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            tasks = [
+                sample_task("success", name="Successful task"),
+                sample_task("idle", name="Idle task"),
+                sample_task("failed-1", name="Failed task 1"),
+                sample_task("failed-2", name="Failed task 2"),
+                sample_task("failed-3", name="Failed task 3"),
+                sample_task("failed-4", name="Failed task 4"),
+                sample_task("untouched", name="Untouched task"),
+            ]
+            write_json(paths.TASK_FILE, tasks)
+
+            stop_results = {
+                "success": (True, "已结束"),
+                "idle": (False, "任务未运行"),
+                "failed-1": (False, "停止失败 1"),
+                "failed-2": (False, "停止失败 2"),
+                "failed-3": (False, "停止失败 3"),
+                "failed-4": (False, "停止失败 4"),
+            }
+            selected_ids = list(stop_results)
+
+            with patch(
+                "fls_manager.routes.api.stop_task_now",
+                side_effect=lambda task_id: stop_results[task_id],
+            ) as stop_task_now:
+                with patch("fls_manager.routes.api.reload_scheduler") as reload_scheduler:
+                    response = app.test_client().post(
+                        "/api/task/bulk-action",
+                        json={"action": "delete", "task_ids": selected_ids},
+                        headers={"X-Token": TOKEN},
+                    )
+
+            payload = response.get_json()
+            expected_failures = [
+                "Failed task 1: 停止失败 1",
+                "Failed task 2: 停止失败 2",
+                "Failed task 3: 停止失败 3",
+                "Failed task 4: 停止失败 4",
+            ]
+
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["action"], "delete")
+            self.assertEqual(payload["count"], 6)
+            self.assertEqual(payload["deleted_count"], 2)
+            self.assertEqual(payload["failed_count"], 4)
+            self.assertEqual(payload["failures"], expected_failures)
+            self.assertEqual(
+                payload["msg"],
+                "已删除 2 个任务；4 个删除失败："
+                "Failed task 1: 停止失败 1；"
+                "Failed task 2: 停止失败 2；"
+                "Failed task 3: 停止失败 3；等 4 个",
+            )
+            self.assertNotIn(expected_failures[3], payload["msg"])
+            self.assertEqual(
+                stop_task_now.call_args_list,
+                [unittest.mock.call(task_id) for task_id in selected_ids],
+            )
+            reload_scheduler.assert_called_once_with()
+            self.assertEqual(
+                [task["id"] for task in read_json(base_dir / "data" / "tasks.json")],
+                ["failed-1", "failed-2", "failed-3", "failed-4", "untouched"],
             )
 
     def test_task_bulk_enable_disable_skips_write_when_no_state_changes(self):

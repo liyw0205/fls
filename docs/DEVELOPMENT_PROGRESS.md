@@ -1,6 +1,6 @@
 # FLS 开发进度
 
-更新时间：2026-07-08
+更新时间：2026-07-14
 
 本文记录阶段开发进度。每个阶段结束前必须更新本文件，并生成或更新 `docs/SESSION_HANDOFF.md`。
 
@@ -3058,6 +3058,63 @@
 
 ## 下一阶段候选
 
-- 阶段 73：固定批量删除的混合停止结果与持久化边界。
+## 阶段 73：批量删除混合结果回归
+
+状态：已完成
+
+目标：
+
+- 固定批量删除任务在混合停止结果下的响应统计、失败列表和持久化边界。
+
+测试契约：
+
+- mock 三类停止结果：停止成功、停止失败和“任务未运行”。
+- 停止成功与“任务未运行”的任务计入 `deleted_count` 并从任务文件移除；其他停止失败项计入 `failed_count`、写入完整 `failures` 并保留在任务文件中。
+- 删除消息摘要最多展开前三项失败，超过三项时保留失败总数提示，完整失败列表仍由 `failures` 返回。
+- 混合结果存在可删除项时只写回可删除项的移除结果，并重载调度器一次。
+
+目标测试命令：
+
+- `python -B -m unittest tests.test_bulk_workflows.BulkWorkflowTests.test_task_bulk_delete_reports_complete_failures_and_truncates_summary`
+
+验证记录：
+
+- 目标测试通过，1 test OK。
+- 全量 `python -B -m unittest discover -s tests`：通过，191 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `node --check fls_manager/static/fls.js`：通过。
+- `git -c safe.directory=/data/data/com.termux/files/home/fls diff --check`：通过。
+
+## 阶段 74：运行状态进程名兜底回归
+
+状态：已完成
+
+目标：
+
+- 固定 `/api/status` 在运行中任务记录缺少进程名称时的安全兜底表示。
+
+测试契约：
+
+- mock 任务处于运行中，但对应运行记录缺少或未提供 `process_name`。
+- 响应继续包含完整状态字段，`pid` 保留运行记录值，`process_name` 使用任务名称或命令经 `safe_process_name()` 推导的兜底值，接口不抛异常。
+- 兜底仅用于缺失进程名称的运行记录，不改变已有非空进程名称。
+
+目标测试命令：
+
+- `python -B -m unittest tests.test_bulk_workflows.BulkWorkflowTests.test_api_status_running_record_without_process_name_uses_safe_fallback`
+
+验证记录：
+
+- 目标测试通过，1 test OK。
+- 两项目标测试合并运行通过，2 tests OK。
+- 全量 `python -B -m unittest discover -s tests`：通过，191 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `python -B -m compileall fls-manager.py fls_manager tests tools`：通过。
+- `node --check fls_manager/static/fls.js`：通过。
+- `git -c safe.directory=/data/data/com.termux/files/home/fls diff --check`：通过。
+
+## 下一阶段候选
+
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
