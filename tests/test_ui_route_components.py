@@ -1409,6 +1409,41 @@ class UiRouteComponentTests(unittest.TestCase):
                 1600,
             )
 
+    def test_about_job_log_invalid_lines_returns_json_error(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.routes.about.state import ABOUT_JOBS
+
+            info = {
+                "id": "job-1",
+                "running": True,
+                "status": "运行中",
+                "updated_at": "2026-07-14 11:00:00",
+                "log_file": "/tmp/about-job.log",
+            }
+            ABOUT_JOBS["job-1"] = info.copy()
+
+            with patch("fls_manager.routes.about.jobs.tail_file") as tail_file:
+                response = app.test_client().get(
+                    "/api/about/job-log/job-1?lines=invalid",
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.content_type, "application/json")
+            self.assertEqual(
+                response.get_json(),
+                {
+                    "ok": False,
+                    "msg": "lines 必须为整数",
+                    "running": False,
+                    "status": "参数错误",
+                    "updated_at": "-",
+                    "log": "",
+                },
+            )
+            tail_file.assert_not_called()
+            self.assertEqual(ABOUT_JOBS["job-1"], info)
+
 
 if __name__ == "__main__":
     unittest.main()
