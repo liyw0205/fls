@@ -947,6 +947,30 @@ class UiRouteComponentTests(unittest.TestCase):
             )
             self.assertNotIn("example.invalid", html)
 
+    def test_api_logfile_rejects_symlink_outside_log_directory(self):
+        with isolated_app() as (app, base_dir):
+            outside_file = base_dir / "outside-secret.txt"
+            outside_file.write_text("outside-log-secret-83", encoding="utf-8")
+            log_dir = base_dir / "log"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            symlink_path = log_dir / "external.log"
+            symlink_path.symlink_to(outside_file)
+
+            with patch("fls_manager.routes.logs.files.tail_file") as tail_file:
+                response = app.test_client().get(
+                    "/api/logfile/external.log?lines=20",
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 404)
+            self.assertNotIn(
+                "outside-log-secret-83",
+                response.get_data(as_text=True),
+            )
+            tail_file.assert_not_called()
+            self.assertTrue(outside_file.exists())
+            self.assertTrue(symlink_path.is_symlink())
+
     def test_task_log_page_keeps_history_table_actions_and_safe_back(self):
         with isolated_app() as (app, base_dir):
             data_dir = base_dir / "data"

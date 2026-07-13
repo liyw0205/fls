@@ -5,10 +5,7 @@ from ._common import *
 def logfile_view(filename):
     back_url = get_back_url("/logs")
     filename = filename.split("/")[-1]
-    file_path = LOG_DIR / filename
-
-    if not file_path.exists():
-        abort(404)
+    safe_log_file(filename)
 
     body = f"""
 <div class="card">
@@ -80,11 +77,7 @@ window.__FLS_ACTIVE_LOG_INTERVAL__ = setInterval(loadLog, 2000);
 
 @bp.route("/api/logfile/<filename>")
 def api_logfile(filename):
-    filename = filename.split("/")[-1]
-    file_path = LOG_DIR / filename
-
-    if not file_path.exists():
-        abort(404)
+    file_path = safe_log_file(filename)
 
     lines = int(request.args.get("lines", "1500"))
 

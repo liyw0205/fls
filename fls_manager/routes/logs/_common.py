@@ -11,6 +11,23 @@ from ...utils import h, get_back_url
 from ...ui.layout import layout
 from ...ui.log_controls import log_controls
 
+
+def safe_log_file(filename):
+    filename = str(filename or "").split("/")[-1].split("\\")[-1]
+    file_path = LOG_DIR / filename
+
+    try:
+        resolved = file_path.resolve()
+        log_dir = LOG_DIR.resolve()
+    except OSError:
+        abort(404)
+
+    if resolved.parent != log_dir or not resolved.is_file():
+        abort(404)
+
+    return resolved
+
+
 def page_links(base, q, page, pages):
     if pages <= 1:
         return ""

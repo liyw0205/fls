@@ -1,7 +1,7 @@
 # FLS 开发文档
 
 更新时间：2026-07-14
-基线：`main` / 阶段 82
+基线：`main` / 阶段 83
 
 本文是 FLS 当前代码库的开发协作文档。历史阶段流水见
 `docs/DEVELOPMENT_PROGRESS.md`，下一轮接续信息见
@@ -261,6 +261,10 @@ CSRF 约定：
 在线脚本 API：
 
 - `/api/online-scripts/log/<install_id>` 对已有安装记录返回 `running/status/returncode/error/log_file/log`，日志行数由 `lines` 参数控制，内部进程对象不进入响应。
+
+日志文件边界：
+
+- 日志查看页和 `/api/logfile/<filename>` 只接受真实路径仍位于 `LOG_DIR` 的普通文件；指向目录外的符号链接返回 404。
 
 兼容页面动作：
 
