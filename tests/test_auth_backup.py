@@ -1,4 +1,5 @@
 import contextlib
+from datetime import datetime
 import io
 import json
 import os
@@ -354,6 +355,57 @@ class BackupSafetyTests(unittest.TestCase):
                 missing.get_json(),
                 {"ok": False, "msg": "任务不存在"},
             )
+
+    def test_api_backup_list_returns_stable_file_fields_in_newest_order(self):
+        with isolated_fls_env(token="unit-token"):
+            from fls_manager.routes.backup._common import backup_dir
+
+            target_dir = backup_dir()
+            older = target_dir / "older.tar.gz"
+            newer = target_dir / "newer.tar.gz"
+            ignored = target_dir / "ignored.zip"
+            nested = target_dir / "nested.tar.gz"
+
+            older.write_bytes(b"o" * 1024)
+            newer.write_bytes(b"n" * 2048)
+            ignored.write_bytes(b"ignored")
+            nested.mkdir()
+            os.utime(older, (1700000000, 1700000000))
+            os.utime(newer, (1700000100, 1700000100))
+
+            response = load_app().test_client().get(
+                "/api/backup/list",
+                headers={"X-Token": "unit-token"},
+            )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.content_type, "application/json")
+            payload = response.get_json()
+            self.assertTrue(payload["ok"])
+            self.assertEqual(
+                [item["name"] for item in payload["items"]],
+                ["newer.tar.gz", "older.tar.gz"],
+            )
+
+            expected = {
+                "newer.tar.gz": (newer, 2048, "2.0 KB"),
+                "older.tar.gz": (older, 1024, "1.0 KB"),
+            }
+
+            for item in payload["items"]:
+                path, size, size_text = expected[item["name"]]
+                mtime = path.stat().st_mtime
+                self.assertEqual(
+                    set(item),
+                    {"name", "size", "size_text", "mtime", "mtime_text"},
+                )
+                self.assertEqual(item["size"], size)
+                self.assertEqual(item["size_text"], size_text)
+                self.assertEqual(item["mtime"], mtime)
+                self.assertEqual(
+                    item["mtime_text"],
+                    datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                )
 
     def test_safe_extract_zip_accepts_regular_paths(self):
         with isolated_fls_env(token="unit-token"):
