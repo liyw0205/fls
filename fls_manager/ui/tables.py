@@ -691,17 +691,28 @@ async function taskBulkAction(action){{
     }});
 
     try{{
+        const headers = {{
+            "Content-Type": "application/json",
+            "X-Requested-With": "XMLHttpRequest"
+        }};
+        if(typeof flsGetCsrfToken === "function"){{
+            const csrf = flsGetCsrfToken();
+            if(csrf) headers["X-CSRF-Token"] = csrf;
+        }}
+
         const res = await fetch("/api/task/bulk-action", {{
             method: "POST",
-            headers: {{
-                "Content-Type": "application/json",
-                "X-Requested-With": "XMLHttpRequest"
-            }},
+            headers: headers,
             credentials: "same-origin",
             body: JSON.stringify({{action: action, task_ids: ids}})
         }});
 
-        const json = await res.json();
+        let json;
+        try {{
+            json = await res.json();
+        }} catch (parseErr) {{
+            throw new Error(res.status === 400 ? "CSRF 校验失败或登录已失效，请刷新页面后重试" : ("响应解析失败：" + res.status));
+        }}
 
         if(!json.ok){{
             alert(flsBulkActionMessage(json, json.msg || (label + "失败")));
@@ -749,13 +760,24 @@ async function taskAjaxAction(action, taskId){{
     }});
 
     try{{
+        const headers = {{"X-Requested-With":"XMLHttpRequest"}};
+        if(typeof flsGetCsrfToken === "function"){{
+            const csrf = flsGetCsrfToken();
+            if(csrf) headers["X-CSRF-Token"] = csrf;
+        }}
+
         const res = await fetch("/api/task/action/" + encodeURIComponent(action) + "/" + encodeURIComponent(taskId), {{
             method: "POST",
-            headers: {{"X-Requested-With":"XMLHttpRequest"}},
+            headers: headers,
             credentials: "same-origin"
         }});
 
-        const json = await res.json();
+        let json;
+        try {{
+            json = await res.json();
+        }} catch (parseErr) {{
+            throw new Error(res.status === 400 ? "CSRF 校验失败或登录已失效，请刷新页面后重试" : ("响应解析失败：" + res.status));
+        }}
 
         if(!json.ok){{
             alert(json.msg || "操作失败");

@@ -55,7 +55,7 @@ def layout(title, active, body):
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <meta name="csrf-token" content="__CSRF_TOKEN__">
 
-<link rel="stylesheet" href="/static/fls.css?v=20260704-31">
+<link rel="stylesheet" href="/static/fls.css?v=20260801-1">
 
 </head>
 
@@ -78,7 +78,7 @@ def layout(title, active, body):
     </main>
 </div>
 
-<script src="/static/fls.js?v=20260704-31"></script>
+<script src="/static/fls.js?v=20260801-1"></script>
 </body>
 </html>
 '''

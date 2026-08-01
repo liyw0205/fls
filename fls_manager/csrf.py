@@ -1,6 +1,6 @@
 import secrets
 
-from flask import abort, request, session
+from flask import abort, jsonify, request, session
 
 from .config import fls_get_admin_token
 
@@ -16,6 +16,25 @@ def csrf_token():
         session[CSRF_SESSION_KEY] = token
 
     return token
+
+
+def _wants_json_response():
+    if request.path.startswith("/api/"):
+        return True
+
+    accept = (request.headers.get("Accept") or "").lower()
+    if "application/json" in accept:
+        return True
+
+    requested_with = (request.headers.get("X-Requested-With") or "").lower()
+    if requested_with == "xmlhttprequest":
+        return True
+
+    content_type = (request.headers.get("Content-Type") or "").lower()
+    if "application/json" in content_type:
+        return True
+
+    return False
 
 
 def csrf_before_request():
@@ -34,6 +53,9 @@ def csrf_before_request():
     )
 
     if not expected or not submitted or not secrets.compare_digest(str(expected), str(submitted)):
-        abort(400, "CSRF token 校验失败，请刷新页面后重试")
+        msg = "CSRF token 校验失败，请刷新页面后重试"
+        if _wants_json_response():
+            return jsonify({"ok": False, "msg": msg}), 400
+        abort(400, msg)
 
     return None
