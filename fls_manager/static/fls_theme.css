@@ -11,8 +11,8 @@
     --blue:#147d74;
     --red:#b42318;
     --orange:#8a6100;
-    --sidebar:#17272b;
-    --side-text:#d7e2e1;
+    --sidebar:#ffffff;
+    --side-text:#506268;
     --focus:#147d74;
 }
 
@@ -29,7 +29,9 @@ body {
 .sidebar {
     width:224px;
     background:var(--sidebar);
-    border-right:1px solid rgba(255,255,255,.06);
+    color:var(--side-text);
+    border-right:1px solid var(--border);
+    box-shadow:4px 0 16px rgba(24,52,56,.04);
     transition:transform .18s ease-out;
     will-change:transform;
 }
@@ -43,6 +45,7 @@ body {
     height:64px;
     padding:0 20px;
     font-size:18px;
+    color:#1d2a2e;
     letter-spacing:.02em;
 }
 
@@ -64,20 +67,20 @@ body {
     margin:2px 0;
     padding:9px 12px;
     border-radius:7px;
-    color:#b9c9c8;
+    color:#506268;
     font-size:14px;
     transition:background .14s ease,color .14s ease;
 }
 
 .nav a:hover {
-    background:rgba(255,255,255,.08);
-    color:#fff;
+    background:#f0f7f5;
+    color:#146b63;
 }
 
 .nav a.active {
-    background:#286b66;
-    color:#fff;
-    box-shadow:inset 3px 0 #82d3c6;
+    background:#dff1ed;
+    color:#12665e;
+    box-shadow:inset 3px 0 #36a397;
 }
 
 .topbar {
@@ -492,6 +495,151 @@ td {
     background:#147d74!important;
 }
 
+/* Details open in a bounded dialog instead of growing the page. */
+.fls-disclosure-modal {
+    position:fixed;
+    inset:0;
+    z-index:1200;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    padding:24px;
+    background:rgba(23,42,46,.22);
+    backdrop-filter:blur(3px);
+}
+
+.fls-disclosure-dialog {
+    position:relative;
+    width:min(720px,100%);
+    max-height:min(760px,calc(100vh - 48px));
+    overflow:auto;
+    border:1px solid var(--border);
+    border-radius:12px;
+    background:#fff;
+    box-shadow:0 20px 60px rgba(24,52,56,.18);
+}
+
+.fls-disclosure-dialog-head {
+    position:sticky;
+    top:0;
+    z-index:1;
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:16px;
+    padding:15px 18px;
+    border-bottom:1px solid var(--border);
+    background:rgba(255,255,255,.96);
+}
+
+.fls-disclosure-dialog-title {
+    color:#203236;
+    font-size:16px;
+    font-weight:800;
+}
+
+.fls-disclosure-dialog-close,
+.fls-floating-panel-close {
+    width:32px;
+    height:32px;
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    flex:0 0 auto;
+    border:1px solid var(--border);
+    border-radius:7px;
+    background:#fff;
+    color:#506268;
+    font-size:18px;
+    line-height:1;
+    cursor:pointer;
+}
+
+.fls-disclosure-dialog-close:hover,
+.fls-floating-panel-close:hover {
+    border-color:#8cc8c0;
+    background:#edf7f5;
+    color:var(--primary);
+}
+
+.fls-disclosure-dialog-body {
+    padding:18px;
+}
+
+body.fls-modal-open {
+    overflow:hidden;
+}
+
+.fls-floating-panel {
+    position:fixed!important;
+    top:76px;
+    right:22px;
+    z-index:900;
+    width:min(460px,calc(100vw - 44px));
+    max-height:calc(100vh - 98px);
+    overflow:auto;
+    margin:0!important;
+    border:1px solid var(--border);
+    background:#fff;
+    box-shadow:0 16px 42px rgba(24,52,56,.16);
+}
+
+.fls-floating-panel .card-title {
+    padding-right:42px;
+}
+
+.fls-floating-panel-close {
+    position:absolute;
+    top:12px;
+    right:12px;
+}
+
+.fls-form-float-actions {
+    top:76px;
+    bottom:auto;
+    right:18px;
+    z-index:900;
+    border-color:var(--border);
+    background:rgba(255,255,255,.97);
+    box-shadow:0 10px 26px rgba(24,52,56,.14);
+}
+
+body.fls-has-floating-actions .content {
+    padding-bottom:44px;
+}
+
+.fls-log-float {
+    top:124px;
+    bottom:auto;
+}
+
+.fls-log-float-hidden {
+    display:none!important;
+}
+
+.fls-log-float button {
+    border:1px solid var(--border);
+    background:#fff;
+    color:#506268;
+}
+
+.fls-log-float button:hover {
+    background:#edf7f5;
+    color:var(--primary);
+}
+
+.fls-log-new-tip {
+    top:124px;
+    bottom:auto;
+    background:#147d74;
+}
+
+.fls-float-menu-btn {
+    border-color:var(--border);
+    background:#fff;
+    color:#203236;
+}
+
 @media (min-width:1200px) {
     .content {
         padding-left:36px;
@@ -603,5 +751,43 @@ td {
     .topbar-refresh {
         width:32px;
         height:32px;
+    }
+
+    .fls-disclosure-modal {
+        align-items:flex-end;
+        padding:10px;
+    }
+
+    .fls-disclosure-dialog {
+        max-height:calc(100vh - 20px);
+        border-radius:12px;
+    }
+
+    .fls-disclosure-dialog-body {
+        padding:14px;
+    }
+
+    .fls-floating-panel {
+        top:62px;
+        right:10px;
+        width:calc(100vw - 20px);
+        max-height:calc(100vh - 76px);
+    }
+
+    .fls-form-float-actions {
+        top:62px;
+        right:10px;
+        bottom:auto;
+        max-width:calc(100vw - 20px);
+    }
+
+    body.fls-has-floating-actions .content {
+        padding-bottom:34px!important;
+    }
+
+    .fls-log-float,
+    .fls-log-new-tip {
+        top:112px;
+        bottom:auto;
     }
 }

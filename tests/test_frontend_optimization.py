@@ -58,10 +58,10 @@ class FrontendOptimizationTests(unittest.TestCase):
             html = response.get_data(as_text=True)
 
             self.assertEqual(response.status_code, 200)
-            self.assertIn('/static/favicon.svg?v=20260919-1', html)
-            self.assertIn('/static/fls.css?v=20260919-1', html)
-            self.assertIn('/static/fls.js?v=20260919-1', html)
-            self.assertIn('/static/fls_theme.css?v=20260919-1', html)
+            self.assertIn('/static/favicon.svg?v=20260919-2', html)
+            self.assertIn('/static/fls.css?v=20260919-2', html)
+            self.assertIn('/static/fls.js?v=20260919-2', html)
+            self.assertIn('/static/fls_theme.css?v=20260919-2', html)
 
     def test_favicon_is_served_as_static_asset(self):
         with isolated_app() as app:
@@ -110,6 +110,16 @@ class FrontendOptimizationTests(unittest.TestCase):
         self.assertIn("FLS_SESSION_CACHE_MAX", js)
         self.assertIn("window.flsRefreshCurrentPage", js)
         self.assertIn("flsHtmlCacheAllowed", js)
+
+    def test_details_use_modal_and_result_panels_float(self):
+        js = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+        css = (ROOT / "fls_manager" / "static" / "fls_theme.css").read_text(encoding="utf-8")
+
+        self.assertIn("flsOpenDisclosureModal", js)
+        self.assertIn("flsShowFloatingPanel", js)
+        self.assertIn(".fls-disclosure-modal", css)
+        self.assertIn(".fls-floating-panel", css)
+        self.assertIn("--sidebar:#ffffff", css)
 
     def test_dashboard_uses_theme_stat_classes(self):
         html = (ROOT / "fls_manager" / "routes" / "dashboard.py").read_text(encoding="utf-8")

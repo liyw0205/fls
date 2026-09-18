@@ -134,6 +134,10 @@ function flsEscapeHtml(s){{
 }}
 
 function flsShowBackupJob(text){{
+    if(typeof flsShowFloatingPanel === "function"){{
+        flsShowFloatingPanel("backupJobCard", text);
+        return;
+    }}
     var card = document.getElementById("backupJobCard");
     var el = document.getElementById("backupJobText");
 

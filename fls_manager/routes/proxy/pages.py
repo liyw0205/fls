@@ -126,6 +126,10 @@ function escapeHtml(s){{
 }}
 
 function showProxyResult(html){{
+    if(typeof flsShowFloatingPanel === "function"){{
+        flsShowFloatingPanel("proxyResultCard", html);
+        return;
+    }}
     document.getElementById("proxyResultCard").style.display = "block";
     document.getElementById("proxyResultText").innerHTML = html;
 }}

@@ -141,6 +141,125 @@ function flsToast(message, type, timeout){
     }, timeout);
 }
 
+function flsConvertFeedbackCards(root){
+    root = root || document;
+
+    root.querySelectorAll(".feedback").forEach(function(feedback){
+        const card = feedback.closest(".card");
+        if(!card || card.dataset.flsFeedbackHandled === "1") return;
+
+        const kindClass = Array.from(feedback.classList).find(function(name){
+            return name.indexOf("feedback-") === 0;
+        }) || "feedback-info";
+        const type = kindClass.replace("feedback-", "") || "info";
+        const text = (feedback.textContent || "").trim();
+
+        card.dataset.flsFeedbackHandled = "1";
+        if(text) flsToast(text, type, type === "error" ? 6200 : 4200);
+        card.remove();
+    });
+}
+
+function flsShowFloatingPanel(id, html){
+    const card = document.getElementById(String(id || ""));
+    if(!card) return;
+
+    card.classList.add("fls-floating-panel");
+    card.style.display = "block";
+    const text = card.querySelector(".help") || card.querySelector("[id$='Text']");
+    if(text && html !== undefined) text.innerHTML = String(html);
+
+    if(!card.querySelector(".fls-floating-panel-close")){
+        const close = document.createElement("button");
+        close.type = "button";
+        close.className = "fls-floating-panel-close";
+        close.setAttribute("aria-label", "关闭浮窗");
+        close.title = "关闭浮窗";
+        close.textContent = "×";
+        close.addEventListener("click", function(){ card.style.display = "none"; });
+        card.appendChild(close);
+    }
+}
+
+function flsDisclosureDetails(details){
+    return details && details.matches(
+        "details.detail-disclosure, details.fls-collapsible-value, " +
+        "details.fls-fold-card, details.log-group-card, details.fls-update-log-fold"
+    );
+}
+
+function flsCloseDisclosureModal(){
+    const modal = document.querySelector(".fls-disclosure-modal");
+    if(!modal) return false;
+
+    const trigger = modal.__flsTrigger;
+    modal.remove();
+    document.body.classList.remove("fls-modal-open");
+    if(trigger && document.body.contains(trigger)) trigger.focus({preventScroll:true});
+    return true;
+}
+
+function flsOpenDisclosureModal(details){
+    flsCloseDisclosureModal();
+
+    const modal = document.createElement("div");
+    modal.className = "fls-disclosure-modal";
+    modal.setAttribute("role", "presentation");
+    modal.__flsTrigger = details.querySelector("summary");
+
+    const dialog = document.createElement("section");
+    dialog.className = "fls-disclosure-dialog";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+
+    const head = document.createElement("div");
+    head.className = "fls-disclosure-dialog-head";
+    const title = document.createElement("div");
+    title.className = "fls-disclosure-dialog-title";
+    title.textContent = (details.querySelector("summary")?.textContent || "查看详情").trim();
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "fls-disclosure-dialog-close";
+    close.setAttribute("aria-label", "关闭详情");
+    close.title = "关闭详情";
+    close.textContent = "×";
+    close.addEventListener("click", flsCloseDisclosureModal);
+    head.appendChild(title);
+    head.appendChild(close);
+
+    const body = document.createElement("div");
+    body.className = "fls-disclosure-dialog-body";
+    Array.from(details.children).forEach(function(child){
+        if(child.tagName !== "SUMMARY") body.appendChild(child.cloneNode(true));
+    });
+
+    dialog.appendChild(head);
+    dialog.appendChild(body);
+    modal.appendChild(dialog);
+    modal.addEventListener("click", function(event){
+        if(event.target === modal) flsCloseDisclosureModal();
+    });
+    document.body.appendChild(modal);
+    document.body.classList.add("fls-modal-open");
+    close.focus({preventScroll:true});
+}
+
+document.addEventListener("click", function(event){
+    const summary = event.target.closest && event.target.closest("summary");
+    const details = summary && summary.parentElement;
+    if(!flsDisclosureDetails(details)) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    flsOpenDisclosureModal(details);
+}, true);
+
+if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", function(){ flsConvertFeedbackCards(document); });
+} else {
+    flsConvertFeedbackCards(document);
+}
+
 if(!window.__FLS_ALERT_PATCHED__){
     window.__FLS_ORIGINAL_ALERT__ = window.alert;
     window.alert = function(message){
@@ -280,6 +399,10 @@ function toggleMenu(show){
 
 document.addEventListener("keydown", function(e){
     if(e.key === "Escape") {
+        if(flsCloseDisclosureModal()) {
+            e.preventDefault();
+            return;
+        }
         const sidebar = document.getElementById("sidebar");
         const wasOpen = !!sidebar && sidebar.classList.contains("open");
         toggleMenu(false);
@@ -409,6 +532,9 @@ function flsPickFloatingForm(root){
         if(method === "GET") return;
 
         if(form.dataset.noFloatActions === "1") return;
+        // Code editors already occupy the user's working surface; a cloned
+        // submit bar would cover the editor and is especially awkward on mobile.
+        if(form.querySelector("textarea.fls-code-editor, .CodeMirror")) return;
         if(!flsIsElementVisible(form)) return;
 
         const buttons = flsGetSubmitButtons(form);
@@ -512,11 +638,33 @@ function flsUpdateFloatingFormVisibility(){
 
     if(!box.classList.contains("show")) return;
 
-    if(flsSidebarIsOpen() || flsOriginalButtonsInViewport()){
+    if(flsSidebarIsOpen() || flsOriginalButtonsInViewport() || flsFixedActionOverlapsFields(box)){
         box.classList.add("hide-near-original");
     }else{
         box.classList.remove("hide-near-original");
     }
+}
+
+function flsFixedActionOverlapsFields(box){
+    if(!box || getComputedStyle(box).display === "none") return false;
+    const boxRect = box.getBoundingClientRect();
+    return Array.from(document.querySelectorAll(
+        "input,select,textarea,button[type=submit],.form-item:last-child"
+    )).some(function(el){
+        const style = getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0 &&
+            rect.bottom > boxRect.top && rect.top < boxRect.bottom;
+    });
+}
+
+function flsUpdateLogFloatVisibility(){
+    const box = document.querySelector(".fls-log-float");
+    if(!box || getComputedStyle(box).display === "none") return;
+
+    const overlaps = flsFixedActionOverlapsFields(box);
+
+    box.classList.toggle("fls-log-float-hidden", overlaps);
 }
 
 function flsInitFloatingFormActions(root){
@@ -605,7 +753,18 @@ window.addEventListener("orientationchange", function(){
 
 window.addEventListener("scroll", function(){
     flsUpdateFloatingFormVisibility();
+    flsUpdateLogFloatVisibility();
 }, {passive:true});
+
+window.addEventListener("resize", function(){
+    flsUpdateLogFloatVisibility();
+});
+
+if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", flsUpdateLogFloatVisibility);
+} else {
+    flsUpdateLogFloatVisibility();
+}
 
 /* ============================================================
    脚本编辑器语法高亮：CodeMirror
@@ -724,8 +883,7 @@ async function flsEnsureCodeMirrorLoaded(){
 
     const base = "https://cdn.jsdelivr.net/npm/codemirror@5.65.16/";
 
-    flsLoadStyleOnce(base + "lib/codemirror.min.css");
-    flsLoadStyleOnce(base + "theme/material-darker.min.css");
+    flsLoadStyleOnce(base + "lib/codemirror.css");
 
     try {
         await flsLoadScriptOnce(base + "lib/codemirror.min.js");
@@ -806,7 +964,7 @@ async function flsInitCodeEditors(root){
         var cm = CodeMirror.fromTextArea(textarea, {
             lineNumbers: true,
             mode: mode,
-            theme: "material-darker",
+            theme: "default",
             lineWrapping: true,
             indentUnit: 4,
             tabSize: 4,
@@ -1223,6 +1381,8 @@ if (document.readyState === "loading") {
             return;
         }
 
+        flsCloseDisclosureModal();
+
         if (window.__FLS_ACTIVE_LOG_INTERVAL__) {
             clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
             window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
@@ -1234,6 +1394,7 @@ if (document.readyState === "loading") {
         }
 
         oldContent.innerHTML = newContent.innerHTML;
+        flsConvertFeedbackCards(oldContent);
 
         if (newTitle && oldTitle) oldTitle.innerHTML = newTitle.innerHTML;
         if (newNav && oldNav) oldNav.innerHTML = newNav.innerHTML;

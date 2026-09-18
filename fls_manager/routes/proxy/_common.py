@@ -153,6 +153,10 @@ function escapeHtml(s){{
 }}
 
 function showProxyResult(html){{
+    if(typeof flsShowFloatingPanel === "function"){{
+        flsShowFloatingPanel("proxyRealtimeResult", html);
+        return;
+    }}
     document.getElementById("proxyRealtimeResult").style.display = "block";
     document.getElementById("proxyRealtimeText").innerHTML = html;
 }}
