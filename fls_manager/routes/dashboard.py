@@ -753,12 +753,12 @@ def dashboard():
 <div class="grid">
     <div class="stat">
         <div class="label">当前时间</div>
-        <div class="num" id="flsDashboardNow" style="color:#2563eb;font-size:22px;">{h(current_time_text)}</div>
+        <div class="num stat-emphasis" id="flsDashboardNow">{h(current_time_text)}</div>
     </div>
 
     <div class="stat">
         <div class="label">面板已运行</div>
-        <div class="num" id="flsDashboardUptime" style="color:#18a058;font-size:22px;">{h(panel_uptime)}</div>
+        <div class="num stat-emphasis" id="flsDashboardUptime">{h(panel_uptime)}</div>
     </div>
 
     <div class="stat">
@@ -768,57 +768,57 @@ def dashboard():
 
     <div class="stat">
         <div class="label">已启用</div>
-        <div class="num" style="color:#18a058;">{enabled}</div>
+        <div class="num">{enabled}</div>
     </div>
 
     <div class="stat">
         <div class="label">运行中</div>
-        <div class="num" style="color:#2563eb;">{running}</div>
+        <div class="num">{running}</div>
     </div>
 
     <div class="stat">
         <div class="label">定时任务</div>
-        <div class="num" style="color:#f59e0b;">{cron_count}</div>
+        <div class="num">{cron_count}</div>
     </div>
 
     <div class="stat">
         <div class="label">累计运行次数</div>
-        <div class="num" style="color:#7c3aed;">{run_total}</div>
+        <div class="num">{run_total}</div>
     </div>
 
     <div class="stat">
         <div class="label">CPU 使用率</div>
-        <div class="num" style="color:#dc2626;">{h(cpu_percent)}</div>
+        <div class="num stat-warning">{h(cpu_percent)}</div>
     </div>
 
     <div class="stat">
         <div class="label">RAM 使用率</div>
-        <div class="num" style="color:#2563eb;">{h(ram.get("percent", "-"))}</div>
+        <div class="num">{h(ram.get("percent", "-"))}</div>
     </div>
 
     <div class="stat">
         <div class="label">RAM 可用</div>
-        <div class="num" style="color:#18a058;font-size:22px;">{h(fmt_bytes(ram.get("available", 0)))}</div>
+        <div class="num stat-emphasis">{h(fmt_bytes(ram.get("available", 0)))}</div>
     </div>
 
     <div class="stat">
         <div class="label">RAM 总量</div>
-        <div class="num" style="color:#7c3aed;font-size:22px;">{h(fmt_bytes(ram.get("total", 0)))}</div>
+        <div class="num stat-emphasis">{h(fmt_bytes(ram.get("total", 0)))}</div>
     </div>
 
     <div class="stat">
         <div class="label">面板 RAM</div>
-        <div class="num" style="color:#f59e0b;font-size:22px;">{h(fmt_bytes(process_rss) if process_rss else "-")}</div>
+        <div class="num stat-emphasis">{h(fmt_bytes(process_rss) if process_rss else "-")}</div>
     </div>
 
     <div class="stat">
         <div class="label">面板当前 CPU</div>
-        <div class="num" id="flsDashboardPanelCpuCurrent" style="color:#f59e0b;font-size:22px;">{h(panel_cpu_current)}</div>
+        <div class="num stat-warning stat-emphasis" id="flsDashboardPanelCpuCurrent">{h(panel_cpu_current)}</div>
     </div>
 
     <div class="stat">
         <div class="label">面板峰值 CPU</div>
-        <div class="num" id="flsDashboardPanelCpuPeak" style="color:#dc2626;font-size:22px;">{h(panel_cpu_peak)}</div>
+        <div class="num stat-danger stat-emphasis" id="flsDashboardPanelCpuPeak">{h(panel_cpu_peak)}</div>
     </div>
 </div>
 </section>

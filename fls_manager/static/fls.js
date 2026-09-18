@@ -860,8 +860,13 @@ if (document.readyState === "loading") {
 
     const FLS_PAGE_CACHE_TTL = 5 * 60 * 1000;
     const FLS_PAGE_CACHE_MAX = 40;
+    const FLS_SESSION_CACHE_KEY = "fls-page-cache-v2";
+    const FLS_SESSION_CACHE_MAX = 12;
+    const FLS_SESSION_CACHE_TTL = 15 * 60 * 1000;
 
     window.__FLS_PAGE_CACHE__ = window.__FLS_PAGE_CACHE__ || new Map();
+    window.__FLS_PAGE_PREFETCH__ = window.__FLS_PAGE_PREFETCH__ || new Map();
+    window.__FLS_PAGE_CACHE_EPOCH__ = window.__FLS_PAGE_CACHE_EPOCH__ || 0;
 
     function sameOrigin(url){
         try {
@@ -894,15 +899,84 @@ if (document.readyState === "loading") {
         const cache = window.__FLS_PAGE_CACHE__;
         if(!cache) return;
 
+        // In-flight prefetches may finish after a mutation. Ignore their old
+        // response so a write cannot repopulate a cache we just invalidated.
+        window.__FLS_PAGE_CACHE_EPOCH__ += 1;
+
         if(!prefix){
             cache.clear();
-            return;
+        }else{
+            for(const key of Array.from(cache.keys())){
+                if(key.indexOf(prefix) >= 0){
+                    cache.delete(key);
+                }
+            }
         }
 
-        for(const key of Array.from(cache.keys())){
-            if(key.indexOf(prefix) >= 0){
-                cache.delete(key);
+        try {
+            const stored = JSON.parse(sessionStorage.getItem(FLS_SESSION_CACHE_KEY) || "{}");
+            Object.keys(stored).forEach(function(key){
+                if(!prefix || key.indexOf(prefix) >= 0){
+                    delete stored[key];
+                }
+            });
+            sessionStorage.setItem(FLS_SESSION_CACHE_KEY, JSON.stringify(stored));
+        } catch(e) {
+            // sessionStorage may be disabled; memory cache still remains useful.
+        }
+    }
+
+    function flsHtmlCacheAllowed(html){
+        const text = String(html || "");
+        return !/<form\b[^>]*\bmethod\s*=\s*["']?post\b/i.test(text) && !/<textarea\b/i.test(text);
+    }
+
+    function flsSessionCacheAllowed(url, html){
+        try {
+            const u = new URL(url, location.href);
+            const path = u.pathname;
+
+            if(path !== "/" && path !== "/history") return false;
+            if(!flsHtmlCacheAllowed(html)) return false;
+            return true;
+        } catch(e) {
+            return false;
+        }
+    }
+
+    function flsReadSessionCache(key){
+        try {
+            const stored = JSON.parse(sessionStorage.getItem(FLS_SESSION_CACHE_KEY) || "{}");
+            const item = stored[key];
+
+            if(!item) return "";
+            if(Date.now() - Number(item.time || 0) > FLS_SESSION_CACHE_TTL){
+                delete stored[key];
+                sessionStorage.setItem(FLS_SESSION_CACHE_KEY, JSON.stringify(stored));
+                return "";
             }
+
+            return item.html || "";
+        } catch(e) {
+            return "";
+        }
+    }
+
+    function flsWriteSessionCache(key, html){
+        try {
+            const stored = JSON.parse(sessionStorage.getItem(FLS_SESSION_CACHE_KEY) || "{}");
+            stored[key] = {time:Date.now(), html:String(html || "")};
+            const keys = Object.keys(stored).sort(function(a,b){
+                return Number(stored[a].time || 0) - Number(stored[b].time || 0);
+            });
+
+            while(keys.length > FLS_SESSION_CACHE_MAX){
+                delete stored[keys.shift()];
+            }
+
+            sessionStorage.setItem(FLS_SESSION_CACHE_KEY, JSON.stringify(stored));
+        } catch(e) {
+            // Keep navigation working when browser storage is unavailable/full.
         }
     }
 
@@ -953,18 +1027,25 @@ if (document.readyState === "loading") {
         const key = flsPageCacheKey(url);
         const item = cache.get(key);
 
-        if(!item) return "";
+        if(item){
+            if(Date.now() - item.time > FLS_PAGE_CACHE_TTL){
+                cache.delete(key);
+                return "";
+            }
 
-        if(Date.now() - item.time > FLS_PAGE_CACHE_TTL){
-            cache.delete(key);
-            return "";
+            return item.html || "";
         }
 
-        return item.html || "";
+        const sessionHtml = flsReadSessionCache(key);
+        if(sessionHtml){
+            cache.set(key, {time:Date.now(), html:sessionHtml});
+        }
+        return sessionHtml;
     }
 
     function flsPutCachedPage(url, html){
         if(!flsIsCacheablePage(url)) return;
+        if(!flsHtmlCacheAllowed(html)) return;
 
         const cache = window.__FLS_PAGE_CACHE__;
         if(!cache) return;
@@ -980,6 +1061,58 @@ if (document.readyState === "loading") {
             const firstKey = cache.keys().next().value;
             cache.delete(firstKey);
         }
+
+        if(flsSessionCacheAllowed(url, html)){
+            flsWriteSessionCache(key, html);
+        }
+    }
+
+    function flsPrefetchPage(url){
+        if(!flsIsCacheablePage(url)) return;
+
+        try {
+            const path = new URL(url, location.href).pathname;
+            if(["/", "/tasks", "/history"].indexOf(path) < 0) return;
+        } catch(e) {
+            return;
+        }
+
+        const key = flsPageCacheKey(url);
+        if(flsGetCachedPage(url) || window.__FLS_PAGE_PREFETCH__.has(key)) return;
+
+        const epoch = window.__FLS_PAGE_CACHE_EPOCH__;
+
+        const request = fetch(url, {
+            headers:{"X-Requested-With":"FLS-Ajax"},
+            credentials:"same-origin",
+            cache:"no-store"
+        }).then(function(res){
+            if(!res.ok) return "";
+            return res.text().then(function(text){
+                if(epoch === window.__FLS_PAGE_CACHE_EPOCH__){
+                    flsPutCachedPage(res.url || url, text);
+                }
+                return text;
+            });
+        }).catch(function(){
+            // Prefetch is optional; the next click performs a regular request.
+        });
+
+        window.__FLS_PAGE_PREFETCH__.set(key, request);
+        request.finally(function(){
+            window.__FLS_PAGE_PREFETCH__.delete(key);
+        });
+    }
+
+    window.flsRefreshCurrentPage = function(){
+        const key = flsPageCacheKey(location.href);
+        flsClearPageCache(key);
+        ajaxLoad(location.href, false, {force:true});
+    };
+
+    function flsSeedCurrentPageCache(){
+        if(!flsIsCacheablePage(location.href)) return;
+        flsPutCachedPage(location.href, document.documentElement.outerHTML);
     }
 
     function shouldAjaxLink(a){
@@ -1138,8 +1271,16 @@ if (document.readyState === "loading") {
         await replaceHtmlText(text, res.url || location.href, push);
     }
 
-    async function ajaxLoad(url, push){
+    async function ajaxLoad(url, push, options){
+        options = options || {};
         const canCache = flsIsCacheablePage(url);
+
+        if(canCache && !options.force){
+            const pending = window.__FLS_PAGE_PREFETCH__.get(flsPageCacheKey(url));
+            if(pending){
+                await pending;
+            }
+        }
 
         /*
            缓存命中：
@@ -1147,7 +1288,7 @@ if (document.readyState === "loading") {
            - 不让页面变灰
            - 直接渲染缓存页面
         */
-        if(canCache){
+        if(canCache && !options.force){
             const cached = flsGetCachedPage(url);
 
             if(cached){
@@ -1213,6 +1354,16 @@ if (document.readyState === "loading") {
 
         ajaxLoad(a.href, true);
     }, true);
+
+    document.addEventListener("mouseover", function(e){
+        const a = e.target.closest(".nav a");
+        if(a && shouldAjaxLink(a)) flsPrefetchPage(a.href);
+    }, {passive:true});
+
+    document.addEventListener("focusin", function(e){
+        const a = e.target.closest(".nav a");
+        if(a && shouldAjaxLink(a)) flsPrefetchPage(a.href);
+    });
 
     document.addEventListener("submit", async function(e){
         const form = e.target;
@@ -1284,6 +1435,8 @@ if (document.readyState === "loading") {
     window.addEventListener("popstate", function(){
         ajaxLoad(location.href, false);
     });
+
+    flsSeedCurrentPageCache();
 })();
 
 /* ============================================================

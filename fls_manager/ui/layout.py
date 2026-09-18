@@ -23,28 +23,30 @@ def layout(title, active, body):
     body = inject_csrf_inputs(body, token)
 
     nav = [
-        ("dashboard", "/", "📊 仪表盘"),
-        ("tasks", "/tasks", "📜 任务"),
-        ("collections", "/collections", "🗂️ 任务合集"),
-        ("history", "/history", "🧾 运行历史"),
-        ("env", "/env", "🌐 变量"),
-        ("proxy", "/proxy", "🧩 代理"),
-        ("pull", "/pull", "📂 脚本"),
-        ("online_scripts", "/online-scripts", "🌍 在线脚本"),
-        ("backup", "/backup", "💾 备份"),
-        ("deps", "/deps", "📦 依赖"),
-        ("logs", "/logs", "📁 日志"),
-        ("notify", "/notify", "🔔 通知"),
-        ("status", "/panel/status", "🖥️ 面板状态"),
-        ("config", "/config", "🔧 面板配置"),
-        ("about", "/about", "⚙️ 关于"),
+        ("dashboard", "/", "仪表盘"),
+        ("tasks", "/tasks", "任务"),
+        ("collections", "/collections", "任务合集"),
+        ("history", "/history", "运行历史"),
+        ("env", "/env", "变量"),
+        ("proxy", "/proxy", "代理"),
+        ("pull", "/pull", "脚本"),
+        ("online_scripts", "/online-scripts", "在线脚本"),
+        ("backup", "/backup", "备份"),
+        ("deps", "/deps", "依赖"),
+        ("logs", "/logs", "日志"),
+        ("notify", "/notify", "通知"),
+        ("status", "/panel/status", "面板状态"),
+        ("config", "/config", "面板配置"),
+        ("about", "/about", "关于"),
     ]
 
     nav_html = ""
     for key, url, text in nav:
         cls = "active" if active == key else ""
         current = ' aria-current="page"' if cls else ""
-        nav_html += '<a class="{}" href="{}"{}>{}</a>'.format(cls, h(url), current, h(text))
+        nav_html += '<a class="{}" href="{}" data-nav-key="{}"{}>{}</a>'.format(
+            cls, h(url), h(key), current, h(text)
+        )
 
     nav_html += '<a href="/logout">退出登录</a>'
 
@@ -57,9 +59,10 @@ def layout(title, active, body):
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <meta name="csrf-token" content="__CSRF_TOKEN__">
 
-<link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=20260918-1">
-<link rel="stylesheet" href="/static/fls.css?v=20260918-1">
-<link rel="stylesheet" href="/static/fls_responsive.css?v=20260918-1">
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=20260919-1">
+<link rel="stylesheet" href="/static/fls.css?v=20260919-1">
+<link rel="stylesheet" href="/static/fls_responsive.css?v=20260919-1">
+<link rel="stylesheet" href="/static/fls_theme.css?v=20260919-1">
 
 </head>
 
@@ -77,13 +80,16 @@ def layout(title, active, body):
     <main class="main">
         <div class="topbar">
             <div class="title">__TITLE__</div>
+            <div class="topbar-tools">
+                <button class="topbar-refresh" type="button" onclick="flsRefreshCurrentPage()" aria-label="刷新当前页面" title="刷新当前页面">↻</button>
+            </div>
         </div>
 
         <div class="content page-shell" id="main-content">__BODY__</div>
     </main>
 </div>
 
-<script src="/static/fls.js?v=20260918-1"></script>
+<script src="/static/fls.js?v=20260919-1"></script>
 </body>
 </html>
 '''
