@@ -418,15 +418,24 @@ is_running_pid() {
 
 find_running_pids() {
   if command -v pgrep >/dev/null 2>&1; then
-    {
-      pgrep -f "fls-manager.py" 2>/dev/null || true
-      pgrep -f "fls-manager" 2>/dev/null || true
-      pgrep -x "fls-manager" 2>/dev/null || true
-    } | sort -u
+    pgrep -x "fls-manager" 2>/dev/null || true
     return 0
   fi
 
-  ps -ef 2>/dev/null | grep -E "fls-manager.py|fls-manager" | grep -v grep | awk '{print $2}' | sort -u || true
+  ps -eo pid=,comm=,args= 2>/dev/null | awk -v target="$MANAGER_FILE" '
+    {
+      pid = $1
+      comm = $2
+      line = $0
+      sub(/^[[:space:]]*[0-9]+[[:space:]]+[^[:space:]]+[[:space:]]+/, "", line)
+
+      if (comm == "fls-manager") {
+        print pid
+      } else if (comm ~ /^python([0-9.]*)?$/ && index(line, target)) {
+        print pid
+      }
+    }
+  ' | sort -u || true
 }
 
 parse_start_opts() {

@@ -5,6 +5,7 @@ import uuid
 import shutil
 import threading
 import subprocess
+import shlex
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 
@@ -473,6 +474,60 @@ def fls_control_script():
     return BASE_DIR / "fls.sh"
 
 
+def systemd_fls_unit():
+    """Return the loaded systemd unit name when FLS is systemd-managed."""
+    if os.name == "nt" or not os.path.exists("/run/systemd/system"):
+        return ""
+
+    systemctl = shutil.which("systemctl")
+    systemd_run = shutil.which("systemd-run")
+    if not systemctl or not systemd_run:
+        return ""
+
+    unit = (os.environ.get("FLS_SYSTEMD_UNIT") or "fls.service").strip()
+    if not unit:
+        return ""
+
+    try:
+        result = subprocess.run(
+            [systemctl, "show", unit, "--property=LoadState", "--value"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except Exception:
+        return ""
+
+    return unit if result.returncode == 0 and result.stdout.strip() == "loaded" else ""
+
+
+def systemd_control_command(action, unit):
+    """Build a detached transient unit for service control."""
+    systemd_run = shutil.which("systemd-run")
+    systemctl = shutil.which("systemctl")
+    if not systemd_run or not systemctl:
+        return None
+
+    transient_unit = f"fls-panel-control-{action}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    control = " ".join(
+        shlex.quote(part)
+        for part in (systemctl, action, unit)
+    )
+    return [
+        systemd_run,
+        "--quiet",
+        "--collect",
+        "--unit",
+        transient_unit,
+        "--service-type=oneshot",
+        "/bin/sh",
+        "-c",
+        f"sleep 1; exec {control}",
+    ]
+
+
 def build_fls_control_command(action):
     action = str(action or "").strip().lower()
 
@@ -483,6 +538,12 @@ def build_fls_control_command(action):
 
     if not script.exists():
         raise FileNotFoundError(f"控制脚本不存在：{script}")
+
+    unit = systemd_fls_unit()
+    if unit:
+        command = systemd_control_command(action, unit)
+        if command:
+            return command
 
     current_pid = os.getpid()
     script_text = str(script)
@@ -617,7 +678,7 @@ def run_fls_control_later(action):
                     f"脚本路径: {script}\n"
                     f"工作目录: {BASE_DIR}\n"
                     f"命令: {' '.join(str(x) for x in cmd)}\n"
-                    f"说明: restart 会直接结束当前 Flask 进程，再调用控制脚本 start，避免端口未释放\n"
+                    f"说明: systemd 环境通过独立 transient unit 控制服务，避免当前服务 cgroup 清理重启进程\n"
                     f"============================================================\n"
                 ).encode("utf-8", errors="replace")
             )

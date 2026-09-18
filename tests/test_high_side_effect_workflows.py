@@ -493,6 +493,37 @@ class BackupIsolationTests(unittest.TestCase):
 
 
 class PanelControlIsolationTests(unittest.TestCase):
+    def test_systemd_panel_control_uses_detached_transient_unit(self):
+        with isolated_app() as (_app, base_dir):
+            from fls_manager.routes.about import helpers
+
+            script = base_dir / "fls.sh"
+            script.write_text("#!/bin/sh\n", encoding="utf-8")
+
+            def fake_which(name):
+                if name == "systemd-run":
+                    return "/usr/bin/systemd-run"
+                if name == "systemctl":
+                    return "/usr/bin/systemctl"
+                return None
+
+            with patch.object(helpers, "systemd_fls_unit", return_value="fls.service"):
+                with patch.object(helpers.shutil, "which", side_effect=fake_which):
+                    command = helpers.build_fls_control_command("restart")
+
+            self.assertEqual(command[0], "/usr/bin/systemd-run")
+            self.assertIn("--service-type=oneshot", command)
+            self.assertIn("fls.service", command[-1])
+            self.assertIn("systemctl restart fls.service", command[-1])
+            self.assertNotIn("kill -TERM", command[-1])
+
+    def test_shell_fls_process_scan_does_not_use_broad_match(self):
+        script = (ROOT / "fls.sh").read_text(encoding="utf-8")
+
+        self.assertNotIn('pgrep -f "fls-manager.py"', script)
+        self.assertNotIn('pgrep -f "fls-manager"', script)
+        self.assertIn('pgrep -x "fls-manager"', script)
+
     def test_panel_restart_posts_status_without_starting_control_thread(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.routes.about.panel_control import delayed_restart_panel
