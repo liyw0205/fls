@@ -1,5 +1,5 @@
 from ._common import *
-from ...ui.components import page_header_card, table_card
+from ...ui.components import page_header_card, table_card, empty_table_row
 
 
 @bp.route("/notify")
@@ -10,14 +10,22 @@ def notify_page():
     rows = ""
 
     if not items:
-        rows = '<tr><td colspan="6">暂无通知，请点击新增通知</td></tr>'
+        rows = empty_table_row(6, "暂无通知", '<a class="btn btn-primary" href="/notify/new">新增通知</a>')
     else:
         for item in items:
             item_id = item.get("id")
             cname = channel_name(item.get("channel"))
-            enabled_badge = '<span class="badge green">启用</span>' if item.get("enabled", True) else '<span class="badge gray">禁用</span>'
-            default_badge = '<span class="badge blue">全局默认</span>' if item_id in defaults else '<span class="badge gray">-</span>'
-            toggle_text = "禁用" if item.get("enabled", True) else "启用"
+            enabled_badge = (
+                '<span class="badge green status-badge status-enabled" role="status">启用</span>'
+                if item.get("enabled", True) else
+                '<span class="badge gray status-badge status-disabled" role="status">禁用</span>'
+            )
+            default_badge = (
+                '<span class="badge blue status-badge status-info" role="status">全局默认</span>'
+                if item_id in defaults else
+                '<span class="badge gray status-badge status-info" role="status">-</span>'
+            )
+            toggle_text = "停用通知" if item.get("enabled", True) else "启用通知"
             toggle_class = "btn-gray" if item.get("enabled", True) else "btn-primary"
 
             rows += f"""
@@ -28,16 +36,24 @@ def notify_page():
     <td>{default_badge}</td>
     <td>{h(item.get("updated_at", "-"))}</td>
     <td>
-        <form class="inline-form" method="post" action="/notify/test/{h(item_id)}">
-            <button class="btn btn-orange" type="submit">测试</button>
-        </form>
-        <a class="btn btn-blue" href="/notify/edit/{h(item_id)}">编辑</a>
-        <form class="inline-form" method="post" action="/notify/toggle/{h(item_id)}">
-            <button class="btn {toggle_class}" type="submit">{toggle_text}</button>
-        </form>
-        <form class="inline-form" method="post" action="/notify/delete/{h(item_id)}">
-            <button class="btn btn-red" type="submit" onclick="return confirm('确定删除该通知吗？')">删除</button>
-        </form>
+        <div class="row-actions" aria-label="通知 {h(item.get('name', ''))} 行操作">
+            <div class="row-actions-primary">
+                <form class="inline-form" method="post" action="/notify/test/{h(item_id)}">
+                    <button class="btn btn-orange" type="submit">发送测试通知</button>
+                </form>
+            </div>
+            <div class="row-actions-secondary">
+                <a class="btn btn-blue" href="/notify/edit/{h(item_id)}">编辑通知设置</a>
+                <form class="inline-form" method="post" action="/notify/toggle/{h(item_id)}">
+                    <button class="btn {toggle_class}" type="submit">{toggle_text}</button>
+                </form>
+            </div>
+            <div class="row-actions-danger">
+                <form class="inline-form" method="post" action="/notify/delete/{h(item_id)}">
+                    <button class="btn btn-red" type="submit" onclick="return confirm('确定删除该通知吗？')">删除通知</button>
+                </form>
+            </div>
+        </div>
     </td>
 </tr>
 """
@@ -60,15 +76,15 @@ def notify_page():
 {header}
 
 <form method="post" action="/notify/default">
-<div class="card">
-    <div class="card-title">全局默认通知</div>
+<section class="section fls-form-section" id="notify-defaults">
+    <h2 class="section-title">全局默认通知</h2>
     <select name="default_ids" multiple size="6">{default_options(defaults)}</select>
     <div class="help">
         这里设置全局默认通知。任务选择“使用全局默认通知”时会使用这里的配置。
     </div>
     <br>
     <button class="btn btn-primary" type="submit">保存全局默认通知</button>
-</div>
+</section>
 </form>
 
 {table}

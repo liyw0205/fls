@@ -12,7 +12,7 @@ from ..state import DEPS_RUNNING
 from ..utils import h, now_str, safe_name, get_back_url
 from ..logs import tail_file
 from ..ui.layout import layout
-from ..ui.components import page_header_card, table_card
+from ..ui.components import page_header_card, page_header, table_card, empty_table_row
 
 bp = Blueprint("deps", __name__)
 
@@ -136,10 +136,14 @@ def deps_page():
     <td>{h(name)}</td>
     <td>{h(version)}</td>
     <td>
-        <form class="inline-form" method="post" action="/deps/uninstall">
-            <input type="hidden" name="name" value="{h(name)}">
-            <button class="btn btn-red" type="submit" onclick="return confirm('确定卸载 {h(name)} 吗？')">卸载</button>
-        </form>
+        <div class="row-actions" aria-label="依赖 {h(name)} 行操作">
+            <div class="row-actions-danger">
+                <form class="inline-form" method="post" action="/deps/uninstall">
+                    <input type="hidden" name="name" value="{h(name)}">
+                    <button class="btn btn-red" type="submit" onclick="return confirm('确定卸载 {h(name)} 吗？')">卸载依赖</button>
+                </form>
+            </div>
+        </div>
     </td>
 </tr>
 """
@@ -147,25 +151,32 @@ def deps_page():
     installed_table = table_card(
         "已安装依赖",
         ["包名", "版本", "操作"],
-        rows or '<tr><td colspan="3">暂无依赖</td></tr>',
+        rows or empty_table_row(3, "暂无依赖", '<a class="btn btn-primary" href="/deps#deps-install">安装依赖</a>'),
     )
 
+    header = page_header(
+        "依赖管理",
+        help_html="安装依赖、查看已安装包并刷新运行器检测。",
+    )
     body = f"""
+{header}
 <nav class="fls-section-nav" aria-label="依赖管理区块导航">
     <span class="fls-section-nav-label">依赖管理</span>
     <a href="#deps-install">安装依赖</a>
     <a href="#deps-installed">已安装依赖</a>
 </nav>
 
-<section class="fls-section" id="deps-install">
+<section class="section fls-section" id="deps-install">
 <div class="card">
-    <div class="card-title">安装依赖</div>
+    <h2 class="section-title">安装依赖</h2>
     <form method="post" action="/deps/install">
-        <input name="name" value="{h(package)}" placeholder="例如：requests 或 PySocks">
+        <input name="name" value="{h(package)}" placeholder="例如：requests 或 PySocks" aria-label="依赖名">
         <br><br>
         <button class="btn btn-primary" type="submit">安装并查看日志</button>
-        <a class="btn btn-blue" href="/deps/refresh">刷新依赖检测</a>
     </form>
+        <form class="inline-form" method="post" action="/deps/refresh">
+            <button class="btn btn-blue" type="submit">刷新依赖检测结果</button>
+        </form>
     <div class="help">
         安装依赖会进入实时日志页面。<br>
         如果安装失败，可以到日志管理查看 deps-install-*.log。
@@ -173,7 +184,7 @@ def deps_page():
 </div>
 </section>
 
-<section class="fls-section" id="deps-installed">
+<section class="section fls-section" id="deps-installed">
 {installed_table}
 </section>
 """
@@ -187,7 +198,7 @@ def deps_install():
     name = request.form.get("name", "").strip()
 
     if not name:
-        return "依赖名不能为空", 400
+        return "依赖名不能为空。下一步：填写包名后重试", 400
 
     install_id = uuid.uuid4().hex
     log_file = deps_log_file(install_id, name)
@@ -214,7 +225,7 @@ def deps_install():
     except Exception as e:
         log_fp.write(f"启动安装失败: {e}\n".encode("utf-8"))
         log_fp.close()
-        return f"启动安装失败：{h(e)}", 500
+        return f"启动安装失败：{h(e)}。下一步：检查 Python、pip 和日志目录权限后重试", 500
 
     DEPS_RUNNING[install_id] = {
         "process": proc,
@@ -245,7 +256,9 @@ def deps_install_log(install_id):
 """,
         actions_html=f"""
 <a class="btn btn-gray" href="{h(back_url)}">返回</a>
-<a class="btn btn-blue" href="/deps/refresh">刷新依赖</a>
+<form class="inline-form" method="post" action="/deps/refresh">
+    <button class="btn btn-blue" type="submit">刷新依赖检测结果</button>
+</form>
 """,
     )
 
@@ -275,7 +288,7 @@ async function loadLog(){{
             window.scrollTo(0, document.documentElement.scrollHeight);
         }}
     }} catch(e) {{
-        document.getElementById("log").textContent = "日志读取失败: " + e;
+        document.getElementById("log").textContent = "日志读取失败：" + e + "。下一步：检查安装日志文件和服务状态后重试";
     }}
 }}
 
@@ -320,7 +333,7 @@ def api_deps_install_log(install_id):
     })
 
 
-@bp.route("/deps/refresh")
+@bp.route("/deps/refresh", methods=["GET", "POST"])
 def deps_refresh():
     result = refresh_dependency_cache()
 
@@ -328,7 +341,11 @@ def deps_refresh():
 
     for name, status in result["packages"].items():
         ok = not str(status).startswith("不可用")
-        badge = '<span class="badge green">可用</span>' if ok else '<span class="badge red">异常</span>'
+        badge = (
+            '<span class="badge green status-badge status-success" role="status">可用</span>'
+            if ok else
+            '<span class="badge red status-badge status-error" role="status">异常</span>'
+        )
 
         rows += f"""
 <tr>

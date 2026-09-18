@@ -5,6 +5,7 @@ from flask import request, redirect, url_for, abort
 
 from ...ui.layout import layout
 from ...utils import h, now_str
+from ...ui.components import page_header
 from ...sensitive import is_sensitive_key
 from ...notify import (
     NOTIFY_CHANNELS,
@@ -103,7 +104,7 @@ def notify_form(item=None):
             fields_html += f"""
 <div class="form-item">
     <label>{h(label)}</label>
-    <textarea name="{h(field)}" style="min-height:110px;" placeholder="{h(placeholder)}">{h(value)}</textarea>
+    <textarea name="{h(field)}" style="min-height:110px;" placeholder="{h(placeholder)}" aria-label="{h(label)}">{h(value)}</textarea>
 </div>
 """
         else:
@@ -112,7 +113,7 @@ def notify_form(item=None):
             fields_html += f"""
 <div class="form-item">
     <label>{h(label)}</label>
-    <input name="{h(field)}" type="{input_type}" value="{h(value)}" placeholder="{h(placeholder)}"{autocomplete}>
+            <input name="{h(field)}" type="{input_type}" value="{h(value)}" placeholder="{h(placeholder)}" aria-label="{h(label)}"{autocomplete}>
 </div>
 """
 
@@ -120,28 +121,34 @@ def notify_form(item=None):
         fields_html = '<div class="help">该渠道无需额外配置。</div>'
 
     title = "编辑通知" if item.get("id") else "新增通知"
+    header = page_header(
+        "通知渠道设置",
+        help_html="设置通知渠道、启停状态和测试动作。",
+        actions_html='<a class="btn btn-gray" href="/notify">返回通知管理</a>',
+    )
 
     body = f"""
+{header}
 <form method="post">
-<div class="card">
-    <div class="card-title">{h(title)}</div>
+<section class="section fls-form-section">
+    <h2 class="section-title">{h(title)}</h2>
     <div class="help">通知名称留空时会自动使用渠道名；若重名会自动追加序号。</div>
-</div>
+</section>
 
-<div class="card">
-    <div class="card-title">选择通知渠道</div>
+<section class="section fls-form-section">
+    <h2 class="section-title">选择通知渠道</h2>
     <div class="action-row">{quick_links}</div>
-</div>
+</section>
 
-<div class="card">
+<section class="section fls-form-section">
     <div class="form-grid">
         <div class="form-item">
             <label>通知名称</label>
-            <input name="name" value="{h(item.get("name", ""))}" placeholder="例如：微信机器人">
+            <input name="name" value="{h(item.get("name", ""))}" placeholder="例如：微信机器人" aria-label="通知名称">
         </div>
         <div class="form-item">
             <label>通知渠道</label>
-            <select name="channel">{channel_options(channel)}</select>
+            <select name="channel" aria-label="通知渠道">{channel_options(channel)}</select>
         </div>
     </div>
     <br>
@@ -149,18 +156,18 @@ def notify_form(item=None):
         <input type="checkbox" name="enabled" value="1" {checked} style="width:auto;">
         启用此通知
     </label>
-</div>
+</section>
 
-<div class="card">
-    <div class="card-title">{h(meta.get("name", channel))} 配置</div>
+<section class="section fls-form-section">
+    <h2 class="section-title">{h(meta.get("name", channel))} 通知渠道设置</h2>
     <div class="form-grid">{fields_html}</div>
-</div>
+</section>
 
-<div class="card">
-    <button class="btn btn-primary" type="submit" name="action" value="save">保存</button>
-    <button class="btn btn-orange" type="submit" name="action" value="test">保存并测试</button>
+<section class="section fls-form-section fls-save-section">
+    <button class="btn btn-primary" type="submit" name="action" value="save">保存通知设置</button>
+    <button class="btn btn-orange" type="submit" name="action" value="test">保存并发送测试通知</button>
     <a class="btn btn-gray" href="/notify">返回通知管理</a>
-</div>
+</section>
 </form>
 """
-    return layout("通知配置", "notify", body)
+    return layout("通知渠道设置", "notify", body)

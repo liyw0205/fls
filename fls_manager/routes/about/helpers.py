@@ -12,6 +12,7 @@ from email.utils import parsedate_to_datetime
 import requests
 
 from ...ui.layout import layout
+from ...ui.components import empty_table_row
 from ...utils import h, now_str, safe_name
 from ...logs import tail_file
 from ...paths import BASE_DIR, DATA_DIR, LOG_DIR, SCRIPT_DIR
@@ -146,23 +147,26 @@ def get_version_info():
 
 def render_update_log_rows(logs):
     if not logs:
-        return '<tr><td colspan="4">暂无更新日志，请点击“刷新更新日志”</td></tr>'
+        action = '<form method="post" action="/about/refresh-log"><button class="btn btn-primary" type="submit">刷新更新日志</button></form>'
+        return empty_table_row(4, "暂无更新日志", action)
 
     rows = ""
 
     for item in logs:
         if item.get("current"):
-            version_badge = '<span class="badge green">当前版本</span>'
-            action = '<span class="badge green">正在使用</span>'
+            version_badge = '<span class="badge green status-badge status-success" role="status">当前版本</span>'
+            action = '<span class="badge green status-badge status-success" role="status">正在使用</span>'
         else:
-            version_badge = '<span class="badge gray">可更新</span>'
+            version_badge = '<span class="badge gray status-badge status-info" role="status">可更新</span>'
             action = f"""
-<form method="post" action="/about/update-version" style="display:inline;">
-    <input type="hidden" name="version" value="{h(item.get("full"))}">
-    <button class="btn btn-orange" type="submit" onclick="return confirm('确定更新到该版本吗？更新任务将在后台执行。更新完成后需要手动重启面板。')">
-        更新到此版本
-    </button>
-</form>
+<div class="row-actions-danger">
+    <form method="post" action="/about/update-version" style="display:inline;">
+        <input type="hidden" name="version" value="{h(item.get("full"))}">
+        <button class="btn btn-orange" type="submit" onclick="return confirm('确定更新到该版本吗？更新任务将在后台执行。更新完成后需要手动重启面板。')">
+            更新到此版本
+        </button>
+    </form>
+</div>
 """
 
         rows += f"""

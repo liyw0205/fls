@@ -45,14 +45,14 @@ def env_view_all():
     body = f"""
 <form method="post">
 {header}
-<div class="card">
-    <textarea name="env_text" placeholder='变量名="变量值"'>{h(env_text)}</textarea>
-</div>
+<section class="section fls-form-section">
+            <textarea name="env_text" placeholder='变量名="变量值"' aria-label="全部全局变量文本">{h(env_text)}</textarea>
+</section>
 
-<div class="card">
-    <button class="btn btn-primary" type="submit">保存全部</button>
+<section class="section fls-form-section fls-save-section">
+    <button class="btn btn-primary" type="submit">保存全部全局变量</button>
     <a class="btn btn-gray" href="/env">返回列表</a>
-</div>
+</section>
 </form>
 """
     return layout("查看全部全局变量", "env", body)
@@ -65,7 +65,7 @@ def env_new():
         value = request.form.get("value", "")
 
         if not key:
-            return "变量名不能为空", 400
+            return "变量名不能为空。下一步：填写变量名后重试", 400
 
         env = load_global_env()
         env[key] = value
@@ -81,23 +81,23 @@ def env_new():
     body = f"""
 <form method="post">
 {header}
-<div class="card">
+<section class="section fls-form-section">
     <div class="form-grid">
         <div class="form-item">
             <label>变量名</label>
-            <input name="key" placeholder="例如：TOKEN">
+            <input name="key" placeholder="例如：TOKEN" aria-label="全局变量名">
         </div>
         <div class="form-item">
             <label>变量值</label>
-            <input name="value" placeholder="变量值">
+            <input name="value" placeholder="变量值" aria-label="全局变量值">
         </div>
     </div>
-</div>
+</section>
 
-<div class="card">
-    <button class="btn btn-primary" type="submit">保存</button>
+<section class="section fls-form-section fls-save-section">
+    <button class="btn btn-primary" type="submit">保存全局变量</button>
     <a class="btn btn-gray" href="/env">返回</a>
-</div>
+</section>
 </form>
 """
     return layout("新增全局变量", "env", body)
@@ -115,7 +115,7 @@ def env_edit(key):
         value = request.form.get("value", "")
 
         if not new_key:
-            return "变量名不能为空", 400
+            return "变量名不能为空。下一步：填写变量名后重试", 400
 
         if new_key != key:
             env.pop(key, None)
@@ -133,23 +133,23 @@ def env_edit(key):
     body = f"""
 <form method="post">
 {header}
-<div class="card">
+<section class="section fls-form-section">
     <div class="form-grid">
         <div class="form-item">
             <label>变量名</label>
-            <input name="key" value="{h(key)}">
+            <input name="key" value="{h(key)}" aria-label="全局变量名">
         </div>
         <div class="form-item">
             <label>变量值</label>
-            <input name="value" value="{h(env.get(key, ''))}">
+            <input name="value" value="{h(env.get(key, ''))}" aria-label="全局变量值">
         </div>
     </div>
-</div>
+</section>
 
-<div class="card">
-    <button class="btn btn-primary" type="submit">保存</button>
+<section class="section fls-form-section fls-save-section">
+    <button class="btn btn-primary" type="submit">保存变量</button>
     <a class="btn btn-gray" href="/env">返回</a>
-</div>
+</section>
 </form>
 """
     return layout("编辑全局变量", "env", body)

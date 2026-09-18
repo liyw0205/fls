@@ -23,7 +23,7 @@ def online_scripts_import_tasks_only(script_id):
         return redirect(
             url_for(
                 "online_scripts.online_scripts_page",
-                err="没有选择任何任务，未导入",
+                err="没有选择任何任务，未导入。下一步：至少选择一个任务后重试",
             )
         )
 
@@ -47,7 +47,7 @@ def online_scripts_import_tasks_only(script_id):
         return redirect(
             url_for(
                 "online_scripts.online_scripts_page",
-                err=f"任务导入失败：{e}",
+                err=f"任务导入失败：{e}。下一步：检查任务选择和任务字段后重试",
             )
         )
 
@@ -116,11 +116,7 @@ def online_scripts_install_select(script_id):
     task_rows = ""
 
     if not show_indexed_tasks:
-        task_rows = """
-<div class="fls-empty-card" style="grid-column:1 / -1;">
-    暂无匹配任务
-</div>
-"""
+        task_rows = '<div class="empty-state" style="grid-column:1 / -1;"><p>暂无匹配任务</p></div>'
     else:
         for idx, task_cron in show_indexed_tasks:
             name = str(task_cron.get("name") or f"任务{idx}").strip()
@@ -149,7 +145,7 @@ def online_scripts_install_select(script_id):
             if config_path:
                 config_html = f"""
                 <div class="fls-install-task-meta">
-                    <b>配置：</b>{h(config_path)}
+                    <b>任务配置文件：</b>{h(config_path)}
                 </div>
 """
 
@@ -305,8 +301,10 @@ def online_scripts_install_select(script_id):
     word-break:break-all;
 }}
 
-body.fls-mobile .fls-install-task-list {{
-    grid-template-columns:1fr!important;
+@media(max-width:767px) {{
+    .fls-install-task-list {{
+        grid-template-columns:1fr!important;
+    }}
 }}
 </style>
 
@@ -316,13 +314,13 @@ body.fls-mobile .fls-install-task-list {{
 
 {header_card}
 
-<div class="card">
-    <div class="card-title">安装选项</div>
+<section class="section fls-form-section">
+    <h2 class="section-title">安装选项</h2>
 
     <div class="form-grid">
         <div class="form-item">
             <label>代理</label>
-            <select name="proxy_id">{proxy_options}</select>
+            <select name="proxy_id" aria-label="在线脚本安装使用的代理">{proxy_options}</select>
         </div>
 
         <div class="form-item">
@@ -339,32 +337,32 @@ body.fls-mobile .fls-install-task-list {{
                 </label>
             </div>
             <div class="help">
-                不勾选“导入后启用任务”时，导入后的任务默认为禁用，需要到任务管理手动启用。
+                不勾选“导入后启用任务”时，导入后的任务默认为禁用，需要到任务页面手动启用。
             </div>
         </div>
     </div>
-</div>
+</section>
 
-<div class="card">
-    <div class="card-title">搜索任务</div>
+<section class="section fls-form-section">
+    <h2 class="section-title">搜索任务</h2>
     <div class="form-grid">
         <div class="form-item">
             <label>关键词</label>
-            <input id="installTaskSearchInput" value="{h(task_q)}" placeholder="任务名 / Cron / 命令 / 备注 / 变量 / 序号">
+            <input id="installTaskSearchInput" value="{h(task_q)}" placeholder="任务名 / Cron / 命令 / 备注 / 变量 / 序号" aria-label="搜索任务关键词">
         </div>
 
         <div class="form-item">
             <label>&nbsp;</label>
-            <button class="btn btn-primary" type="button" onclick="flsInstallSearchTasks()">搜索</button>
-            <button class="btn btn-gray" type="button" onclick="flsInstallClearSearch()">重置搜索</button>
+            <button class="btn btn-primary" type="button" onclick="flsInstallSearchTasks()">查询导入任务</button>
+            <button class="btn btn-gray" type="button" onclick="flsInstallClearSearch()">重置任务筛选</button>
         </div>
     </div>
-</div>
+</section>
 
-<div class="card">
+<section class="section fls-form-section">
     <div class="fls-install-select-head">
         <div>
-            <div class="card-title">选择要导入的任务</div>
+            <h2 class="section-title">选择要导入的任务</h2>
             <div class="help">
                 当前页显示 {display_start} - {display_end} / {filtered_total} 个匹配任务，每页 10 个。<br>
                 默认全选全部任务，可以取消不需要导入的任务。
@@ -374,7 +372,7 @@ body.fls-mobile .fls-install-task-list {{
         <div class="fls-install-task-tools">
             <button class="btn btn-blue" type="button" onclick="flsInstallSelectCurrentPage(true)">当前页全选</button>
             <button class="btn btn-gray" type="button" onclick="flsInstallSelectCurrentPage(false)">当前页取消</button>
-            <button class="btn btn-red" type="button" onclick="flsInstallCancelAllGlobal()">全部取消</button>
+            <button class="btn btn-gray" type="button" onclick="flsInstallCancelAllGlobal()">全部取消选择</button>
             <button class="btn btn-primary" type="button" onclick="flsInstallSelectAllGlobal()">全部任务全选</button>
         </div>
     </div>
@@ -384,15 +382,21 @@ body.fls-mobile .fls-install-task-list {{
     <div class="fls-install-task-list">
         {task_rows}
     </div>
-</div>
+</section>
 
 {page_links_html}
 
-<div class="card">
-    <button class="btn btn-primary" type="submit">开始下载安装</button>
-    <button class="btn btn-orange" type="submit" formaction="/online-scripts/import-tasks/{h(script_id)}">立即导入所选任务</button>
-    <a class="btn btn-gray" href="/online-scripts">取消</a>
-</div>
+<section class="section fls-form-section fls-save-section">
+    <div class="row-actions" aria-label="在线脚本导入操作">
+        <div class="row-actions-primary">
+            <button class="btn btn-primary" type="submit">开始下载安装</button>
+            <button class="btn btn-orange" type="submit" formaction="/online-scripts/import-tasks/{h(script_id)}">立即导入所选任务</button>
+        </div>
+        <div class="row-actions-secondary">
+            <a class="btn btn-gray" href="/online-scripts">取消导入</a>
+        </div>
+    </div>
+</section>
 </form>
 
 <script>

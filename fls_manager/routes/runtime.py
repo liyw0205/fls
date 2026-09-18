@@ -132,7 +132,7 @@ def runtime_install_command(runtime):
 
     pkg_map = packages.get(runtime)
     if not pkg_map or pm not in pkg_map:
-        raise RuntimeError("暂不支持自动安装该运行环境")
+        raise RuntimeError("暂不支持自动安装该运行器")
 
     pkg_name = pkg_map[pm]
 
@@ -188,7 +188,7 @@ def install_runtime(runtime):
         return redirect(url_for("deps.deps_install_log", install_id=install_id, back="/panel/status"))
 
     header = (
-        f"===== 安装运行环境: {runtime} =====\n"
+        f"===== 安装运行器: {runtime} =====\n"
         f"时间: {now_str()}\n"
         f"命令: sh -lc {cmd_text}\n"
         f"日志文件: {log_file}\n"

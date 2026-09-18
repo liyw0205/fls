@@ -39,7 +39,7 @@ def api_proxy_quality_form():
         })
 
 
-@bp.route("/api/proxy/test/<proxy_id>")
+@bp.route("/api/proxy/test/<proxy_id>", methods=["GET", "POST"])
 def api_proxy_test_saved(proxy_id):
     proxy = get_proxy_for_test(proxy_id)
 
@@ -66,7 +66,7 @@ def api_proxy_test_saved(proxy_id):
         })
 
 
-@bp.route("/api/proxy/quality/<proxy_id>")
+@bp.route("/api/proxy/quality/<proxy_id>", methods=["GET", "POST"])
 def api_proxy_quality_saved(proxy_id):
     proxy = get_proxy_for_test(proxy_id)
 
@@ -80,7 +80,7 @@ def api_proxy_quality_saved(proxy_id):
     try:
         items = quality_proxy_object(
             proxy,
-            parse_quality_urls(request.args.get("urls"))
+            parse_quality_urls(request.values.get("urls"))
         )
         return jsonify({
             "ok": True,

@@ -117,7 +117,7 @@ def online_script_doc(script_id):
     <iframe src="{h(real_url)}" class="fls-doc-iframe"></iframe>
 </div>
 <div class="help" style="margin-top:10px;">
-    文档内容拉取失败，已尝试用网页窗口打开。若仍无法显示，请点击“打开原文”。
+    文档内容加载失败，已尝试用网页窗口打开。若仍无法显示，请点击“打开原文”。
 </div>
 """
 
@@ -252,33 +252,36 @@ def online_script_doc(script_id):
     line-height:1.55;
 }}
 
-body.fls-mobile .fls-doc-window {{
-    height:calc(100vh - 190px);
-    min-height:520px;
-    border-radius:12px;
-}}
+@media(max-width:767px) {{
+    .fls-doc-window {{
+        height:calc(100vh - 190px);
+        min-height:520px;
+        border-radius:12px;
+    }}
 
-body.fls-mobile .fls-doc-md {{
-    padding:13px;
-    border-radius:12px;
-}}
+    .fls-doc-md {{
+        padding:13px;
+        border-radius:12px;
+    }}
 
-body.fls-mobile .fls-doc-md h1 {{
-    font-size:23px;
-}}
+    .fls-doc-md h1 {{
+        font-size:23px;
+    }}
 
-body.fls-mobile .fls-doc-md h2 {{
-    font-size:20px;
-}}
+    .fls-doc-md h2 {{
+        font-size:20px;
+    }}
 
-body.fls-mobile .fls-doc-raw {{
-    min-height:520px;
-    font-size:12px;
+    .fls-doc-raw {{
+        min-height:520px;
+        font-size:12px;
+    }}
 }}
 </style>
 
-<div class="card">
-    <div class="card-title">脚本文档：{h(item.get("name") or script_id)}</div>
+<form method="get">
+<section class="section fls-form-section">
+    <h2 class="section-title">脚本文档：{h(item.get("name") or script_id)}</h2>
     <div class="help">
         脚本 ID：{h(item.get("id"))}<br>
         识别结果：<b>{h(detected)}</b><br>
@@ -288,9 +291,9 @@ body.fls-mobile .fls-doc-raw {{
     </div>
     <br>
 
-    <form method="get" class="fls-doc-toolbar">
-        <select name="proxy_id">{proxy_options}</select>
-        <select name="mode">
+    <div class="fls-doc-toolbar">
+        <select name="proxy_id" aria-label="查看文档使用的代理">{proxy_options}</select>
+        <select name="mode" aria-label="文档查看模式">
             <option value="auto" {"selected" if mode == "auto" else ""}>自动识别</option>
             <option value="render" {"selected" if mode == "render" else ""}>渲染 Markdown / 文本</option>
             <option value="web" {"selected" if mode == "web" else ""}>网页窗口</option>
@@ -299,14 +302,16 @@ body.fls-mobile .fls-doc-raw {{
         <button class="btn btn-primary" type="submit">重新加载</button>
         <a class="btn btn-blue" href="{h(real_url)}" target="_blank">打开原文</a>
         <a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>
-    </form>
-</div>
+    </div>
+</section>
+</form>
 
-{message_card("文档加载失败：" + err, "error", strong=True) if err else ""}
+{message_card("文档加载失败：" + err + "。下一步：切换查看模式或打开原文后重试", "error", strong=True) if err else ""}
 
-<div class="card">
+<section class="section">
+    <h2 class="section-title">文档内容</h2>
     {doc_html or '<div class="help">暂无文档内容</div>'}
-</div>
+</section>
 """
 
     return layout("脚本文档", "online_scripts", body)

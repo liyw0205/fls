@@ -21,7 +21,7 @@ def about_refresh_log():
     if not git_available():
         body = page_header_card(
             "刷新失败",
-            help_html='<span style="color:#dc2626;">系统未安装 git。</span>',
+            help_html='<span style="color:#dc2626;">系统未安装 git。下一步：安装 git 后返回关于页重试。</span>',
             actions_html='<a class="btn btn-gray" href="/about">返回关于页</a>',
         )
         return layout("刷新失败", "about", body)
@@ -31,7 +31,7 @@ def about_refresh_log():
             "刷新失败",
             help_html=(
                 '<span style="color:#dc2626;">'
-                f"当前目录不是 Git 仓库：{h(BASE_DIR)}"
+                f"当前目录不是 Git 仓库：{h(BASE_DIR)}。下一步：切换到 Git 仓库后重试"
                 "</span>"
             ),
             actions_html='<a class="btn btn-gray" href="/about">返回关于页</a>',
@@ -62,7 +62,7 @@ def about_update_version():
             "更新失败",
             help_html=(
                 '<span style="color:#dc2626;">'
-                f"版本号非法：{h(version)}"
+                f"版本号非法：{h(version)}。下一步：填写 7-40 位提交哈希后重试"
                 "</span>"
             ),
             actions_html='<a class="btn btn-gray" href="/about">返回关于页</a>',
@@ -72,7 +72,7 @@ def about_update_version():
     if not git_available():
         body = page_header_card(
             "更新失败",
-            help_html='<span style="color:#dc2626;">系统未安装 git。</span>',
+            help_html='<span style="color:#dc2626;">系统未安装 git。下一步：安装 git 后返回关于页重试。</span>',
             actions_html='<a class="btn btn-gray" href="/about">返回关于页</a>',
         )
         return layout("更新失败", "about", body)
@@ -82,7 +82,7 @@ def about_update_version():
             "更新失败",
             help_html=(
                 '<span style="color:#dc2626;">'
-                f"当前目录不是 Git 仓库：{h(BASE_DIR)}"
+                f"当前目录不是 Git 仓库：{h(BASE_DIR)}。下一步：切换到 Git 仓库后重试"
                 "</span>"
             ),
             actions_html='<a class="btn btn-gray" href="/about">返回关于页</a>',

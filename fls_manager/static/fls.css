@@ -11,6 +11,11 @@
     --orange:#f59e0b;
     --sidebar:#111827;
     --side-text:#d1d5db;
+    --surface:#fff;
+    --surface-muted:#f8fafc;
+    --focus:#0f766e;
+    --danger-surface:#fff1f2;
+    --content-max:1680px;
 }
 
 * {
@@ -44,6 +49,36 @@ html {
 a {
     text-decoration:none;
     color:#2563eb;
+}
+
+button,
+a,
+input,
+textarea,
+select,
+summary {
+    -webkit-tap-highlight-color:transparent;
+}
+
+:where(a,button,input,textarea,select,summary):focus-visible {
+    outline:3px solid color-mix(in srgb, var(--focus) 45%, transparent);
+    outline-offset:2px;
+}
+
+.skip-link {
+    position:fixed;
+    left:12px;
+    top:8px;
+    z-index:1000;
+    padding:8px 12px;
+    border-radius:6px;
+    background:#111827;
+    color:#fff;
+    transform:translateY(-180%);
+}
+
+.skip-link:focus {
+    transform:translateY(0);
 }
 
 .app {
@@ -148,6 +183,223 @@ a {
     padding:22px;
     width:100%;
     min-width:0;
+    max-width:var(--content-max);
+    margin:0 auto;
+}
+
+.page-header {
+    display:flex;
+    align-items:flex-start;
+    justify-content:space-between;
+    gap:18px;
+    margin-bottom:20px;
+    padding-bottom:16px;
+    border-bottom:1px solid var(--border);
+}
+
+.page-header-copy {
+    min-width:0;
+}
+
+.page-eyebrow {
+    color:var(--muted);
+    font-size:12px;
+    font-weight:800;
+    margin-bottom:4px;
+}
+
+.page-title {
+    margin:0;
+    color:#111827;
+    font-size:30px;
+    line-height:1.2;
+}
+
+.page-header .card-title {
+    display:none;
+}
+
+.page-description {
+    max-width:760px;
+    margin:8px 0 0;
+    color:var(--muted);
+    font-size:14px;
+    line-height:1.65;
+}
+
+.page-header-actions,
+.page-header-back {
+    display:flex;
+    flex-wrap:wrap;
+    gap:8px;
+    align-items:center;
+}
+
+.section {
+    width:100%;
+    min-width:0;
+    margin:0 0 24px;
+}
+
+.fls-form-section {
+    padding:0 0 24px;
+    border-bottom:1px solid var(--border);
+}
+
+.fls-save-section {
+    padding-top:4px;
+    border-bottom:0;
+}
+
+.section-header {
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:12px;
+    margin-bottom:12px;
+}
+
+.section-title {
+    margin:0;
+    color:#111827;
+    font-size:18px;
+    line-height:1.35;
+}
+
+.data-table td a:not(.btn) {
+    display:inline-flex;
+    align-items:center;
+    min-height:32px;
+}
+
+.section-toolbar {
+    display:flex;
+    flex-wrap:wrap;
+    gap:8px;
+    align-items:center;
+}
+
+.data-toolbar {
+    display:flex;
+    flex-wrap:wrap;
+    align-items:flex-end;
+    gap:12px;
+    width:100%;
+    margin:0 0 14px;
+    padding:12px;
+    border:1px solid var(--border);
+    border-radius:8px;
+    background:var(--surface-muted);
+}
+
+.data-toolbar > .section-title {
+    flex:1 1 100%;
+    margin:0;
+}
+
+.row-actions {
+    display:flex;
+    flex-wrap:wrap;
+    align-items:center;
+    gap:6px;
+    min-width:180px;
+}
+
+.row-actions-primary,
+.row-actions-secondary,
+.row-actions-danger {
+    display:flex;
+    flex-wrap:wrap;
+    align-items:center;
+    gap:6px;
+}
+
+.row-actions-danger {
+    padding-left:6px;
+    border-left:1px solid var(--border);
+}
+
+.detail-disclosure {
+    margin-top:10px;
+    border:1px solid var(--border);
+    border-radius:6px;
+    background:var(--surface-muted);
+}
+
+.detail-disclosure > summary {
+    cursor:pointer;
+    padding:9px 10px;
+    color:#374151;
+    font-size:13px;
+    font-weight:700;
+}
+
+.detail-disclosure-content {
+    padding:0 10px 10px;
+}
+
+.status-badge {
+    display:inline-flex;
+    align-items:center;
+    min-height:24px;
+    padding:3px 8px;
+    border-radius:999px;
+    background:#f3f4f6;
+    color:#374151;
+    font-size:12px;
+    font-weight:800;
+    white-space:nowrap;
+}
+
+.status-success,.status-enabled,.status-running { background:#dcfce7; color:#166534; }
+.status-error,.status-failed,.status-stopped,.status-disabled { background:#fee2e2; color:#991b1b; }
+.status-info,.status-starting { background:#dbeafe; color:#1d4ed8; }
+.status-warning,.status-delaying { background:#fff7ed; color:#9a3412; }
+
+.empty-state {
+    padding:28px 18px;
+    border:1px dashed #cbd5e1;
+    border-radius:8px;
+    background:var(--surface-muted);
+    color:var(--muted);
+    text-align:center;
+}
+
+.empty-state p {
+    margin:0;
+    line-height:1.6;
+}
+
+.empty-state-title {
+    margin:0 0 6px;
+    color:#374151;
+    font-size:16px;
+}
+
+.empty-state-actions {
+    display:flex;
+    justify-content:center;
+    flex-wrap:wrap;
+    gap:8px;
+    margin-top:12px;
+}
+
+.danger-confirm {
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:12px;
+    padding:10px 12px;
+    border:1px solid #fecdd3;
+    border-radius:8px;
+    background:var(--danger-surface);
+}
+
+.danger-confirm-description {
+    margin:0;
+    color:#9f1239;
+    font-size:13px;
+    line-height:1.5;
 }
 
 .card {
@@ -225,6 +477,10 @@ th {
     background:#fafafa;
 }
 
+body.page-tasks #tasksTable th {
+    white-space:nowrap;
+}
+
 .badge {
     display:inline-block;
     padding:4px 9px;
@@ -262,7 +518,7 @@ th {
     display:inline-flex;
     align-items:center;
     justify-content:center;
-    min-height:34px;
+    min-height:36px;
     padding:7px 11px;
     border-radius:8px;
     border:0;
@@ -271,6 +527,12 @@ th {
     font-size:13px;
     margin:2px;
     white-space:nowrap;
+}
+
+.btn:disabled,
+button[aria-busy="true"] {
+    cursor:wait;
+    opacity:.6;
 }
 
 .btn-primary {
@@ -414,13 +676,6 @@ pre.log {
     border-left-color:var(--orange);
 }
 
-body.fls-mobile .fls-toast-box {
-    left:10px;
-    right:10px;
-    top:calc(env(safe-area-inset-top, 0px) + 10px);
-    max-width:none;
-}
-
 /* ============================================================
    通用卡片网格 / 折叠卡片组件
    可用于：在线脚本、任务、日志、通知、代理等
@@ -437,6 +692,22 @@ body.fls-mobile .fls-toast-box {
     border-radius:16px;
     box-shadow:0 4px 16px rgba(0,0,0,.04);
     overflow:hidden;
+    padding:14px;
+}
+
+.mobile-list {
+    display:grid;
+    gap:12px;
+}
+
+.mobile-list-item {
+    min-width:0;
+}
+
+.fls-card-primary-action {
+    margin-top:12px;
+    padding-top:12px;
+    border-top:1px solid #f1f5f9;
 }
 
 .fls-fold-card summary {
@@ -535,6 +806,12 @@ body.fls-mobile .fls-toast-box {
     font-size:12px;
 }
 
+.fls-info-value a {
+    display:inline-flex;
+    align-items:center;
+    min-height:32px;
+}
+
 .fls-card-section {
     margin-top:10px;
     background:#f9fafb;
@@ -597,16 +874,6 @@ body.fls-mobile .fls-toast-box {
 .fls-btn-line .inline-form .btn {
     width:100%;
     margin:0;
-}
-
-.fls-empty-card {
-    grid-column:1 / -1;
-    background:#fff;
-    border:1px dashed #d1d5db;
-    border-radius:16px;
-    padding:28px 18px;
-    text-align:center;
-    color:#6b7280;
 }
 
 .fls-source-code {
@@ -729,45 +996,6 @@ body.fls-mobile .fls-toast-box {
     display:none;
 }
 
-body.fls-mobile .fls-float-menu-btn {
-    display:flex!important;
-    position:fixed;
-    left:8px;
-    top:calc(env(safe-area-inset-top, 0px) + 8px);
-    width:38px;
-    height:38px;
-    border:1px solid rgba(255,255,255,.45);
-    border-radius:999px;
-    background:rgba(255,255,255,.58);
-    color:#111827;
-    font-size:18px;
-    font-weight:900;
-    align-items:center;
-    justify-content:center;
-    z-index:31;
-    box-shadow:0 6px 18px rgba(0,0,0,.16);
-    backdrop-filter:blur(14px) saturate(180%);
-    -webkit-backdrop-filter:blur(14px) saturate(180%);
-    cursor:pointer;
-    transition:opacity .18s ease, transform .18s ease, background .18s ease;
-}
-
-body.fls-mobile .fls-float-menu-btn.menu-open {
-    opacity:0;
-    pointer-events:none;
-    transform:scale(.92);
-}
-
-body.fls-mobile .fls-float-menu-btn:active {
-    transform:scale(.94);
-    background:rgba(255,255,255,.72);
-}
-
-body.fls-menu-open .fls-float-menu-btn {
-    opacity:0;
-    pointer-events:none;
-}
-
 /* ============================================================
    表单悬浮提交按钮
    - 层级低于侧边栏遮罩和侧边栏
@@ -834,409 +1062,6 @@ body.fls-has-floating-actions .content {
 }
 
 /* 手机端：更小、更短，不占太多宽度 */
-body.fls-mobile .fls-form-float-actions {
-    left:auto;
-    right:10px;
-    bottom:calc(env(safe-area-inset-bottom, 0px) + 12px);
-    max-width:calc(100vw - 20px);
-    padding:7px;
-    border-radius:999px;
-}
-
-body.fls-mobile.fls-has-floating-actions .content {
-    padding-bottom:128px!important;
-}
-
-body.fls-mobile .fls-form-float-actions .btn {
-    flex:0 0 auto;
-    min-width:54px;
-    max-width:82px;
-    min-height:36px;
-    padding:7px 10px;
-    font-size:12px;
-}
-
-body.fls-mobile .fls-form-float-title {
-    display:none;
-}
-
-/* ============================================================
-   手机端布局
-   ============================================================ */
-body.fls-mobile .sidebar {
-    transform:translateX(-100%)!important;
-    width:240px!important;
-}
-
-body.fls-mobile .sidebar.open {
-    transform:translateX(0)!important;
-}
-
-body.fls-mobile .main {
-    margin-left:0!important;
-    width:100%!important;
-    max-width:100%!important;
-}
-
-body.fls-mobile .menu-btn {
-    display:none!important;
-}
-
-body.fls-mobile .topbar {
-    height:var(--topbar-height)!important;
-    padding:0 10px 0 52px!important;
-}
-
-body.fls-mobile {
-    --topbar-height:52px;
-}
-
-body.fls-mobile .title {
-    font-size:16px!important;
-}
-
-body.fls-mobile .content {
-    padding:12px!important;
-    width:100%!important;
-    max-width:100%!important;
-}
-
-body.fls-mobile .card {
-    padding:12px!important;
-    border-radius:12px!important;
-    width:100%!important;
-    max-width:100%!important;
-}
-
-body.fls-mobile .grid {
-    grid-template-columns:repeat(2,minmax(0,1fr))!important;
-    gap:10px!important;
-}
-
-body.fls-mobile .stat {
-    padding:12px!important;
-}
-
-body.fls-mobile .stat .label {
-    font-size:12px!important;
-}
-
-body.fls-mobile .stat .num {
-    font-size:22px!important;
-}
-
-body.fls-mobile .form-grid {
-    grid-template-columns:1fr!important;
-}
-
-body.fls-mobile .mask.show {
-    display:block!important;
-    position:fixed!important;
-    inset:0!important;
-    background:rgba(0,0,0,.45)!important;
-    z-index:20!important;
-}
-
-body.fls-mobile .content > .card[style*="max-width"] {
-    max-width:none!important;
-    width:100%!important;
-    margin:16px 0!important;
-}
-
-body.fls-mobile .fls-section-nav {
-    top:var(--topbar-height);
-    margin-bottom:12px;
-    padding:7px;
-    gap:6px;
-}
-
-body.fls-mobile .fls-section-nav-label {
-    flex:0 0 100%;
-    padding:0 2px 2px;
-}
-
-body.fls-mobile .fls-section-nav a {
-    flex:1 1 auto;
-    justify-content:center;
-    min-height:34px;
-    padding:6px 8px;
-}
-
-body.fls-mobile .fls-subsection {
-    padding:12px;
-}
-
-/* 通用卡片移动端 */
-body.fls-mobile .fls-card-grid {
-    grid-template-columns:1fr!important;
-    gap:12px!important;
-}
-
-body.fls-mobile .fls-fold-card {
-    border-radius:14px!important;
-}
-
-body.fls-mobile .fls-fold-card summary {
-    padding:13px!important;
-}
-
-body.fls-mobile .fls-card-body {
-    padding:0 13px 13px!important;
-}
-
-body.fls-mobile .fls-info-grid {
-    grid-template-columns:1fr 1fr!important;
-    gap:8px!important;
-}
-
-body.fls-mobile .fls-summary-grid {
-    grid-template-columns:repeat(3,minmax(0,1fr))!important;
-    gap:8px!important;
-}
-
-body.fls-mobile .fls-summary-item {
-    padding:10px!important;
-    border-radius:12px!important;
-}
-
-body.fls-mobile .fls-summary-num {
-    font-size:20px!important;
-}
-
-body.fls-mobile .fls-action-line {
-    display:grid!important;
-    grid-template-columns:1fr!important;
-    gap:10px!important;
-}
-
-body.fls-mobile .fls-action-line select {
-    width:100%!important;
-}
-
-body.fls-mobile .fls-check-group {
-    display:grid!important;
-    grid-template-columns:1fr 1fr!important;
-    gap:10px!important;
-    width:100%!important;
-}
-
-body.fls-mobile .fls-check-group .fls-inline-check {
-    justify-content:center!important;
-    background:#f9fafb!important;
-    border:1px solid #f1f5f9!important;
-    border-radius:10px!important;
-    padding:10px!important;
-    margin:0!important;
-}
-
-/* 平板竖屏通常仍使用抽屉菜单，但内容区可以比手机更密一些 */
-body.fls-tablet.fls-mobile .sidebar {
-    width:280px!important;
-}
-
-body.fls-tablet.fls-mobile .content {
-    padding:16px!important;
-}
-
-body.fls-tablet.fls-mobile .card {
-    padding:16px!important;
-}
-
-body.fls-tablet.fls-mobile .grid {
-    grid-template-columns:repeat(3,minmax(0,1fr))!important;
-    gap:12px!important;
-}
-
-body.fls-tablet.fls-mobile .fls-card-grid {
-    grid-template-columns:repeat(2,minmax(0,1fr))!important;
-}
-
-body.fls-tablet.fls-mobile .form-grid {
-    grid-template-columns:repeat(2,minmax(0,1fr))!important;
-}
-
-body.fls-tablet.fls-mobile .fls-form-float-actions .btn {
-    max-width:120px;
-}
-
-body.fls-phone .form-grid,
-body.fls-phone.fls-mobile .form-grid {
-    grid-template-columns:1fr!important;
-}
-
-body.fls-phone .fls-card-grid,
-body.fls-phone.fls-mobile .fls-card-grid {
-    grid-template-columns:1fr!important;
-}
-
-body.fls-phone .fls-summary-grid,
-body.fls-phone.fls-mobile .fls-summary-grid {
-    grid-template-columns:repeat(2,minmax(0,1fr))!important;
-}
-
-body.fls-phone .fls-check-group,
-body.fls-phone.fls-mobile .fls-check-group {
-    grid-template-columns:1fr!important;
-}
-
-/* ============================================================
-   文件管理 / 代理管理：保持横向表格
-   ============================================================ */
-body.fls-mobile.page-pull .table-wrap table,
-body.fls-mobile.page-proxy .table-wrap table {
-    display:table!important;
-    min-width:980px!important;
-    width:100%!important;
-    border-collapse:collapse!important;
-}
-
-body.fls-mobile.page-pull .table-wrap thead,
-body.fls-mobile.page-proxy .table-wrap thead {
-    display:table-header-group!important;
-}
-
-body.fls-mobile.page-pull .table-wrap tbody,
-body.fls-mobile.page-proxy .table-wrap tbody {
-    display:table-row-group!important;
-}
-
-body.fls-mobile.page-pull .table-wrap tr,
-body.fls-mobile.page-proxy .table-wrap tr {
-    display:table-row!important;
-    width:auto!important;
-    background:transparent!important;
-    border:0!important;
-    border-radius:0!important;
-    padding:0!important;
-    margin:0!important;
-    box-shadow:none!important;
-}
-
-body.fls-mobile.page-pull .table-wrap th,
-body.fls-mobile.page-proxy .table-wrap th,
-body.fls-mobile.page-pull .table-wrap td,
-body.fls-mobile.page-proxy .table-wrap td {
-    display:table-cell!important;
-    width:auto!important;
-    border-bottom:1px solid #e5e7eb!important;
-    padding:10px 8px!important;
-    font-size:13px!important;
-    vertical-align:middle!important;
-}
-
-body.fls-mobile.page-pull .table-wrap td::before,
-body.fls-mobile.page-proxy .table-wrap td::before {
-    display:none!important;
-    content:""!important;
-}
-
-/* ============================================================
-   依赖管理：双列卡片
-   ============================================================ */
-body.fls-mobile.page-deps .table-wrap table {
-    display:block!important;
-    min-width:0!important;
-    width:100%!important;
-}
-
-body.fls-mobile.page-deps .table-wrap thead {
-    display:none!important;
-}
-
-body.fls-mobile.page-deps .table-wrap tbody {
-    display:grid!important;
-    grid-template-columns:repeat(2,minmax(0,1fr))!important;
-    gap:12px!important;
-}
-
-body.fls-mobile.page-deps .table-wrap tr {
-    display:block!important;
-    margin:0!important;
-    padding:12px!important;
-    border:1px solid #e5e7eb!important;
-    border-radius:14px!important;
-    background:#fff!important;
-    box-shadow:0 4px 16px rgba(0,0,0,.04)!important;
-}
-
-body.fls-mobile.page-deps .table-wrap td {
-    display:block!important;
-    border-bottom:1px solid #f1f5f9!important;
-    padding:7px 0!important;
-    width:100%!important;
-}
-
-body.fls-mobile.page-deps .table-wrap td::before {
-    display:block!important;
-    content:attr(data-label);
-    color:#6b7280;
-    font-size:12px;
-    font-weight:700;
-    margin-bottom:3px;
-}
-
-body.fls-mobile.page-deps .table-wrap td:last-child {
-    border-bottom:0!important;
-}
-
-body.fls-mobile.page-deps .table-wrap td:last-child .btn {
-    width:100%!important;
-    margin:4px 0!important;
-}
-
-/* ============================================================
-   运行环境：横向滚动
-   ============================================================ */
-body.fls-mobile.page-status #runtimeTable {
-    display:table!important;
-    min-width:760px!important;
-    width:100%!important;
-    border-collapse:collapse!important;
-}
-
-body.fls-mobile.page-status #runtimeTable thead {
-    display:table-header-group!important;
-}
-
-body.fls-mobile.page-status #runtimeTable tbody {
-    display:table-row-group!important;
-}
-
-body.fls-mobile.page-status #runtimeTable tr {
-    display:table-row!important;
-    width:auto!important;
-    background:transparent!important;
-    border:0!important;
-    border-radius:0!important;
-    padding:0!important;
-    margin:0!important;
-    box-shadow:none!important;
-}
-
-body.fls-mobile.page-status #runtimeTable th,
-body.fls-mobile.page-status #runtimeTable td {
-    display:table-cell!important;
-    width:auto!important;
-    border-bottom:1px solid #e5e7eb!important;
-    padding:10px 8px!important;
-    font-size:13px!important;
-    vertical-align:middle!important;
-}
-
-body.fls-mobile.page-status #runtimeTable td::before {
-    display:none!important;
-    content:""!important;
-}
-
-/* ============================================================
-   日志管理：卡片折叠样式
-   ============================================================ */
-#logsGroupGrid {
-    display:grid;
-    grid-template-columns:repeat(2,minmax(0,1fr));
-    gap:14px;
-}
-
 .log-group-card {
     background:#fff;
     border:1px solid #e5e7eb;
@@ -1313,128 +1138,6 @@ body.fls-mobile.page-status #runtimeTable td::before {
     color:#6b7280;
     background:#fff;
     border-radius:12px;
-}
-
-body.fls-mobile.page-logs #logsGroupGrid {
-    display:grid!important;
-    grid-template-columns:repeat(2,minmax(0,1fr))!important;
-    gap:12px!important;
-}
-
-body.fls-mobile.page-logs .log-group-card summary {
-    padding:12px!important;
-}
-
-body.fls-mobile.page-logs .log-group-body {
-    padding:0 12px 12px!important;
-}
-
-body.fls-mobile.page-logs .log-group-title {
-    font-size:14px!important;
-}
-
-body.fls-mobile.page-logs .log-group-body .table-wrap table {
-    display:table!important;
-    min-width:560px!important;
-    width:100%!important;
-    border-collapse:collapse!important;
-}
-
-body.fls-mobile.page-logs .log-group-body .table-wrap thead {
-    display:table-header-group!important;
-}
-
-body.fls-mobile.page-logs .log-group-body .table-wrap tbody {
-    display:table-row-group!important;
-}
-
-body.fls-mobile.page-logs .log-group-body .table-wrap tr {
-    display:table-row!important;
-    box-shadow:none!important;
-    border:0!important;
-    padding:0!important;
-    margin:0!important;
-}
-
-body.fls-mobile.page-logs .log-group-body .table-wrap th,
-body.fls-mobile.page-logs .log-group-body .table-wrap td {
-    display:table-cell!important;
-    padding:8px 6px!important;
-    border-bottom:1px solid #e5e7eb!important;
-    font-size:12px!important;
-}
-
-body.fls-mobile.page-logs .log-group-body .table-wrap td::before {
-    display:none!important;
-    content:""!important;
-}
-
-/* ============================================================
-   其他普通表格：移动端卡片化
-   ============================================================ */
-body.fls-mobile:not(.page-pull):not(.page-proxy):not(.page-deps):not(.page-status):not(.page-logs) .table-wrap table:not(#tasksTable) {
-    min-width:0!important;
-    width:100%!important;
-    display:block!important;
-    border-collapse:separate!important;
-}
-
-body.fls-mobile:not(.page-pull):not(.page-proxy):not(.page-deps):not(.page-status):not(.page-logs) .table-wrap table:not(#tasksTable) thead {
-    display:none!important;
-}
-
-body.fls-mobile:not(.page-pull):not(.page-proxy):not(.page-deps):not(.page-status):not(.page-logs) .table-wrap table:not(#tasksTable) tbody {
-    display:block!important;
-    width:100%!important;
-}
-
-body.fls-mobile:not(.page-pull):not(.page-proxy):not(.page-deps):not(.page-status):not(.page-logs) .table-wrap table:not(#tasksTable) tr {
-    display:block!important;
-    width:100%!important;
-    background:#fff!important;
-    border:1px solid #e5e7eb!important;
-    border-radius:14px!important;
-    padding:12px!important;
-    margin-bottom:12px!important;
-    box-shadow:0 4px 16px rgba(0,0,0,.04)!important;
-}
-
-body.fls-mobile:not(.page-pull):not(.page-proxy):not(.page-deps):not(.page-status):not(.page-logs) .table-wrap table:not(#tasksTable) td {
-    display:flex!important;
-    align-items:flex-start!important;
-    justify-content:space-between!important;
-    gap:12px!important;
-    width:100%!important;
-    border-bottom:1px solid #f1f5f9!important;
-    padding:9px 0!important;
-    font-size:14px!important;
-    word-break:break-word!important;
-}
-
-body.fls-mobile:not(.page-pull):not(.page-proxy):not(.page-deps):not(.page-status):not(.page-logs) .table-wrap table:not(#tasksTable) td:last-child {
-    border-bottom:0!important;
-    display:block!important;
-}
-
-body.fls-mobile:not(.page-pull):not(.page-proxy):not(.page-deps):not(.page-status):not(.page-logs) .table-wrap table:not(#tasksTable) td::before {
-    content:attr(data-label);
-    flex:0 0 86px;
-    max-width:86px;
-    color:#6b7280;
-    font-size:12px;
-    font-weight:700;
-    line-height:1.5;
-}
-
-/* 变量长值折叠 */
-.fls-collapsible-value[open] summary .fls-value-preview {
-    display:none!important;
-}
-
-.fls-collapsible-value[open] summary::after {
-    content:"点击收起";
-    color:#6b7280;
-    font-size:12px;
 }
 
 .fls-collapsible-value summary {
@@ -1536,7 +1239,7 @@ body.fls-menu-open .fls-log-new-tip {
 .fls-section-nav a {
     display:inline-flex;
     align-items:center;
-    min-height:30px;
+    min-height:34px;
     padding:5px 9px;
     border:1px solid var(--border);
     border-radius:7px;
@@ -1582,7 +1285,7 @@ body.fls-menu-open .fls-log-new-tip {
     }
 }
 
-@media(min-width:901px) and (max-width:1180px) {
+@media(min-width:768px) and (max-width:1199px) {
     :root {
         --topbar-height:58px;
     }
@@ -1786,7 +1489,7 @@ body.fls-menu-open .fls-log-new-tip {
     }
 }
 
-@media(max-width:900px) {
+@media(max-width:767px) {
     .sidebar {
         transform:translateX(-100%);
         width:240px;
@@ -1870,6 +1573,72 @@ body.fls-menu-open .fls-log-new-tip {
     }
 }
 
+/* The layout contract has three explicit bands selected by media queries. */
+@media(max-width:767px) {
+    .content {
+        padding:12px;
+    }
+
+    .page-title {
+        font-size:24px;
+    }
+
+    .row-actions {
+        min-width:0;
+        width:100%;
+    }
+
+    .row-actions-danger {
+        padding-left:0;
+        border-left:0;
+        border-top:1px solid var(--border);
+        padding-top:6px;
+        width:100%;
+    }
+}
+
+@media(min-width:768px) and (max-width:1199px) {
+    .content {
+        padding:18px;
+    }
+
+    .page-header {
+        margin-bottom:18px;
+    }
+
+    .section-title {
+        font-size:17px;
+    }
+
+    .page-title {
+        font-size:28px;
+    }
+
+    .data-toolbar {
+        align-items:center;
+    }
+}
+
+@media(min-width:1200px) {
+    .content {
+        padding:24px 28px 32px;
+    }
+
+    .section {
+        margin-bottom:28px;
+    }
+
+    /* Keep row actions available while scanning wide desktop tables. */
+    .table-wrap table th:last-child,
+    .table-wrap table td:last-child {
+        position:sticky;
+        right:0;
+        z-index:2;
+        background:#fff;
+        box-shadow:-8px 0 10px -10px rgba(17,24,39,.65);
+    }
+}
+
 @media(max-width:420px) {
     .fls-info-grid {
         grid-template-columns:1fr!important;
@@ -1881,8 +1650,8 @@ body.fls-menu-open .fls-log-new-tip {
 }
 
 @media(max-width:390px) {
-    body.fls-mobile.page-deps .table-wrap tbody,
-    body.fls-mobile.page-logs #logsGroupGrid {
+    .page-deps .table-wrap tbody,
+    .page-logs #logsGroupGrid {
         grid-template-columns:1fr!important;
     }
 }
@@ -1896,17 +1665,8 @@ body.fls-menu-open .fls-log-new-tip {
     line-height:1.55;
 }
 
-body.fls-mobile .CodeMirror {
-    min-height:520px;
-    font-size:13px;
-    border-radius:10px;
-}
-
 /* ============================================================
    AJAX 页面切换顶部加载条
-   - 替代 content opacity 变灰
-   - 缓存命中时不显示
-   - 网络加载时显示顶部细条
    ============================================================ */
 .fls-page-loading-bar {
     position:fixed;

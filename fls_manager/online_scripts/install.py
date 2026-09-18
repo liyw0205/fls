@@ -186,7 +186,7 @@ def download_online_script_logged(item, proxy_id, log_file, force=False, install
     target = online_script_target(item)
 
     append_log(log_file, "")
-    append_log(log_file, "===== 下载/拉取脚本 =====")
+    append_log(log_file, "===== 下载在线脚本 =====")
     append_log(log_file, f"脚本类型: {script_type}")
     append_log(log_file, f"原始链接: {link}")
     append_log(log_file, f"保存目标: {target}")
@@ -248,7 +248,7 @@ def download_online_script_logged(item, proxy_id, log_file, force=False, install
     if script_type == "repo":
         git_bin = shutil.which("git")
         if not git_bin:
-            raise RuntimeError("未安装 git，无法拉取仓库")
+            raise RuntimeError("未安装 git，无法下载仓库")
 
         env = os.environ.copy()
         env = apply_proxy_env(env, proxy_id)
@@ -303,7 +303,7 @@ def download_online_script_logged(item, proxy_id, log_file, force=False, install
                 install_id=install_id,
             )
 
-        append_log(log_file, f"仓库拉取/更新完成：{target}")
+        append_log(log_file, f"仓库下载/更新完成：{target}")
         return target
 
     raise RuntimeError("未知脚本类型")

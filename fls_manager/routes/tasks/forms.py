@@ -4,6 +4,7 @@ from ...utils import h
 from ...paths import SCRIPT_DIR
 from ...proxy import proxy_select_options
 from ...notify import notify_select_options
+from ...ui.components import page_header, empty_table_row
 from .helpers import collection_select_options
 
 
@@ -16,9 +17,13 @@ def task_env_rows(env):
 
         rows += f"""
 <tr>
-    <td><input name="env_key" value="{h(key)}" placeholder="变量名"></td>
-    <td><textarea name="env_value" style="min-height:72px;" placeholder="变量值">{h(value)}</textarea></td>
-    <td><button class="btn btn-red" type="button" onclick="flsTaskEnvRemoveRow(this)">删除</button></td>
+    <td><input name="env_key" value="{h(key)}" placeholder="变量名" aria-label="任务变量名"></td>
+    <td><textarea name="env_value" style="min-height:72px;" placeholder="变量值" aria-label="任务变量值">{h(value)}</textarea></td>
+    <td>
+        <div class="row-actions-danger">
+            <button class="btn btn-red" type="button" onclick="flsTaskEnvRemoveRow(this)">删除变量</button>
+        </div>
+    </td>
 </tr>
 """
     return rows
@@ -235,22 +240,35 @@ def task_form(task=None, back_url="/tasks"):
 
     env_rows = task_env_rows(task.get("env", {}) or {})
     empty_style = "" if not env_rows else "display:none;"
+    empty_env_row = empty_table_row(
+        3,
+        "暂无任务变量",
+        '<button class="btn btn-primary" type="button" onclick="flsTaskEnvAddRow()">新增任务变量</button>',
+        row_id="taskEnvEmptyRow",
+        style=empty_style,
+    )
 
     back_url = str(back_url or "/tasks")
+    page_title = "编辑任务" if str(task.get("id") or "").strip() else "新建任务"
+    header = page_header(
+        page_title,
+        help_html="设置任务信息、变量、通知和运行策略。",
+    )
 
     body = f"""
+{header}
 <form method="post">
 <input type="hidden" name="back" value="{h(back_url)}">
-<div class="card">
-    <div class="card-title">任务信息</div>
+<section class="section fls-form-section">
+    <h2 class="section-title">任务信息</h2>
     <div class="form-grid">
         <div class="form-item">
             <label>任务名，必填</label>
-            <input name="name" required value="{h(task.get('name', ''))}">
+            <input name="name" required value="{h(task.get('name', ''))}" aria-label="任务名">
         </div>
         <div class="form-item">
             <label>Cron 表达式</label>
-            <input name="cron" value="{h(task.get('cron', ''))}" placeholder="0 8 * * *">
+            <input name="cron" value="{h(task.get('cron', ''))}" placeholder="0 8 * * *" aria-label="Cron 表达式">
             <div class="help">留空表示手动任务。支持 5 位或 6 位 Cron。</div>
         </div>
     </div>
@@ -259,7 +277,7 @@ def task_form(task=None, back_url="/tasks"):
 
     <div class="form-item">
         <label>备注，可空</label>
-        <input name="remark" value="{h(task.get('remark', ''))}" placeholder="例如：账号1、主号、备用任务等">
+        <input name="remark" value="{h(task.get('remark', ''))}" placeholder="例如：账号1、主号、备用任务等" aria-label="任务备注">
         <div class="help">备注默认为空，仅用于任务列表展示和区分任务。</div>
     </div>
 
@@ -267,7 +285,7 @@ def task_form(task=None, back_url="/tasks"):
 
     <div class="form-item">
         <label>命令，必填</label>
-        <textarea name="command" required style="min-height:160px;" placeholder="task 1.py&#10;&#10;也可以写多行命令，例如：&#10;cd /root/fls/scripts&#10;python3 test.py&#10;echo 完成">{h(task.get('command', ''))}</textarea>
+        <textarea name="command" required style="min-height:160px;" placeholder="task 1.py&#10;&#10;也可以写多行命令，例如：&#10;cd /root/fls/scripts&#10;python3 test.py&#10;echo 完成" aria-label="任务命令">{h(task.get('command', ''))}</textarea>
         <div class="help">
             单行运行脚本可以写：<code>task 1.py</code><br>
             如果要写多行命令，请不要以 <code>task</code> 开头，直接写 Shell 命令即可。
@@ -278,7 +296,7 @@ def task_form(task=None, back_url="/tasks"):
 
     <div class="form-item">
         <label>配置文件路径，可空</label>
-        <input name="config_path" value="{h(task.get('config_path', ''))}" placeholder="例如：checkbox/config.yml">
+        <input name="config_path" value="{h(task.get('config_path', ''))}" placeholder="例如：checkbox/config.yml" aria-label="任务配置文件路径">
         <div class="help">
             相对于 scripts 目录。填写后任务列表会显示“配置”按钮。<br>
             例如：<code>checkbox/config.yml</code> 对应 <code>{h(str(SCRIPT_DIR / 'checkbox/config.yml'))}</code>
@@ -289,7 +307,7 @@ def task_form(task=None, back_url="/tasks"):
 
     <div class="form-item">
         <label>所属合集</label>
-        <select name="collection_id">{collection_select_options(task.get("collection_id", ""))}</select>
+        <select name="collection_id" aria-label="所属合集">{collection_select_options(task.get("collection_id", ""))}</select>
         <div class="help">
             放入合集的任务不会在普通任务列表显示，但仍会正常运行。
         </div>
@@ -299,7 +317,7 @@ def task_form(task=None, back_url="/tasks"):
 
     <div class="form-item">
         <label>代理</label>
-        <select name="proxy_id">{proxy_options}</select>
+        <select name="proxy_id" aria-label="任务代理">{proxy_options}</select>
         <div class="help">只显示已启用代理。任务运行时会自动注入 HTTP_PROXY / HTTPS_PROXY / ALL_PROXY。</div>
     </div>
 
@@ -324,7 +342,7 @@ def task_form(task=None, back_url="/tasks"):
         </label>
 
         <div id="notifyCustomBox" style="display:none;margin-top:10px;">
-            <select name="notify_ids" multiple size="8">{notify_options}</select>
+            <select name="notify_ids" multiple size="8" aria-label="指定通知渠道">{notify_options}</select>
             <div class="help">可以多选。选择指定通知但未选择任何渠道时，会自动按“不通知”处理。</div>
         </div>
     </div>
@@ -350,7 +368,7 @@ def task_form(task=None, back_url="/tasks"):
         </label>
 
         <div id="randomDelayCustomBox" style="display:none;margin-top:10px;">
-            <input name="random_delay_seconds" type="number" min="1" max="120" value="{h(random_delay_seconds or 1)}">
+            <input name="random_delay_seconds" type="number" min="1" max="120" value="{h(random_delay_seconds or 1)}" aria-label="自定义随机延迟秒数">
             <div class="help">
                 范围 1-120 秒。任务启动前会随机等待 1 到该秒数。
             </div>
@@ -362,13 +380,13 @@ def task_form(task=None, back_url="/tasks"):
     <div class="form-grid">
         <div class="form-item">
             <label>失败重试次数</label>
-            <input name="retry_attempts" type="number" min="0" max="5" value="{h(retry_attempts)}">
+            <input name="retry_attempts" type="number" min="0" max="5" value="{h(retry_attempts)}" aria-label="失败重试次数">
             <div class="help">任务退出码非 0、启动失败或超时时自动重试。0 表示不重试，最多 5 次。</div>
         </div>
 
         <div class="form-item">
             <label>重试间隔，秒</label>
-            <input name="retry_interval_seconds" type="number" min="5" max="3600" value="{h(retry_interval_seconds)}">
+            <input name="retry_interval_seconds" type="number" min="5" max="3600" value="{h(retry_interval_seconds)}" aria-label="重试间隔秒数">
             <div class="help">每次失败后等待该秒数再重试。范围 5-3600 秒。</div>
         </div>
     </div>
@@ -379,12 +397,12 @@ def task_form(task=None, back_url="/tasks"):
         <input type="checkbox" name="enabled" value="1" {checked} style="width:auto;">
         启用任务
     </label>
-</div>
+</section>
 
-<div class="card">
+<section class="section fls-form-section">
     <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
         <div>
-            <div class="card-title">任务变量</div>
+            <h2 class="section-title">任务变量</h2>
             <div class="help">任务变量仅对此任务生效，会覆盖同名全局变量。</div>
         </div>
         <button class="btn btn-primary" type="button" onclick="flsTaskEnvAddRow()">新增任务变量</button>
@@ -403,18 +421,16 @@ def task_form(task=None, back_url="/tasks"):
             </thead>
             <tbody id="taskEnvTbody">
                 {env_rows}
-                <tr id="taskEnvEmptyRow" style="{empty_style}">
-                    <td colspan="3">暂无任务变量，请点击“新增任务变量”</td>
-                </tr>
+                {empty_env_row}
             </tbody>
         </table>
     </div>
-</div>
+ </section>
 
-<div class="card">
-    <button class="btn btn-primary" type="submit">保存</button>
+<section class="section fls-form-section fls-save-section">
+    <button class="btn btn-primary" type="submit">保存任务配置</button>
     <a class="btn btn-gray" href="{h(back_url)}">返回</a>
-</div>
+</section>
 </form>
 
 <script>
@@ -460,9 +476,9 @@ function flsTaskEnvAddRow(key, value){{
 
     var tr = document.createElement("tr");
     tr.innerHTML =
-        '<td><input name="env_key" value="' + flsEscapeHtml(key) + '" placeholder="变量名"></td>' +
-        '<td><textarea name="env_value" style="min-height:72px;" placeholder="变量值">' + flsEscapeHtml(value) + '</textarea></td>' +
-        '<td><button class="btn btn-red" type="button" onclick="flsTaskEnvRemoveRow(this)">删除</button></td>';
+        '<td><input name="env_key" value="' + flsEscapeHtml(key) + '" placeholder="变量名" aria-label="任务变量名"></td>' +
+        '<td><textarea name="env_value" style="min-height:72px;" placeholder="变量值" aria-label="任务变量值">' + flsEscapeHtml(value) + '</textarea></td>' +
+        '<td><div class="row-actions-danger"><button class="btn btn-red" type="button" onclick="flsTaskEnvRemoveRow(this)">删除变量</button></div></td>';
 
     tbody.appendChild(tr);
     refreshEmptyRow();

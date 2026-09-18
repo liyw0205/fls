@@ -105,7 +105,7 @@ class UiComponentTests(unittest.TestCase):
             table_id='runtime"table',
         )
 
-        self.assertIn('<div class="card-title">&lt;依赖&gt;</div>', html)
+        self.assertIn('<h2 class="section-title">&lt;依赖&gt;</h2>', html)
         self.assertIn("<th>包名</th>", html)
         self.assertIn("<th>版本 &lt;x&gt;</th>", html)
         self.assertIn('<table id="runtime&quot;table">', html)

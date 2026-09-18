@@ -53,7 +53,7 @@ def scripts_new():
 
             return redirect(script_url(current_rel))
         except Exception as e:
-            msg = f"新建失败：{e}"
+            msg = f"新建失败：{e}。下一步：检查名称、目标路径和文件权限后重试"
             msg_kind = "error"
             msg_strong = True
 
@@ -69,35 +69,36 @@ def scripts_new():
 <form method="post">
 <input type="hidden" name="current_rel" value="{h(current_rel)}">
 {header}
-<div class="card">
+<section class="section fls-form-section">
     <div class="form-grid">
         <div class="form-item">
             <label>类型</label>
-            <select name="item_type">
+            <select name="item_type" aria-label="新建项目类型">
                 <option value="file"{file_selected}>文件</option>
                 <option value="dir"{dir_selected}>文件夹</option>
             </select>
         </div>
         <div class="form-item">
             <label>名称</label>
-            <input name="name" required value="{h(name)}" placeholder="test.py 或 demo">
+            <input name="name" required value="{h(name)}" placeholder="test.py 或 demo" aria-label="新建项目名称">
         </div>
     </div>
-</div>
-<div class="card">
-    <div class="card-title">文件内容</div>
+</section>
+<section class="section fls-form-section">
+    <h2 class="section-title">文件内容</h2>
     <textarea
         name="content"
+        aria-label="新建脚本内容"
         class="fls-code-editor"
         data-filename=""
     >{h(content)}</textarea>
-</div>
-<div class="card">
-    <button class="btn btn-primary" type="submit">保存新建</button>
+</section>
+<section class="section fls-form-section fls-save-section">
+    <button class="btn btn-primary" type="submit">保存新建脚本</button>
     <a class="btn btn-gray" href="{h(script_url(current_rel))}">返回</a>
-</div>
-{message_card(msg or "暂无操作", msg_kind, strong=msg_strong)}
+</section>
 </form>
+{message_card(msg or "暂无操作", msg_kind, strong=msg_strong)}
 """
     return layout("新建脚本", "pull", body)
 
@@ -123,7 +124,7 @@ def scripts_view():
             msg_kind = "success"
             msg_strong = True
         except Exception as e:
-            msg = f"保存失败：{e}"
+            msg = f"保存失败：{e}。下一步：检查文件权限和磁盘空间后重试"
             msg_kind = "error"
             msg_strong = True
             content_override = posted_content
@@ -143,9 +144,9 @@ def scripts_view():
         f"查看 / 编辑文件：{target.name}",
         f"路径：{h(target)}",
         f"""
-    <button class="btn btn-primary" type="submit">保存文件</button>
+    <button class="btn btn-primary" type="submit">保存脚本文件</button>
     <a class="btn btn-primary" href="{h(script_debug_url(rel))}">调试运行</a>
-    <a class="btn btn-orange" href="{h(rename_url(rel))}">改名</a>
+    <a class="btn btn-orange" href="{h(rename_url(rel))}">重命名脚本</a>
     <a class="btn btn-gray" href="{h(script_url(parent_rel))}">返回</a>
         """,
     )
@@ -153,16 +154,17 @@ def scripts_view():
     body = f"""
 <form method="post">
 {header}
-<div class="card">
+<section class="section fls-form-section">
     <textarea
         name="content"
+        aria-label="脚本文件内容"
         class="fls-code-editor"
         data-filename="{h(target.name)}"
         style="min-height:680px;"
     >{h(content)}</textarea>
-</div>
-{message_card(msg or "暂无保存操作", msg_kind, strong=msg_strong)}
+</section>
 </form>
+{message_card(msg or "暂无保存操作", msg_kind, strong=msg_strong)}
 """
     return layout("查看 / 编辑文件", "pull", body)
 
@@ -198,7 +200,7 @@ def scripts_rename():
             parent_rel = "" if new_target.parent == SCRIPT_DIR else str(new_target.parent.relative_to(SCRIPT_DIR))
             return redirect(script_url(parent_rel))
         except Exception as e:
-            msg = f"改名失败：{e}"
+            msg = f"改名失败：{e}。下一步：检查新名称、目标路径和文件权限后重试"
             msg_kind = "error"
             msg_strong = True
 
@@ -210,18 +212,18 @@ def scripts_rename():
     body = f"""
 <form method="post">
 {header}
-<div class="card">
+<section class="section fls-form-section">
     <div class="form-item">
         <label>新名称</label>
-        <input name="new_name" required value="{h(new_name)}">
+        <input name="new_name" required value="{h(new_name)}" aria-label="脚本新名称">
     </div>
-</div>
-<div class="card">
-    <button class="btn btn-primary" type="submit">保存改名</button>
+</section>
+<section class="section fls-form-section fls-save-section">
+    <button class="btn btn-primary" type="submit">保存脚本改名</button>
     <a class="btn btn-gray" href="/pull">返回</a>
-</div>
-{message_card(msg or "暂无操作", msg_kind, strong=msg_strong)}
+</section>
 </form>
+{message_card(msg or "暂无操作", msg_kind, strong=msg_strong)}
 """
     return layout("改名", "pull", body)
 

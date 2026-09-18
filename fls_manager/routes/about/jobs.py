@@ -104,7 +104,7 @@ async function loadAboutJobLog(){{
             window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
         }}
     }} catch(e) {{
-        document.getElementById("log").textContent = "日志读取失败: " + e;
+        document.getElementById("log").textContent = "日志读取失败：" + e + "。下一步：返回关于页面并检查后台任务日志后重试";
     }}
 }}
 

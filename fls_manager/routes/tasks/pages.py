@@ -25,7 +25,7 @@ from ...models import (
 )
 from ...utils import h, now_str
 from ...ui.layout import layout
-from ...ui.components import message_card
+from ...ui.components import message_card, page_header, section, data_toolbar, empty_state
 from ...ui.tables import tasks_table
 from ...scheduler import reload_scheduler, cron_to_trigger
 
@@ -100,13 +100,16 @@ def _render_collection_cards(collections, all_tasks):
     </div>
     <div class="action-row" style="margin-top:10px;">
         <a class="btn btn-blue" href="/collections#collection-{h(cid)}">查看</a>
-        <a class="btn btn-orange" href="/collection/edit/{h(cid)}">编辑</a>
+        <a class="btn btn-orange" href="/collection/edit/{h(cid)}">编辑任务合集</a>
     </div>
 </div>
 """
 
     if not cards:
-        cards = '<div class="fls-empty-card">暂无合集，请点击“新建合集”</div>'
+        cards = empty_state(
+            "暂无任务合集。",
+            '<a class="btn btn-primary" href="/collection/new">新建任务合集</a>',
+        )
 
     return f'<div class="fls-summary-grid">{cards}</div>'
 
@@ -199,63 +202,48 @@ def tasks_page():
     if len(collections_sorted) > TASK_PAGE_COLLECTION_LIMIT:
         more_collection_tip = f"""
 <div class="help" style="margin-top:8px;">
-    共 {len(collections_sorted)} 个合集，完整内容请到
-    <a href="/collections">合集管理</a> 查看。
+    共 {len(collections_sorted)} 个任务合集，完整内容请到
+    <a href="/collections">任务合集</a> 查看。
 </div>
 """
 
+    header = page_header(
+        "任务管理",
+        help_html=(
+            f"Cron 留空表示手动任务。共 {len(all_tasks)} 个任务，其中 {hidden_count} 个已放入合集，"
+            f"当前置顶 {pinned_count} 个。放入合集的任务仍会正常运行。"
+        ),
+        actions_html=(
+            '<a class="btn btn-primary" href="/task/new">新建任务</a>'
+            '<a class="btn btn-blue" href="/collection/new">新建合集</a>'
+            '<a class="btn btn-gray" href="/collections">任务合集</a>'
+        ),
+    )
+    collection_section = section(
+        "任务合集",
+        f'<div class="help">完整任务合集请进入“任务合集”。</div>{collection_cards_html}{more_collection_tip}',
+        section_id="task-collections",
+    )
+    search_controls = f"""
+    <div class="form-item">
+        <label for="task-search">搜索任务</label>
+        <input id="task-search" name="q" value="{h(q)}" placeholder="任务名 / 备注 / 命令 / Cron / 配置路径">
+    </div>
+    <div class="form-item">
+        <label for="task-sort">排序方式</label>
+        <select id="task-sort" name="sort">{sort_options_html}</select>
+    </div>
+    <div class="action-row">
+        <button class="btn btn-primary" type="submit">查询任务</button>
+        <a class="btn btn-gray" href="/tasks">重置筛选</a>
+    </div>
+"""
+    toolbar = data_toolbar(search_controls, toolbar_id="task-filter-toolbar")
     body = f"""
-<div class="card">
-    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;">
-        <div>
-            <div class="card-title">任务管理</div>
-            <div class="help">
-                Cron 留空表示手动任务。<br>
-                共 {len(all_tasks)} 个任务，其中 {hidden_count} 个已放入合集，当前置顶 {pinned_count} 个。<br>
-                放入合集的任务不会在普通列表显示，但仍会正常运行。
-            </div>
-        </div>
-        <div class="action-row">
-            <a class="btn btn-primary" href="/task/new">新建任务</a>
-            <a class="btn btn-blue" href="/collection/new">新建合集</a>
-            <a class="btn btn-gray" href="/collections">合集管理</a>
-        </div>
-    </div>
-</div>
-
-<div class="card">
-    <div class="card-title">合集</div>
-    <div class="help">完整合集请进入“合集管理”。</div>
-    <br>
-    {collection_cards_html}
-    {more_collection_tip}
-</div>
-
-<form method="get">
-<div class="card">
-    <div class="form-grid">
-        <div class="form-item">
-            <label>搜索任务</label>
-            <input name="q" value="{h(q)}" placeholder="任务名 / 备注 / 命令 / Cron / 配置路径">
-        </div>
-
-        <div class="form-item">
-            <label>排序方式</label>
-            <select name="sort">{sort_options_html}</select>
-        </div>
-    </div>
-
-    <br>
-
-    <button class="btn btn-primary" type="submit">搜索</button>
-    <a class="btn btn-gray" href="/tasks">重置</a>
-</div>
-</form>
-
-<div class="card">
-    {tasks_table(show_tasks)}
-</div>
-
+{header}
+{collection_section}
+<form method="get" aria-label="任务查询">{toolbar}</form>
+{section("任务列表", tasks_table(show_tasks), section_id="task-list")}
 {page_links_html}
 """
     return layout("任务管理", "tasks", body)

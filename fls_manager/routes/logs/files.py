@@ -10,10 +10,16 @@ def logfile_view(filename):
     body = f"""
 <div class="card">
     <div class="card-title">日志文件：{h(filename)}</div>
-    <a class="btn btn-gray" href="{h(back_url)}">返回</a>
-    <form class="inline-form" method="post" action="/logfile/delete/{h(filename)}?back={h(back_url)}">
-        <button class="btn btn-red" type="submit" onclick="return confirm('确定删除日志吗？')">删除</button>
-    </form>
+    <div class="row-actions" aria-label="日志文件操作">
+        <div class="row-actions-primary">
+            <a class="btn btn-gray" href="{h(back_url)}">返回日志列表</a>
+        </div>
+        <div class="row-actions-danger">
+            <form class="inline-form" method="post" action="/logfile/delete/{h(filename)}?back={h(back_url)}">
+                <button class="btn btn-red" type="submit" onclick="return confirm('确定删除日志吗？')">删除日志</button>
+            </form>
+        </div>
+    </div>
 </div>
 
 <pre class="log" id="log">加载中...</pre>
@@ -63,7 +69,7 @@ async function loadLog(){{
             }}
         }}
     }} catch(e) {{
-        document.getElementById("log").textContent = "日志读取失败: " + e;
+        document.getElementById("log").textContent = "日志读取失败：" + e + "。下一步：返回日志列表并检查服务状态后重试";
     }}
 }}
 

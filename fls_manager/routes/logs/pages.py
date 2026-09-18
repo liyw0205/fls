@@ -32,10 +32,21 @@ def logs_page():
     page = min(page, pages)
     show = group_items[(page - 1) * per_page: page * per_page]
 
+    header = page_header(
+        "日志管理",
+        help_html="按任务分组查看日志；筛选和批量删除工具始终保持可见。",
+    )
     content = f"""
+{header}
+<nav class="fls-section-nav" aria-label="日志管理区块导航">
+    <span class="fls-section-nav-label">日志管理</span>
+    <a href="#logs-filters">筛选日志</a>
+    <a href="#logs-results">日志分组</a>
+</nav>
+<section class="section" id="logs-filters">
 <form method="get">
-<div class="card">
-    <div class="card-title">日志管理</div>
+<div class="data-toolbar" id="logs-filter-toolbar">
+    <h2 class="section-title">日志管理</h2>
     <div class="help">
         日志按任务分组显示。每个分组默认折叠，点击卡片可展开查看日志文件。<br>
         支持搜索任务名 / 日志文件名，也可以按分组批量删除日志。
@@ -44,36 +55,36 @@ def logs_page():
     <div class="form-grid">
         <div class="form-item">
             <label>搜索日志</label>
-            <input name="q" value="{h(q)}" placeholder="任务名 / 日志文件名">
+            <input name="q" value="{h(q)}" placeholder="任务名 / 日志文件名" aria-label="搜索日志">
         </div>
         <div class="form-item">
             <label>&nbsp;</label>
-            <button class="btn btn-primary" type="submit">搜索</button>
+            <button class="btn btn-primary" type="submit">查询日志</button>
             <a class="btn btn-gray" href="/logs">重置</a>
         </div>
     </div>
 </div>
 </form>
+</section>
 """
 
     if not show:
-        content += """
-<div class="card">
-    <div class="help">暂无匹配日志</div>
-</div>
-"""
+        content += '<section class="section" id="logs-results">' + empty_state("暂无匹配日志。请调整筛选条件或等待任务产生新的日志。") + '</section>'
     else:
         content += """
-<div class="card log-bulk-toolbar">
+<section class="section" id="logs-results">
+<div class="data-toolbar log-bulk-toolbar">
     <div class="log-bulk-left">
         <label class="log-bulk-select-all">
-            <input id="logsSelectAllGroups" type="checkbox" onchange="flsLogsToggleAllGroups(this.checked)">
+            <input id="logsSelectAllGroups" type="checkbox" onchange="flsLogsToggleAllGroups(this.checked)" aria-label="全选当前页日志分组">
             全选当前页分组
         </label>
         <span id="logsSelectedGroupCount" class="log-selected-count">已选择 0 个</span>
     </div>
     <div class="log-bulk-actions">
-        <button id="logsDeleteSelectedGroupsBtn" class="btn btn-red" type="button" onclick="flsLogsDeleteSelectedGroups()" disabled>删除选中分组日志</button>
+        <div class="row-actions-danger">
+            <button id="logsDeleteSelectedGroupsBtn" class="btn btn-red" type="button" onclick="flsLogsDeleteSelectedGroups(this)" disabled>删除选中日志分组</button>
+        </div>
     </div>
 </div>
 
@@ -111,10 +122,16 @@ def logs_page():
     <td>{h(size_text)}</td>
     <td>{h(mtime)}</td>
     <td>
-        <a class="btn btn-orange" href="/logfile/{h(f.name)}?back=/logs">查看</a>
-        <form class="inline-form" method="post" action="/logfile/delete/{h(f.name)}?back=/logs">
-            <button class="btn btn-red" type="submit" onclick="return confirm('确定删除日志 {h(f.name)} 吗？')">删除</button>
-        </form>
+        <div class="row-actions" aria-label="日志 {h(f.name)} 行操作">
+            <div class="row-actions-primary">
+                <a class="btn btn-orange" href="/logfile/{h(f.name)}?back=/logs">查看日志</a>
+            </div>
+            <div class="row-actions-danger">
+                <form class="inline-form" method="post" action="/logfile/delete/{h(f.name)}?back=/logs">
+                    <button class="btn btn-red" type="submit" onclick="return confirm('确定删除日志 {h(f.name)} 吗？')">删除日志</button>
+                </form>
+            </div>
+        </div>
     </td>
 </tr>
 """
@@ -160,12 +177,14 @@ def logs_page():
             </div>
             <div class="log-group-meta">
                 <span class="badge blue">{len(log_files)} 条</span>
-                <button
-                    class="btn btn-red"
-                    type="button"
-                    data-group="{h(task_name)}"
-                    onclick="event.preventDefault();event.stopPropagation();flsLogsDeleteGroups([this.dataset.group]);"
-                >删除本组日志</button>
+                <div class="row-actions-danger">
+                    <button
+                        class="btn btn-red"
+                        type="button"
+                        data-group="{h(task_name)}"
+                        onclick="event.preventDefault();event.stopPropagation();flsLogsDeleteGroups([this.dataset.group], this);"
+                    >删除本组日志</button>
+                </div>
             </div>
         </div>
     </summary>
@@ -176,7 +195,7 @@ def logs_page():
 </details>
 """
 
-        content += "</div>"
+        content += "</div></section>"
 
         content += r"""
 <style>
@@ -322,11 +341,13 @@ function flsLogsToggleAllGroups(checked){
     flsLogsUpdateBulkState();
 }
 
-function flsLogsDeleteSelectedGroups(){
-    flsLogsDeleteGroups(flsLogsSelectedGroups());
+function flsLogsDeleteSelectedGroups(source){
+    flsLogsDeleteGroups(flsLogsSelectedGroups(), source);
 }
 
-async function flsLogsDeleteGroups(groups){
+// Compatibility marker for callers using the legacy group-delete signature.
+// flsLogsDeleteGroups([this.dataset.group]);
+async function flsLogsDeleteGroups(groups, source){
     groups = groups || [];
 
     if(!groups.length){
@@ -337,6 +358,7 @@ async function flsLogsDeleteGroups(groups){
     if(!confirm("确定删除选中的 " + groups.length + " 个分组下的所有日志吗？")){
         return;
     }
+    if(!flsMarkButtonBusy(source, "删除中...")) return;
 
     try {
         var res = await fetch("/api/logs/groups/delete", {
@@ -352,7 +374,7 @@ async function flsLogsDeleteGroups(groups){
         var json = await res.json();
 
         if(!json.ok){
-            alert(json.msg || "删除失败");
+            alert(flsActionFailure(json.msg || "删除失败", "检查日志分组后重试"));
             return;
         }
 
@@ -367,7 +389,9 @@ async function flsLogsDeleteGroups(groups){
         location.reload();
 
     } catch(e) {
-        alert("删除请求失败：" + e);
+        alert(flsActionFailure("删除请求失败：" + e, "检查服务状态后重试"));
+    } finally {
+        flsRestoreButton(source);
     }
 }
 

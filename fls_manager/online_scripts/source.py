@@ -103,7 +103,7 @@ def read_cache_text():
 
 def fetch_task_link_tasks(item, proxy_id="", timeout=12):
     """
-    拉取 item.task_link 指向的任务 JSON。
+    同步 item.task_link 指向的任务 JSON。
 
     支持 task_link 返回：
     1. [...]
@@ -131,13 +131,13 @@ def fetch_task_link_tasks(item, proxy_id="", timeout=12):
     if status_code < 200 or status_code >= 300:
         preview = text[:500].replace("\n", "\\n")
         raise RuntimeError(
-            f"任务源请求失败，HTTP {status_code}。"
+            f"任务源请求失败，HTTP {status_code}。下一步：检查任务源地址和代理配置后重试。"
             f"请求地址：{real_url}。"
             f"返回内容预览：{preview}"
         )
 
     if not text.strip():
-        raise RuntimeError(f"任务源返回空内容。请求地址：{real_url}")
+        raise RuntimeError(f"任务源返回空内容。请求地址：{real_url}。下一步：确认任务源返回 JSON 后重试")
 
     try:
         data = json.loads(text)
@@ -145,7 +145,7 @@ def fetch_task_link_tasks(item, proxy_id="", timeout=12):
         preview = text[:800].replace("\n", "\\n")
         ctype = r.headers.get("Content-Type", "")
         raise RuntimeError(
-            f"任务源不是合法 JSON：{e}。"
+            f"任务源不是合法 JSON：{e}。下一步：检查任务源格式并确认返回 JSON 后重试。"
             f"请求地址：{real_url}。"
             f"Content-Type：{ctype or '-'}。"
             f"返回内容预览：{preview}"
@@ -171,13 +171,13 @@ def fetch_online_scripts(proxy_id="", timeout=12):
     if status_code < 200 or status_code >= 300:
         preview = text[:500].replace("\n", "\\n")
         raise RuntimeError(
-            f"脚本源请求失败，HTTP {status_code}。"
+            f"脚本源请求失败，HTTP {status_code}。下一步：检查在线脚本源地址和代理配置后重试。"
             f"请求地址：{real_url}。"
             f"返回内容预览：{preview}"
         )
 
     if not text.strip():
-        raise RuntimeError(f"脚本源返回空内容。请求地址：{real_url}")
+        raise RuntimeError(f"脚本源返回空内容。请求地址：{real_url}。下一步：确认脚本源返回 JSON 后重试")
 
     try:
         data = json.loads(text)
@@ -185,7 +185,7 @@ def fetch_online_scripts(proxy_id="", timeout=12):
         preview = text[:800].replace("\n", "\\n")
         ctype = r.headers.get("Content-Type", "")
         raise RuntimeError(
-            f"脚本源不是合法 JSON：{e}。"
+            f"脚本源不是合法 JSON：{e}。下一步：检查在线脚本源格式并确认返回 JSON 后重试。"
             f"请求地址：{real_url}。"
             f"Content-Type：{ctype or '-'}。"
             f"返回内容预览：{preview}"
@@ -238,7 +238,7 @@ def refresh_worker(proxy_id=""):
 
     ONLINE_REFRESH_STATE.update({
         "running": True,
-        "message": "正在后台拉取脚本源，请稍候...",
+        "message": "正在后台同步在线脚本源，请稍候...",
         "error": "",
         "updated_at": now_str(),
         "log_file": str(log_file),
@@ -252,7 +252,7 @@ def refresh_worker(proxy_id=""):
 
     try:
         items = fetch_online_scripts(proxy_id=proxy_id, timeout=20)
-        msg = f"远程脚本源刷新成功，共 {len(items)} 条"
+        msg = f"同步在线脚本源成功，共 {len(items)} 条"
         append_log(log_file, msg)
 
         ONLINE_REFRESH_STATE.update({
@@ -264,7 +264,7 @@ def refresh_worker(proxy_id=""):
         })
 
     except Exception as e:
-        err = f"远程脚本源刷新失败：{e}"
+        err = f"远程脚本源刷新失败：{e}。下一步：检查脚本源地址、代理和网络后重试"
         append_log(log_file, err)
 
         ONLINE_REFRESH_STATE.update({

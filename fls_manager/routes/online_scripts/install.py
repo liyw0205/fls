@@ -34,7 +34,7 @@ def online_scripts_install(script_id):
         return redirect(
             url_for(
                 "online_scripts.online_scripts_page",
-                err="已勾选导入任务，但没有选择任何任务",
+                err="已勾选导入任务，但没有选择任何任务。下一步：返回选择页面勾选任务后重试",
             )
         )
 
@@ -43,7 +43,7 @@ def online_scripts_install(script_id):
     except Exception as e:
         body = page_header_card(
             "目标路径非法",
-            help_html=h(e),
+            help_html=f"{h(e)}。下一步：检查脚本保存路径后重试",
             actions_html='<a class="btn btn-gray" href="/online-scripts">返回</a>',
         )
         return layout("在线脚本安装失败", "online_scripts", body), 400
@@ -91,8 +91,9 @@ def online_scripts_install(script_id):
 
         body = f"""
 {header_card}
-<div class="card">
-    <form method="post" action="/online-scripts/install/{h(script_id)}">
+<form method="post" action="/online-scripts/install/{h(script_id)}">
+<section class="section fls-form-section">
+    <h2 class="section-title">覆盖确认</h2>
         <input type="hidden" name="force" value="1">
         {install_option_hidden}
         {select_mode_hidden}
@@ -100,7 +101,7 @@ def online_scripts_install(script_id):
 
         <div class="form-item">
             <label>代理</label>
-            <select name="proxy_id">{proxy_options}</select>
+            <select name="proxy_id" aria-label="覆盖安装使用的代理">{proxy_options}</select>
         </div>
 
         <br>
@@ -113,10 +114,19 @@ def online_scripts_install(script_id):
 
         <br>
 
-        <button class="btn btn-orange" type="submit" onclick="return confirm('确定继续吗？可能会覆盖文件或更新仓库。')">确认继续</button>
-        <a class="btn btn-gray" href="/online-scripts">取消</a>
-    </form>
-</div>
+        <div class="danger-confirm">
+            <div class="danger-confirm-description">继续操作可能覆盖现有文件或更新 Git 仓库，请确认目标路径和导入选项。</div>
+            <div class="row-actions">
+                <div class="row-actions-danger">
+                    <button class="btn btn-orange" type="submit" onclick="return confirm('确定继续吗？可能会覆盖文件或更新仓库。')">确认覆盖并继续</button>
+                </div>
+                <div class="row-actions-secondary">
+                    <a class="btn btn-gray" href="/online-scripts">取消</a>
+                </div>
+            </div>
+        </div>
+</section>
+</form>
 """
         return layout("目标已存在", "online_scripts", body)
 

@@ -39,12 +39,12 @@ def backup_import():
     f = request.files.get("file")
 
     if not f:
-        return "未上传文件", 400
+        return "未上传备份文件。下一步：选择 .tar.gz、.tgz、.tar 或 .zip 文件后重试", 400
 
     restore_items = parse_items_from_form("restore_items")
 
     if not restore_items:
-        return "请至少选择一个恢复内容", 400
+        return "请至少选择一个恢复内容。下一步：勾选配置或脚本后重试", 400
 
     restore_deps = request.form.get("restore_deps") == "1"
     tmp_dir = tempfile.mkdtemp()
@@ -130,7 +130,7 @@ def backup_import():
         return layout("备份导入完成", "backup", body)
 
     except Exception as e:
-        return f"备份导入失败：{h(e)}", 400
+        return f"备份导入失败：{h(e)}。下一步：检查备份内容和恢复范围后重试", 400
 
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)

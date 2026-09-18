@@ -13,6 +13,7 @@ import requests
 from ...paths import SCRIPT_DIR
 from ...utils import h, now_str
 from ...command import build_command
+from ...ui.components import empty_state, empty_table_row
 from ...proxy import (
     github_proxy_url,
     requests_proxy_dict,
@@ -81,7 +82,7 @@ def breadcrumb(current_rel):
     return " / ".join(items)
 
 
-def render_rows(current_rel=""):
+def _resolve_script_listing(current_rel=""):
     current_rel = str(current_rel or "").strip().strip("/")
 
     try:
@@ -96,6 +97,12 @@ def render_rows(current_rel=""):
     if not current_dir.is_dir():
         current_dir = current_dir.parent
         current_rel = script_rel_path(current_dir) if current_dir != SCRIPT_DIR else ""
+
+    return current_rel, current_dir
+
+
+def render_rows(current_rel=""):
+    current_rel, current_dir = _resolve_script_listing(current_rel)
 
     rows = ""
 
@@ -116,7 +123,7 @@ def render_rows(current_rel=""):
     items.sort(key=lambda x: (x.is_file(), x.name.lower()))
 
     if not items and not rows:
-        return '<tr><td colspan="6">暂无脚本，请点击“新建”添加脚本</td></tr>'
+        return empty_table_row(6, "暂无脚本", '<a class="btn btn-primary" href="/pull/new">新建脚本</a>')
 
     for item in items:
         rel = script_rel_path(item)
@@ -135,23 +142,33 @@ def render_rows(current_rel=""):
             size_text = "-"
             name_html = f'<a href="{h(script_url(rel))}" style="font-weight:800;">📁 {h(item.name)}</a>'
             buttons = f"""
-<a class="btn btn-primary" href="{h(script_url(rel))}">打开</a>
-<a class="btn btn-orange" href="{h(rename_url(rel))}">改名</a>
-<form class="inline-form" method="post" action="{h(delete_url(rel))}">
-    <button class="btn btn-red" type="submit" onclick="return confirm('确定删除 {h(rel)} 吗？')">删除</button>
-</form>
+<div class="row-actions" aria-label="脚本目录 {h(item.name)} 行操作">
+    <div class="row-actions-primary"><a class="btn btn-primary" href="{h(script_url(rel))}">打开目录</a></div>
+    <div class="row-actions-secondary"><a class="btn btn-orange" href="{h(rename_url(rel))}">重命名目录</a></div>
+    <div class="row-actions-danger">
+        <form class="inline-form" method="post" action="{h(delete_url(rel))}">
+            <button class="btn btn-red" type="submit" onclick="return confirm('确定删除 {h(rel)} 吗？')">删除目录</button>
+        </form>
+    </div>
+</div>
 """
         else:
             size_text = f"{item.stat().st_size / 1024:.1f} KB"
             name_html = f'<a href="{h(view_url(rel))}" style="font-weight:800;">📄 {h(item.name)}</a>'
             buttons = f"""
-<a class="btn btn-blue" href="{h(view_url(rel))}">查看</a>
-<a class="btn btn-primary" href="{h(script_debug_url(rel))}">调试</a>
-<a class="btn btn-primary" href="{h(download_url(rel))}">下载</a>
-<a class="btn btn-orange" href="{h(rename_url(rel))}">改名</a>
-<form class="inline-form" method="post" action="{h(delete_url(rel))}">
-    <button class="btn btn-red" type="submit" onclick="return confirm('确定删除 {h(rel)} 吗？')">删除</button>
-</form>
+<div class="row-actions" aria-label="脚本 {h(item.name)} 行操作">
+    <div class="row-actions-primary"><a class="btn btn-primary" href="{h(view_url(rel))}">查看脚本</a></div>
+    <div class="row-actions-secondary">
+        <a class="btn btn-blue" href="{h(script_debug_url(rel))}">调试脚本</a>
+        <a class="btn btn-blue" href="{h(download_url(rel))}">下载脚本</a>
+        <a class="btn btn-orange" href="{h(rename_url(rel))}">重命名脚本</a>
+    </div>
+    <div class="row-actions-danger">
+        <form class="inline-form" method="post" action="{h(delete_url(rel))}">
+            <button class="btn btn-red" type="submit" onclick="return confirm('确定删除 {h(rel)} 吗？')">删除脚本</button>
+        </form>
+    </div>
+</div>
 """
 
         rows += f"""
@@ -166,6 +183,105 @@ def render_rows(current_rel=""):
 """
 
     return rows
+
+
+def render_mobile_rows(current_rel=""):
+    """Render script entities as a single-column mobile list."""
+    current_rel, current_dir = _resolve_script_listing(current_rel)
+    cards = ""
+
+    if current_dir.resolve() != SCRIPT_DIR.resolve():
+        parent = current_dir.parent
+        parent_rel = "" if parent.resolve() == SCRIPT_DIR.resolve() else script_rel_path(parent)
+        cards += f"""
+<article class="fls-fold-card mobile-list-item script-mobile-item">
+    <div class="fls-card-head">
+        <div class="fls-card-main">
+            <div class="fls-card-title-main">返回上级目录</div>
+            <div class="fls-card-sub">{h(str(parent))}</div>
+        </div>
+        <span class="badge gray status-badge status-info" role="status">导航</span>
+    </div>
+    <div class="fls-card-actions fls-card-primary-action">
+        <a class="btn btn-primary" href="{h(script_url(parent_rel))}">返回上级目录</a>
+    </div>
+</article>
+"""
+
+    items = list(current_dir.iterdir()) if current_dir.exists() else []
+    items.sort(key=lambda x: (x.is_file(), x.name.lower()))
+
+    for item in items:
+        rel = script_rel_path(item)
+        is_dir = item.is_dir()
+        item_type = "文件夹" if is_dir else "文件"
+        badge_class = "green" if is_dir else "blue"
+        badge = f'<span class="badge {badge_class} status-badge status-info" role="status">{item_type}</span>'
+
+        try:
+            mtime = __import__("datetime").datetime.fromtimestamp(item.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            mtime = "-"
+
+        if is_dir:
+            size_text = "-"
+            primary_url = script_url(rel)
+            primary_label = "打开脚本目录"
+            secondary = f'<a class="btn btn-orange" href="{h(rename_url(rel))}">重命名目录</a>'
+            danger_label = "删除目录"
+        else:
+            size_text = f"{item.stat().st_size / 1024:.1f} KB"
+            primary_url = view_url(rel)
+            primary_label = "查看脚本"
+            secondary = (
+                f'<a class="btn btn-blue" href="{h(script_debug_url(rel))}">调试脚本</a>'
+                f'<a class="btn btn-blue" href="{h(download_url(rel))}">下载脚本</a>'
+                f'<a class="btn btn-orange" href="{h(rename_url(rel))}">重命名脚本</a>'
+            )
+            danger_label = "删除脚本"
+
+        cards += f"""
+<article class="fls-fold-card mobile-list-item script-mobile-item">
+    <div class="fls-card-head">
+        <div class="fls-card-main">
+            <div class="fls-card-title-main">{h(item.name)}</div>
+            <div class="fls-card-sub">{h(rel)}</div>
+        </div>
+        <div class="fls-card-badges">{badge}</div>
+    </div>
+    <div class="fls-card-actions fls-card-primary-action">
+        <a class="btn btn-primary" href="{h(primary_url)}">{primary_label}</a>
+    </div>
+    <details class="detail-disclosure">
+        <summary>查看脚本详情</summary>
+        <div class="fls-card-body">
+            <div class="fls-info-grid">
+                <div class="fls-info-item"><div class="fls-info-label">类型</div><div class="fls-info-value">{h(item_type)}</div></div>
+                <div class="fls-info-item"><div class="fls-info-label">大小</div><div class="fls-info-value">{h(size_text)}</div></div>
+                <div class="fls-info-item"><div class="fls-info-label">修改时间</div><div class="fls-info-value">{h(mtime)}</div></div>
+                <div class="fls-info-item"><div class="fls-info-label">绝对路径</div><div class="fls-info-value">{h(str(item))}</div></div>
+            </div>
+        </div>
+    </details>
+    <div class="fls-card-actions">
+        <div class="row-actions" aria-label="脚本 {h(item.name)} 行操作">
+            <div class="row-actions-secondary">{secondary}</div>
+            <div class="row-actions-danger">
+                <form class="inline-form" method="post" action="{h(delete_url(rel))}">
+                    <button class="btn btn-red" type="submit" onclick="return confirm('确定删除 {h(rel)} 吗？')">{danger_label}</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</article>
+"""
+
+    if not cards:
+        return empty_state(
+            "暂无脚本，请点击“新建脚本”添加。",
+            '<a class="btn btn-primary" href="/pull/new">新建脚本</a>',
+        )
+    return cards
 
 
 def guess_filename_from_url(url):

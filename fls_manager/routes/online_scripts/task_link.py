@@ -40,7 +40,7 @@ def online_scripts_pull_task_link(script_id):
             return redirect(
                 url_for(
                     "online_scripts.online_scripts_page",
-                    err="外部任务源已拉取，但没有可用任务",
+                    err="外部任务源同步完成，但没有可用任务",
                 )
             )
 
@@ -81,7 +81,7 @@ def online_scripts_pull_task_link(script_id):
         return redirect(
             url_for(
                 "online_scripts.online_scripts_page",
-                msg=f"外部任务源拉取完成，新增 {added} 个任务，当前共 {len(merged)} 个任务",
+                msg=f"外部任务源同步完成，新增 {added} 个任务，当前共 {len(merged)} 个任务",
             )
         )
 
@@ -89,6 +89,6 @@ def online_scripts_pull_task_link(script_id):
         return redirect(
             url_for(
                 "online_scripts.online_scripts_page",
-                err=f"外部任务源拉取失败：{e}",
+                err=f"外部任务源同步失败：{e}。下一步：检查任务源地址和代理后重试",
             )
         )

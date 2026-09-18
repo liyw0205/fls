@@ -99,8 +99,8 @@ class UiRouteComponentTests(unittest.TestCase):
             html = response.get_data(as_text=True)
 
             self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">脚本管理</div>', html)
-            self.assertIn('<div class="card-title">文件列表</div>', html)
+            self.assertIn('<h1 class="page-title">脚本</h1>', html)
+            self.assertIn('<h2 class="section-title">脚本文件</h2>', html)
             self.assertIn('<div class="card-title">任务命令示例</div>', html)
             self.assertIn('<div class="code">', html)
             self.assertIn("task 1.py<br>", html)
@@ -231,7 +231,7 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertIn('<div class="card-title">结果</div>', html)
             self.assertIn('style="color:#18a058;font-weight:800;"', html)
-            self.assertIn("文件拉取成功", html)
+            self.assertIn("远程文件导入成功", html)
 
     def test_pull_fetch_failure_escapes_message_card(self):
         with isolated_app() as (app, _base_dir):
@@ -253,7 +253,7 @@ class UiRouteComponentTests(unittest.TestCase):
 
             self.assertEqual(response.status_code, 200)
             self.assertIn('style="color:#dc2626;font-weight:800;"', html)
-            self.assertIn("拉取失败：&lt;bad &amp; &quot;x&quot;&gt;", html)
+            self.assertIn("脚本导入失败：&lt;bad &amp; &quot;x&quot;&gt;", html)
             self.assertNotIn("<bad", html)
 
     def test_pull_import_renders_error_message_card(self):
@@ -426,7 +426,7 @@ class UiRouteComponentTests(unittest.TestCase):
             html = response.get_data(as_text=True)
 
             self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">任务配置文件</div>', html)
+            self.assertIn('<h2 class="section-title">任务配置文件</h2>', html)
             self.assertIn("该任务没有配置 config_path。", html)
             self.assertIn('href="/tasks"', html)
             self.assertIn('href="/task/edit/task-config?back=/tasks"', html)
@@ -459,7 +459,7 @@ class UiRouteComponentTests(unittest.TestCase):
             html = response.get_data(as_text=True)
 
             self.assertEqual(response.status_code, 400)
-            self.assertIn('<div class="card-title">配置文件路径非法</div>', html)
+            self.assertIn('<h2 class="section-title">配置文件路径非法</h2>', html)
             self.assertIn("配置文件路径非法", html)
             self.assertIn('href="/collections"', html)
             self.assertIn('href="/task/edit/task-config?back=/collections"', html)
@@ -1045,7 +1045,7 @@ class UiRouteComponentTests(unittest.TestCase):
 
             self.assertEqual(response.status_code, 200)
             self.assertIn('<div class="card-title">日志文件：live.log</div>', html)
-            self.assertIn('<a class="btn btn-gray" href="/history">返回</a>', html)
+            self.assertIn('<a class="btn btn-gray" href="/history">返回日志列表</a>', html)
             self.assertIn(
                 'action="/logfile/delete/live.log?back=/history"',
                 html,
@@ -1061,7 +1061,7 @@ class UiRouteComponentTests(unittest.TestCase):
             html = response.get_data(as_text=True)
 
             self.assertEqual(response.status_code, 200)
-            self.assertIn('<a class="btn btn-gray" href="/logs">返回</a>', html)
+            self.assertIn('<a class="btn btn-gray" href="/logs">返回日志列表</a>', html)
             self.assertIn(
                 'action="/logfile/delete/live.log?back=/logs"',
                 html,
@@ -1166,8 +1166,8 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertIn("日志：历史任务 &lt;x&gt;", html)
             self.assertNotIn("历史任务 <x>", html)
-            self.assertIn('<div class="card-title">最近运行历史</div>', html)
-            self.assertIn('<span class="badge red">失败</span>', html)
+            self.assertIn('<h2 class="section-title">最近运行历史</h2>', html)
+            self.assertIn('<span class="status-badge status-error" role="status">失败</span>', html)
             self.assertIn("<td>manual</td>", html)
             self.assertIn("<td>exit &lt;bad&gt;</td>", html)
             self.assertIn(
@@ -1255,13 +1255,13 @@ class UiRouteComponentTests(unittest.TestCase):
             html = response.get_data(as_text=True)
 
             self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">运行历史</div>', html)
+            self.assertIn('<h2 class="section-title">运行历史</h2>', html)
             self.assertIn("当前匹配 <b>1</b> 条", html)
             self.assertIn('name="q" value="Alpha &lt;x&gt;"', html)
             self.assertIn('<option value="success" selected>成功</option>', html)
             self.assertIn("Alpha &lt;x&gt;", html)
             self.assertIn("task alpha.py --arg &lt;x&gt;", html)
-            self.assertIn('<span class="badge green">成功</span>', html)
+            self.assertIn('<span class="status-badge status-success" role="status">成功</span>', html)
             self.assertIn("<td>manual</td>", html)
             self.assertIn("<td>1/3</td>", html)
             self.assertIn("<td>done &lt;ok&gt;</td>", html)
@@ -1320,12 +1320,12 @@ class UiRouteComponentTests(unittest.TestCase):
             html = response.get_data(as_text=True)
 
             self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">最近运行</div>', html)
-            self.assertIn('<div class="card-title">最近异常</div>', html)
+            self.assertIn('<h2 class="section-title">最近运行</h2>', html)
+            self.assertIn('<h2 class="section-title">最近异常</h2>', html)
             self.assertIn("Recent &lt;ok&gt;", html)
             self.assertIn("Broken &lt;x&gt;", html)
-            self.assertIn('<span class="badge green">成功</span>', html)
-            self.assertIn('<span class="badge red">失败</span>', html)
+            self.assertIn('<span class="status-badge status-success" role="status">成功</span>', html)
+            self.assertIn('<span class="status-badge status-error" role="status">失败</span>', html)
             self.assertIn("<td>done &lt;ok&gt;</td>", html)
             self.assertIn("<td>boom &lt;bad&gt;</td>", html)
             self.assertIn(
@@ -1361,7 +1361,7 @@ class UiRouteComponentTests(unittest.TestCase):
             html = response.get_data(as_text=True)
 
             self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">已安装依赖</div>', html)
+            self.assertIn('<h2 class="section-title">已安装依赖</h2>', html)
             self.assertIn("<th>包名</th>", html)
             self.assertIn("&lt;pkg &amp; &quot;x&quot;&gt;", html)
             self.assertIn("1&lt;2", html)
@@ -1391,7 +1391,7 @@ class UiRouteComponentTests(unittest.TestCase):
             html = response.get_data(as_text=True)
 
             self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">运行环境</div>', html)
+            self.assertIn('<h2 class="section-title">运行器状态</h2>', html)
             self.assertIn('<table id="runtimeTable">', html)
             self.assertIn("<th>脚本类型</th>", html)
             self.assertIn("&lt;Python&gt;", html)
@@ -1408,7 +1408,7 @@ class UiRouteComponentTests(unittest.TestCase):
             html = response.get_data(as_text=True)
 
             self.assertEqual(response.status_code, 200)
-            self.assertIn('<div class="card-title">面板信息</div>', html)
+            self.assertIn('<h2 class="section-title">面板信息</h2>', html)
             self.assertIn("<th>项目</th>", html)
             self.assertIn("<th>值</th>", html)
             self.assertIn("<td><b>项目仓库</b></td>", html)
@@ -1447,7 +1447,7 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn('id="onlineRefreshBtn"', html)
             self.assertIn('href="/online-scripts/source"', html)
             self.assertIn('href="/config"', html)
-            self.assertIn('<div class="card-title">脚本列表，本地缓存</div>', html)
+            self.assertIn('<h2 class="section-title">脚本列表，本地缓存</h2>', html)
 
     def test_online_script_doc_error_renders_escaped_message_card(self):
         with isolated_app() as (app, base_dir):

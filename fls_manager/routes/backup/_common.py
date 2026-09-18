@@ -16,6 +16,7 @@ from flask import request, Response, redirect, url_for, jsonify, abort
 
 from ...paths import BASE_DIR, DATA_DIR, SCRIPT_DIR, LOG_DIR
 from ...ui.layout import layout
+from ...ui.components import page_header, empty_table_row
 from ...utils import h, now_str, safe_name
 from ...scheduler import reload_scheduler
 
@@ -449,7 +450,7 @@ def backup_rows_html():
     files = list_backup_files()
 
     if not files:
-        return '<tr><td colspan="4">暂无备份</td></tr>'
+        return empty_table_row(4, "暂无备份", '<a class="btn btn-primary" href="#backup-create">创建备份</a>')
 
     rows = ""
 
@@ -464,8 +465,14 @@ def backup_rows_html():
     <td>{h(item.get("size_text", "-"))}</td>
     <td>{h(item.get("mtime_text", "-"))}</td>
     <td>
-        <a class="btn btn-primary" href="/backup/download/{h(name)}">下载</a>
-        <button class="btn btn-red" type="button" onclick="flsDeleteBackup('{h(name)}')">删除</button>
+        <div class="row-actions" aria-label="备份 {h(name)} 行操作">
+            <div class="row-actions-primary">
+                <a class="btn btn-primary" href="/backup/download/{h(name)}">下载备份</a>
+            </div>
+            <div class="row-actions-danger">
+                <button class="btn btn-red" type="button" onclick="flsDeleteBackup('{h(name)}', this)">删除备份</button>
+            </div>
+        </div>
     </td>
 </tr>
 """

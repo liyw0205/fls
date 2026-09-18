@@ -16,9 +16,14 @@ def notify_test(item_id):
     )
 
     status_badge = (
-        '<span class="badge green">成功</span>'
+        '<span class="badge green status-badge status-success" role="status">成功</span>'
         if ok else
-        '<span class="badge red">失败</span>'
+        '<span class="badge red status-badge status-error" role="status">失败</span>'
+    )
+    result_text = (
+        str(msg)
+        if ok else
+        f"{msg}。下一步：检查通知渠道设置和网络后重试"
     )
     rows = f"""
 <tr>
@@ -35,7 +40,7 @@ def notify_test(item_id):
 </tr>
 <tr>
     <td><b>返回</b></td>
-    <td>{h(msg)}</td>
+    <td>{h(result_text)}</td>
 </tr>
 """
     body = table_card(

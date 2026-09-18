@@ -268,11 +268,13 @@ def scripts_debug_log(debug_id):
 
     if info.get("running"):
         stop_btn = f"""
-<form class="inline-form" method="post" action="/scripts/debug-stop/{h(debug_id)}?back={h(back_url)}">
-    <button class="btn btn-red" type="submit" onclick="return confirm('确定停止该调试运行吗？')">
-        停止调试
-    </button>
-</form>
+<div class="row-actions-danger">
+    <form class="inline-form" method="post" action="/scripts/debug-stop/{h(debug_id)}?back={h(back_url)}">
+        <button class="btn btn-red" type="submit" onclick="return confirm('确定停止该调试运行吗？')">
+            停止调试运行
+        </button>
+    </form>
+</div>
 """
 
     header_card = page_header_card(
@@ -286,7 +288,7 @@ def scripts_debug_log(debug_id):
         actions_html=f"""
 {stop_btn}
 <a class="btn btn-gray" href="{h(back_url)}">返回</a>
-<a class="btn btn-blue" href="/pull">脚本管理</a>
+<a class="btn btn-blue" href="/pull">脚本</a>
 """,
     )
 
@@ -352,7 +354,7 @@ async function loadScriptDebugLog(){{
             window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
         }}
     }} catch(e) {{
-        document.getElementById("log").textContent = "日志读取失败: " + e;
+        document.getElementById("log").textContent = "日志读取失败：" + e + "。下一步：检查调试日志文件和脚本状态后重试";
     }}
 }}
 

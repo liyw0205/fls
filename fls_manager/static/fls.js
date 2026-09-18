@@ -57,6 +57,60 @@ function flsInitCsrfFetchPatch(){
 
 flsInitCsrfFetchPatch();
 
+function flsMarkFormSubmitting(form, submitter){
+    if(!form || form.dataset.submitting === "true") return;
+    form.dataset.submitting = "true";
+    const button = submitter || form.querySelector('button[type="submit"], input[type="submit"]');
+    if(!button || button.dataset.noBusyState === "true") return;
+    button.dataset.originalLabel = button.innerText || button.value || "";
+    button.setAttribute("aria-busy", "true");
+    button.disabled = true;
+    if(button.tagName === "INPUT") button.value = "处理中...";
+    else button.innerText = "处理中...";
+}
+
+function flsMarkButtonBusy(button, label){
+    if(!button) return true;
+    if(button.dataset.busy === "true") return false;
+
+    button.dataset.busy = "true";
+    button.dataset.originalLabel = button.innerText || button.value || "";
+    button.setAttribute("aria-busy", "true");
+    button.disabled = true;
+    label = String(label || "处理中...");
+
+    if(button.tagName === "INPUT") button.value = label;
+    else button.innerText = label;
+
+    return true;
+}
+
+function flsRestoreButton(button){
+    if(!button) return;
+
+    const original = button.dataset.originalLabel;
+    if(original !== undefined){
+        if(button.tagName === "INPUT") button.value = original;
+        else button.innerText = original;
+    }
+
+    button.disabled = false;
+    button.removeAttribute("aria-busy");
+    delete button.dataset.busy;
+}
+
+function flsActionFailure(message, nextStep){
+    const text = String(message || "操作未完成");
+    const next = String(nextStep || "刷新页面后重试");
+    return text + "。下一步：" + next;
+}
+
+document.addEventListener("submit", function(event){
+    const form = event.target;
+    if(!form || String(form.dataset.noBusyState || "") === "true") return;
+    flsMarkFormSubmitting(form, event.submitter || null);
+});
+
 function flsToast(message, type, timeout){
     message = String(message || "");
     type = type || "info";
@@ -128,7 +182,7 @@ function flsBulkActionMessage(json, fallback){
     const fallbackText = String(fallback || json.msg || "");
 
     if(!json.ok){
-        return String(json.msg || fallbackText || "操作失败");
+        return String(json.msg || fallbackText || "操作未完成，请检查输入后重试");
     }
 
     const count = flsNumberValue(json.count);
@@ -166,76 +220,24 @@ function flsBulkActionMessage(json, fallback){
     return fallbackText;
 }
 
-function flsViewportWidth(){
-    var w = window.innerWidth || document.documentElement.clientWidth || 0;
-    var sw = window.screen ? window.screen.width : 0;
-
-    if (w && sw) return Math.min(w, sw);
-    return w || sw || 0;
-}
-
-function detectFlsPhone(){
-    var w = flsViewportWidth();
-    var ua = navigator.userAgent || "";
-
-    if (/iPhone|iPod|Mobile/i.test(ua) && w <= 760) return true;
-    if (w && w <= 640) return true;
-
-    return false;
-}
-
-function detectFlsTablet(){
-    var w = flsViewportWidth();
-    var ua = navigator.userAgent || "";
-
-    if (/iPad|Tablet/i.test(ua)) return true;
-    if (/Android/i.test(ua) && !/Mobile/i.test(ua)) return true;
-    if (w && w > 640 && w <= 1180) return true;
-
-    return false;
-}
-
-function detectFlsMobile(){
-    var w = flsViewportWidth();
-    var ua = navigator.userAgent || "";
-
-    if (w && w <= 900) return true;
-    if (/iPhone|iPod|Mobile/i.test(ua) && w <= 900) return true;
-    if (/Android/i.test(ua) && /Mobile/i.test(ua) && w <= 900) return true;
-    if (/iPad|Tablet/i.test(ua) && w <= 900) return true;
-
-    return false;
-}
-
-function applyFlsMobileClass(){
-    document.body.classList.remove("fls-phone");
-    document.body.classList.remove("fls-tablet");
-    document.body.classList.remove("fls-desktop");
-
-    if (detectFlsPhone()) {
-        document.body.classList.add("fls-phone");
-    } else if (detectFlsTablet()) {
-        document.body.classList.add("fls-tablet");
-    } else {
-        document.body.classList.add("fls-desktop");
+function flsMediaQuery(query){
+    try {
+        return !!(window.matchMedia && window.matchMedia(query).matches);
+    } catch(e) {
+        return false;
     }
+}
 
-    if (detectFlsMobile()) {
-        document.body.classList.add("fls-mobile");
-    } else {
-        document.body.classList.remove("fls-mobile");
-    }
+function flsIsMobileViewport(){
+    return flsMediaQuery("(max-width: 767px)");
+}
 
-    if (!document.body.classList.contains("fls-mobile")) {
-        var sidebar = document.getElementById("sidebar");
-        var mask = document.getElementById("mask");
-        var btn = document.getElementById("flsFloatMenuBtn");
+function flsIsDrawerViewport(){
+    return flsMediaQuery("(max-width: 1199px)");
+}
 
-        if (sidebar) sidebar.classList.remove("open");
-        if (mask) mask.classList.remove("show");
-        document.body.classList.remove("fls-menu-open");
-        if (btn) btn.classList.remove("menu-open");
-    }
+function flsSyncMenuViewport(){
+    if (!flsIsDrawerViewport()) toggleMenu(false);
 }
 
 function toggleMenu(show){
@@ -253,12 +255,22 @@ function toggleMenu(show){
         sidebar.classList.add("open");
         mask.classList.add("show");
         document.body.classList.add("fls-menu-open");
-        if (btn) btn.classList.add("menu-open");
+        if (btn) {
+            btn.classList.add("menu-open");
+            btn.setAttribute("aria-expanded", "true");
+        }
+        if (sidebar) {
+            const firstLink = sidebar.querySelector("a");
+            if(firstLink) firstLink.focus({preventScroll:true});
+        }
     } else {
         sidebar.classList.remove("open");
         mask.classList.remove("show");
         document.body.classList.remove("fls-menu-open");
-        if (btn) btn.classList.remove("menu-open");
+        if (btn) {
+            btn.classList.remove("menu-open");
+            btn.setAttribute("aria-expanded", "false");
+        }
     }
 
     if (typeof flsUpdateFloatingFormVisibility === "function") {
@@ -267,18 +279,26 @@ function toggleMenu(show){
 }
 
 document.addEventListener("keydown", function(e){
-    if(e.key === "Escape") toggleMenu(false);
+    if(e.key === "Escape") {
+        const sidebar = document.getElementById("sidebar");
+        const wasOpen = !!sidebar && sidebar.classList.contains("open");
+        toggleMenu(false);
+        if(wasOpen) {
+            const btn = document.getElementById("flsFloatMenuBtn");
+            if(btn) btn.focus({preventScroll:true});
+        }
+    }
 });
 
 if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", applyFlsMobileClass);
+    document.addEventListener("DOMContentLoaded", flsSyncMenuViewport);
 } else {
-    applyFlsMobileClass();
+    flsSyncMenuViewport();
 }
 
-window.addEventListener("resize", applyFlsMobileClass);
+window.addEventListener("resize", flsSyncMenuViewport);
 window.addEventListener("orientationchange", function(){
-    setTimeout(applyFlsMobileClass, 200);
+    setTimeout(flsSyncMenuViewport, 200);
 });
 
 /* 表格字段名补全 */
@@ -439,8 +459,6 @@ function flsShortFloatButtonText(text){
         [/立即导入所选任务/, "导入"],
         [/导入所选变量/, "导入"],
         [/开始导入/, "导入"],
-
-        [/开始拉取/, "拉取"],
         [/安装并查看日志/, "安装"],
         [/提交/, "提交"],
     ];
@@ -629,14 +647,9 @@ function flsShouldUseCodeMirror(){
        桌面端继续启用语法高亮。
     */
     try {
-        if (document.body && document.body.classList.contains("fls-mobile")) {
-            return false;
-        }
-
-        var w = window.innerWidth || document.documentElement.clientWidth || 0;
         var ua = navigator.userAgent || "";
 
-        if (w && w <= 900) return false;
+        if (flsIsMobileViewport()) return false;
         if (/Android|iPhone|iPad|iPod|Mobile/i.test(ua)) return false;
 
         return true;
@@ -1094,7 +1107,6 @@ if (document.readyState === "loading") {
 
         if (newBody) {
             document.body.className = newBody.className;
-            applyFlsMobileClass();
         }
 
         document.title = doc.title || document.title;

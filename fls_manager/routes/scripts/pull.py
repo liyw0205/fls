@@ -75,7 +75,7 @@ def pull_fetch():
                         env=env,
                     )
 
-                    msg = f"仓库拉取成功：{target}"
+                    msg = f"仓库导入成功：{target}"
                     msg_kind = "success"
                     msg_strong = True
                 else:
@@ -87,29 +87,30 @@ def pull_fetch():
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(fetch_file_bytes(url, proxy_id))
 
-                    msg = f"文件拉取成功：{target}"
+                    msg = f"远程文件导入成功：{target}"
                     msg_kind = "success"
                     msg_strong = True
 
             except Exception as e:
-                msg = f"拉取失败：{e}"
+                msg = f"脚本导入失败：{e}。下一步：检查 URL、代理和目标路径后重试"
                 msg_kind = "error"
                 msg_strong = True
 
     header = page_header_card(
-        "拉取脚本 / 仓库",
+        "从远程导入脚本",
         f"当前目录：{h(current_rel or 'scripts 根目录')}",
     )
 
     body = f"""
 {header}
-<div class="card">
-    <form method="post">
+<form method="post">
+<section class="section fls-form-section">
+    <h2 class="section-title">远程脚本导入设置</h2>
         <input type="hidden" name="current_rel" value="{h(current_rel)}">
 
         <div class="form-item">
-            <label>拉取类型</label>
-            <select name="pull_type">
+            <label>导入类型</label>
+            <select name="pull_type" aria-label="远程导入类型">
                 <option value="file">单文件</option>
                 <option value="repo">Git 仓库</option>
             </select>
@@ -119,32 +120,32 @@ def pull_fetch():
 
         <div class="form-item">
             <label>URL</label>
-            <input name="url" placeholder="https://example.com/test.py 或 https://github.com/user/repo.git">
+            <input name="url" placeholder="https://example.com/test.py 或 https://github.com/user/repo.git" aria-label="远程脚本 URL">
         </div>
 
         <br>
 
         <div class="form-item">
             <label>保存为，相对当前目录</label>
-            <input name="filename" placeholder="文件：1.py；仓库：repo-name。不填则自动识别">
+            <input name="filename" placeholder="文件：1.py；仓库：repo-name。不填则自动识别" aria-label="远程脚本保存名称">
         </div>
 
         <br>
 
         <div class="form-item">
             <label>代理</label>
-            <select name="proxy_id">{proxy_options}</select>
+            <select name="proxy_id" aria-label="远程导入代理">{proxy_options}</select>
         </div>
 
         <br>
-        <button class="btn btn-primary" type="submit">开始拉取</button>
-        <a class="btn btn-gray" href="{h(script_url(current_rel))}">返回脚本管理</a>
-    </form>
-</div>
+        <button class="btn btn-primary" type="submit">开始导入脚本</button>
+        <a class="btn btn-gray" href="{h(script_url(current_rel))}">返回脚本</a>
+</section>
+</form>
 
 {pull_result_card(msg, msg_kind, msg_strong)}
 """
-    return layout("拉取脚本", "pull", body)
+    return layout("从远程导入脚本", "pull", body)
 
 
 @bp.route("/pull/import", methods=["GET", "POST"])
@@ -211,7 +212,7 @@ def pull_import():
                     msg_strong = True
 
             except Exception as e:
-                msg = f"导入失败：{e}"
+                msg = f"导入失败：{e}。下一步：检查文件格式、解压路径和权限后重试"
                 msg_kind = "error"
                 msg_strong = True
             finally:
@@ -224,13 +225,14 @@ def pull_import():
 
     body = f"""
 {header}
-<div class="card">
-    <form method="post" enctype="multipart/form-data">
+<form method="post" enctype="multipart/form-data">
+<section class="section fls-form-section">
+    <h2 class="section-title">脚本文件导入设置</h2>
         <input type="hidden" name="current_rel" value="{h(current_rel)}">
 
         <div class="form-item">
             <label>选择文件</label>
-            <input type="file" name="file">
+            <input type="file" name="file" aria-label="要导入的脚本文件">
             <div class="help">支持普通脚本文件、.zip / .tar / .tar.gz / .tgz。</div>
         </div>
 
@@ -238,15 +240,15 @@ def pull_import():
 
         <div class="form-item">
             <label>保存为 / 解压到，相对当前目录，可空</label>
-            <input name="save_as" placeholder="普通文件：1.py；压缩包：folder-name；为空则使用原文件名或解压到当前目录">
+            <input name="save_as" placeholder="普通文件：1.py；压缩包：folder-name；为空则使用原文件名或解压到当前目录" aria-label="脚本保存名称或解压目录">
         </div>
 
         <br>
 
-        <button class="btn btn-primary" type="submit">开始导入</button>
-        <a class="btn btn-gray" href="{h(script_url(current_rel))}">返回脚本管理</a>
-    </form>
-</div>
+        <button class="btn btn-primary" type="submit">开始导入脚本文件</button>
+        <a class="btn btn-gray" href="{h(script_url(current_rel))}">返回脚本</a>
+</section>
+</form>
 
 {pull_result_card(msg, msg_kind, msg_strong)}
 """

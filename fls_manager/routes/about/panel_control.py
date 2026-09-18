@@ -25,7 +25,8 @@ def about_restart_panel():
             help_html=f"""
         <span style="color:#dc2626;font-weight:800;">未找到 FLS 控制脚本：{h(script)}</span><br>
         Windows 请确认存在：<code>{h(BASE_DIR / "fls.bat")}</code> 或 <code>{h(BASE_DIR / "fls.ps1")}</code><br>
-        Linux / Termux 请确认存在：<code>{h(BASE_DIR / "fls.sh")}</code>
+        Linux / Termux 请确认存在：<code>{h(BASE_DIR / "fls.sh")}</code><br>
+        下一步：补齐控制脚本后返回关于页重试。
 """,
             actions_html='<a class="btn btn-gray" href="/about">返回关于页</a>',
         )
@@ -75,7 +76,8 @@ def about_stop_panel():
             help_html=f"""
         <span style="color:#dc2626;font-weight:800;">未找到 FLS 控制脚本：{h(script)}</span><br>
         Windows 请确认存在：<code>{h(BASE_DIR / "fls.bat")}</code> 或 <code>{h(BASE_DIR / "fls.ps1")}</code><br>
-        Linux / Termux 请确认存在：<code>{h(BASE_DIR / "fls.sh")}</code>
+        Linux / Termux 请确认存在：<code>{h(BASE_DIR / "fls.sh")}</code><br>
+        下一步：补齐控制脚本后返回关于页重试。
 """,
             actions_html='<a class="btn btn-gray" href="/about">返回关于页</a>',
         )

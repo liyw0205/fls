@@ -64,9 +64,11 @@ def online_install_log(install_id):
 
     if info.get("running"):
         stop_install_button = f"""
-<form method="post" action="/online-scripts/install-stop/{h(install_id)}" style="display:inline;">
-    <button class="btn btn-red" type="submit" onclick="return confirm('确定停止该安装任务吗？')">停止安装</button>
-</form>
+<div class="row-actions-danger">
+    <form method="post" action="/online-scripts/install-stop/{h(install_id)}" style="display:inline;">
+        <button class="btn btn-red" type="submit" onclick="return confirm('确定停止该安装任务吗？')">停止安装任务</button>
+    </form>
+</div>
 """
 
     header_card = page_header_card(
@@ -77,8 +79,8 @@ def online_install_log(install_id):
 """,
         actions_html=f"""
 <a class="btn btn-gray" href="{h(back_url)}">返回</a>
-<a class="btn btn-blue" href="/pull">脚本管理</a>
-<a class="btn btn-orange" href="/tasks">任务管理</a>
+<a class="btn btn-blue" href="/pull">脚本</a>
+<a class="btn btn-orange" href="/tasks">任务</a>
 {stop_install_button}
 """,
     )
@@ -143,7 +145,7 @@ async function loadLog(){{
             window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
         }}
     }} catch(e) {{
-        document.getElementById("log").textContent = "日志读取失败: " + e;
+        document.getElementById("log").textContent = "日志读取失败：" + e + "。下一步：检查安装日志文件和服务状态后重试";
     }}
 }}
 

@@ -4,6 +4,7 @@ from flask import request, redirect, url_for, abort
 from ...models import load_global_env, save_global_env, load_tasks
 from ...utils import h, parse_env_text, env_to_text
 from ...ui.layout import layout
+from ...ui.components import empty_table_row, status_badge
 from ...sensitive import mask_if_sensitive
 
 def collapsible_text(value, limit=50):
@@ -26,7 +27,7 @@ def env_rows():
     env = load_global_env()
 
     if not env:
-        return '<tr><td colspan="3">暂无全局变量</td></tr>'
+        return empty_table_row(3, "暂无全局变量", '<a class="btn btn-primary" href="/env/new">新增变量</a>')
 
     rows = ""
 
@@ -39,10 +40,16 @@ def env_rows():
     <td><b>{h(k)}</b></td>
     <td>{collapsible_text(display_value, 50)}</td>
     <td>
-        <a class="btn btn-blue" href="/env/edit/{h(k)}">编辑</a>
-        <form class="inline-form" method="post" action="/env/delete/{h(k)}">
-            <button class="btn btn-red" type="submit" onclick="return confirm('确定删除变量 {h(k)} 吗？')">删除</button>
-        </form>
+        <div class="row-actions" aria-label="变量 {h(k)} 行操作">
+            <div class="row-actions-primary">
+                <a class="btn btn-blue" href="/env/edit/{h(k)}">编辑变量</a>
+            </div>
+            <div class="row-actions-danger">
+                <form class="inline-form" method="post" action="/env/delete/{h(k)}">
+                    <button class="btn btn-red" type="submit" onclick="return confirm('确定删除变量 {h(k)} 吗？')">删除变量</button>
+                </form>
+            </div>
+        </div>
     </td>
 </tr>
 """
@@ -66,7 +73,7 @@ def collect_task_env_rows():
             v = task_env.get(k, "")
             display_value = mask_if_sensitive(k, v)
             exists = k in global_env
-            exists_badge = '<span class="badge orange">将覆盖</span>' if exists else '<span class="badge green">新增</span>'
+            exists_badge = status_badge("warning" if exists else "success", "将覆盖" if exists else "新增")
 
             rows += f"""
 <tr>
@@ -79,6 +86,6 @@ def collect_task_env_rows():
 """
 
     if not rows:
-        rows = '<tr><td colspan="5">所有任务都没有单独设置变量</td></tr>'
+        rows = empty_table_row(5, "所有任务都没有单独设置变量")
 
     return rows

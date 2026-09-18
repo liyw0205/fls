@@ -1,4 +1,5 @@
 from ..utils import h
+from ..ui.components import empty_state, status_badge
 from ..proxy import proxy_select_options
 from .tasks import (
     online_script_task_crons,
@@ -77,15 +78,10 @@ def _task_vars_preview_text(task_crons, limit=3):
 
 def render_online_script_rows(items):
     if not items:
-        return """
-<div class="fls-empty-card">
-    <div style="font-size:34px;margin-bottom:8px;">📭</div>
-    <div style="font-weight:900;font-size:16px;">暂无在线脚本</div>
-    <div class="help" style="margin-top:6px;">
-        请点击“刷新远程脚本源”，或进入“脚本源 JSON”手动粘贴缓存。
-    </div>
-</div>
-"""
+        return empty_state(
+            "请点击“同步在线脚本源”，或进入“在线脚本源数据”手动粘贴缓存。",
+            title="暂无在线脚本",
+        )
 
     cards = ""
 
@@ -113,7 +109,7 @@ def render_online_script_rows(items):
             pass
 
         type_badge = f'<span class="badge blue">{h(item.get("type"))}</span>'
-        exists_badge = '<span class="badge orange">目标已存在</span>' if exists else '<span class="badge green">可安装</span>'
+        exists_badge = status_badge("warning" if exists else "success", "目标已存在" if exists else "可安装")
 
         if has_task:
             task_badge = f'<span class="badge blue">可导入 {len(task_crons)} 个任务</span>'
@@ -157,7 +153,7 @@ def render_online_script_rows(items):
     type="submit"
     form="{h(task_link_form_id)}"
 >
-    手动拉取任务源
+    同步在线脚本源
 </button>
 """
 
@@ -171,10 +167,14 @@ def render_online_script_rows(items):
     </div>
 
     <div class="fls-btn-line">
-        <a class="btn btn-blue" href="{h(item.get("link"))}" target="_blank">查看源</a>
-        {doc_btn}
-        <a class="btn btn-orange" href="/online-scripts/log/{h(running_install_id)}?back=/online-scripts">查看日志</a>
-        <button class="btn btn-red" type="submit" onclick="return confirm('确定停止该安装任务吗？')">停止安装</button>
+        <div class="row-actions-primary">
+            <a class="btn btn-blue" href="{h(item.get("link"))}" target="_blank">查看源</a>
+            {doc_btn}
+            <a class="btn btn-orange" href="/online-scripts/log/{h(running_install_id)}?back=/online-scripts">查看安装日志</a>
+        </div>
+        <div class="row-actions-danger">
+            <button class="btn btn-red" type="submit" onclick="return confirm('确定停止该安装任务吗？')">停止安装任务</button>
+        </div>
     </div>
 </form>
 """
@@ -204,7 +204,7 @@ def render_online_script_rows(items):
     </div>
 
     <div class="help" style="margin:6px 0 10px;">
-        {"该脚本配置了外部任务源，但尚未加载任务。可以先手动拉取任务源。" if task_link_unloaded else "该脚本没有内置任务。下载安装后可到任务管理手动创建任务。"}
+        {"该脚本配置了外部任务源，但尚未加载任务。可以先同步在线脚本源。" if task_link_unloaded else "该脚本没有内置任务。下载安装后可到任务页面手动创建任务。"}
     </div>
 
     <div class="fls-btn-line">
@@ -237,26 +237,30 @@ def render_online_script_rows(items):
             )
 
         cards += f"""
-<details class="fls-fold-card">
-    <summary>
-        <div class="fls-card-head">
-            <div class="fls-card-main">
-                <div class="fls-card-title-main">{h(item.get("name"))}</div>
-                <div class="fls-card-sub">
-                    ID：{h(item_id)}<br>
-                    保存名：{h(item.get("link_name"))}
-                </div>
-            </div>
-
-            <div class="fls-card-badges">
-                {type_badge}
-                {exists_badge}
-                {doc_badge}
+<article class="fls-fold-card mobile-list-item">
+    <div class="fls-card-head">
+        <div class="fls-card-main">
+            <div class="fls-card-title-main">{h(item.get("name"))}</div>
+            <div class="fls-card-sub">
+                ID：{h(item_id)}<br>
+                保存名：{h(item.get("link_name"))}
             </div>
         </div>
-    </summary>
 
-    <div class="fls-card-body">
+        <div class="fls-card-badges">
+            {type_badge}
+            {exists_badge}
+            {doc_badge}
+        </div>
+    </div>
+
+    <div class="fls-card-actions fls-card-primary-action">
+        {install_action_html}
+    </div>
+
+    <details class="detail-disclosure">
+        <summary>查看脚本详情</summary>
+        <div class="fls-card-body">
         <div class="fls-info-grid">
             <div class="fls-info-item">
                 <div class="fls-info-label">目标路径</div>
@@ -311,11 +315,9 @@ def render_online_script_rows(items):
         {task_link_section}
         {doc_section}
 
-        <div class="fls-card-actions">
-            {install_action_html}
         </div>
-    </div>
-</details>
+    </details>
+</article>
 """
 
     return cards

@@ -7,7 +7,7 @@ def online_scripts_refresh():
         return redirect(
             url_for(
                 "online_scripts.online_scripts_page",
-                msg="脚本源正在后台拉取中，请稍候",
+                msg="在线脚本源正在后台同步中，请稍候",
             )
         )
 
@@ -17,7 +17,7 @@ def online_scripts_refresh():
     return redirect(
         url_for(
             "online_scripts.online_scripts_page",
-            msg="已提交后台刷新，正在拉取中",
+                msg="已提交在线脚本源同步，正在处理中",
         )
     )
 

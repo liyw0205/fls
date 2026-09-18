@@ -36,7 +36,7 @@ def proxy_form(proxy=None, mode="new"):
     action = "/proxy/new" if mode == "new" else f"/proxy/edit/{proxy.get('id')}"
     title = "新增代理" if mode == "new" else "编辑代理"
     help_html = (
-        "代理可用于任务运行、脚本拉取和 GitHub 加速。保存前可先使用测试或质量检测。"
+        "代理可用于任务运行、脚本导入和 GitHub 加速。保存前可先使用测试或质量检测。"
         if mode == "new"
         else (
             f'当前代理：<b>{h(proxy.get("name", "") or proxy.get("id", ""))}</b>。'
@@ -48,18 +48,19 @@ def proxy_form(proxy=None, mode="new"):
     body = f"""
 <form method="post" id="proxyForm" action="{h(action)}">
 {header}
-<div class="card">
+<section class="section fls-form-section">
+    <h2 class="section-title">代理连接设置</h2>
     <input type="hidden" name="id" value="{h(proxy.get('id', ''))}">
 
     <div class="form-grid">
         <div class="form-item">
             <label>代理名称</label>
-            <input name="name" value="{h(proxy.get('name', ''))}" placeholder="例如：本地 SOCKS5">
+            <input name="name" value="{h(proxy.get('name', ''))}" placeholder="例如：本地 SOCKS5" aria-label="代理名称">
         </div>
 
         <div class="form-item">
             <label>代理类型</label>
-            <select name="type" id="proxyType" onchange="toggleGithubProxyBox()">
+            <select name="type" id="proxyType" onchange="toggleGithubProxyBox()" aria-label="代理类型">
                 <option value="socks5" {selected("socks5")}>SOCKS5</option>
                 <option value="http" {selected("http")}>HTTP</option>
                 <option value="https" {selected("https")}>HTTPS</option>
@@ -73,22 +74,22 @@ def proxy_form(proxy=None, mode="new"):
     <div class="form-grid" id="normalProxyBox">
         <div class="form-item">
             <label>Host</label>
-            <input name="host" value="{h(proxy.get('host', ''))}" placeholder="127.0.0.1">
+            <input name="host" value="{h(proxy.get('host', ''))}" placeholder="127.0.0.1" aria-label="代理 Host">
         </div>
 
         <div class="form-item">
             <label>Port</label>
-            <input name="port" value="{h(proxy.get('port', ''))}" placeholder="1080">
+            <input name="port" value="{h(proxy.get('port', ''))}" placeholder="1080" aria-label="代理 Port">
         </div>
 
         <div class="form-item">
             <label>用户名，可空</label>
-            <input name="username" value="{h(proxy.get('username', ''))}">
+            <input name="username" value="{h(proxy.get('username', ''))}" aria-label="代理用户名">
         </div>
 
         <div class="form-item">
             <label>密码，可空</label>
-            <input name="password" type="password" value="{h(proxy.get('password', ''))}" autocomplete="new-password">
+            <input name="password" type="password" value="{h(proxy.get('password', ''))}" autocomplete="new-password" aria-label="代理密码">
         </div>
     </div>
 
@@ -96,34 +97,41 @@ def proxy_form(proxy=None, mode="new"):
 
     <div class="form-item" id="githubProxyBox" style="display:none;">
         <label>GitHub 代理地址</label>
-        <input name="url" value="{h(proxy.get('url', ''))}" placeholder="例如：https://gh-proxy.com/">
+        <input name="url" value="{h(proxy.get('url', ''))}" placeholder="例如：https://gh-proxy.com/" aria-label="GitHub 代理地址">
         <div class="help">会把 GitHub URL 转为：代理地址/原始URL。</div>
     </div>
 
     <br>
 
     <label>
-        <input type="checkbox" name="enabled" value="1" {checked} style="width:auto;">
+        <input type="checkbox" name="enabled" value="1" {checked} style="width:auto;" aria-label="启用此代理">
         启用此代理
     </label>
-</div>
+</section>
 
-<div class="card">
+<section class="section fls-form-section fls-save-section">
+    <h2 class="section-title">质量检测与保存</h2>
     <div class="form-item">
         <label>自定义质量检测地址，可空</label>
         <textarea name="quality_urls" style="min-height:110px;" placeholder="每行一个，例如：
 https://www.baidu.com
 https://www.github.com
-https://raw.githubusercontent.com"></textarea>
+https://raw.githubusercontent.com" aria-label="自定义质量检测地址"></textarea>
     </div>
 
     <br>
 
-    <button class="btn btn-primary" type="submit">保存代理</button>
-    <button class="btn btn-blue" type="button" onclick="testProxyRealtime()">测试</button>
-    <button class="btn btn-orange" type="button" onclick="qualityProxyRealtime()">质量检测</button>
-    <a class="btn btn-gray" href="/proxy">返回</a>
-</div>
+    <div class="row-actions" aria-label="代理设置操作">
+        <div class="row-actions-primary">
+            <button class="btn btn-primary" type="submit">保存代理设置</button>
+        </div>
+        <div class="row-actions-secondary">
+            <button class="btn btn-blue" type="button" onclick="testProxyRealtime(this)">测试代理连接</button>
+            <button class="btn btn-orange" type="button" onclick="qualityProxyRealtime(this)">检测代理质量</button>
+            <a class="btn btn-gray" href="/proxy">返回代理列表</a>
+        </div>
+    </div>
+</section>
 </form>
 
 <div class="card" id="proxyRealtimeResult" style="display:none;">
@@ -149,7 +157,8 @@ function showProxyResult(html){{
     document.getElementById("proxyRealtimeText").innerHTML = html;
 }}
 
-async function testProxyRealtime(){{
+async function testProxyRealtime(source){{
+    if(!flsMarkButtonBusy(source, "测试中...")) return;
     const form = document.getElementById("proxyForm");
     const data = new FormData(form);
     showProxyResult("正在测试代理，请稍候...");
@@ -169,14 +178,17 @@ async function testProxyRealtime(){{
                 "耗时：" + json.elapsed_ms + " ms"
             );
         }} else {{
-            showProxyResult("状态：<b style='color:#dc2626'>失败</b><br>错误：" + escapeHtml(json.error || "未知错误"));
+            showProxyResult("状态：<b style='color:#dc2626'>失败</b><br>" + escapeHtml(flsActionFailure("错误：" + (json.error || "未知错误"), "检查代理配置后重试")));
         }}
     }} catch(e) {{
-        showProxyResult("请求失败：" + escapeHtml(String(e)));
+        showProxyResult(escapeHtml(flsActionFailure("请求失败：" + String(e), "检查服务状态后重试")));
+    }} finally {{
+        flsRestoreButton(source);
     }}
 }}
 
-async function qualityProxyRealtime(){{
+async function qualityProxyRealtime(source){{
+    if(!flsMarkButtonBusy(source, "检测中...")) return;
     const form = document.getElementById("proxyForm");
     const data = new FormData(form);
     showProxyResult("正在进行质量检测，请稍候...");
@@ -190,7 +202,7 @@ async function qualityProxyRealtime(){{
         const json = await res.json();
 
         if(!json.ok){{
-            showProxyResult("检测失败：" + escapeHtml(json.error || "未知错误"));
+            showProxyResult(escapeHtml(flsActionFailure("检测失败：" + (json.error || "未知错误"), "检查代理配置后重试")));
             return;
         }}
 
@@ -201,7 +213,7 @@ async function qualityProxyRealtime(){{
         for(const item of json.items){{
             html += "<tr>" +
                 "<td>" + escapeHtml(item.url) + "</td>" +
-                "<td>" + (item.ok ? "<span class='badge green'>成功</span>" : "<span class='badge red'>失败</span>") + "</td>" +
+                "<td>" + (item.ok ? "<span class='badge green status-badge status-success' role='status'>成功</span>" : "<span class='badge red status-badge status-error' role='status'>失败</span>") + "</td>" +
                 "<td>" + escapeHtml(String(item.status_code)) + "</td>" +
                 "<td>" + escapeHtml(String(item.elapsed)) + "</td>" +
                 "</tr>";
@@ -211,7 +223,9 @@ async function qualityProxyRealtime(){{
         showProxyResult(html);
 
     }} catch(e) {{
-        showProxyResult("请求失败：" + escapeHtml(String(e)));
+        showProxyResult(escapeHtml(flsActionFailure("请求失败：" + String(e), "检查服务状态后重试")));
+    }} finally {{
+        flsRestoreButton(source);
     }}
 }}
 

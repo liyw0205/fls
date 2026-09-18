@@ -24,27 +24,29 @@ def layout(title, active, body):
 
     nav = [
         ("dashboard", "/", "📊 仪表盘"),
-        ("tasks", "/tasks", "📜 任务管理"),
+        ("tasks", "/tasks", "📜 任务"),
+        ("collections", "/collections", "🗂️ 任务合集"),
         ("history", "/history", "🧾 运行历史"),
-        ("env", "/env", "🌐 全局变量"),
-        ("proxy", "/proxy", "🧩 代理管理"),
-        ("pull", "/pull", "📂 脚本管理"),
+        ("env", "/env", "🌐 变量"),
+        ("proxy", "/proxy", "🧩 代理"),
+        ("pull", "/pull", "📂 脚本"),
         ("online_scripts", "/online-scripts", "🌍 在线脚本"),
-        ("backup", "/backup", "💾 备份恢复"),
-        ("deps", "/deps", "📦 依赖管理"),
-        ("logs", "/logs", "📁 日志管理"),
-        ("notify", "/notify", "🔔 通知管理"),
-        ("status", "/panel/status", "🖥️ 运行环境"),
-        ("config", "/config", "🔧 配置"),
+        ("backup", "/backup", "💾 备份"),
+        ("deps", "/deps", "📦 依赖"),
+        ("logs", "/logs", "📁 日志"),
+        ("notify", "/notify", "🔔 通知"),
+        ("status", "/panel/status", "🖥️ 面板状态"),
+        ("config", "/config", "🔧 面板配置"),
         ("about", "/about", "⚙️ 关于"),
     ]
 
     nav_html = ""
     for key, url, text in nav:
         cls = "active" if active == key else ""
-        nav_html += '<a class="{}" href="{}">{}</a>'.format(cls, h(url), h(text))
+        current = ' aria-current="page"' if cls else ""
+        nav_html += '<a class="{}" href="{}"{}>{}</a>'.format(cls, h(url), current, h(text))
 
-    nav_html += '<a href="/logout">🚪 退出登录</a>'
+    nav_html += '<a href="/logout">退出登录</a>'
 
     html = r'''
 <!doctype html>
@@ -57,17 +59,19 @@ def layout(title, active, body):
 
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=20260918-1">
 <link rel="stylesheet" href="/static/fls.css?v=20260918-1">
+<link rel="stylesheet" href="/static/fls_responsive.css?v=20260918-1">
 
 </head>
 
-<body class="page-__ACTIVE__">
+<body class="__BODY_CLASSES__">
+<a class="skip-link" href="#main-content">跳转到主要内容</a>
 <div class="mask" id="mask" onclick="toggleMenu(false)"></div>
-<button class="fls-float-menu-btn" id="flsFloatMenuBtn" type="button" onclick="toggleMenu()" aria-label="打开导航菜单" title="打开导航菜单">☰</button>
+<button class="fls-float-menu-btn" id="flsFloatMenuBtn" type="button" onclick="toggleMenu()" aria-expanded="false" aria-controls="sidebar" aria-label="打开导航菜单" title="打开导航菜单">☰</button>
 
 <div class="app">
     <aside class="sidebar" id="sidebar">
         <div class="brand"><span></span>FLS 面板</div>
-        <div class="nav">__NAV__</div>
+        <nav class="nav" aria-label="主导航">__NAV__</nav>
     </aside>
 
     <main class="main">
@@ -75,7 +79,7 @@ def layout(title, active, body):
             <div class="title">__TITLE__</div>
         </div>
 
-        <div class="content">__BODY__</div>
+        <div class="content page-shell" id="main-content">__BODY__</div>
     </main>
 </div>
 
@@ -84,11 +88,17 @@ def layout(title, active, body):
 </html>
 '''
 
+    body_classes = f"page-{active}"
+    # Collections share task-specific table rules while keeping their own
+    # navigation identity and body hook.
+    if active == "collections":
+        body_classes += " page-tasks"
+
     return (
         html
         .replace("__TITLE__", h(title))
         .replace("__NAV__", nav_html)
         .replace("__BODY__", body)
-        .replace("__ACTIVE__", h(active))
+        .replace("__BODY_CLASSES__", h(body_classes))
         .replace("__CSRF_TOKEN__", h(token))
     )

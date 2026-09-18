@@ -70,10 +70,10 @@ def env_import_from_tasks():
 <form method="post">
 {header_card}
 {import_table}
-<div class="card">
+<section class="section fls-form-section fls-save-section">
     <button class="btn btn-primary" type="submit">导入所选变量</button>
     <a class="btn btn-gray" href="/env">返回</a>
-</div>
+</section>
 </form>
 """
     return layout("导入全局变量", "env", body)

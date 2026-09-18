@@ -7,7 +7,7 @@ from .helpers import (
     fls_control_script,
 )
 from ...ui.layout import layout
-from ...ui.components import code_card, table_card
+from ...ui.components import code_card, table_card, page_header
 from ...utils import h
 from ...paths import BASE_DIR, DATA_DIR, LOG_DIR, SCRIPT_DIR
 from ...constants import MAIN_PROCESS_NAME, TASK_PROCESS_PREFIX
@@ -201,7 +201,12 @@ ps -eo pid,ppid,comm,args | grep fls
         """,
     )
 
+    header = page_header(
+        "关于 FLS",
+        help_html="查看版本、更新日志、时间校准和面板控制；危险动作单独确认。",
+    )
     body = f"""
+{header}
 <style>
 .fls-update-log-fold {{
     overflow:hidden;
@@ -249,32 +254,34 @@ ps -eo pid,ppid,comm,args | grep fls
     <a href="#about-rules">运行规则</a>
 </nav>
 
-<div class="card" id="about-intro">
-    <div class="card-title">关于 FLS 面板</div>
+<section class="section" id="about-intro">
+    <h2 class="section-title">关于 FLS 面板</h2>
     <div class="help">
         <p><b>FLS 面板</b> 是一个轻量级脚本任务管理面板，可用于管理 Python、Shell、Node.js 等脚本任务。</p>
-        <p>支持任务管理、Cron 定时、脚本导入/拉取、日志查看、依赖管理、代理配置、通知管理、备份恢复和面板配置。</p>
+        <p>支持任务管理、Cron 定时、脚本导入、日志查看、依赖管理、代理配置、通知管理、备份恢复和面板配置。</p>
     </div>
 
     <br>
 
-    <div class="action-row">
-        <form method="post" action="/about/restart-panel" style="display:inline;">
-            <button class="btn btn-orange" type="submit" onclick="return confirm('确定重启面板吗？重启期间页面会短暂无法访问。')">
-                重启面板
-            </button>
-        </form>
+    <div class="row-actions" aria-label="面板控制危险操作">
+        <div class="row-actions-danger">
+            <form method="post" action="/about/restart-panel" style="display:inline;">
+                <button class="btn btn-orange" type="submit" onclick="return confirm('确定重启面板吗？重启期间页面会短暂无法访问。')">
+                    重启面板
+                </button>
+            </form>
 
-        <form method="post" action="/about/stop-panel" style="display:inline;">
-            <button class="btn btn-red" type="submit" onclick="return confirm('确定停止面板吗？停止后需要手动重新启动。')">
-                停止面板
-            </button>
-        </form>
+            <form method="post" action="/about/stop-panel" style="display:inline;">
+                <button class="btn btn-red" type="submit" onclick="return confirm('确定停止面板吗？停止后需要手动重新启动。')">
+                    停止面板
+                </button>
+            </form>
+        </div>
     </div>
-</div>
+</section>
 
-<div class="card" id="about-time">
-    <div class="card-title">面板时间校准</div>
+<section class="section" id="about-time">
+    <h2 class="section-title">面板时间校准</h2>
     <div class="help">
         当前面板时间：<b>{h(about_panel_time_text())}</b><br>
         当前面板时区：<b>{h(get_panel_timezone_text())}</b><br>
@@ -287,7 +294,7 @@ ps -eo pid,ppid,comm,args | grep fls
 
     <div class="form-item">
         <label>选择校准方式</label>
-        <select id="flsTimeSyncMode" onchange="flsToggleTimeSyncMode()">
+        <select id="flsTimeSyncMode" aria-label="选择校准方式" onchange="flsToggleTimeSyncMode()">
             <option value="beijing">自动校准北京时间</option>
             <option value="utc_offset">选择 UTC 偏移自动校准</option>
             <option value="custom">自定义当前时间</option>
@@ -330,7 +337,7 @@ ps -eo pid,ppid,comm,args | grep fls
 
                 <div class="form-item">
                     <label>UTC 偏移</label>
-                    <select name="utc_offset">
+                    <select name="utc_offset" aria-label="UTC 偏移">
                         {utc_offset_options(current_offset)}
                     </select>
                 </div>
@@ -363,12 +370,12 @@ ps -eo pid,ppid,comm,args | grep fls
                 <div class="form-grid">
                     <div class="form-item">
                         <label>自定义当前时间</label>
-                        <input name="custom_time" placeholder="例如：20260508121200">
+                        <input name="custom_time" placeholder="例如：20260508121200" aria-label="自定义当前时间">
                     </div>
 
                     <div class="form-item">
                         <label>该时间属于哪个 UTC 偏移</label>
-                        <select name="utc_offset">
+                        <select name="utc_offset" aria-label="自定义时间 UTC 偏移">
                             {utc_offset_options(current_offset)}
                         </select>
                     </div>
@@ -408,7 +415,7 @@ ps -eo pid,ppid,comm,args | grep fls
     <div class="help" style="color:#18a058;">
         校准成功后会自动重载调度器，让 Cron 任务的下次执行时间重新计算。
     </div>
-</div>
+</section>
 
 <script>
 function flsToggleTimeSyncMode(){{
@@ -440,16 +447,22 @@ flsToggleTimeSyncMode();
 
 {version_card}
 
-<section class="fls-section" id="about-info">
+<section class="section fls-section" id="about-info">
 {panel_info_table}
 </section>
 
-<section class="fls-section" id="about-rules">
+<section class="section fls-section" id="about-rules">
+<div class="about-rule-item">
 {task_command_card}
+</div>
 
+<div class="about-rule-item">
 {cron_card}
+</div>
 
+<div class="about-rule-item">
 {process_card}
+</div>
 </section>
 """
 

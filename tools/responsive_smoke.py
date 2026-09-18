@@ -22,6 +22,7 @@ TOKEN = "responsive-smoke-token"
 PAGES = (
     ("/", "page-dashboard"),
     ("/tasks", "page-tasks"),
+    ("/collections", "page-collections"),
     ("/history", "page-history"),
     ("/env", "page-env"),
     ("/proxy", "page-proxy"),
@@ -212,14 +213,21 @@ def run_smoke():
                 check_static_asset(
                     client,
                     "/static/fls.css",
-                    ("fls-phone", "fls-tablet", "fls-mobile", "901px", "1180px"),
+                    ("@media(max-width:767px)", "@media(min-width:768px) and (max-width:1199px)", "768px", "1199px"),
+                )
+            )
+            results.append(
+                check_static_asset(
+                    client,
+                    "/static/fls_responsive.css",
+                    ("@media (max-width: 767px)", "@media (min-width: 768px) and (max-width: 1199px)", "#proxyMobileList", "#tasksMobileCards"),
                 )
             )
             results.append(
                 check_static_asset(
                     client,
                     "/static/fls.js",
-                    ("fls-phone", "fls-tablet", "fls-desktop", "detectFlsMobile"),
+                    ("flsMediaQuery", "flsIsMobileViewport", "flsSyncMenuViewport", "toggleMenu"),
                 )
             )
             results.append(

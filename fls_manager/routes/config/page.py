@@ -1,5 +1,5 @@
 from ._common import *
-from ...ui.components import table_card
+from ...ui.components import table_card, page_header
 
 
 @bp.route("/config", methods=["GET", "POST"])
@@ -63,7 +63,7 @@ def config_page():
                 if not verify_totp(totp_secret, totp_code):
                     return (
                         "2FA 验证码错误，未开启 2FA。"
-                        "请用认证器扫码后输入正确验证码再保存。"
+                        "下一步：用认证器生成当前验证码后重新保存。"
                     ), 400
 
         elif security_verify_enabled and security_verify_type == "code":
@@ -169,7 +169,7 @@ def config_page():
         rows += f"""
 <tr>
     <td><b>{h(name)}</b></td>
-    <td><input type="checkbox" name="type_{h(k)}" value="1" {checked(k)} style="width:auto;"></td>
+    <td><input type="checkbox" name="type_{h(k)}" value="1" {checked(k)} style="width:auto;" aria-label="启用 {h(name)}"></td>
 </tr>
 """
 
@@ -209,7 +209,12 @@ def config_page():
         rows,
     )
 
+    header = page_header(
+        "面板配置",
+        help_html="按主题管理登录、安全、在线脚本、日志和任务运行设置；保存后按提示重新加载面板。",
+    )
     body = f"""
+{header}
 <form method="post">
 <nav class="fls-section-nav" aria-label="配置区块导航">
     <span class="fls-section-nav-label">配置区块</span>
@@ -222,12 +227,11 @@ def config_page():
     <a href="#config-save">保存</a>
 </nav>
 
-<section class="fls-section" id="config-login">
-<div class="card">
-    <div class="card-title">登录配置</div>
+<section class="section fls-section fls-form-section" id="config-login">
+    <h2 class="section-title">登录设置</h2>
     <div class="form-item">
         <label>登录 Token</label>
-        <input name="admin_token" type="password" value="{h(cfg.get('admin_token', ''))}" autocomplete="new-password">
+        <input name="admin_token" type="password" value="{h(cfg.get('admin_token', ''))}" autocomplete="new-password" aria-label="登录 Token">
         <div class="help">
             Token 为空时，面板会进入首次设置引导 /setup。<br>
             不建议在公网环境关闭或清空 Token。<br>
@@ -237,15 +241,13 @@ def config_page():
     <br>
     <div class="form-item">
         <label>面板端口，保存后重启生效</label>
-        <input name="port" type="number" min="1" max="65535" value="{h(cfg.get('port', 5700))}">
+        <input name="port" type="number" min="1" max="65535" value="{h(cfg.get('port', 5700))}" aria-label="面板端口">
         <div class="help">当前进程实际监听端口：{h(get_port())}</div>
     </div>
-</div>
 </section>
 
-<section class="fls-section" id="config-security">
-<div class="card">
-    <div class="card-title">安全验证</div>
+<section class="section fls-section fls-form-section" id="config-security">
+    <h2 class="section-title">安全验证</h2>
 
     <div class="help">
         当前状态：<b>{h(security_status_text)}</b><br>
@@ -263,6 +265,7 @@ def config_page():
             {security_enabled_checked}
             style="width:auto;"
             onchange="flsToggleSecurityBox()"
+            aria-label="登录后启用二次安全验证"
         >
         登录后启用二次安全验证
     </label>
@@ -271,7 +274,7 @@ def config_page():
 
     <div class="form-item">
         <label>验证方式</label>
-        <select name="security_verify_type" id="securityVerifyType" onchange="flsToggleSecurityBox()">
+        <select name="security_verify_type" id="securityVerifyType" aria-label="安全验证方式" onchange="flsToggleSecurityBox()">
             <option value="code" {code_selected}>随机验证码</option>
             <option value="totp" {totp_selected}>2FA / TOTP 验证</option>
         </select>
@@ -319,7 +322,7 @@ def config_page():
                 <div style="min-width:260px;flex:1;">
                     <div class="form-item">
                         <label>2FA 密钥</label>
-                        <input value="{h(mask_secret_value(totp_secret))}" readonly>
+                    <input value="{h(mask_secret_value(totp_secret))}" readonly aria-label="2FA 密钥">
                     </div>
 
                     <br>
@@ -337,7 +340,7 @@ def config_page():
 
                     <div class="form-item">
                         <label>输入认证器中的 6 位验证码</label>
-                        <input name="totp_code" placeholder="首次开启 2FA 时必填，例如：123456">
+                        <input name="totp_code" placeholder="首次开启 2FA 时必填，例如：123456" aria-label="输入认证器中的 6 位验证码">
                         <div class="help">
                             如果当前已经开启 2FA，且没有更换密钥，保存其它配置时可不填写。
                         </div>
@@ -346,51 +349,45 @@ def config_page():
             </div>
         </div>
     </div>
-</div>
 </section>
 
-<section class="fls-section" id="config-online">
-<div class="card">
-    <div class="card-title">在线脚本源</div>
+<section class="section fls-section fls-form-section" id="config-online">
+    <h2 class="section-title">在线脚本源</h2>
     <div class="form-item">
         <label>脚本源 index.json 地址</label>
-        <input name="online_script_source" value="{h(cfg.get('online_script_source', 'https://raw.githubusercontent.com/liyw0205/fls-scripts/main/index.json'))}">
+        <input name="online_script_source" value="{h(cfg.get('online_script_source', 'https://raw.githubusercontent.com/liyw0205/fls-scripts/main/index.json'))}" aria-label="在线脚本源 index.json 地址">
         <div class="help">
             在线脚本页面会从该 JSON 地址读取脚本列表。<br>
             默认：<code>https://raw.githubusercontent.com/liyw0205/fls-scripts/main/index.json</code>
         </div>
     </div>
-</div>
 </section>
 
-<section class="fls-section" id="config-logs">
-<div class="card">
-    <div class="card-title">日志清理</div>
+<section class="section fls-section fls-form-section" id="config-logs">
+    <h2 class="section-title">日志清理</h2>
     <div class="form-grid">
         <div class="form-item">
             <label>清理间隔，分钟</label>
-            <input name="log_cleanup_minutes" type="number" value="{h(cfg.get('log_cleanup_minutes', 30))}">
+            <input name="log_cleanup_minutes" type="number" value="{h(cfg.get('log_cleanup_minutes', 30))}" aria-label="日志清理间隔，分钟">
         </div>
         <div class="form-item">
             <label>单个日志最大 MB</label>
-            <input name="log_max_size_mb" type="number" value="{h(cfg.get('log_max_size_mb', 10))}">
+            <input name="log_max_size_mb" type="number" value="{h(cfg.get('log_max_size_mb', 10))}" aria-label="单个日志最大 MB">
         </div>
         <div class="form-item">
             <label>每个任务保留日志数量</label>
-            <input name="log_keep_per_task" type="number" value="{h(cfg.get('log_keep_per_task', 10))}">
+            <input name="log_keep_per_task" type="number" value="{h(cfg.get('log_keep_per_task', 10))}" aria-label="每个任务保留日志数量">
         </div>
     </div>
-</div>
 </section>
 
-<section class="fls-section" id="config-runtime">
-<div class="card">
-    <div class="card-title">任务运行控制</div>
+<section class="section fls-section fls-form-section" id="config-runtime">
+    <h2 class="section-title">任务运行控制</h2>
 
     <div class="form-grid">
         <div class="form-item">
             <label>任务超时时间，秒</label>
-            <input name="task_timeout_seconds" type="number" min="0" value="{h(cfg.get('task_timeout_seconds', 1800))}">
+            <input name="task_timeout_seconds" type="number" min="0" value="{h(cfg.get('task_timeout_seconds', 1800))}" aria-label="任务超时时间，秒">
             <div class="help">
                 默认 1800 秒。设置为 0 表示关闭超时控制。<br>
                 任务运行超过该时间会被强制结束，避免卡死。
@@ -399,24 +396,21 @@ def config_page():
 
         <div class="form-item">
             <label>全局随机延迟，秒</label>
-            <input name="random_delay_seconds" type="number" min="0" max="120" value="{h(cfg.get('random_delay_seconds', 0))}">
+            <input name="random_delay_seconds" type="number" min="0" max="120" value="{h(cfg.get('random_delay_seconds', 0))}" aria-label="全局随机延迟，秒">
             <div class="help">
                 范围 1-120 秒。设置为 0 表示不启用。<br>
                 任务选择“使用全局随机延迟”时，会在 1 到该秒数之间随机等待。
             </div>
         </div>
     </div>
-</div>
 </section>
 
-<section class="fls-section" id="config-types">
+<section class="section fls-section" id="config-types">
 {task_type_table}
 </section>
 
-<section class="fls-section" id="config-save">
-<div class="card fls-save-section">
-    <button class="btn btn-primary" type="submit">保存配置</button>
-</div>
+<section class="section fls-section fls-form-section fls-save-section" id="config-save">
+    <button class="btn btn-primary" type="submit">保存面板配置</button>
 </section>
 </form>
 
@@ -443,4 +437,4 @@ flsToggleSecurityBox();
 </script>
 """
 
-    return layout("配置", "config", body)
+    return layout("面板配置", "config", body)

@@ -192,11 +192,11 @@ def login():
     <form method="post">
         <div class="form-item">
             <label>Token</label>
-            <input name="token" type="password" placeholder="请输入登录 Token" autofocus>
+            <input name="token" type="password" placeholder="请输入登录 Token" autofocus aria-label="登录 Token">
         </div>
         <br>
         <label>
-            <input type="checkbox" name="remember" value="1" style="width:auto;">
+            <input type="checkbox" name="remember" value="1" style="width:auto;" aria-label="保持登录 14 天">
             保持登录 14 天
         </label>
         <div class="help">不勾选则登录有效期为 1 小时。</div>
@@ -323,7 +323,7 @@ def verify():
     <form method="post">
         <div class="form-item">
             <label>{"随机验证码" if stype == "code" else "2FA 验证码"}</label>
-            <input name="code" placeholder="请输入验证码" autofocus>
+            <input name="code" placeholder="请输入验证码" autofocus aria-label="安全验证码">
         </div>
         <br>
         <button class="btn btn-primary" type="submit">验证</button>
@@ -407,12 +407,12 @@ def setup():
     <form method="post">
         <div class="form-item">
             <label>登录 Token</label>
-            <input name="token" type="password" autofocus>
+            <input name="token" type="password" autofocus aria-label="登录 Token">
         </div>
         <br>
         <div class="form-item">
             <label>确认 Token</label>
-            <input name="confirm_token" type="password">
+            <input name="confirm_token" type="password" aria-label="确认登录 Token">
         </div>
         <br>
         <button class="btn btn-primary" type="submit">保存 Token</button>

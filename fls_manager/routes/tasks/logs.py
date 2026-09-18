@@ -5,6 +5,7 @@ from . import bp
 from ...models import get_task, task_history_for_task
 from ...utils import h, get_back_url
 from ...ui.layout import layout
+from ...ui.components import empty_table_row, status_badge
 from ...ui.log_controls import log_controls
 from ...task_runner import run_task_now, stop_task_now, is_running
 from ...logs import latest_log_for_task, tail_file
@@ -14,17 +15,17 @@ from ...state import RUNNING
 def history_status_badge(status):
     status = str(status or "")
     mapping = {
-        "success": ("green", "成功"),
-        "failed": ("red", "失败"),
-        "timeout": ("red", "超时"),
-        "stopped": ("gray", "手动停止"),
-        "running": ("blue", "运行中"),
-        "starting": ("blue", "启动中"),
-        "delaying": ("orange", "延迟中"),
-        "start_failed": ("red", "启动失败"),
+        "success": ("success", "成功"),
+        "failed": ("error", "失败"),
+        "timeout": ("error", "超时"),
+        "stopped": ("stopped", "手动停止"),
+        "running": ("running", "运行中"),
+        "starting": ("starting", "启动中"),
+        "delaying": ("warning", "延迟中"),
+        "start_failed": ("error", "启动失败"),
     }
-    cls, text = mapping.get(status, ("gray", status or "-"))
-    return f'<span class="badge {cls}">{h(text)}</span>'
+    tone, text = mapping.get(status, ("neutral", status or "-"))
+    return status_badge(status, label=text, tone=tone)
 
 
 def render_task_history_rows(task_id):
@@ -51,7 +52,7 @@ def render_task_history_rows(task_id):
 """
 
     if not rows:
-        rows = '<tr><td colspan="7">暂无运行历史</td></tr>'
+        rows = empty_table_row(7, "暂无运行历史", '<a class="btn btn-primary" href="/tasks">返回任务列表</a>')
 
     return rows
 
@@ -76,29 +77,37 @@ def log_view(task_id):
     config_btn = ""
 
     if str(task.get("config_path") or "").strip():
-        config_btn = f'<a class="btn btn-blue" href="/task/config/{h(task_id)}?back={h(back_url)}">配置</a>'
+        config_btn = f'<a class="btn btn-blue" href="/task/config/{h(task_id)}?back={h(back_url)}">任务配置</a>'
 
     body = f"""
-<div class="card">
-    <div class="card-title">日志：{h(task.get('name') or task.get('command'))}</div>
+<section class="section" id="task-log-overview">
+    <h2 class="section-title">日志：{h(task.get('name') or task.get('command'))}</h2>
     <div class="help">
         状态：<b>{"运行中" if running else "已停止"}</b><br>
         PID：{h(pid or "-")}<br>
         日志文件：{h(log_file or "暂无")}
     </div>
     <br>
-    <form class="inline-form" method="post" action="/run/{h(task_id)}?back={h(back_url)}">
-        <button class="btn btn-primary" type="submit">运行</button>
-    </form>
-    <form class="inline-form" method="post" action="/stop/{h(task_id)}?back={h(back_url)}">
-        <button class="btn btn-red" type="submit" onclick="return confirm('确定结束该任务吗？')">结束</button>
-    </form>
-    {config_btn}
-    <a class="btn btn-gray" href="{h(back_url)}">返回</a>
-</div>
+    <div class="row-actions" aria-label="任务日志操作">
+        <div class="row-actions-primary">
+            <form class="inline-form" method="post" action="/run/{h(task_id)}?back={h(back_url)}">
+                <button class="btn btn-primary" type="submit">立即运行任务</button>
+            </form>
+        </div>
+        <div class="row-actions-secondary">
+            {config_btn}
+            <a class="btn btn-gray" href="{h(back_url)}">返回</a>
+        </div>
+        <div class="row-actions-danger">
+            <form class="inline-form" method="post" action="/stop/{h(task_id)}?back={h(back_url)}">
+                <button class="btn btn-red" type="submit" onclick="return confirm('确定停止该任务吗？')">停止任务</button>
+            </form>
+        </div>
+    </div>
+</section>
 
-<div class="card">
-    <div class="card-title">最近运行历史</div>
+<section class="section" id="task-log-history">
+    <h2 class="section-title">最近运行历史</h2>
     <div class="table-wrap">
         <table>
             <thead>
@@ -115,7 +124,7 @@ def log_view(task_id):
             <tbody>{render_task_history_rows(task_id)}</tbody>
         </table>
     </div>
-</div>
+</section>
 
 <pre class="log" id="log">加载中...</pre>
 {log_controls()}
@@ -166,7 +175,7 @@ async function loadLog(){{
             }}
         }}
     }} catch(e) {{
-        document.getElementById("log").textContent = "日志读取失败: " + e;
+        document.getElementById("log").textContent = "日志读取失败：" + e + "。下一步：刷新页面并检查任务日志文件后重试";
     }}
 }}
 

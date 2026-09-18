@@ -16,9 +16,8 @@ from ...models import (
 )
 from ...utils import h, now_str, get_back_url
 from ...ui.layout import layout
-from ...ui.tables import collapsible_code
-from ...task_runner import is_running
-from ...state import RUNNING
+from ...ui.tables import collapsible_code, task_row_model
+from ...ui.components import page_header, data_toolbar, empty_state
 
 
 COLLECTIONS_PER_PAGE = 10
@@ -100,20 +99,20 @@ def _collections_page_links(q, task_q, page, pages):
 
 
 def _task_card(task, back_url, collection_id=""):
-    task_id = task.get("id", "")
-    name = task.get("name") or task.get("command") or "未命名任务"
-    remark = str(task.get("remark", "") or "").strip()
-    command = str(task.get("command", "") or "").strip()
+    row = task_row_model(task)
+    task_id = row["id"]
+    name = row["name"]
+    remark = row["remark"]
+    command = row["command"]
     command_html = collapsible_code(command, limit=90, max_lines=2)
-    enabled = task.get("enabled", True)
-    pinned = bool(task.get("pinned", False))
-    config_path = str(task.get("config_path", "") or "").strip()
+    enabled = row["enabled"]
+    pinned = row["pinned"]
+    config_path = row["config_path"]
+    running = row["running"]
+    pid = row["pid"]
 
-    running = is_running(task_id)
-    pid = RUNNING.get(task_id, {}).get("pid", "-") if running else "-"
-
-    status_badge = '<span class="badge blue">运行中</span>' if running else '<span class="badge red">已停止</span>'
-    enabled_badge = '<span class="badge green">启用</span>' if enabled else '<span class="badge gray">禁用</span>'
+    status_badge = '<span class="badge blue status-badge status-running" role="status">运行中</span>' if running else '<span class="badge red status-badge status-stopped" role="status">已停止</span>'
+    enabled_badge = '<span class="badge green status-badge status-enabled" role="status">启用</span>' if enabled else '<span class="badge gray status-badge status-disabled" role="status">禁用</span>'
     pin_badge = '<span class="badge orange">置顶</span>' if pinned else ""
 
     pin_text = "取消置顶" if pinned else "置顶"
@@ -121,10 +120,10 @@ def _task_card(task, back_url, collection_id=""):
 
     config_btn = ""
     if config_path:
-        config_btn = f'<a class="btn btn-blue" href="/task/config/{h(task_id)}?back={_back_param(back_url)}">配置</a>'
+        config_btn = f'<a class="btn btn-blue" href="/task/config/{h(task_id)}?back={_back_param(back_url)}">任务配置</a>'
 
     return f"""
-<div class="fls-fold-card collection-task-card" data-collection-id="{h(collection_id)}" data-task-id="{h(task_id)}">
+<article class="fls-fold-card mobile-list-item collection-task-card" data-collection-id="{h(collection_id)}" data-task-id="{h(task_id)}">
     <div style="padding:14px;">
         <div class="fls-card-head">
             <div class="collection-task-select-wrap">
@@ -151,27 +150,31 @@ def _task_card(task, back_url, collection_id=""):
             <div class="fls-source-code">{command_html}</div>
         </div>
 
-        <div class="fls-card-actions">
-            <div class="fls-btn-line">
+        <div class="fls-card-actions row-actions collection-task-actions" aria-label="任务 {h(name)} 行操作">
+            <div class="row-actions-primary">
                 <form class="inline-form" method="post" action="/run/{h(task_id)}?back={_back_param(back_url)}">
-                    <button class="btn btn-primary" type="submit">运行</button>
+                    <button class="btn btn-primary" type="submit">立即运行任务</button>
                 </form>
-                <form class="inline-form" method="post" action="/stop/{h(task_id)}?back={_back_param(back_url)}">
-                    <button class="btn btn-red" type="submit" onclick="return confirm('确定结束该任务吗？')">结束</button>
-                </form>
-                <a class="btn btn-orange" href="/log/{h(task_id)}?back={_back_param(back_url)}">日志</a>
+                <a class="btn btn-orange" href="/log/{h(task_id)}?back={_back_param(back_url)}">查看任务日志</a>
                 {config_btn}
-                <a class="btn btn-blue" href="/task/edit/{h(task_id)}?back={_back_param(back_url)}">编辑</a>
+                <a class="btn btn-blue" href="/task/edit/{h(task_id)}?back={_back_param(back_url)}">编辑任务</a>
+            </div>
+            <div class="row-actions-secondary">
                 <form class="inline-form" method="post" action="/task/pin/{h(task_id)}?back={_back_param(back_url)}">
                     <button class="btn {pin_class}" type="submit">{pin_text}</button>
                 </form>
+            </div>
+            <div class="row-actions-danger">
+                <form class="inline-form" method="post" action="/stop/{h(task_id)}?back={_back_param(back_url)}">
+                    <button class="btn btn-orange" type="submit" onclick="return confirm('确定停止该任务吗？')">停止任务</button>
+                </form>
                 <form class="inline-form" method="post" action="/task/collection/clear/{h(task_id)}?back={_back_param(back_url)}">
-                    <button class="btn btn-gray" type="submit">取出</button>
+                    <button class="btn btn-gray" type="submit">移出合集</button>
                 </form>
             </div>
         </div>
     </div>
-</div>
+</article>
 """
 
 
@@ -190,18 +193,23 @@ def _collection_task_bulk_toolbar(collection_id, has_tasks):
                 type="checkbox"
                 data-collection-id="{cid}"
                 onchange="flsCollectionToggleAll(this)"
+                aria-label="全选本合集任务"
             >
             全选本合集
         </label>
         <span class="collection-selected-count">已选择 0 个</span>
     </div>
     <div class="collection-bulk-actions">
-        <button class="btn btn-primary collection-bulk-btn" type="button" data-collection-id="{cid}" onclick="flsCollectionTaskBulkAction(this.dataset.collectionId, 'enable')" disabled>启用</button>
-        <button class="btn btn-gray collection-bulk-btn" type="button" data-collection-id="{cid}" onclick="flsCollectionTaskBulkAction(this.dataset.collectionId, 'disable')" disabled>禁用</button>
-        <button class="btn btn-blue collection-bulk-btn" type="button" data-collection-id="{cid}" onclick="flsCollectionTaskBulkAction(this.dataset.collectionId, 'run')" disabled>运行</button>
-        <button class="btn btn-red collection-bulk-btn" type="button" data-collection-id="{cid}" onclick="flsCollectionTaskBulkAction(this.dataset.collectionId, 'stop')" disabled>停止</button>
-        <button class="btn btn-gray collection-bulk-btn" type="button" data-collection-id="{cid}" onclick="flsCollectionTaskBulkAction(this.dataset.collectionId, 'clear_collection')" disabled>取出</button>
-        <button class="btn btn-gray collection-bulk-btn" type="button" data-collection-id="{cid}" onclick="flsCollectionTaskBulkAction(this.dataset.collectionId, 'delete')" disabled>删除</button>
+        <div class="row-actions-primary">
+            <button class="btn btn-primary collection-bulk-btn" type="button" data-collection-id="{cid}" onclick="flsCollectionTaskBulkAction(this.dataset.collectionId, 'enable', this)" disabled>启用任务</button>
+            <button class="btn btn-gray collection-bulk-btn" type="button" data-collection-id="{cid}" onclick="flsCollectionTaskBulkAction(this.dataset.collectionId, 'disable', this)" disabled>停用任务</button>
+            <button class="btn btn-blue collection-bulk-btn" type="button" data-collection-id="{cid}" onclick="flsCollectionTaskBulkAction(this.dataset.collectionId, 'run', this)" disabled>立即运行任务</button>
+        </div>
+        <div class="row-actions-danger">
+            <button class="btn btn-red collection-bulk-btn" type="button" data-collection-id="{cid}" onclick="flsCollectionTaskBulkAction(this.dataset.collectionId, 'stop', this)" disabled>停止任务</button>
+            <button class="btn btn-gray collection-bulk-btn" type="button" data-collection-id="{cid}" onclick="flsCollectionTaskBulkAction(this.dataset.collectionId, 'clear_collection', this)" disabled>移出合集</button>
+            <button class="btn btn-gray collection-bulk-btn" type="button" data-collection-id="{cid}" onclick="flsCollectionTaskBulkAction(this.dataset.collectionId, 'delete', this)" disabled>删除任务</button>
+        </div>
     </div>
 </div>
 """
@@ -210,6 +218,24 @@ def _collection_task_bulk_toolbar(collection_id, has_tasks):
 def _collections_bulk_assets():
     return r"""
 <style>
+.collection-panel {
+    padding:0 0 24px;
+    margin-bottom:24px;
+    border-bottom:1px solid var(--border);
+}
+
+.collection-panel:last-child {
+    margin-bottom:0;
+    border-bottom:0;
+}
+
+.collection-panel-title {
+    margin:0 0 8px;
+    color:#111827;
+    font-size:20px;
+    line-height:1.3;
+}
+
 .collection-bulk-toolbar {
     display:flex;
     justify-content:space-between;
@@ -390,7 +416,7 @@ function flsCollectionSyncSelection(source){
     flsCollectionUpdateBulkState(source.dataset.collectionId || "");
 }
 
-async function flsCollectionTaskBulkAction(collectionId, action){
+async function flsCollectionTaskBulkAction(collectionId, action, source){
     var ids = flsCollectionSelectedIds(collectionId);
 
     if(!ids.length){
@@ -421,6 +447,8 @@ async function flsCollectionTaskBulkAction(collectionId, action){
         if(!confirm("确定从当前合集中取出选中的 " + ids.length + " 个任务吗？")) return;
     }
 
+    if(source && !flsMarkButtonBusy(source, "处理中...")) return;
+
     flsCollectionTaskCards(collectionId).forEach(function(card){
         if(ids.indexOf(card.dataset.taskId || "") >= 0){
             card.style.opacity = "0.55";
@@ -441,7 +469,8 @@ async function flsCollectionTaskBulkAction(collectionId, action){
         var json = await res.json();
 
         if(!json.ok){
-            alert(flsBulkActionMessage(json, json.msg || (label + "失败")));
+            alert(flsActionFailure(flsBulkActionMessage(json, json.msg || (label + "失败")), "确认选择后重新提交"));
+            flsRestoreButton(source);
             flsCollectionTaskCards(collectionId).forEach(function(card){
                 card.style.opacity = "1";
             });
@@ -460,7 +489,8 @@ async function flsCollectionTaskBulkAction(collectionId, action){
         await flsRefreshCollectionsBlockPartial();
 
     } catch(e) {
-        alert("请求失败：" + e);
+        alert(flsActionFailure("请求失败：" + e, "检查网络或登录状态后重试"));
+        flsRestoreButton(source);
         flsCollectionTaskCards(collectionId).forEach(function(card){
             card.style.opacity = "1";
         });
@@ -506,33 +536,36 @@ def _collection_form(item=None):
         "remark": "",
     }
 
-    title = "编辑合集" if item.get("id") else "新建合集"
+    title = "编辑任务合集" if item.get("id") else "新建任务合集"
+
+    header = page_header(
+        title,
+        help_html="合集只负责组织任务，不影响任务调度。",
+        actions_html='<a class="btn btn-gray" href="/collections">返回任务合集</a>',
+    )
 
     return f"""
+{header}
 <form method="post">
-<div class="card">
-    <div class="card-title">{h(title)}</div>
-    <div class="help">合集只负责组织任务，不影响任务调度。</div>
-</div>
-
-<div class="card">
+<section class="section fls-form-section">
+    <h2 class="section-title">合集信息</h2>
     <div class="form-item">
         <label>合集名称</label>
-        <input name="name" required value="{h(item.get('name', ''))}" placeholder="例如：每日签到">
+        <input name="name" required value="{h(item.get('name', ''))}" placeholder="例如：每日签到" aria-label="合集名称">
     </div>
 
     <br>
 
     <div class="form-item">
         <label>备注，可空</label>
-        <input name="remark" value="{h(item.get('remark', ''))}" placeholder="例如：主号 / 备用 / 测试">
+        <input name="remark" value="{h(item.get('remark', ''))}" placeholder="例如：主号 / 备用 / 测试" aria-label="合集备注">
     </div>
-</div>
+</section>
 
-<div class="card">
-    <button class="btn btn-primary" type="submit">保存</button>
+<section class="section fls-form-section fls-save-section">
+    <button class="btn btn-primary" type="submit">保存合集设置</button>
     <a class="btn btn-gray" href="/collections">返回</a>
-</div>
+</section>
 </form>
 """
 
@@ -667,15 +700,15 @@ def collections_page():
             for task in show_tasks:
                 task_items += _task_card(task, collection_back, collection_id=cid)
         else:
-            task_items = '<div class="help">该合集暂无任务。</div>'
+            task_items = empty_state("该合集暂无任务。")
 
         bulk_toolbar = _collection_task_bulk_toolbar(cid, bool(show_tasks))
 
         body_cols += f"""
-<div class="card" id="collection-{h(cid)}">
+<section class="collection-panel" id="collection-{h(cid)}">
     <div class="fls-card-head">
         <div class="fls-card-main">
-            <div class="card-title" style="margin-bottom:8px;">{h(cname)}</div>
+            <h3 class="collection-panel-title">{h(cname)}</h3>
             <div class="help">{h(cremark or "暂无备注")}</div>
         </div>
         <div class="fls-card-badges">
@@ -683,11 +716,15 @@ def collections_page():
         </div>
     </div>
 
-    <div class="action-row" style="margin-top:12px;">
-        <a class="btn btn-orange" href="/collection/edit/{h(cid)}">编辑合集</a>
-        <form class="inline-form" method="post" action="/collection/delete/{h(cid)}?back={_back_param(current_back)}">
-            <button class="btn btn-red" type="submit" onclick="return confirm('确定删除该合集吗？合集内任务会自动取出。')">删除合集</button>
-        </form>
+    <div class="row-actions" style="margin-top:12px;" aria-label="合集 {h(cname)} 行操作">
+        <div class="row-actions-secondary">
+            <a class="btn btn-orange" href="/collection/edit/{h(cid)}">编辑任务合集</a>
+        </div>
+        <div class="row-actions-danger">
+            <form class="inline-form" method="post" action="/collection/delete/{h(cid)}?back={_back_param(current_back)}">
+                <button class="btn btn-red" type="submit" onclick="return confirm('确定删除该合集吗？合集内任务会自动取出。')">删除任务合集</button>
+            </form>
+        </div>
     </div>
 
     <hr style="border:0;border-top:1px solid #eef2f7;margin:14px 0;">
@@ -695,7 +732,7 @@ def collections_page():
     <form method="post" action="/collection/add-task/{h(cid)}?back={_back_param(current_back + '#collection-' + cid)}">
         <div class="form-item">
             <label>搜索并加入任务</label>
-            <select name="task_ids" size="8" multiple>{task_options}</select>
+            <select name="task_ids" size="8" multiple aria-label="选择要加入合集的任务">{task_options}</select>
             <div class="help" style="margin-top:6px;">
                 这里会列出当前不在本合集中的任务。可用上方“搜索可加入任务”过滤任务。
             </div>
@@ -708,68 +745,68 @@ def collections_page():
 
     {bulk_toolbar}
 
-    <div class="fls-card-grid">
+    <div class="fls-card-grid mobile-list">
         {task_items}
     </div>
-</div>
-"""
+</section>
+        """
 
     if not body_cols:
-        body_cols = """
-<div class="card">
-    <div class="help">暂无匹配合集，请尝试调整搜索条件，或点击“新建合集”创建一个。</div>
-</div>
-"""
+        body_cols = empty_state(
+            "暂无匹配任务合集，请尝试调整搜索条件，或点击“新建任务合集”创建一个。",
+            '<a class="btn btn-primary" href="/collection/new">新建任务合集</a>',
+        )
 
     bulk_assets = _collections_bulk_assets()
 
+    header = page_header(
+        "任务合集",
+        help_html=f"管理任务合集并调整任务归属；当前匹配 <b>{total}</b> 个合集，每页 <b>{COLLECTIONS_PER_PAGE}</b> 个。",
+        actions_html='<a class="btn btn-primary" href="/collection/new">新建任务合集</a><a class="btn btn-gray" href="/tasks">返回任务</a>',
+    )
     body = f"""
-<div class="card">
-    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;">
-        <div>
-            <div class="card-title">合集管理</div>
-            <div class="help">
-                这里可以新建/编辑/删除合集，也可以把任务放入合集，或从合集里取出任务。<br>
-                当前匹配 <b>{total}</b> 个合集，每页 <b>{COLLECTIONS_PER_PAGE}</b> 个。
-            </div>
-        </div>
-        <div class="action-row">
-            <a class="btn btn-primary" href="/collection/new">新建合集</a>
-            <a class="btn btn-gray" href="/tasks">返回任务管理</a>
-        </div>
-    </div>
-</div>
-
+{header}
+<nav class="fls-section-nav" aria-label="任务合集区块导航">
+    <span class="fls-section-nav-label">任务合集</span>
+    <a href="#collection-filters">查询合集</a>
+    <a href="#collection-list">合集列表</a>
+</nav>
+<section class="section" id="collection-filters">
 <form method="get">
-<div class="card">
+<div class="data-toolbar" id="collection-filter-toolbar">
     <div class="form-grid">
         <div class="form-item">
             <label>搜索合集</label>
-            <input name="q" value="{h(q)}" placeholder="合集名 / 备注 / 合集内任务">
+            <input name="q" value="{h(q)}" placeholder="合集名 / 备注 / 合集内任务" aria-label="搜索合集">
         </div>
 
         <div class="form-item">
             <label>搜索可加入任务</label>
-            <input name="task_q" value="{h(task_q)}" placeholder="任务名 / 备注 / 命令 / Cron">
+            <input name="task_q" value="{h(task_q)}" placeholder="任务名 / 备注 / 命令 / Cron" aria-label="搜索可加入任务">
         </div>
     </div>
 
     <br>
 
-    <button class="btn btn-primary" type="submit">搜索</button>
-    <a class="btn btn-gray" href="/collections">重置</a>
+    <div class="action-row">
+        <button class="btn btn-primary" type="submit">查询任务合集</button>
+        <a class="btn btn-gray" href="/collections">重置筛选</a>
+    </div>
 </div>
 </form>
+</section>
 
+<section class="section" id="collection-list">
 <div id="collectionsPageBlock">
 {body_cols}
 
 {page_links_html}
 </div>
+</section>
 
 {bulk_assets}
 """
-    return layout("合集管理", "tasks", body)
+    return layout("任务合集", "collections", body)
 
 
 @bp.route("/collection/new", methods=["GET", "POST"])
@@ -793,7 +830,7 @@ def collection_new():
 
         return redirect(url_for("tasks.collections_page"))
 
-    return layout("新建合集", "tasks", _collection_form())
+    return layout("新建任务合集", "collections", _collection_form())
 
 
 @bp.route("/collection/edit/<collection_id>", methods=["GET", "POST"])
@@ -821,7 +858,7 @@ def collection_edit(collection_id):
 
         return redirect(url_for("tasks.collections_page"))
 
-    return layout("编辑合集", "tasks", _collection_form(item))
+    return layout("编辑任务合集", "collections", _collection_form(item))
 
 
 @bp.route("/collection/delete/<collection_id>", methods=["POST"])

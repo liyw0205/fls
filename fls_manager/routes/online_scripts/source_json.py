@@ -16,16 +16,16 @@ def online_scripts_source():
                 data = json.loads(text)
                 items = normalize_online_scripts(data)
                 save_online_script_cache(items)
-                msg = f"脚本源 JSON 保存成功，共 {len(items)} 条"
+                msg = f"在线脚本源数据保存成功，共 {len(items)} 条"
             except Exception as e:
-                err = f"脚本源 JSON 保存失败：{e}"
+                err = f"在线脚本源数据保存失败：{e}。下一步：检查 JSON 格式和文件权限后重试"
 
     cache_text = read_cache_text() or "[]"
 
     header = page_header_card(
-        "脚本源 JSON",
+        "在线脚本源数据",
         """
-        这里显示当前本地缓存的脚本源 JSON。<br>
+        这里显示当前本地缓存的在线脚本源数据。<br>
         如果服务器无法访问远程源，可以手动复制远程 index.json 内容，粘贴到这里保存。<br>
         保存后“在线脚本”列表会直接使用这份缓存。<br>
         支持字段：<code>doc_link</code>，可用于在线脚本页面查看文档。<br>
@@ -41,16 +41,16 @@ def online_scripts_source():
 {message_card(err, "error")}
 
 <form method="post">
-<div class="card">
-    <div class="card-title">查看 / 修改缓存 JSON</div>
-    <textarea name="json_text" style="min-height:520px;">{h(cache_text)}</textarea>
-</div>
+<section class="section fls-form-section">
+    <h2 class="section-title">查看 / 修改缓存 JSON</h2>
+    <textarea name="json_text" style="min-height:520px;" aria-label="在线脚本源 JSON 数据">{h(cache_text)}</textarea>
+</section>
 
-<div class="card">
-    <button class="btn btn-primary" type="submit">保存脚本源 JSON</button>
+<section class="section fls-form-section fls-save-section">
+    <button class="btn btn-primary" type="submit">保存在线脚本源数据</button>
     <a class="btn btn-gray" href="/online-scripts">返回</a>
-</div>
+</section>
 </form>
 """
 
-    return layout("脚本源 JSON", "online_scripts", body)
+    return layout("在线脚本源数据", "online_scripts", body)

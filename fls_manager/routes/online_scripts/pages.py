@@ -43,7 +43,7 @@ def online_scripts_page():
     install_total = sum(1 for x in filtered_items if script_has_install(x))
 
     refresh_status_text = (
-        "正在后台拉取中，请稍候..."
+        "正在后台同步在线脚本源，请稍候..."
         if refresh_running
         else h(refresh_message or refresh_error or "")
     )
@@ -51,19 +51,19 @@ def online_scripts_page():
         "在线脚本",
         help_html=f"""
 默认读取本地缓存，不会因为脚本源网络问题卡住。<br>
-点击“刷新远程脚本源”后会后台拉取，页面不会变白，也不影响其它操作。<br>
+点击“同步在线脚本源”后会后台更新缓存，页面不会变白，也不影响其它操作。<br>
 脚本源支持 <code>doc_link</code> 字段，可在面板内查看 Markdown 文档或网页文档。<br>
 <code>task_cron.var</code> 可预设任务变量，导入任务时会自动写入任务变量。
 <div class="fls-source-code">{h(source)}</div>
         """,
         actions_html=f"""
 <form method="post" action="/online-scripts/refresh" class="action-row">
-    <select name="proxy_id" style="width:auto;min-width:180px;">{proxy_options}</select>
-    <button class="btn btn-primary" type="submit" id="onlineRefreshBtn">刷新远程脚本源</button>
+    <select name="proxy_id" aria-label="刷新脚本源使用的代理" style="width:auto;min-width:180px;">{proxy_options}</select>
+    <button class="btn btn-primary" type="submit" id="onlineRefreshBtn">同步在线脚本源</button>
 </form>
 
 <a class="btn btn-blue" href="{h(source)}" target="_blank">打开源地址</a>
-<a class="btn btn-orange" href="/online-scripts/source">脚本源 JSON</a>
+<a class="btn btn-orange" href="/online-scripts/source">在线脚本源数据</a>
 <a class="btn btn-gray" href="/config">修改源地址</a>
         """,
         content_style="min-width:0;flex:1 1 360px;",
@@ -79,18 +79,18 @@ def online_scripts_page():
     <a href="#online-list">脚本列表</a>
 </nav>
 
-<section class="fls-section" id="online-search">
+<section class="section fls-section" id="online-search">
 <form method="get">
-<div class="card">
+<div class="data-toolbar" id="online-search-toolbar">
     <div class="form-grid">
         <div class="form-item">
             <label>搜索在线脚本</label>
-            <input name="q" value="{h(q)}" placeholder="脚本名 / ID / 保存名 / 链接 / 任务名 / 命令">
+            <input name="q" value="{h(q)}" placeholder="脚本名 / ID / 保存名 / 链接 / 任务名 / 命令" aria-label="搜索在线脚本">
         </div>
 
         <div class="form-item">
             <label>&nbsp;</label>
-            <button class="btn btn-primary" type="submit">搜索</button>
+            <button class="btn btn-primary" type="submit">查询在线脚本</button>
             <a class="btn btn-gray" href="/online-scripts">重置</a>
         </div>
     </div>
@@ -111,9 +111,9 @@ def online_scripts_page():
 {message_card(msg, "success", strong=True)}
 {message_card(err, "error", strong=True)}
 
-<section class="fls-section" id="online-status">
+<section class="section fls-section" id="online-status">
 <div class="card" id="onlineRefreshStatusCard" style="{refresh_display}">
-    <div class="card-title">脚本源刷新状态</div>
+    <h2 class="section-title">在线脚本源同步状态</h2>
     <div class="help" id="onlineRefreshStatusText">
         {refresh_status_text}<br>
         更新时间：{h(refresh_updated_at or "-")}<br>
@@ -122,18 +122,16 @@ def online_scripts_page():
 </div>
 </section>
 
-<section class="fls-section" id="online-list">
-<div class="card">
-    <div class="card-title">脚本列表，本地缓存</div>
+<section class="section fls-section" id="online-list">
+    <h2 class="section-title">脚本列表，本地缓存</h2>
     <div class="help">
         缓存文件：{h(ONLINE_SCRIPT_CACHE_FILE)}
     </div>
     <br>
 
-    <div class="fls-card-grid">
+    <div class="fls-card-grid mobile-list">
         {render_online_script_rows(items)}
     </div>
-</div>
 </section>
 {page_links_html}
 
@@ -166,7 +164,7 @@ async function updateOnlineRefreshStatus(){{
             card.style.display = "block";
 
             let color = json.error ? "#dc2626" : "#18a058";
-            let first = json.running ? "正在后台拉取中，请稍候..." : (json.message || json.error || "");
+            let first = json.running ? "正在后台同步在线脚本源，请稍候..." : (json.message || json.error || "");
 
             text.innerHTML =
                 "<span style='color:" + color + ";font-weight:900;'>" + escapeHtml(first) + "</span><br>" +
@@ -175,12 +173,12 @@ async function updateOnlineRefreshStatus(){{
 
             if(btn){{
                 btn.disabled = !!json.running;
-                btn.textContent = json.running ? "正在拉取中..." : "刷新远程脚本源";
+                btn.textContent = json.running ? "正在同步中..." : "同步在线脚本源";
             }}
         }}else{{
             if(btn){{
                 btn.disabled = false;
-                btn.textContent = "刷新远程脚本源";
+                btn.textContent = "同步在线脚本源";
             }}
         }}
 
@@ -194,7 +192,7 @@ async function updateOnlineRefreshStatus(){{
             window.__FLS_ONLINE_REFRESH_RELOADED__ = true;
 
             if(btn){{
-                btn.textContent = "刷新成功，正在更新列表...";
+                btn.textContent = "同步成功，正在更新列表...";
             }}
 
             setTimeout(function(){{

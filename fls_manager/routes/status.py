@@ -6,7 +6,7 @@ from pathlib import Path
 from flask import Blueprint
 
 from ..ui.layout import layout
-from ..ui.components import table_card
+from ..ui.components import table_card, page_header
 from ..utils import h
 
 bp = Blueprint("status", __name__)
@@ -119,11 +119,11 @@ def panel_status():
         version = item.get("version") or "未安装"
 
         if item.get("version"):
-            action = '<span class="badge green">已安装</span>'
+            action = '<span class="badge green status-badge status-success" role="status">已安装</span>'
         else:
             action = f'''
 <form class="inline-form" method="post" action="{h(item.get("install_url"))}">
-    <button class="btn btn-primary" type="submit">安装</button>
+    <button class="btn btn-primary" type="submit">安装{h(item.get("name"))}</button>
 </form>
 '''
 
@@ -137,8 +137,11 @@ def panel_status():
 </tr>
 """
 
-    body = table_card(
-        "运行环境",
+    body = page_header(
+        "面板状态",
+        help_html="查看 task 可用的脚本运行器状态；安装操作会提交到对应的安装接口。",
+    ) + table_card(
+        "运行器状态",
         ["环境", "脚本类型", "检测命令", "版本", "操作"],
         runtime_rows,
         help_html="""
@@ -149,4 +152,4 @@ def panel_status():
         table_id="runtimeTable",
     )
 
-    return layout("运行环境", "status", body)
+    return layout("面板状态", "status", body)

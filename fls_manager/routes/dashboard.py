@@ -12,7 +12,7 @@ from flask import Blueprint, jsonify, request
 from ..models import load_tasks, load_task_history
 from ..task_runner import is_running
 from ..ui.layout import layout
-from ..ui.components import table_card
+from ..ui.components import table_card, page_header, section, data_toolbar, empty_table_row, status_badge
 from ..utils import h
 from ..paths import BASE_DIR, DATA_DIR, LOG_DIR, SCRIPT_DIR
 from ..config import get_host, get_port, fls_get_admin_token, panel_now, get_panel_timezone_text
@@ -86,17 +86,17 @@ def fmt_duration(seconds):
 def dashboard_history_badge(status):
     status = str(status or "")
     mapping = {
-        "success": ("green", "成功"),
-        "failed": ("red", "失败"),
-        "timeout": ("red", "超时"),
-        "stopped": ("gray", "手动停止"),
-        "running": ("blue", "运行中"),
-        "starting": ("blue", "启动中"),
-        "delaying": ("orange", "延迟中"),
-        "start_failed": ("red", "启动失败"),
+        "success": ("success", "成功"),
+        "failed": ("error", "失败"),
+        "timeout": ("error", "超时"),
+        "stopped": ("stopped", "手动停止"),
+        "running": ("running", "运行中"),
+        "starting": ("starting", "启动中"),
+        "delaying": ("warning", "延迟中"),
+        "start_failed": ("error", "启动失败"),
     }
-    cls, text = mapping.get(status, ("gray", status or "-"))
-    return f'<span class="badge {cls}">{h(text)}</span>'
+    tone, text = mapping.get(status, ("neutral", status or "-"))
+    return status_badge(status, label=text, tone=tone)
 
 
 def dashboard_history_rows(items, empty_text):
@@ -122,7 +122,7 @@ def dashboard_history_rows(items, empty_text):
 """
 
     if not rows:
-        rows = f'<tr><td colspan="6">{h(empty_text)}</td></tr>'
+        rows = empty_table_row(6, empty_text)
 
     return rows
 
@@ -219,7 +219,7 @@ def history_table_rows(items):
 """
 
     if not rows:
-        rows = '<tr><td colspan="10">暂无匹配历史</td></tr>'
+        rows = empty_table_row(10, "暂无匹配历史", '<a class="btn btn-gray" href="/history">查看运行历史</a>')
 
     return rows
 
@@ -580,49 +580,44 @@ def history_page():
         selected = "selected" if value == status else ""
         status_options += f'<option value="{h(value)}" {selected}>{h(text)}</option>'
 
+    header = page_header(
+        "运行历史",
+        help_html=f"记录任务每次运行、重试、失败和耗时。当前匹配 <b>{total}</b> 条。",
+    )
+    history_filter = data_toolbar(
+        f"""
+        <h2 class="section-title">筛选运行历史</h2>
+        <div class="help">记录任务每次运行、重试、失败和耗时。当前匹配 <b>{total}</b> 条。</div>
+        <div class="form-item">
+            <label for="history-search">关键词</label>
+            <input id="history-search" name="q" value="{h(q)}" placeholder="任务名 / 命令 / 说明 / 来源" aria-label="搜索运行历史">
+        </div>
+        <div class="form-item">
+            <label for="history-status">状态</label>
+            <select id="history-status" name="status">{status_options}</select>
+        </div>
+        <div class="action-row">
+            <button class="btn btn-primary" type="submit">筛选运行历史</button>
+            <a class="btn btn-gray" href="/history">重置筛选</a>
+        </div>
+        """,
+        toolbar_id="history-filter-toolbar",
+    )
+    history_table = table_card(
+        "运行历史",
+        ["任务", "状态", "开始时间", "结束时间", "耗时", "退出码", "来源", "重试", "说明", "日志"],
+        history_table_rows(show),
+        section_id="history-results",
+    )
     body = f"""
+{header}
+<section class="section" id="history-filters">
 <form method="get">
-<div class="card">
-    <div class="card-title">运行历史</div>
-    <div class="help">记录任务每次运行、重试、失败和耗时。当前匹配 <b>{total}</b> 条。</div>
-    <br>
-    <div class="form-grid">
-        <div class="form-item">
-            <label>关键词</label>
-            <input name="q" value="{h(q)}" placeholder="任务名 / 命令 / 说明 / 来源">
-        </div>
-        <div class="form-item">
-            <label>状态</label>
-            <select name="status">{status_options}</select>
-        </div>
-    </div>
-    <br>
-    <button class="btn btn-primary" type="submit">筛选</button>
-    <a class="btn btn-gray" href="/history">重置</a>
-</div>
+{history_filter}
 </form>
+</section>
 
-<div class="card">
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>任务</th>
-                    <th>状态</th>
-                    <th>开始时间</th>
-                    <th>结束时间</th>
-                    <th>耗时</th>
-                    <th>退出码</th>
-                    <th>来源</th>
-                    <th>重试</th>
-                    <th>说明</th>
-                    <th>日志</th>
-                </tr>
-            </thead>
-            <tbody>{history_table_rows(show)}</tbody>
-        </table>
-    </div>
-</div>
+{history_table}
 
 {history_page_links(q, status, page, pages)}
 """
@@ -707,7 +702,20 @@ def dashboard():
 </tr>
 """
 
-    env_table = table_card(
+    history_headers = ["任务", "状态", "开始时间", "耗时", "说明", "日志"]
+    recent_table = table_card(
+        "最近运行",
+        history_headers,
+        dashboard_history_rows(recent_history, "暂无运行历史"),
+        section_id="dashboard-recent",
+    )
+    abnormal_table = table_card(
+        "最近异常",
+        history_headers,
+        dashboard_history_rows(abnormal_history, "暂无异常记录"),
+        section_id="dashboard-errors",
+    )
+    environment_table = table_card(
         "环境状态",
         ["项目", "值"],
         env_rows,
@@ -715,9 +723,33 @@ def dashboard():
         面板峰值 CPU 每天 00:00 和 12:00 自动重置。<br>
         当前峰值统计周期：{h(panel_cpu_peak_period)}
         """,
+        section_id="dashboard-environment",
+    )
+    shortcut_section = section(
+        "常用入口",
+        """
+<div class="action-row">
+    <a class="btn btn-primary" href="/tasks">任务</a>
+    <a class="btn btn-blue" href="/pull">脚本</a>
+    <a class="btn btn-orange" href="/logs">日志</a>
+    <a class="btn btn-primary" href="/online-scripts">在线脚本</a>
+    <a class="btn btn-primary" href="/notify">通知</a>
+    <a class="btn btn-gray" href="/panel/status">面板状态</a>
+    <a class="btn btn-gray" href="/config">面板配置</a>
+    <a class="btn btn-gray" href="/about">关于</a>
+</div>
+""",
+        section_id="dashboard-shortcuts",
     )
 
+    header = page_header(
+        "仪表盘",
+        help_html="查看任务摘要、最近活动和面板运行状态。",
+        actions_html='<a class="btn btn-primary" href="/task/new">新建任务</a><a class="btn btn-gray" href="/panel/status">查看面板状态</a>',
+    )
     body = f"""
+{header}
+<section class="section" id="dashboard-summary">
 <div class="grid">
     <div class="stat">
         <div class="label">当前时间</div>
@@ -789,72 +821,12 @@ def dashboard():
         <div class="num" id="flsDashboardPanelCpuPeak" style="color:#dc2626;font-size:22px;">{h(panel_cpu_peak)}</div>
     </div>
 </div>
+</section>
 
-<div class="card">
-    <div class="card-title">常用入口</div>
-    <div class="action-row">
-        <a class="btn btn-primary" href="/tasks">任务管理</a>
-        <a class="btn btn-blue" href="/pull">脚本管理</a>
-        <a class="btn btn-orange" href="/logs">日志管理</a>
-        <a class="btn btn-primary" href="/online-scripts">在线脚本</a>
-        <a class="btn btn-primary" href="/notify">通知管理</a>
-        <a class="btn btn-gray" href="/panel/status">环境状态</a>
-        <a class="btn btn-gray" href="/config">配置</a>
-        <a class="btn btn-gray" href="/about">关于</a>
-    </div>
-</div>
-
-<div class="card">
-    <div class="card-title">最近运行</div>
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>任务</th>
-                    <th>状态</th>
-                    <th>开始时间</th>
-                    <th>耗时</th>
-                    <th>说明</th>
-                    <th>日志</th>
-                </tr>
-            </thead>
-            <tbody>{dashboard_history_rows(recent_history, "暂无运行历史")}</tbody>
-        </table>
-    </div>
-</div>
-
-<div class="card">
-    <div class="card-title">最近异常</div>
-    <div class="table-wrap">
-        <table>
-            <thead>
-                <tr>
-                    <th>任务</th>
-                    <th>状态</th>
-                    <th>开始时间</th>
-                    <th>耗时</th>
-                    <th>说明</th>
-                    <th>日志</th>
-                </tr>
-            </thead>
-            <tbody>{dashboard_history_rows(abnormal_history, "暂无异常记录")}</tbody>
-        </table>
-    </div>
-</div>
-
-<div class="card">
-    <div class="card-title">环境状态</div>
-    <div class="help">
-        面板峰值 CPU 每天 00:00 和 12:00 自动重置。<br>
-        当前峰值统计周期：{h(panel_cpu_peak_period)}
-    </div>
-    <br>
-    <div class="table-wrap">
-        <table>
-            <tbody>{env_rows}</tbody>
-        </table>
-    </div>
-</div>
+{shortcut_section}
+{recent_table}
+{abnormal_table}
+{environment_table}
 
 <script>
 const FLS_DASHBOARD_RUNTIME_INTERVAL_MS = 3000;

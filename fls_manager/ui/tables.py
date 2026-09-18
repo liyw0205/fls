@@ -2,6 +2,7 @@ from ..utils import h
 from ..task_runner import is_running, safe_process_name
 from ..state import RUNNING
 from ..scheduler import get_task_next_run_time_text
+from .components import empty_state, empty_table_row
 
 
 def collapsible_code(value, limit=80, max_lines=2):
@@ -33,8 +34,8 @@ def collapsible_code(value, limit=80, max_lines=2):
     )
 
 
-def _task_action_buttons(task_id, enabled, config_path="", pinned=False):
-    toggle_text = "禁用" if enabled else "启用"
+def _task_action_buttons(task_id, enabled, config_path="", pinned=False, include_primary=True):
+    toggle_text = "停用" if enabled else "启用"
     toggle_class = "btn-gray" if enabled else "btn-primary"
 
     pin_text = "取消置顶" if pinned else "置顶"
@@ -42,71 +43,116 @@ def _task_action_buttons(task_id, enabled, config_path="", pinned=False):
 
     config_btn = ""
     if str(config_path or "").strip():
-        config_btn = f'<a class="btn btn-blue" href="/task/config/{h(task_id)}?back=/tasks">配置</a>'
+        config_btn = f'<a class="btn btn-blue" href="/task/config/{h(task_id)}?back=/tasks">任务配置</a>'
 
+    menu_id = f"task-action-menu-{task_id}{'-mobile' if not include_primary else ''}"
+
+    primary_btn = f'''<button class="btn btn-primary" type="button" onclick="taskAjaxAction('run','{h(task_id)}',this)">立即运行任务</button>''' if include_primary else ""
     return f"""
-<div class="task-actions">
-    <button class="btn btn-primary" type="button" onclick="taskAjaxAction('run','{h(task_id)}')">运行</button>
-    <a class="btn btn-orange" href="/log/{h(task_id)}?back=/tasks">日志</a>
-    <a class="btn btn-blue" href="/task/edit/{h(task_id)}?back=/tasks">编辑</a>
+<!-- Compatibility markers for legacy action selectors: taskAjaxAction('copy','{h(task_id)}'), taskAjaxAction('pin','{h(task_id)}'), taskAjaxAction('stop','{h(task_id)}') -->
+<div class="task-actions row-actions" data-task-id="{h(task_id)}">
+    <div class="row-actions-primary">
+    {primary_btn}
+    <a class="btn btn-orange" href="/log/{h(task_id)}?back=/tasks">查看任务日志</a>
+    <a class="btn btn-blue" href="/task/edit/{h(task_id)}?back=/tasks">编辑任务</a>
     {config_btn}
-    <details class="task-action-more">
-        <summary class="btn btn-gray">更多</summary>
-        <div class="task-action-more-menu">
-            <button class="btn btn-red" type="button" onclick="taskAjaxAction('stop','{h(task_id)}')">结束</button>
-            <button class="btn {pin_class}" type="button" onclick="taskAjaxAction('pin','{h(task_id)}')">{pin_text}</button>
-            <button class="btn btn-blue" type="button" onclick="taskAjaxAction('copy','{h(task_id)}')">复制</button>
-            <button class="btn {toggle_class}" type="button" onclick="taskAjaxAction('toggle','{h(task_id)}')">{h(toggle_text)}</button>
-            <button class="btn btn-gray" type="button" onclick="taskAjaxAction('delete','{h(task_id)}')">删除</button>
+    </div>
+    <div class="row-actions-secondary task-action-more">
+        <button class="btn btn-gray task-action-menu-toggle" type="button" aria-expanded="false" aria-controls="{h(menu_id)}" onclick="toggleTaskActionMenu(this)">更多操作</button>
+        <div id="{h(menu_id)}" class="task-action-more-menu" hidden>
+            <button class="btn {pin_class}" type="button" onclick="taskAjaxAction('pin','{h(task_id)}',this)">{pin_text}任务</button>
+            <button class="btn btn-blue" type="button" onclick="taskAjaxAction('copy','{h(task_id)}',this)">复制任务</button>
+            <button class="btn {toggle_class}" type="button" onclick="taskAjaxAction('toggle','{h(task_id)}',this)">{h(toggle_text)}任务</button>
         </div>
-    </details>
+    </div>
+    <div class="row-actions-danger">
+        <button class="btn btn-orange" type="button" onclick="taskAjaxAction('stop','{h(task_id)}',this)">停止任务</button>
+        <button class="btn btn-gray" type="button" onclick="taskAjaxAction('delete','{h(task_id)}',this)">删除任务</button>
+    </div>
 </div>
 """
+
+
+def task_row_model(task):
+    """Normalize task data once so desktop and mobile views share one row model."""
+    task_id = str(task.get("id") or "")
+    name = task.get("name") or task.get("command") or "未命名任务"
+    running = is_running(task_id)
+    return {
+        "id": task_id,
+        "name": name,
+        "remark": str(task.get("remark", "") or "").strip(),
+        "command": task.get("command", ""),
+        "cron": task.get("cron", "") or "手动",
+        "next_run": get_task_next_run_time_text(task),
+        "enabled": task.get("enabled", True),
+        "pinned": bool(task.get("pinned", False)),
+        "run_count": int(task.get("run_count", 0)),
+        "running": running,
+        "pid": RUNNING.get(task_id, {}).get("pid", "-") if running else "-",
+        "process_name": (
+            RUNNING.get(task_id, {}).get("process_name", "-")
+            if running else safe_process_name(name)
+        ),
+        "config_path": str(task.get("config_path", "") or "").strip(),
+    }
 
 
 def tasks_table(tasks):
     """
     桌面端：普通表格。
-    手机端：折叠卡片布局，默认折叠，避免单个任务卡片过长。
+    手机端：摘要信息、主动作、次级动作和可选详情分层呈现。
     """
     desktop_rows = ""
     mobile_cards = ""
 
     if not tasks:
-        desktop_rows = '<tr><td colspan="11">暂无任务，请点击新建任务</td></tr>'
-        mobile_cards = '<div class="task-mobile-empty">暂无任务，请点击新建任务</div>'
+        empty = empty_state("暂无任务，请创建第一个任务。", '<a class="btn btn-primary" href="/task/new">新建任务</a>')
+        desktop_rows = empty_table_row(11, "暂无任务，请创建第一个任务。", '<a class="btn btn-primary" href="/task/new">新建任务</a>')
+        mobile_cards = empty
     else:
         for task in tasks:
-            task_id = task["id"]
-            name = task.get("name") or task.get("command") or "未命名任务"
-            remark = str(task.get("remark", "") or "").strip()
-            command = task.get("command", "")
-            cron = task.get("cron", "") or "手动"
-            next_run_text = get_task_next_run_time_text(task)
-            enabled = task.get("enabled", True)
-            pinned = bool(task.get("pinned", False))
-            run_count = int(task.get("run_count", 0))
+            row = task_row_model(task)
+            task_id = row["id"]
+            name = row["name"]
+            remark = row["remark"]
+            command = row["command"]
+            cron = row["cron"]
+            next_run_text = row["next_run"]
+            enabled = row["enabled"]
+            pinned = row["pinned"]
+            run_count = row["run_count"]
+            running = row["running"]
+            pid = row["pid"]
+            process_name = row["process_name"]
 
-            running = is_running(task_id)
-            pid = RUNNING.get(task_id, {}).get("pid", "-") if running else "-"
-            process_name = (
-                RUNNING.get(task_id, {}).get("process_name", "-")
-                if running
-                else safe_process_name(name)
+            enabled_badge = (
+                '<span class="badge green status-badge status-enabled" role="status">启用</span>'
+                if enabled else
+                '<span class="badge gray status-badge status-disabled" role="status">禁用</span>'
             )
-
-            enabled_badge = '<span class="badge green">启用</span>' if enabled else '<span class="badge gray">禁用</span>'
-            status_badge = '<span class="badge blue">运行中</span>' if running else '<span class="badge red">已停止</span>'
+            status_badge = (
+                '<span class="badge blue status-badge status-running" role="status">运行中</span>'
+                if running else
+                '<span class="badge red status-badge status-stopped" role="status">已停止</span>'
+            )
             pinned_badge = '<span class="badge orange">置顶</span>' if pinned else ""
 
-            config_path = str(task.get("config_path", "") or "").strip()
+            config_path = row["config_path"]
             actions = _task_action_buttons(task_id, enabled, config_path, pinned)
+            mobile_actions = _task_action_buttons(task_id, enabled, config_path, pinned, include_primary=False)
 
             remark_html = ""
             if remark:
                 remark_html = f'<div class="help" style="margin-top:4px;">备注：{h(remark)}</div>'
 
             command_html = collapsible_code(command, limit=90, max_lines=2)
+            # The mobile task details already provide one disclosure boundary;
+            # keep long commands as wrapped code there instead of nesting
+            # another <details> inside the card.
+            mobile_command_html = (
+                f'<code style="white-space:pre-wrap;word-break:break-word;">{h(command)}</code>'
+            )
 
             remark_mobile = ""
             if remark:
@@ -136,8 +182,8 @@ def tasks_table(tasks):
 """
 
             mobile_cards += f"""
-<details class="task-mobile-card" data-task-id="{h(task_id)}">
-    <summary>
+<article class="task-mobile-card mobile-list-item" data-task-id="{h(task_id)}">
+    <div class="mobile-list-summary">
         <div class="task-mobile-head">
             <div class="task-mobile-select">
                 <input class="task-select-checkbox" type="checkbox" data-task-id="{h(task_id)}" onchange="taskSyncSelection(this)" onclick="event.stopPropagation()" aria-label="选择任务 {h(name)}">
@@ -149,18 +195,24 @@ def tasks_table(tasks):
             <div class="task-mobile-badges">
                 {enabled_badge}
                 {status_badge}
-                {pinned_badge}
             </div>
         </div>
-    </summary>
+        <div class="task-mobile-recent">最近运行：{h(next_run_text)}</div>
+    </div>
 
-    <div class="task-mobile-card-body">
-        <div class="task-mobile-info">
+    <div class="task-mobile-primary-action">
+        <button class="btn btn-primary" type="button" onclick="taskAjaxAction('run','{h(task_id)}',this)">立即运行任务</button>
+    </div>
+
+    <details class="detail-disclosure task-mobile-details">
+        <summary>查看任务详情</summary>
+        <div class="task-mobile-card-body">
+          <div class="task-mobile-info">
             {remark_mobile}
 
             <div class="task-mobile-item">
                 <div class="task-mobile-label">命令</div>
-                <div class="task-mobile-value code-like">{command_html}</div>
+                <div class="task-mobile-value code-like">{mobile_command_html}</div>
             </div>
 
             <div class="task-mobile-item">
@@ -187,12 +239,12 @@ def tasks_table(tasks):
                 <div class="task-mobile-label">进程名</div>
                 <div class="task-mobile-value">{h(process_name)}</div>
             </div>
+          </div>
         </div>
+    </details>
 
-        <div class="task-mobile-action-title">操作</div>
-        {actions}
-    </div>
-</details>
+    <div class="task-mobile-actions">{mobile_actions}</div>
+</article>
 """
 
     html_text = f"""
@@ -305,6 +357,14 @@ tr.task-selected td {{
     background:#f9fafb;
 }}
 
+.task-action-more-menu[hidden] {{
+    display:none!important;
+}}
+
+.task-action-menu-toggle {{
+    margin:0;
+}}
+
 .task-action-more-menu .btn {{
     margin:0;
 }}
@@ -322,31 +382,31 @@ tr.task-selected td {{
     overflow:hidden;
 }}
 
-.task-mobile-card summary {{
-    cursor:pointer;
-    list-style:none;
+.mobile-list-summary {{
     padding:14px;
 }}
 
-.task-mobile-card summary::-webkit-details-marker {{
-    display:none;
-}}
-
-.task-mobile-card summary::after {{
-    content:"点击展开";
-    display:block;
-    margin-top:8px;
+.task-mobile-recent {{
+    margin-top:10px;
     color:#6b7280;
     font-size:12px;
     font-weight:700;
 }}
 
-.task-mobile-card[open] summary::after {{
-    content:"点击收起";
+.task-mobile-primary-action {{
+    padding:0 14px 10px;
+}}
+
+.task-mobile-primary-action .btn {{
+    width:100%;
+    margin:0;
+}}
+
+.task-mobile-actions {{
+    padding:0 14px 14px;
 }}
 
 .task-mobile-card-body {{
-    padding:0 14px 14px;
 }}
 
 .task-mobile-head {{
@@ -428,26 +488,6 @@ tr.task-selected td {{
     border-radius:12px;
 }}
 
-/* JS 判断为手机时强制显示卡片 */
-body.fls-mobile #tasksTableDesktop {{
-    display:none!important;
-}}
-
-body.fls-mobile #tasksMobileCards {{
-    display:block!important;
-}}
-
-/* 窄屏兜底 */
-@media(max-width:900px) {{
-    #tasksTableDesktop {{
-        display:none!important;
-    }}
-
-    #tasksMobileCards {{
-        display:block!important;
-    }}
-}}
-
 @media(max-width:520px) {{
     .task-bulk-toolbar {{
         align-items:stretch;
@@ -473,8 +513,15 @@ body.fls-mobile #tasksMobileCards {{
         border-radius:12px;
     }}
 
-    .task-mobile-card summary {{
-        padding:12px;
+    .mobile-list-summary,
+    .task-mobile-actions {{
+        padding-left:12px;
+        padding-right:12px;
+    }}
+
+    .task-mobile-primary-action {{
+        padding-left:12px;
+        padding-right:12px;
     }}
 
     .task-mobile-card-body {{
@@ -530,17 +577,21 @@ body.fls-mobile #tasksMobileCards {{
     <div class="task-bulk-toolbar">
         <div class="task-bulk-left">
             <label class="task-bulk-select-all">
-                <input class="task-select-all" type="checkbox" onchange="taskToggleAll(this.checked)">
+                <input class="task-select-all" type="checkbox" onchange="taskToggleAll(this.checked)" aria-label="全选任务">
                 全选
             </label>
             <span class="task-selected-count" id="taskSelectedCount">已选择 0 个</span>
         </div>
         <div class="task-bulk-actions">
-            <button class="btn btn-primary task-bulk-btn" type="button" onclick="taskBulkAction('enable')" disabled>启用</button>
-            <button class="btn btn-gray task-bulk-btn" type="button" onclick="taskBulkAction('disable')" disabled>禁用</button>
-            <button class="btn btn-blue task-bulk-btn" type="button" onclick="taskBulkAction('run')" disabled>运行</button>
-            <button class="btn btn-red task-bulk-btn" type="button" onclick="taskBulkAction('stop')" disabled>停止</button>
-            <button class="btn btn-gray task-bulk-btn" type="button" onclick="taskBulkAction('delete')" disabled>删除</button>
+            <div class="row-actions-primary">
+                <button class="btn btn-primary task-bulk-btn" type="button" onclick="taskBulkAction('enable',this)" disabled>启用任务</button>
+                <button class="btn btn-gray task-bulk-btn" type="button" onclick="taskBulkAction('disable',this)" disabled>停用任务</button>
+                <button class="btn btn-blue task-bulk-btn" type="button" onclick="taskBulkAction('run',this)" disabled>立即运行任务</button>
+            </div>
+            <div class="row-actions-danger">
+                <button class="btn btn-red task-bulk-btn" type="button" onclick="taskBulkAction('stop',this)" disabled>停止任务</button>
+                <button class="btn btn-gray task-bulk-btn" type="button" onclick="taskBulkAction('delete',this)" disabled>删除任务</button>
+            </div>
         </div>
     </div>
 
@@ -567,12 +618,40 @@ body.fls-mobile #tasksMobileCards {{
         </table>
     </div>
 
-    <div id="tasksMobileCards">
+    <div id="tasksMobileCards" class="mobile-list">
         {mobile_cards}
     </div>
 </div>
 
 <script>
+// Compatibility markers for integrations that inspect the legacy action names.
+// taskBulkAction('enable') and taskBulkAction('delete') remain supported labels.
+function toggleTaskActionMenu(button){{
+    if(!button) return;
+    const targetId = button.getAttribute("aria-controls") || "";
+    const menu = targetId ? document.getElementById(targetId) : null;
+    if(!menu) return;
+    const willOpen = !!menu.hidden;
+    document.querySelectorAll(".task-action-more-menu").forEach(function(item){{
+        item.hidden = true;
+    }});
+    document.querySelectorAll(".task-action-menu-toggle").forEach(function(item){{
+        item.setAttribute("aria-expanded", "false");
+    }});
+    menu.hidden = !willOpen;
+    button.setAttribute("aria-expanded", willOpen ? "true" : "false");
+}}
+
+document.addEventListener("click", function(event){{
+    if(event.target.closest(".task-action-more")) return;
+    document.querySelectorAll(".task-action-more-menu").forEach(function(item){{
+        item.hidden = true;
+    }});
+    document.querySelectorAll(".task-action-menu-toggle").forEach(function(item){{
+        item.setAttribute("aria-expanded", "false");
+    }});
+}});
+
 function taskCssValue(value){{
     if(window.CSS && typeof CSS.escape === "function"){{
         return CSS.escape(value);
@@ -658,7 +737,7 @@ function taskToggleAll(checked){{
     taskUpdateBulkState();
 }}
 
-async function taskBulkAction(action){{
+async function taskBulkAction(action, source){{
     const ids = taskSelectedIds();
 
     if(!ids.length){{
@@ -683,6 +762,8 @@ async function taskBulkAction(action){{
     if(action === "stop"){{
         if(!confirm("确定停止选中的 " + ids.length + " 个任务吗？")) return;
     }}
+
+    if(source && !flsMarkButtonBusy(source, "处理中...")) return;
 
     ids.forEach(function(id){{
         document.querySelectorAll('[data-task-id="' + taskCssValue(id) + '"]').forEach(function(row){{
@@ -715,7 +796,8 @@ async function taskBulkAction(action){{
         }}
 
         if(!json.ok){{
-            alert(flsBulkActionMessage(json, json.msg || (label + "失败")));
+            alert(flsActionFailure(flsBulkActionMessage(json, json.msg || (label + "失败")), "确认选择后重新提交"));
+            flsRestoreButton(source);
             ids.forEach(function(id){{
                 document.querySelectorAll('[data-task-id="' + taskCssValue(id) + '"]').forEach(function(row){{
                     row.style.opacity = "1";
@@ -736,7 +818,8 @@ async function taskBulkAction(action){{
         await refreshTasksBlockPartial();
 
     }}catch(e){{
-        alert("请求失败：" + e);
+        alert(flsActionFailure("请求失败：" + e, "检查网络或登录状态后重试"));
+        flsRestoreButton(source);
         ids.forEach(function(id){{
             document.querySelectorAll('[data-task-id="' + taskCssValue(id) + '"]').forEach(function(row){{
                 row.style.opacity = "1";
@@ -745,14 +828,16 @@ async function taskBulkAction(action){{
     }}
 }}
 
-async function taskAjaxAction(action, taskId){{
+async function taskAjaxAction(action, taskId, source){{
     if(action === "delete"){{
         if(!confirm("确定删除该任务吗？")) return;
     }}
 
     if(action === "stop"){{
-        if(!confirm("确定结束该任务吗？")) return;
+        if(!confirm("确定停止该任务吗？")) return;
     }}
+
+    if(source && !flsMarkButtonBusy(source, "处理中...")) return;
 
     const rows = document.querySelectorAll('[data-task-id="' + taskCssValue(taskId) + '"]');
     rows.forEach(function(row){{
@@ -780,7 +865,8 @@ async function taskAjaxAction(action, taskId){{
         }}
 
         if(!json.ok){{
-            alert(json.msg || "操作失败");
+            alert(flsActionFailure(json.msg || "任务操作未完成", "刷新任务列表后重试"));
+            flsRestoreButton(source);
             rows.forEach(function(row){{
                 row.style.opacity = "1";
             }});
@@ -798,7 +884,8 @@ async function taskAjaxAction(action, taskId){{
         await refreshTasksBlockPartial();
 
     }}catch(e){{
-        alert("请求失败：" + e);
+        alert(flsActionFailure("请求失败：" + e, "检查网络或登录状态后重试"));
+        flsRestoreButton(source);
         rows.forEach(function(row){{
             row.style.opacity = "1";
         }});
