@@ -16,7 +16,20 @@ def api_online_install_log(install_id):
         })
 
     log_file = info.get("log_file", "")
-    lines = int(request.args.get("lines", "1200") or 1200)
+
+    try:
+        lines = int(request.args.get("lines", "1200") or 1200)
+    except (TypeError, ValueError):
+        return jsonify({
+            "ok": False,
+            "msg": "lines 必须为整数",
+            "running": False,
+            "status": "参数错误",
+            "returncode": None,
+            "error": "",
+            "log_file": "",
+            "log": "",
+        }), 400
 
     return jsonify({
         "running": bool(info.get("running")),

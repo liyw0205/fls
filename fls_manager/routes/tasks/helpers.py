@@ -6,6 +6,7 @@ from flask import request
 from ...paths import SCRIPT_DIR
 from ...utils import h
 from ...models import load_collections
+from ...ui.components import pagination_card
 
 
 def task_config_safe_path(rel_path):
@@ -174,9 +175,6 @@ def sort_tasks_for_display(tasks, sort="default"):
 
 
 def tasks_page_links(q, page, pages, sort="default"):
-    if pages <= 1:
-        return ""
-
     def build_url(p):
         url = f"/tasks?page={int(p)}"
 
@@ -188,62 +186,7 @@ def tasks_page_links(q, page, pages, sort="default"):
 
         return url
 
-    def page_btn(p, text=None, active=False, disabled=False):
-        text = text if text is not None else str(p)
-
-        if disabled:
-            return f'<span class="btn btn-gray" style="opacity:.45;cursor:not-allowed;">{h(text)}</span>'
-
-        cls = "btn-primary" if active else "btn-gray"
-
-        return f'<a class="btn {cls}" href="{h(build_url(p))}">{h(text)}</a>'
-
-    page = max(1, min(int(page), int(pages)))
-
-    items = []
-
-    items.append(
-        page_btn(page - 1, "上一页", disabled=(page <= 1))
-    )
-
-    show = {1, pages}
-
-    for p in range(page - 2, page + 3):
-        if 1 <= p <= pages:
-            show.add(p)
-
-    show = sorted(show)
-
-    last = 0
-
-    for p in show:
-        if last and p - last > 1:
-            items.append(
-                '<span class="btn btn-gray" style="opacity:.75;cursor:default;">...</span>'
-            )
-
-        items.append(
-            page_btn(p, active=(p == page))
-        )
-
-        last = p
-
-    items.append(
-        page_btn(page + 1, "下一页", disabled=(page >= pages))
-    )
-
-    return f"""
-<div class="card">
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
-        <div class="help">
-            第 <b>{page}</b> / <b>{pages}</b> 页
-        </div>
-        <div class="action-row">
-            {''.join(items)}
-        </div>
-    </div>
-</div>
-"""
+    return pagination_card(page, pages, href_for=build_url)
 
 
 def filter_tasks_for_page(tasks, q):

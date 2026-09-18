@@ -28,9 +28,13 @@ def notify_page():
     <td>{default_badge}</td>
     <td>{h(item.get("updated_at", "-"))}</td>
     <td>
-        <a class="btn btn-orange" href="/notify/test/{h(item_id)}">测试</a>
+        <form class="inline-form" method="post" action="/notify/test/{h(item_id)}">
+            <button class="btn btn-orange" type="submit">测试</button>
+        </form>
         <a class="btn btn-blue" href="/notify/edit/{h(item_id)}">编辑</a>
-        <a class="btn {toggle_class}" href="/notify/toggle/{h(item_id)}">{toggle_text}</a>
+        <form class="inline-form" method="post" action="/notify/toggle/{h(item_id)}">
+            <button class="btn {toggle_class}" type="submit">{toggle_text}</button>
+        </form>
         <form class="inline-form" method="post" action="/notify/delete/{h(item_id)}">
             <button class="btn btn-red" type="submit" onclick="return confirm('确定删除该通知吗？')">删除</button>
         </form>

@@ -211,6 +211,18 @@ def config_page():
 
     body = f"""
 <form method="post">
+<nav class="fls-section-nav" aria-label="配置区块导航">
+    <span class="fls-section-nav-label">配置区块</span>
+    <a href="#config-login">登录</a>
+    <a href="#config-security">安全验证</a>
+    <a href="#config-online">在线脚本</a>
+    <a href="#config-logs">日志清理</a>
+    <a href="#config-runtime">任务运行</a>
+    <a href="#config-types">脚本类型</a>
+    <a href="#config-save">保存</a>
+</nav>
+
+<section class="fls-section" id="config-login">
 <div class="card">
     <div class="card-title">登录配置</div>
     <div class="form-item">
@@ -229,7 +241,9 @@ def config_page():
         <div class="help">当前进程实际监听端口：{h(get_port())}</div>
     </div>
 </div>
+</section>
 
+<section class="fls-section" id="config-security">
 <div class="card">
     <div class="card-title">安全验证</div>
 
@@ -264,7 +278,7 @@ def config_page():
     </div>
 
     <div id="securityCodeBox" style="margin-top:14px;">
-        <div class="card" style="box-shadow:none;border:1px solid #e5e7eb;margin:0;">
+        <div class="fls-subsection">
             <div class="card-title">随机验证码</div>
             <div class="help">
                 Token 登录成功后，系统会生成 6 位随机验证码。<br>
@@ -280,7 +294,7 @@ def config_page():
     <div id="securityTotpBox" style="margin-top:14px;display:none;">
         <input type="hidden" name="totp_secret" value="{h(totp_secret)}">
 
-        <div class="card" style="box-shadow:none;border:1px solid #e5e7eb;margin:0;">
+        <div class="fls-subsection">
             <div class="card-title">2FA / TOTP 验证</div>
 
             <div class="help">
@@ -333,7 +347,9 @@ def config_page():
         </div>
     </div>
 </div>
+</section>
 
+<section class="fls-section" id="config-online">
 <div class="card">
     <div class="card-title">在线脚本源</div>
     <div class="form-item">
@@ -345,7 +361,9 @@ def config_page():
         </div>
     </div>
 </div>
+</section>
 
+<section class="fls-section" id="config-logs">
 <div class="card">
     <div class="card-title">日志清理</div>
     <div class="form-grid">
@@ -363,7 +381,9 @@ def config_page():
         </div>
     </div>
 </div>
+</section>
 
+<section class="fls-section" id="config-runtime">
 <div class="card">
     <div class="card-title">任务运行控制</div>
 
@@ -387,12 +407,17 @@ def config_page():
         </div>
     </div>
 </div>
+</section>
 
+<section class="fls-section" id="config-types">
 {task_type_table}
+</section>
 
-<div class="card">
+<section class="fls-section" id="config-save">
+<div class="card fls-save-section">
     <button class="btn btn-primary" type="submit">保存配置</button>
 </div>
+</section>
 </form>
 
 <script>

@@ -3265,6 +3265,239 @@
 
 ## 下一阶段候选
 
-- 在线脚本安装日志已有记录但 `lines` 非法时仍会返回 HTML 500，可作为阶段 90 候选。
+- 在线脚本安装日志已有记录但 `lines` 非法时仍会返回 HTML 500，可作为阶段 91 候选。
 - 有浏览器环境时补真实响应式截图验收，重点覆盖 `/tasks`、`/collections`、`/logs`、`/online-scripts` 和脚本拉取页面。
 - 等任务/日志相关工作区改动收束后，再把 `pagination_card()` 接入任务和日志分页。
+
+## 阶段 90：前端壳层、 中宽表格与长页验收
+
+状态：已完成
+
+目标：
+
+- 修复所有长页面的顶部栏吸附和移动菜单层级，避免固定控件遮挡正文或穿透遮罩。
+- 提升 901–1180px 中宽屏表格的关键字段和操作可达性，保持手机卡片与桌面表格行为不变。
+- 为配置、依赖、在线脚本和关于页增加可定位区块，降低手机长页滚动成本。
+- 补齐 favicon、静态资源版本和真实 Chromium 回归矩阵。
+
+已完成：
+
+- `fls.css` 根滚动使用 `overflow-x:clip`，`.topbar` 在手机、平板、中宽和桌面滚动时保持 viewport 顶部。
+- 菜单状态由 `fls-menu-open` 统一管理，遮罩打开时隐藏表单/日志浮动控件，支持 Escape 关闭；AJAX 页面替换和设备切换清理残留状态。
+- 中宽表格固定首列和末列操作列；任务表隐藏低优先级列，配置类型表取消不必要的最小宽度。
+- 配置、依赖、在线脚本、关于页接入区块导航和锚点，配置/关于说明子块改为 `fls-subsection`。
+- 新增 `fls_manager/static/favicon.svg`、版本化静态资源引用和 `tools/browser_regression.py`。
+- `tools/responsive_smoke.py` 覆盖正式 14 页面，并检查 favicon。
+
+验证记录：
+
+- `python -B tools/browser_regression.py --base-url http://127.0.0.1:5710 --token ui-audit-token`：84/84 组合通过（14 页面 × 6 视口），无页面类、文档溢出、顶栏、菜单遮罩、控制台或请求失败。
+- `python -B -m unittest discover -s tests`：通过，216 tests OK。
+- `python -B tools/responsive_smoke.py`、`node --check fls_manager/static/fls.js`：通过。
+
+受限验证：
+
+- 矩阵未触发真实依赖安装、在线脚本安装、通知发送、备份恢复和面板重启；这些副作用仍需专用夹具或 mock。
+
+## 阶段 91：在线安装日志参数 JSON 回归
+
+状态：已完成
+
+目标：
+
+- 固定在线脚本安装日志接口在已有安装记录时收到非法 `lines` 参数的稳定错误响应，避免轮询调用方收到 Flask HTML 500。
+
+已完成：
+
+- `/api/online-scripts/log/<install_id>` 在安装记录存在但 `lines` 非整数时返回 `400 application/json`。
+- 错误响应包含 `ok/msg/running/status/returncode/error/log_file/log`，与在线安装轮询字段保持稳定；不读取日志、不修改安装记录。
+- 新增 `tests.test_ui_route_components.UiRouteComponentTests.test_online_install_log_api_invalid_lines_returns_json_error` 和 `docs/goals/stage-091-online-install-log-lines-json.md`。
+
+验证记录：
+
+- 目标测试：通过，1 test OK。
+- `python -B -m unittest discover -s tests`：通过，217 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `node --check fls_manager/static/fls.js`、`python -B -m compileall -q fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+## 下一阶段候选
+
+- 将 `pagination_card()` 接入任务和日志分页，并补齐分页状态的页面与请求级回归。
+- 使用 mock/专用夹具验证在线脚本安装、依赖安装、通知发送、备份恢复和面板重启等高副作用流程。
+
+## 阶段 92：任务与日志分页组件收束
+
+状态：已完成
+
+目标：
+
+- 将任务和日志页面的重复分页 HTML 收束到 `pagination_card()`，保持既有查询参数和页面行为。
+- 让任务和日志页面收到非法页码时安全回到第 1 页，不返回 HTML 500。
+
+已完成：
+
+- `tasks_page_links()` 和日志 `page_links()` 统一调用 `fls_manager.ui.components.pagination_card()`。
+- 任务页分页继续保留 `q`、`sort`，日志页继续保留 `q`；页码超范围仍按原逻辑钳制。
+- `/tasks?page=invalid` 和 `/logs?page=invalid` 归一到第 1 页。
+- 新增共享分页生成器测试及两条真实路由分页回归。
+
+验证记录：
+
+- 目标测试：通过，4 tests OK。
+- `python -B -m unittest discover -s tests`：通过，221 tests OK。
+- `python -B tools/responsive_smoke.py`：通过。
+- `node --check fls_manager/static/fls.js`、`python -B -m compileall -q fls-manager.py fls_manager tests tools`：通过。
+- `git diff --check`：通过。
+
+## 下一阶段候选
+
+- 使用 mock/专用夹具验证在线脚本安装、依赖安装、通知发送、备份恢复和面板重启等高副作用流程。
+
+## 阶段 93：在线脚本安装生命周期隔离验证
+
+状态：已完成
+
+目标：
+
+- 为在线脚本安装的高副作用边界补充专用 mock 回归，固定请求登记、日志跳转以及后台 worker 的成功、失败和停止状态转移。
+
+已完成：
+
+- POST `/online-scripts/install/<script_id>` 在目标不存在时初始化 `ONLINE_INSTALL_RUNNING`，跳转到对应安装日志页，并通过 mock 确认不启动真实安装线程。
+- `install_worker()` 成功时返回 `已完成/0`，下载失败时返回 `失败/1`，已有停止请求时返回 `已停止/-1` 并清理 `ONLINE_INSTALL_STOPPING`。
+- 下载和安装命令均由 mock 替换，回归不访问网络、不执行真实脚本或安装命令。
+- 新增 `tests.test_ui_route_components.UiRouteComponentTests` 中的 4 条在线安装生命周期回归和 `docs/goals/stage-093-online-install-lifecycle-mock.md`。
+
+验证记录：
+
+- 目标测试：4 tests OK。
+- `python -B -m unittest discover -s tests`：通过。
+- `python -B tools/responsive_smoke.py`、`node --check fls_manager/static/fls.js`、`python -B -m compileall -q fls-manager.py fls_manager tests tools`、`git diff --check`：通过。
+
+## 下一阶段候选
+
+- 使用 mock/专用夹具验证依赖安装、通知发送、备份恢复和面板重启等高副作用流程。
+
+## 阶段 94：依赖与运行时安装隔离验证
+
+状态：已完成
+
+目标：
+
+- 为依赖安装和运行时安装入口补充请求级 mock 回归，固定安装记录、日志跳转和命令边界。
+
+已完成：
+
+- POST `/deps/install` 注册 `DEPS_RUNNING`、写入隔离日志并跳转安装日志页，真实 pip 进程由 mock 替换。
+- GET `/install/runtime/<runtime>` 注册运行时安装记录并跳转日志页，系统包管理器命令由 mock 替换。
+- 新增 `tests.test_high_side_effect_workflows.DependencyInstallIsolationTests` 的 2 条回归。
+
+验证记录：
+
+- 目标测试：2 tests OK。
+- 全量测试、响应式烟测、JS 语法、Python 编译和 `git diff --check` 均通过。
+
+## 阶段 95：通知发送隔离验证
+
+状态：已完成
+
+目标：
+
+- 为通知测试和“保存并测试”流程补充 mock sender 回归，验证页面结果和配置持久化而不访问外部服务。
+
+已完成：
+
+- GET `/notify/test/<item_id>` 的发送结果和页面展示由 mock sender 驱动，不发起外部请求。
+- POST `/notify/new` 的 `action=test` 持久化配置并调用 mock sender，发送参数保持稳定。
+- 新增 `tests.test_high_side_effect_workflows.NotificationIsolationTests` 的 2 条回归。
+
+验证记录：
+
+- 目标测试：2 tests OK。
+- 全量测试、响应式烟测、JS 语法、Python 编译和 `git diff --check` 均通过。
+
+## 阶段 96：备份创建与恢复隔离验证
+
+状态：已完成
+
+目标：
+
+- 为备份创建和导入恢复流程补充 mock/专用夹具回归，验证任务登记、目录恢复和调度器边界。
+
+已完成：
+
+- POST `/api/backup/create` 解析选择项并调用 mock worker，不启动真实归档线程。
+- POST `/backup/import` 在隔离 `FLS_BASE_DIR` 中处理内存 tar 归档，验证 `data`/`scripts` 覆盖和 `backups` 保留。
+- 依赖恢复和调度器重载由 mock 替换，不执行真实 pip 或重载当前调度器。
+- 新增 `tests.test_high_side_effect_workflows.BackupIsolationTests` 的 2 条回归。
+
+验证记录：
+
+- 目标测试：2 tests OK。
+- 全量测试、响应式烟测、JS 语法、Python 编译和 `git diff --check` 均通过。
+
+## 阶段 97：面板重启与停止隔离验证
+
+状态：已完成
+
+目标：
+
+- 为关于页的面板重启/停止 POST 增加 mock 控制线程回归，固定用户可见状态和进程边界。
+
+已完成：
+
+- POST `/about/restart-panel` 和 `/about/stop-panel` 均渲染对应状态并创建 mock 线程。
+- 两条路径均不执行控制脚本、不终止当前进程或启动新进程。
+- 新增 `tests.test_high_side_effect_workflows.PanelControlIsolationTests` 的 2 条回归。
+
+验证记录：
+
+- 目标测试：2 tests OK。
+- 全量测试、响应式烟测、JS 语法、Python 编译和 `git diff --check` 均通过。
+
+## 下一阶段候选
+
+- 对照 `docs/local/README.md` 和 `FRONTEND_OPTIMIZATION_PLAN.md` 做最终完成度审计；不再触发真实高副作用操作。
+
+## 阶段 98：代理质量检测隔离验证
+
+状态：已完成
+
+目标：
+
+- 为代理质量检测的已保存代理和表单入口补充请求级 mock 回归，固定 URL 解析、响应字段和代理参数边界。
+
+已完成：
+
+- GET `/api/proxy/quality/<proxy_id>` 有效代理路径由 mock detector 驱动，返回稳定结果且不访问外部地址。
+- POST `/api/proxy/quality-form` 解析检测地址后调用 mock detector，保留代理连接参数和结果字段。
+- 新增 `tests.test_high_side_effect_workflows.ProxyQualityIsolationTests` 的 2 条回归。
+
+验证记录：
+
+- 目标测试：2 tests OK。
+- 全量测试、响应式烟测、JS 语法、Python 编译和 `git diff --check` 均通过。
+
+## 阶段 99：关于页辅助高副作用流程隔离验证
+
+状态：已完成
+
+目标：
+
+- 为时间同步、更新日志刷新和版本更新入口补充隔离 mock 回归，固定页面结果、后台任务登记和外部边界。
+
+已完成：
+
+- POST `/about/time-sync` 网络校准路径使用 mock 时间源，验证校准参数和调度器重载，不访问外部时间服务。
+- POST `/about/refresh-log` 与 `/about/update-version` 使用 mock Git 状态和后台任务登记，不执行 Git 网络操作或修改当前仓库。
+- 新增 `tests.test_high_side_effect_workflows.AboutAuxiliaryIsolationTests` 的 3 条回归。
+
+验证记录：
+
+- 目标测试：3 tests OK。
+- 全量测试、响应式烟测、JS 语法、Python 编译和 `git diff --check` 均通过。
+
+## 下一阶段候选
+
+- 对照 `docs/local/README.md` 和 `FRONTEND_OPTIMIZATION_PLAN.md` 做最终完成度审计；不再触发真实高副作用操作。

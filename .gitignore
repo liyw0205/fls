@@ -14,6 +14,12 @@ venv/
 /log/
 /logs/
 /scripts/
+# Keep the built-in check-in scripts versioned; other user/runtime scripts stay ignored.
+!/scripts/
+scripts/*
+!/scripts/README.md
+!/scripts/wisart_checkin.py
+!/scripts/lupi_checkin.py
 data/
 log/
 

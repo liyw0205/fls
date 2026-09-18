@@ -1,4 +1,5 @@
 :root {
+    --topbar-height:64px;
     --bg:#f4f6fb;
     --card:#fff;
     --text:#1f2937;
@@ -31,7 +32,13 @@ html, body {
     background:var(--bg);
     color:var(--text);
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,"Microsoft YaHei",sans-serif;
-    overflow-x:hidden;
+    /* clip does not create the scroll container that breaks sticky descendants. */
+    overflow-x:clip;
+    scroll-padding-top:calc(var(--topbar-height) + 14px);
+}
+
+html {
+    scroll-behavior:smooth;
 }
 
 a {
@@ -111,7 +118,7 @@ a {
 }
 
 .topbar {
-    height:64px;
+    height:var(--topbar-height);
     background:var(--card);
     border-bottom:1px solid var(--border);
     display:flex;
@@ -120,6 +127,7 @@ a {
     position:sticky;
     top:0;
     z-index:10;
+    isolation:isolate;
 }
 
 .menu-btn {
@@ -736,7 +744,7 @@ body.fls-mobile .fls-float-menu-btn {
     font-weight:900;
     align-items:center;
     justify-content:center;
-    z-index:10001;
+    z-index:31;
     box-shadow:0 6px 18px rgba(0,0,0,.16);
     backdrop-filter:blur(14px) saturate(180%);
     -webkit-backdrop-filter:blur(14px) saturate(180%);
@@ -753,6 +761,11 @@ body.fls-mobile .fls-float-menu-btn.menu-open {
 body.fls-mobile .fls-float-menu-btn:active {
     transform:scale(.94);
     background:rgba(255,255,255,.72);
+}
+
+body.fls-menu-open .fls-float-menu-btn {
+    opacity:0;
+    pointer-events:none;
 }
 
 /* ============================================================
@@ -794,6 +807,10 @@ body.fls-mobile .fls-float-menu-btn:active {
     display:flex;
 }
 
+body.fls-has-floating-actions .content {
+    padding-bottom:110px;
+}
+
 .fls-form-float-actions.hide-near-original {
     display:none!important;
 }
@@ -824,6 +841,10 @@ body.fls-mobile .fls-form-float-actions {
     max-width:calc(100vw - 20px);
     padding:7px;
     border-radius:999px;
+}
+
+body.fls-mobile.fls-has-floating-actions .content {
+    padding-bottom:128px!important;
 }
 
 body.fls-mobile .fls-form-float-actions .btn {
@@ -862,8 +883,12 @@ body.fls-mobile .menu-btn {
 }
 
 body.fls-mobile .topbar {
-    height:52px!important;
+    height:var(--topbar-height)!important;
     padding:0 10px 0 52px!important;
+}
+
+body.fls-mobile {
+    --topbar-height:52px;
 }
 
 body.fls-mobile .title {
@@ -916,6 +941,29 @@ body.fls-mobile .content > .card[style*="max-width"] {
     max-width:none!important;
     width:100%!important;
     margin:16px 0!important;
+}
+
+body.fls-mobile .fls-section-nav {
+    top:var(--topbar-height);
+    margin-bottom:12px;
+    padding:7px;
+    gap:6px;
+}
+
+body.fls-mobile .fls-section-nav-label {
+    flex:0 0 100%;
+    padding:0 2px 2px;
+}
+
+body.fls-mobile .fls-section-nav a {
+    flex:1 1 auto;
+    justify-content:center;
+    min-height:34px;
+    padding:6px 8px;
+}
+
+body.fls-mobile .fls-subsection {
+    padding:12px;
 }
 
 /* 通用卡片移动端 */
@@ -1413,7 +1461,7 @@ body.fls-mobile:not(.page-pull):not(.page-proxy):not(.page-deps):not(.page-statu
     position:fixed;
     right:14px;
     bottom:90px;
-    z-index:9999;
+    z-index:18;
     display:flex;
     flex-direction:column;
     gap:8px;
@@ -1444,13 +1492,87 @@ body.fls-mobile:not(.page-pull):not(.page-proxy):not(.page-deps):not(.page-statu
     position:fixed;
     right:14px;
     bottom:22px;
-    z-index:10000;
+    z-index:18;
     display:none;
     background:#18a058;
     color:#fff;
     padding:10px 14px;
     font-size:14px;
     font-weight:800;
+}
+
+body.fls-menu-open .fls-form-float-actions,
+body.fls-menu-open .fls-log-float,
+body.fls-menu-open .fls-log-new-tip {
+    display:none!important;
+}
+
+/* Long pages expose their major sections as stable jump targets. */
+.fls-section-nav {
+    position:sticky;
+    top:var(--topbar-height);
+    z-index:8;
+    display:flex;
+    gap:8px;
+    flex-wrap:wrap;
+    align-items:center;
+    margin:0 0 14px;
+    padding:8px;
+    border:1px solid var(--border);
+    border-radius:10px;
+    background:rgba(255,255,255,.94);
+    box-shadow:0 4px 12px rgba(17,24,39,.06);
+    backdrop-filter:blur(10px);
+    -webkit-backdrop-filter:blur(10px);
+}
+
+.fls-section-nav-label {
+    color:var(--muted);
+    font-size:12px;
+    font-weight:800;
+    padding:0 4px;
+}
+
+.fls-section-nav a {
+    display:inline-flex;
+    align-items:center;
+    min-height:30px;
+    padding:5px 9px;
+    border:1px solid var(--border);
+    border-radius:7px;
+    background:#fff;
+    color:#374151;
+    font-size:12px;
+    font-weight:800;
+    white-space:nowrap;
+}
+
+.fls-section-nav a:hover,
+.fls-section-nav a:focus-visible {
+    border-color:var(--primary);
+    color:var(--primary);
+    outline:none;
+}
+
+.fls-section,
+[id^="config-"],
+[id^="about-"],
+[id^="online-"],
+[id^="deps-"] {
+    scroll-margin-top:calc(var(--topbar-height) + 16px);
+}
+
+.fls-subsection {
+    margin-top:14px;
+    padding:14px;
+    border:1px solid var(--border);
+    border-radius:10px;
+    background:#f9fafb;
+}
+
+.fls-subsection .card-title {
+    font-size:15px;
+    margin-bottom:10px;
 }
 
 /* 响应式 */
@@ -1461,6 +1583,10 @@ body.fls-mobile:not(.page-pull):not(.page-proxy):not(.page-deps):not(.page-statu
 }
 
 @media(min-width:901px) and (max-width:1180px) {
+    :root {
+        --topbar-height:58px;
+    }
+
     .sidebar {
         width:208px;
     }
@@ -1515,6 +1641,143 @@ body.fls-mobile:not(.page-pull):not(.page-proxy):not(.page-deps):not(.page-statu
 
     table {
         min-width:860px;
+    }
+
+    /*
+     * 中宽屏表格保留可读的列宽，同时把首列和操作列固定在视口内。
+     * 首列用于定位记录，末列承载高频操作，阴影用于提示两侧仍可横向滚动。
+     */
+    body.page-history .table-wrap,
+    body.page-proxy .table-wrap,
+    body.page-pull .table-wrap,
+    body.page-backup .table-wrap,
+    body.page-notify .table-wrap,
+    body.page-status .table-wrap {
+        position:relative;
+    }
+
+    body.page-history .table-wrap table,
+    body.page-proxy .table-wrap table,
+    body.page-pull .table-wrap table,
+    body.page-backup .table-wrap table,
+    body.page-notify .table-wrap table {
+        min-width:860px;
+    }
+
+    body.page-status .table-wrap #runtimeTable {
+        min-width:760px;
+    }
+
+    body.page-history .table-wrap th:first-child,
+    body.page-history .table-wrap td:first-child,
+    body.page-proxy .table-wrap th:first-child,
+    body.page-proxy .table-wrap td:first-child,
+    body.page-pull .table-wrap th:first-child,
+    body.page-pull .table-wrap td:first-child,
+    body.page-backup .table-wrap th:first-child,
+    body.page-backup .table-wrap td:first-child,
+    body.page-notify .table-wrap th:first-child,
+    body.page-notify .table-wrap td:first-child,
+    body.page-status .table-wrap #runtimeTable th:first-child,
+    body.page-status .table-wrap #runtimeTable td:first-child {
+        position:sticky;
+        left:0;
+        z-index:2;
+        background:#fff;
+        box-shadow:8px 0 10px -10px rgba(17,24,39,.65);
+    }
+
+    body.page-history .table-wrap th:last-child,
+    body.page-history .table-wrap td:last-child,
+    body.page-proxy .table-wrap th:last-child,
+    body.page-proxy .table-wrap td:last-child,
+    body.page-pull .table-wrap th:last-child,
+    body.page-pull .table-wrap td:last-child,
+    body.page-backup .table-wrap th:last-child,
+    body.page-backup .table-wrap td:last-child,
+    body.page-notify .table-wrap th:last-child,
+    body.page-notify .table-wrap td:last-child,
+    body.page-status .table-wrap #runtimeTable th:last-child,
+    body.page-status .table-wrap #runtimeTable td:last-child {
+        position:sticky;
+        right:0;
+        z-index:2;
+        background:#fff;
+        box-shadow:-8px 0 10px -10px rgba(17,24,39,.65);
+    }
+
+    body.page-history .table-wrap th:first-child,
+    body.page-history .table-wrap th:last-child,
+    body.page-proxy .table-wrap th:first-child,
+    body.page-proxy .table-wrap th:last-child,
+    body.page-pull .table-wrap th:first-child,
+    body.page-pull .table-wrap th:last-child,
+    body.page-backup .table-wrap th:first-child,
+    body.page-backup .table-wrap th:last-child,
+    body.page-notify .table-wrap th:first-child,
+    body.page-notify .table-wrap th:last-child,
+    body.page-status .table-wrap #runtimeTable th:first-child,
+    body.page-status .table-wrap #runtimeTable th:last-child {
+        z-index:3;
+    }
+
+    /* 任务表在中宽屏优先保留身份、调度、状态和操作入口。 */
+    body.page-tasks #tasksTable {
+        min-width:720px;
+    }
+
+    body.page-tasks #tasksTable th:nth-child(3),
+    body.page-tasks #tasksTable td:nth-child(3),
+    body.page-tasks #tasksTable th:nth-child(8),
+    body.page-tasks #tasksTable td:nth-child(8),
+    body.page-tasks #tasksTable th:nth-child(9),
+    body.page-tasks #tasksTable td:nth-child(9),
+    body.page-tasks #tasksTable th:nth-child(10),
+    body.page-tasks #tasksTable td:nth-child(10) {
+        display:none;
+    }
+
+    body.page-tasks #tasksTable th:first-child,
+    body.page-tasks #tasksTable td:first-child {
+        position:sticky;
+        left:0;
+        z-index:2;
+        background:#fff;
+        box-shadow:8px 0 10px -10px rgba(17,24,39,.65);
+        width:44px;
+        min-width:44px;
+    }
+
+    body.page-tasks #tasksTable th:nth-child(2),
+    body.page-tasks #tasksTable td:nth-child(2) {
+        position:sticky;
+        left:44px;
+        z-index:2;
+        background:#fff;
+        min-width:180px;
+        width:180px;
+        box-shadow:8px 0 10px -10px rgba(17,24,39,.65);
+    }
+
+    body.page-tasks #tasksTable th:last-child,
+    body.page-tasks #tasksTable td:last-child {
+        position:sticky;
+        right:0;
+        z-index:2;
+        background:#fff;
+        box-shadow:-8px 0 10px -10px rgba(17,24,39,.65);
+        min-width:240px;
+    }
+
+    body.page-tasks #tasksTable th:first-child,
+    body.page-tasks #tasksTable th:nth-child(2),
+    body.page-tasks #tasksTable th:last-child {
+        z-index:3;
+    }
+
+    /* 配置页的双列表格本身只有两列，不应制造额外滚动区域。 */
+    body.page-config .table-wrap table {
+        min-width:0;
     }
 
     .btn {

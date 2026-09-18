@@ -1,7 +1,7 @@
 from ._common import *
 
 
-@bp.route("/proxy/toggle/<proxy_id>")
+@bp.route("/proxy/toggle/<proxy_id>", methods=["GET", "POST"])
 def proxy_toggle(proxy_id):
     proxies = load_proxies()
 

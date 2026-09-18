@@ -4,7 +4,10 @@ from ._common import *
 @bp.route("/logs")
 def logs_page():
     q = request.args.get("q", "").strip().lower()
-    page = max(1, int(request.args.get("page", "1") or 1))
+    try:
+        page = max(1, int(request.args.get("page", "1") or 1))
+    except (TypeError, ValueError):
+        page = 1
     per_page = 10
 
     groups = load_log_groups()

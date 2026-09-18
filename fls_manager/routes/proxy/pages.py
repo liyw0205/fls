@@ -29,7 +29,9 @@ def proxy_page():
         <a class="btn btn-blue" href="/proxy/edit/{h(proxy_id)}">编辑</a>
         <button class="btn btn-orange" type="button" onclick="flsProxyTest('{h(proxy_id)}')">测试</button>
         <button class="btn btn-primary" type="button" onclick="flsProxyQuality('{h(proxy_id)}')">质量检测</button>
-        <a class="btn {toggle_class}" href="/proxy/toggle/{h(proxy_id)}">{toggle_text}</a>
+        <form class="inline-form" method="post" action="/proxy/toggle/{h(proxy_id)}">
+            <button class="btn {toggle_class}" type="submit">{toggle_text}</button>
+        </form>
         <form class="inline-form" method="post" action="/proxy/delete/{h(proxy_id)}">
             <button class="btn btn-red" type="submit" onclick="return confirm('确定删除代理吗？')">删除</button>
         </form>

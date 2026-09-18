@@ -1,7 +1,7 @@
 # FLS 开发文档
 
-更新时间：2026-07-14
-基线：`main` / 阶段 89
+更新时间：2026-09-18
+基线：`main` / 阶段 99
 
 本文是 FLS 当前代码库的开发协作文档。历史阶段流水见
 `docs/DEVELOPMENT_PROGRESS.md`，下一轮接续信息见
@@ -259,11 +259,14 @@ CSRF 约定：
 
 - `/api/proxy/test/<proxy_id>` 在代理不存在时返回 `404` JSON：`ok=false`、空 `name` 和 `error=代理不存在`，且不执行网络检测。
 - `/api/proxy/quality/<proxy_id>` 在代理不存在时返回同样的 `404` JSON，且不解析检测地址或执行网络质量检测。
+- `/api/proxy/quality/<proxy_id>` 和 `/api/proxy/quality-form` 的有效质量检测路径使用 mock detector 回归，验证 URL 解析、结果字段和代理参数，不访问外部地址。
 
 在线脚本 API：
 
 - `/api/online-scripts/log/<install_id>` 对已有安装记录返回 `running/status/returncode/error/log_file/log`，日志行数由 `lines` 参数控制，内部进程对象不进入响应。
 - 在线脚本安装记录缺失时继续返回 HTTP 200，并保持同一组轮询字段；缺失分支不解析 `lines` 或读取日志。
+- 已有安装记录收到非整数 `lines` 时返回稳定 `400` JSON，包含 `ok/msg/running/status/returncode/error/log_file/log`；参数错误不读取日志、不修改安装记录。
+- 在线脚本安装路由的初始化记录、日志页跳转和后台 worker 状态收束均有隔离 mock 回归；成功、失败和停止路径不会在测试中启动真实线程、访问网络或执行安装命令。
 
 日志文件边界：
 
@@ -273,10 +276,22 @@ CSRF 约定：
 关于页任务 API：
 
 - `/api/about/job-log/<job_id>` 收到非整数 `lines` 时返回 `400` JSON，包含 `ok/msg/running/status/updated_at/log`，且不读取日志或修改任务状态。
+- 关于页时间同步、更新日志刷新和版本更新入口均有隔离 mock 回归；不访问时间服务、执行 Git 网络操作或修改当前仓库。
 
 依赖安装 API：
 
 - `/api/deps/install-log/<install_id>` 收到非整数 `lines` 时返回 `400` JSON，且在参数校验失败时不检查进程状态、不读取日志。
+- `/deps/install` 与 `/install/runtime/<runtime>` 的请求级回归使用隔离进程 mock，验证安装记录和日志跳转，不启动真实 pip、系统包管理器或运行时安装命令。
+
+通知、备份和面板控制：
+
+- 通知测试及“保存并测试”路径使用 mock sender，验证页面结果和配置持久化，不访问外部通知服务。
+- 备份创建请求使用 mock worker；备份导入只在隔离 `FLS_BASE_DIR` 和内存归档中验证目录覆盖、备份目录保留及依赖恢复，不运行真实 pip。
+- 面板重启/停止 POST 使用 mock 控制线程，验证状态页响应，不执行控制脚本、终止当前进程或启动新进程。
+
+分页页面：
+
+- `/tasks` 和 `/logs` 使用共享 `pagination_card()` 渲染分页，保留搜索/排序查询参数；非法 `page` 参数安全归一为第 1 页。
 
 兼容页面动作：
 
@@ -377,6 +392,7 @@ CSRF 约定：
 - JSON schema 读取迁移和配置归一化。
 - 任务运行、停止、超时、失败重试、历史、通知和代理环境注入。
 - 存储、通知出口、代理质量检测、日志 tail 和清理。
+- 高副作用工作流的隔离回归：在线脚本、依赖/运行时安装、通知发送、备份恢复和面板控制均使用 mock/专用夹具，不触发真实外部副作用。
 - 任务批量 API、任务动作 API、单任务运行/停止/复制/切换/置顶 API 边界、合集批量/单项边界、合集加入缺失边界、批量未知操作/启用/禁用与取出合集写入边界、兼容运行/停止/删除/置顶入口错误提示。
 - UI 组件和关键路由渲染、HTML 转义、安全 back、任务配置文件页边界和任务表单校验边界。
 - 响应式结构 smoke。
@@ -390,11 +406,10 @@ python -B -m compileall fls-manager.py fls_manager tests tools
 git -c safe.directory=/data/data/com.termux/files/home/fls diff --check
 ```
 
-受限验证：
+浏览器验证：
 
-- 当前环境没有 Playwright/Chromium，真实浏览器截图检查需要在具备浏览器环境后补充。
-- 推荐截图宽度：390px、768px、1024px、1440px。
-- 推荐页面：`/tasks`、`/collections`、`/logs`、`/online-scripts`、`/pull`、`/config`、`/deps`、`/panel/status`。
+- `python -B tools/browser_regression.py` 已覆盖 14 页面 × 6 视口，共 84/84 组合通过。
+- 矩阵不触发真实高副作用动作；这些动作由阶段 93 至阶段 99 的 mock/专用夹具覆盖。
 
 ## 10. 开发流程
 

@@ -233,6 +233,7 @@ function applyFlsMobileClass(){
 
         if (sidebar) sidebar.classList.remove("open");
         if (mask) mask.classList.remove("show");
+        document.body.classList.remove("fls-menu-open");
         if (btn) btn.classList.remove("menu-open");
     }
 }
@@ -251,10 +252,12 @@ function toggleMenu(show){
     if (show) {
         sidebar.classList.add("open");
         mask.classList.add("show");
+        document.body.classList.add("fls-menu-open");
         if (btn) btn.classList.add("menu-open");
     } else {
         sidebar.classList.remove("open");
         mask.classList.remove("show");
+        document.body.classList.remove("fls-menu-open");
         if (btn) btn.classList.remove("menu-open");
     }
 
@@ -262,6 +265,10 @@ function toggleMenu(show){
         flsUpdateFloatingFormVisibility();
     }
 }
+
+document.addEventListener("keydown", function(e){
+    if(e.key === "Escape") toggleMenu(false);
+});
 
 if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", applyFlsMobileClass);
@@ -499,6 +506,8 @@ function flsInitFloatingFormActions(root){
 
     const box = flsEnsureFloatActionBox();
 
+    document.body.classList.remove("fls-has-floating-actions");
+
     box.innerHTML = "";
     box.classList.remove("show");
     box.classList.remove("hide-near-original");
@@ -550,6 +559,7 @@ function flsInitFloatingFormActions(root){
     });
 
     box.classList.add("show");
+    document.body.classList.add("fls-has-floating-actions");
     flsUpdateFloatingFormVisibility();
 }
 

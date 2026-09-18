@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
 
 sys.dont_write_bytecode = True
@@ -860,6 +861,71 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertNotIn('href="/stop/task-list', html)
             self.assertNotIn('href="/task/delete/task-list', html)
 
+    def test_tasks_pagination_uses_shared_card_and_preserves_filters(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.routes.tasks.helpers import tasks_page_links
+
+            html = tasks_page_links("Task <x>", 2, 4, "name")
+
+            self.assertIn("第 <b>2</b> / <b>4</b> 页", html)
+            self.assertIn(
+                'href="/tasks?page=1&amp;q=Task%20%3Cx%3E&amp;sort=name"',
+                html,
+            )
+            self.assertIn(
+                'href="/tasks?page=3&amp;q=Task%20%3Cx%3E&amp;sort=name"',
+                html,
+            )
+            self.assertEqual(tasks_page_links("", 1, 1), "")
+
+    def test_tasks_page_pagination_preserves_filters_and_invalid_page_is_safe(self):
+        with isolated_app() as (app, _base_dir):
+            tasks = [
+                {
+                    "id": f"task-{idx}",
+                    "name": f"Task {idx}",
+                    "command": "echo task",
+                    "collection_id": "",
+                    "enabled": True,
+                    "pinned": False,
+                    "updated_at": "2026-09-18 00:00:00",
+                    "created_at": "2026-09-18 00:00:00",
+                }
+                for idx in range(21)
+            ]
+
+            with patch(
+                "fls_manager.routes.tasks.pages.load_tasks",
+                return_value=tasks,
+            ):
+                with patch(
+                    "fls_manager.routes.tasks.pages.load_collections",
+                    return_value=[],
+                ):
+                    with patch(
+                        "fls_manager.routes.tasks.pages.tasks_table",
+                        return_value="<div>tasks</div>",
+                    ):
+                        response = app.test_client().get(
+                            "/tasks?page=2&q=Task&sort=name",
+                            headers={"X-Token": TOKEN},
+                        )
+                        invalid = app.test_client().get(
+                            "/tasks?page=invalid",
+                            headers={"X-Token": TOKEN},
+                        )
+
+            html = response.get_data(as_text=True)
+            invalid_html = invalid.get_data(as_text=True)
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("第 <b>2</b> / <b>2</b> 页", html)
+            self.assertIn(
+                'href="/tasks?page=1&amp;q=Task&amp;sort=name"',
+                html,
+            )
+            self.assertEqual(invalid.status_code, 200)
+            self.assertIn("第 <b>1</b> / <b>2</b> 页", invalid_html)
+
     def test_logs_page_keeps_group_bulk_controls_and_post_delete_forms(self):
         with isolated_app() as (app, base_dir):
             log_dir = base_dir / "log"
@@ -906,6 +972,61 @@ class UiRouteComponentTests(unittest.TestCase):
                 html,
             )
             self.assertNotIn('href="/logfile/delete/alpha-one.log', html)
+
+    def test_logs_pagination_uses_shared_card_and_preserves_search(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.routes.logs._common import page_links
+
+            html = page_links("/logs", "Alpha <x>", 2, 4)
+
+            self.assertIn("第 <b>2</b> / <b>4</b> 页", html)
+            self.assertIn(
+                'href="/logs?page=1&amp;q=Alpha%20%3Cx%3E"',
+                html,
+            )
+            self.assertIn(
+                'href="/logs?page=3&amp;q=Alpha%20%3Cx%3E"',
+                html,
+            )
+            self.assertEqual(page_links("/logs", "", 1, 1), "")
+
+    def test_logs_page_pagination_preserves_search_and_invalid_page_is_safe(self):
+        with isolated_app() as (app, base_dir):
+            groups = {}
+            log_dir = base_dir / "log"
+            log_dir.mkdir(parents=True, exist_ok=True)
+
+            for idx in range(11):
+                log_file = log_dir / f"task-{idx}.log"
+                log_file.write_text(
+                    f"===== 启动任务: Task {idx} =====\n",
+                    encoding="utf-8",
+                )
+                groups[f"Task {idx}"] = [log_file]
+
+            with patch(
+                "fls_manager.routes.logs.pages.load_log_groups",
+                return_value=groups,
+            ):
+                response = app.test_client().get(
+                    "/logs?page=2&q=Task",
+                    headers={"X-Token": TOKEN},
+                )
+                invalid = app.test_client().get(
+                    "/logs?page=invalid",
+                    headers={"X-Token": TOKEN},
+                )
+
+            html = response.get_data(as_text=True)
+            invalid_html = invalid.get_data(as_text=True)
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("第 <b>2</b> / <b>2</b> 页", html)
+            self.assertIn(
+                'href="/logs?page=1&amp;q=task"',
+                html,
+            )
+            self.assertEqual(invalid.status_code, 200)
+            self.assertIn("第 <b>1</b> / <b>2</b> 页", invalid_html)
 
     def test_logfile_view_preserves_safe_back_and_sanitizes_external_back(self):
         with isolated_app() as (app, base_dir):
@@ -1482,6 +1603,263 @@ class UiRouteComponentTests(unittest.TestCase):
             )
             tail_file.assert_not_called()
             self.assertNotIn("missing-install", ONLINE_INSTALL_RUNNING)
+
+    def test_online_install_log_api_invalid_lines_returns_json_error(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING
+
+            info = {
+                "id": "install-1",
+                "script_id": "demo",
+                "script_name": "Demo",
+                "log_file": "/tmp/online-script-install-demo.log",
+                "running": True,
+                "status": "安装中",
+                "returncode": None,
+                "error": "",
+                "process": object(),
+            }
+            ONLINE_INSTALL_RUNNING["install-1"] = info.copy()
+
+            with patch(
+                "fls_manager.routes.online_scripts.logs.tail_file"
+            ) as tail_file:
+                response = app.test_client().get(
+                    "/api/online-scripts/log/install-1?lines=invalid",
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.content_type, "application/json")
+            self.assertEqual(
+                response.get_json(),
+                {
+                    "ok": False,
+                    "msg": "lines 必须为整数",
+                    "running": False,
+                    "status": "参数错误",
+                    "returncode": None,
+                    "error": "",
+                    "log_file": "",
+                    "log": "",
+                },
+            )
+            tail_file.assert_not_called()
+            self.assertEqual(ONLINE_INSTALL_RUNNING["install-1"], info)
+
+    def test_online_install_registers_running_record_and_redirects_without_starting_thread(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING
+
+            item = {
+                "id": "demo",
+                "name": "Demo script",
+                "type": "raw",
+                "link": "https://example.invalid/demo.sh",
+                "link_name": "demo.sh",
+                "install": "",
+            }
+            target = base_dir / "scripts" / "demo.sh"
+
+            with patch(
+                "fls_manager.routes.online_scripts.install.get_online_script",
+                return_value=item,
+            ):
+                with patch(
+                    "fls_manager.routes.online_scripts.install.online_script_target",
+                    return_value=target,
+                ):
+                    with patch(
+                        "fls_manager.routes.online_scripts.install.start_install_thread"
+                    ) as start_install_thread:
+                        response = app.test_client().post(
+                            "/online-scripts/install/demo",
+                            data={"proxy_id": "proxy-1", "force": "1"},
+                            headers={"X-Token": TOKEN},
+                        )
+
+            self.assertEqual(response.status_code, 302)
+            location = urlsplit(response.headers["Location"])
+            self.assertEqual(location.path.rsplit("/", 1)[0], "/online-scripts/log")
+            self.assertEqual(parse_qs(location.query), {"back": ["/online-scripts"]})
+
+            install_id = location.path.rsplit("/", 1)[1]
+            self.assertRegex(install_id, r"^[0-9a-f]{32}$")
+            self.assertIn(install_id, ONLINE_INSTALL_RUNNING)
+            info = ONLINE_INSTALL_RUNNING[install_id]
+            self.assertEqual(info["script_id"], "demo")
+            self.assertEqual(info["script_name"], "Demo script")
+            self.assertTrue(info["running"])
+            self.assertEqual(info["status"], "准备中")
+            self.assertIsNone(info["returncode"])
+            self.assertEqual(info["error"], "")
+            self.assertIsNone(info["process"])
+            self.assertTrue(info["log_file"].startswith(str(base_dir / "log")))
+
+            start_install_thread.assert_called_once()
+            self.assertEqual(
+                start_install_thread.call_args.kwargs,
+                {
+                    "install_id": install_id,
+                    "item": item,
+                    "proxy_id": "proxy-1",
+                    "import_task": False,
+                    "force": True,
+                    "enable_task": False,
+                    "selected_task_indexes": [],
+                },
+            )
+
+    def test_online_install_worker_success_sets_completed_state_without_real_command(self):
+        with isolated_app() as (_app, base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING
+            from fls_manager.online_scripts.install import install_worker
+
+            install_id = "install-success"
+            ONLINE_INSTALL_RUNNING[install_id] = {
+                "id": install_id,
+                "script_id": "demo",
+                "script_name": "Demo script",
+                "log_file": str(base_dir / "install.log"),
+                "running": True,
+                "status": "准备中",
+                "returncode": None,
+                "error": "",
+                "process": None,
+            }
+            item = {
+                "id": "demo",
+                "name": "Demo script",
+                "type": "raw",
+                "link": "https://example.invalid/demo.sh",
+                "link_name": "demo.sh",
+                "install": "echo install",
+            }
+
+            with patch("fls_manager.online_scripts.install.append_log"):
+                with patch(
+                    "fls_manager.online_scripts.install.download_online_script_logged",
+                    return_value=base_dir / "scripts" / "demo.sh",
+                ) as download:
+                    with patch(
+                        "fls_manager.online_scripts.install.run_logged_command"
+                    ) as run_command:
+                        with patch(
+                            "fls_manager.online_scripts.install.import_task_if_needed"
+                        ) as import_tasks:
+                            install_worker(
+                                install_id,
+                                item,
+                                import_task=True,
+                                enable_task=True,
+                                selected_task_indexes=["1"],
+                            )
+
+            info = ONLINE_INSTALL_RUNNING[install_id]
+            self.assertFalse(info["running"])
+            self.assertEqual(info["status"], "已完成")
+            self.assertEqual(info["returncode"], 0)
+            self.assertEqual(info["error"], "")
+            self.assertIsNone(info["process"])
+            download.assert_called_once()
+            import_tasks.assert_called_once()
+            run_command.assert_called_once()
+            self.assertEqual(run_command.call_args.args[0], ["sh", "-lc", "echo install"])
+
+    def test_online_install_worker_failure_sets_failed_state_and_skips_command(self):
+        with isolated_app() as (_app, base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING
+            from fls_manager.online_scripts.install import install_worker
+
+            install_id = "install-failure"
+            ONLINE_INSTALL_RUNNING[install_id] = {
+                "id": install_id,
+                "script_id": "demo",
+                "script_name": "Demo script",
+                "log_file": str(base_dir / "install.log"),
+                "running": True,
+                "status": "准备中",
+                "returncode": None,
+                "error": "",
+                "process": None,
+            }
+            item = {
+                "id": "demo",
+                "name": "Demo script",
+                "type": "raw",
+                "link": "https://example.invalid/demo.sh",
+                "link_name": "demo.sh",
+                "install": "echo should-not-run",
+            }
+
+            with patch("fls_manager.online_scripts.install.append_log"):
+                with patch(
+                    "fls_manager.online_scripts.install.download_online_script_logged",
+                    side_effect=RuntimeError("mock download failure"),
+                ) as download:
+                    with patch(
+                        "fls_manager.online_scripts.install.run_logged_command"
+                    ) as run_command:
+                        install_worker(install_id, item)
+
+            info = ONLINE_INSTALL_RUNNING[install_id]
+            self.assertFalse(info["running"])
+            self.assertEqual(info["status"], "失败")
+            self.assertEqual(info["returncode"], 1)
+            self.assertEqual(info["error"], "mock download failure")
+            self.assertIsNone(info["process"])
+            download.assert_called_once()
+            run_command.assert_not_called()
+
+    def test_online_install_worker_stop_sets_stopped_state_and_clears_stop_request(self):
+        with isolated_app() as (_app, base_dir):
+            from fls_manager.online_scripts.constants import (
+                ONLINE_INSTALL_RUNNING,
+                ONLINE_INSTALL_STOPPING,
+            )
+            from fls_manager.online_scripts.install import install_worker
+
+            install_id = "install-stop"
+            ONLINE_INSTALL_RUNNING[install_id] = {
+                "id": install_id,
+                "script_id": "demo",
+                "script_name": "Demo script",
+                "log_file": str(base_dir / "install.log"),
+                "running": True,
+                "status": "准备中",
+                "returncode": None,
+                "error": "",
+                "process": None,
+            }
+            ONLINE_INSTALL_STOPPING.add(install_id)
+            item = {
+                "id": "demo",
+                "name": "Demo script",
+                "type": "raw",
+                "link": "https://example.invalid/demo.sh",
+                "link_name": "demo.sh",
+                "install": "echo should-not-run",
+            }
+
+            with patch("fls_manager.online_scripts.install.append_log"):
+                with patch(
+                    "fls_manager.online_scripts.install.download_online_script_logged",
+                    return_value=base_dir / "scripts" / "demo.sh",
+                ) as download:
+                    with patch(
+                        "fls_manager.online_scripts.install.run_logged_command"
+                    ) as run_command:
+                        install_worker(install_id, item)
+
+            info = ONLINE_INSTALL_RUNNING[install_id]
+            self.assertFalse(info["running"])
+            self.assertEqual(info["status"], "已停止")
+            self.assertEqual(info["returncode"], -1)
+            self.assertEqual(info["error"], "安装已停止")
+            self.assertIsNone(info["process"])
+            self.assertNotIn(install_id, ONLINE_INSTALL_STOPPING)
+            download.assert_called_once()
+            run_command.assert_not_called()
 
     def test_about_job_log_invalid_lines_returns_json_error(self):
         with isolated_app() as (app, _base_dir):

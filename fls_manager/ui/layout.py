@@ -55,13 +55,14 @@ def layout(title, active, body):
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <meta name="csrf-token" content="__CSRF_TOKEN__">
 
-<link rel="stylesheet" href="/static/fls.css?v=20260801-1">
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=20260918-1">
+<link rel="stylesheet" href="/static/fls.css?v=20260918-1">
 
 </head>
 
 <body class="page-__ACTIVE__">
 <div class="mask" id="mask" onclick="toggleMenu(false)"></div>
-<button class="fls-float-menu-btn" id="flsFloatMenuBtn" type="button" onclick="toggleMenu()">☰</button>
+<button class="fls-float-menu-btn" id="flsFloatMenuBtn" type="button" onclick="toggleMenu()" aria-label="打开导航菜单" title="打开导航菜单">☰</button>
 
 <div class="app">
     <aside class="sidebar" id="sidebar">
@@ -78,7 +79,7 @@ def layout(title, active, body):
     </main>
 </div>
 
-<script src="/static/fls.js?v=20260801-1"></script>
+<script src="/static/fls.js?v=20260918-1"></script>
 </body>
 </html>
 '''

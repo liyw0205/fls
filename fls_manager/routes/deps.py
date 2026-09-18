@@ -12,7 +12,7 @@ from ..state import DEPS_RUNNING
 from ..utils import h, now_str, safe_name, get_back_url
 from ..logs import tail_file
 from ..ui.layout import layout
-from ..ui.components import table_card
+from ..ui.components import page_header_card, table_card
 
 bp = Blueprint("deps", __name__)
 
@@ -151,6 +151,13 @@ def deps_page():
     )
 
     body = f"""
+<nav class="fls-section-nav" aria-label="依赖管理区块导航">
+    <span class="fls-section-nav-label">依赖管理</span>
+    <a href="#deps-install">安装依赖</a>
+    <a href="#deps-installed">已安装依赖</a>
+</nav>
+
+<section class="fls-section" id="deps-install">
 <div class="card">
     <div class="card-title">安装依赖</div>
     <form method="post" action="/deps/install">
@@ -164,8 +171,11 @@ def deps_page():
         如果安装失败，可以到日志管理查看 deps-install-*.log。
     </div>
 </div>
+</section>
 
+<section class="fls-section" id="deps-installed">
 {installed_table}
+</section>
 """
     return layout("依赖管理", "deps", body)
 

@@ -121,7 +121,11 @@ def panel_status():
         if item.get("version"):
             action = '<span class="badge green">已安装</span>'
         else:
-            action = f'<a class="btn btn-primary" href="{h(item.get("install_url"))}">安装</a>'
+            action = f'''
+<form class="inline-form" method="post" action="{h(item.get("install_url"))}">
+    <button class="btn btn-primary" type="submit">安装</button>
+</form>
+'''
 
         runtime_rows += f"""
 <tr>

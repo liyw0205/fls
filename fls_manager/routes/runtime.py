@@ -160,7 +160,7 @@ def runtime_install_command(runtime):
     raise RuntimeError("无法生成安装命令")
 
 
-@bp.route("/install/runtime/<runtime>")
+@bp.route("/install/runtime/<runtime>", methods=["GET", "POST"])
 def install_runtime(runtime):
     runtime = str(runtime or "").strip().lower()
 
@@ -220,6 +220,6 @@ def install_runtime(runtime):
     return redirect(url_for("deps.deps_install_log", install_id=install_id, back="/panel/status"))
 
 
-@bp.route("/install/node")
+@bp.route("/install/node", methods=["GET", "POST"])
 def install_node():
     return redirect(url_for("runtime.install_runtime", runtime="node"))

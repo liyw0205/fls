@@ -22,18 +22,18 @@ TOKEN = "responsive-smoke-token"
 PAGES = (
     ("/", "page-dashboard"),
     ("/tasks", "page-tasks"),
-    ("/task/new", "page-tasks"),
-    ("/logs", "page-logs"),
-    ("/pull", "page-pull"),
-    ("/pull/new", "page-pull"),
-    ("/pull/fetch", "page-pull"),
-    ("/pull/import", "page-pull"),
-    ("/online-scripts", "page-online_scripts"),
+    ("/history", "page-history"),
     ("/env", "page-env"),
-    ("/notify", "page-notify"),
     ("/proxy", "page-proxy"),
+    ("/pull", "page-pull"),
+    ("/online-scripts", "page-online_scripts"),
+    ("/backup", "page-backup"),
+    ("/deps", "page-deps"),
+    ("/logs", "page-logs"),
+    ("/notify", "page-notify"),
     ("/config", "page-config"),
     ("/panel/status", "page-status"),
+    ("/about", "page-about"),
 )
 
 
@@ -220,6 +220,13 @@ def run_smoke():
                     client,
                     "/static/fls.js",
                     ("fls-phone", "fls-tablet", "fls-desktop", "detectFlsMobile"),
+                )
+            )
+            results.append(
+                check_static_asset(
+                    client,
+                    "/static/favicon.svg",
+                    ("<title>FLS</title>", "viewBox"),
                 )
             )
         finally:

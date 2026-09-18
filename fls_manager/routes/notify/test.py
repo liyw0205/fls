@@ -2,7 +2,7 @@ from ._common import *
 from ...ui.components import table_card
 
 
-@bp.route("/notify/test/<item_id>")
+@bp.route("/notify/test/<item_id>", methods=["GET", "POST"])
 def notify_test(item_id):
     item = get_notify_item(item_id)
 

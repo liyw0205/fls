@@ -32,7 +32,7 @@ def about():
 
     if not version["git_available"] or not version["is_repo"]:
         version_card = f"""
-<div class="card">
+<div class="card" id="about-version">
     <div class="card-title">当前版本 / 更新日志</div>
     <div class="help" style="color:#dc2626;">
         {h(version.get("error") or "版本信息不可用")}
@@ -48,7 +48,7 @@ def about():
         rows = render_update_log_rows(version.get("logs") or [])
 
         version_card = f"""
-<div class="card">
+<div class="card" id="about-version">
     <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;">
         <div>
             <div class="card-title">当前版本 / 更新日志</div>
@@ -71,7 +71,7 @@ def about():
     </div>
 </div>
 
-<details class="card fls-update-log-fold">
+<details class="card fls-update-log-fold" id="about-updates">
     <summary>
         <div>
             <div class="card-title">更新日志，最近 20 条</div>
@@ -239,7 +239,17 @@ ps -eo pid,ppid,comm,args | grep fls
 }}
 </style>
 
-<div class="card">
+<nav class="fls-section-nav" aria-label="关于页区块导航">
+    <span class="fls-section-nav-label">关于页面</span>
+    <a href="#about-intro">面板控制</a>
+    <a href="#about-time">时间校准</a>
+    <a href="#about-version">版本信息</a>
+    <a href="#about-updates">更新日志</a>
+    <a href="#about-info">面板信息</a>
+    <a href="#about-rules">运行规则</a>
+</nav>
+
+<div class="card" id="about-intro">
     <div class="card-title">关于 FLS 面板</div>
     <div class="help">
         <p><b>FLS 面板</b> 是一个轻量级脚本任务管理面板，可用于管理 Python、Shell、Node.js 等脚本任务。</p>
@@ -263,7 +273,7 @@ ps -eo pid,ppid,comm,args | grep fls
     </div>
 </div>
 
-<div class="card">
+<div class="card" id="about-time">
     <div class="card-title">面板时间校准</div>
     <div class="help">
         当前面板时间：<b>{h(about_panel_time_text())}</b><br>
@@ -289,7 +299,7 @@ ps -eo pid,ppid,comm,args | grep fls
         <form method="post" action="/about/time-sync">
             <input type="hidden" name="mode" value="beijing">
 
-            <div class="card" style="box-shadow:none;border:1px solid #e5e7eb;margin-top:14px;">
+            <div class="fls-subsection">
                 <div class="card-title">自动校准北京时间</div>
                 <div class="help">
                     会从网络 HTTP Date 头获取标准 UTC 时间，并设置 FLS 面板虚拟时间为北京时间。<br>
@@ -308,7 +318,7 @@ ps -eo pid,ppid,comm,args | grep fls
         <form method="post" action="/about/time-sync">
             <input type="hidden" name="mode" value="utc_offset">
 
-            <div class="card" style="box-shadow:none;border:1px solid #e5e7eb;margin-top:14px;">
+            <div class="fls-subsection">
                 <div class="card-title">选择 UTC 偏移自动校准</div>
                 <div class="help">
                     可选择 <code>UTC-23</code> 到 <code>UTC+23</code>。<br>
@@ -338,7 +348,7 @@ ps -eo pid,ppid,comm,args | grep fls
         <form method="post" action="/about/time-sync">
             <input type="hidden" name="mode" value="custom">
 
-            <div class="card" style="box-shadow:none;border:1px solid #e5e7eb;margin-top:14px;">
+            <div class="fls-subsection">
                 <div class="card-title">自定义当前时间</div>
                 <div class="help">
                     输入格式必须是：<code>yyyyMMddHHmmss</code>。<br>
@@ -377,7 +387,7 @@ ps -eo pid,ppid,comm,args | grep fls
         <form method="post" action="/about/time-sync">
             <input type="hidden" name="mode" value="reset">
 
-            <div class="card" style="box-shadow:none;border:1px solid #e5e7eb;margin-top:14px;">
+            <div class="fls-subsection">
                 <div class="card-title">重置时间偏移</div>
                 <div class="help">
                     会清除面板虚拟时间偏移，仅保留当前 UTC 时区设置。<br>
@@ -430,13 +440,17 @@ flsToggleTimeSyncMode();
 
 {version_card}
 
+<section class="fls-section" id="about-info">
 {panel_info_table}
+</section>
 
+<section class="fls-section" id="about-rules">
 {task_command_card}
 
 {cron_card}
 
 {process_card}
+</section>
 """
 
     return layout("关于", "about", body)

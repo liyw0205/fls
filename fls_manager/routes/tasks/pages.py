@@ -147,7 +147,10 @@ def tasks_page():
 
     q = request.args.get("q", "").strip()
     sort = request.args.get("sort", "default").strip()
-    page = max(1, int(request.args.get("page", "1") or 1))
+    try:
+        page = max(1, int(request.args.get("page", "1") or 1))
+    except (TypeError, ValueError):
+        page = 1
     per_page = 20
 
     sort_keys = {x[0] for x in SORT_OPTIONS}

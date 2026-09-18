@@ -7,7 +7,7 @@ def notify_default_save():
     return redirect(url_for("notify.notify_page"))
 
 
-@bp.route("/notify/toggle/<item_id>")
+@bp.route("/notify/toggle/<item_id>", methods=["GET", "POST"])
 def notify_toggle(item_id):
     items = notify_items()
 

@@ -72,6 +72,14 @@ def online_scripts_page():
     body = f"""
 {header}
 
+<nav class="fls-section-nav" aria-label="在线脚本区块导航">
+    <span class="fls-section-nav-label">在线脚本</span>
+    <a href="#online-search">搜索筛选</a>
+    <a href="#online-status">刷新状态</a>
+    <a href="#online-list">脚本列表</a>
+</nav>
+
+<section class="fls-section" id="online-search">
 <form method="get">
 <div class="card">
     <div class="form-grid">
@@ -92,6 +100,7 @@ def online_scripts_page():
     </div>
 </div>
 </form>
+</section>
 
 <div class="fls-summary-grid">
     {summary_item("缓存脚本数", len(items))}
@@ -102,6 +111,7 @@ def online_scripts_page():
 {message_card(msg, "success", strong=True)}
 {message_card(err, "error", strong=True)}
 
+<section class="fls-section" id="online-status">
 <div class="card" id="onlineRefreshStatusCard" style="{refresh_display}">
     <div class="card-title">脚本源刷新状态</div>
     <div class="help" id="onlineRefreshStatusText">
@@ -110,7 +120,9 @@ def online_scripts_page():
         日志：{h(refresh_log or "-")}
     </div>
 </div>
+</section>
 
+<section class="fls-section" id="online-list">
 <div class="card">
     <div class="card-title">脚本列表，本地缓存</div>
     <div class="help">
@@ -122,6 +134,7 @@ def online_scripts_page():
         {render_online_script_rows(items)}
     </div>
 </div>
+</section>
 {page_links_html}
 
 <script>
