@@ -39,8 +39,7 @@ def about():
     </div>
     <br>
     <div class="help">
-        如果你是通过压缩包或手动复制方式安装的，可能无法获取 Git 更新日志。<br>
-        如果需要使用版本更新功能，请使用 git clone 方式安装项目。
+        当前安装方式不支持在线版本信息或更新。请使用支持版本管理的安装方式后重试。
     </div>
 </div>
 """
@@ -63,7 +62,7 @@ def about():
         <div class="action-row">
             <form method="post" action="/about/refresh-log" style="display:inline;">
                 <button class="btn btn-primary" type="submit">
-                    后台刷新更新日志
+                    刷新更新日志
                 </button>
             </form>
             {daemon_log_btn}
@@ -76,8 +75,7 @@ def about():
         <div>
             <div class="card-title">更新日志，最近 20 条</div>
             <div class="help">
-                默认折叠，点击展开查看版本更新内容并选择更新版本。<br>
-                “后台刷新更新日志”会进入实时日志页，不会卡住当前页面。
+                查看最近的版本变化和更新内容。
             </div>
         </div>
     </summary>
@@ -85,8 +83,7 @@ def about():
     <br>
 
     <div class="help">
-        这里显示项目 Git 提交时填写的更新内容。<br>
-        可以选择某个版本进行后台更新。更新完成后需要手动重启面板。
+        这里显示每个版本的更新说明。选择版本更新后，完成时可重启面板使新版本生效。
     </div>
     <br>
 
@@ -219,19 +216,6 @@ ps -eo pid,ppid,comm,args | grep fls
 
 .fls-update-log-fold summary::-webkit-details-marker {{
     display:none;
-}}
-
-.fls-update-log-fold summary::after {{
-    content:"点击展开";
-    display:block;
-    margin-top:8px;
-    color:#6b7280;
-    font-size:12px;
-    font-weight:800;
-}}
-
-.fls-update-log-fold[open] summary::after {{
-    content:"点击收起";
 }}
 
 .fls-time-mode-box {{

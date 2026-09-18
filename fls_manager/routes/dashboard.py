@@ -692,14 +692,14 @@ def dashboard():
         ("磁盘可用", disk_free),
     ]
 
-    env_rows = ""
+    env_items = ""
 
     for k, v in env_data:
-        env_rows += f"""
-<tr>
-    <td><b>{h(k)}</b></td>
-    <td>{h(v)}</td>
-</tr>
+        env_items += f"""
+<div class="environment-status-item">
+    <div class="environment-status-label">{h(k)}</div>
+    <div class="environment-status-value">{h(v)}</div>
+</div>
 """
 
     history_headers = ["任务", "状态", "开始时间", "耗时", "说明", "日志"]
@@ -715,16 +715,15 @@ def dashboard():
         dashboard_history_rows(abnormal_history, "暂无异常记录"),
         section_id="dashboard-errors",
     )
-    environment_table = table_card(
-        "环境状态",
-        ["项目", "值"],
-        env_rows,
-        help_html=f"""
-        面板峰值 CPU 每天 00:00 和 12:00 自动重置。<br>
-        当前峰值统计周期：{h(panel_cpu_peak_period)}
-        """,
-        section_id="dashboard-environment",
-    )
+    environment_table = f"""
+<section class="section environment-status-section" id="dashboard-environment">
+    <div class="section-header">
+        <h2 class="section-title">环境状态</h2>
+        <div class="help">峰值 CPU 每天 00:00 和 12:00 自动重置，当前周期：{h(panel_cpu_peak_period)}</div>
+    </div>
+    <div class="environment-status-grid">{env_items}</div>
+</section>
+"""
     shortcut_section = section(
         "常用入口",
         """

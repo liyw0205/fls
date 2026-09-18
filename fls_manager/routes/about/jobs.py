@@ -17,29 +17,38 @@ def about_job_log(job_id):
 
     if not info:
         body = page_header_card(
-            "后台任务日志",
+            "操作进度",
             help_html="""
-        任务记录不存在或面板已重启。<br>
-        可以到日志管理中查找 about-*.log。
+        操作记录不存在或面板已重启。<br>
+        可以返回关于页后重新发起操作。
 """,
             actions_html=f"""
 <a class="btn btn-gray" href="{h(back_url)}">返回</a>
 <a class="btn btn-blue" href="/logs?back={h(back_url)}">查看日志管理</a>
 """,
         )
-        return layout("后台任务日志", "about", body)
+        return layout("操作进度", "about", body)
+
+    is_update_job = info.get("action") == "update-version"
+    completed_successfully = not info.get("running") and info.get("returncode") == 0
+    job_actions_hidden = "" if completed_successfully else " hidden"
+    restart_action = ""
+    if is_update_job:
+        restart_action = """
+<form method="post" action="/about/restart-panel">
+    <button class="btn btn-primary" type="submit" onclick="return confirm('确定重启面板吗？重启期间页面会短暂无法访问。')">重启面板</button>
+</form>
+"""
 
     header_card = page_header_card(
-        f'后台任务日志：{info.get("title") or job_id}',
+        f'操作进度：{info.get("title") or job_id}',
         help_html=f"""
         状态：<b id="aboutJobStatus">{h(info.get("status") or "-")}</b><br>
-        日志文件：{h(info.get("log_file") or "-")}<br>
         更新时间：<span id="aboutJobUpdatedAt">{h(info.get("updated_at") or "-")}</span>
 """,
         actions_html=f"""
 <a class="btn btn-gray" href="{h(back_url)}">返回关于页</a>
 <a class="btn btn-blue" href="/logs?back={h(back_url)}">日志管理</a>
-<a class="btn btn-orange" href="/logfile/fls-manager-daemon.log?back={h(back_url)}">面板日志</a>
 """,
     )
 
@@ -47,6 +56,10 @@ def about_job_log(job_id):
 {header_card}
 <pre class="log" id="log">加载中...</pre>
 {log_controls()}
+<div class="fls-job-actions action-row" id="aboutJobActions"{job_actions_hidden}>
+    {restart_action}
+    <a class="btn btn-gray" href="{h(back_url)}">返回关于页</a>
+</div>
 
 <script>
 window.__FLS_LOG_LAST_TEXT__ = "";
@@ -54,6 +67,17 @@ window.__FLS_LOG_NEAR_BOTTOM__ = true;
 
 function nearBottom(){{
     return document.documentElement.scrollHeight - window.innerHeight - window.scrollY < 90;
+}}
+
+function updateAboutJobActions(json){{
+    const box = document.getElementById("aboutJobActions");
+    if(!box) return;
+    const done = !json.running && Number(json.returncode) === 0;
+    const isUpdate = json.action === "update-version";
+    box.hidden = !done;
+    box.querySelectorAll("form").forEach(function(form){{
+        form.hidden = !isUpdate;
+    }});
 }}
 
 window.addEventListener("scroll", function(){{
@@ -71,6 +95,7 @@ async function loadAboutJobLog(){{
 
         document.getElementById("aboutJobStatus").textContent = json.status || "-";
         document.getElementById("aboutJobUpdatedAt").textContent = json.updated_at || "-";
+        updateAboutJobActions(json);
 
         const text = json.log || "暂无日志";
         const old = window.__FLS_LOG_LAST_TEXT__ || "";
@@ -104,7 +129,7 @@ async function loadAboutJobLog(){{
             window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
         }}
     }} catch(e) {{
-        document.getElementById("log").textContent = "日志读取失败：" + e + "。下一步：返回关于页面并检查后台任务日志后重试";
+        document.getElementById("log").textContent = "记录读取失败：" + e + "。下一步：返回关于页面后重试";
     }}
 }}
 
@@ -114,7 +139,7 @@ window.__FLS_ACTIVE_LOG_INTERVAL__ = setInterval(loadAboutJobLog, 2000);
 </script>
 """
 
-    return layout("后台任务日志", "about", body)
+    return layout("操作进度", "about", body)
 
 
 @bp.route("/api/about/job-log/<job_id>")
@@ -145,6 +170,7 @@ def api_about_job_log(job_id):
 
     return jsonify({
         "running": bool(info.get("running")),
+        "action": info.get("action") or "",
         "status": info.get("status") or "-",
         "returncode": info.get("returncode"),
         "error": info.get("error", ""),

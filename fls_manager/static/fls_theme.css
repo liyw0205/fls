@@ -1,6 +1,6 @@
 /* FLS visual system: one accent, quiet surfaces, explicit action hierarchy. */
 :root {
-    --bg:#f3f6f5;
+    --bg:#ffffff;
     --card:#ffffff;
     --surface:#ffffff;
     --surface-muted:#eef3f2;
@@ -225,6 +225,16 @@ body {
     box-shadow:none;
 }
 
+/* Nested blocks should read as one surface instead of stacked cards. */
+.card .fls-subsection,
+.card .fls-info-item,
+.card .fls-card-section {
+    border:0;
+    border-radius:0;
+    background:var(--surface-muted);
+    box-shadow:none;
+}
+
 .grid {
     grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
     gap:16px;
@@ -303,6 +313,48 @@ body {
     border-color:var(--border);
     border-radius:7px;
     background:#f7faf9;
+}
+
+.fls-info-item,
+.fls-card-section {
+    border-radius:0;
+    border-left:0;
+    border-right:0;
+}
+
+.environment-status-section {
+    border-top:1px solid var(--border);
+    padding-top:20px;
+}
+
+.environment-status-grid {
+    display:grid;
+    grid-template-columns:repeat(3,minmax(0,1fr));
+    gap:1px;
+    overflow:hidden;
+    border:1px solid var(--border);
+    border-radius:8px;
+    background:var(--border);
+}
+
+.environment-status-item {
+    min-width:0;
+    padding:12px 14px;
+    background:#fff;
+}
+
+.environment-status-label {
+    margin-bottom:4px;
+    color:var(--muted);
+    font-size:12px;
+    font-weight:700;
+}
+
+.environment-status-value {
+    color:var(--text);
+    font-size:14px;
+    font-weight:700;
+    overflow-wrap:anywhere;
 }
 
 .empty-state {
@@ -479,6 +531,33 @@ td {
     border-radius:8px;
     background:rgba(255,255,255,.98);
     box-shadow:0 8px 22px rgba(28,49,53,.14);
+}
+
+/* Task secondary actions are detached from the row so opening them never
+   changes card height or pushes neighboring rows around. */
+.fls-action-menu-popover {
+    position:fixed!important;
+    z-index:1100;
+    display:flex;
+    flex-direction:column;
+    align-items:stretch;
+    gap:4px;
+    width:max-content;
+    min-width:148px;
+    max-width:min(260px,calc(100vw - 16px));
+    margin:0!important;
+    padding:6px;
+    border:1px solid var(--border);
+    border-radius:8px;
+    background:#fff;
+    box-shadow:0 14px 34px rgba(24,52,56,.16);
+}
+
+.fls-action-menu-popover .btn {
+    width:100%;
+    margin:0;
+    text-align:left;
+    white-space:nowrap;
 }
 
 .fls-toast {
@@ -760,7 +839,7 @@ body.fls-has-floating-actions .content {
 
     .fls-disclosure-dialog {
         max-height:calc(100vh - 20px);
-        border-radius:12px;
+        border-radius:8px;
     }
 
     .fls-disclosure-dialog-body {

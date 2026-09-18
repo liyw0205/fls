@@ -58,10 +58,10 @@ class FrontendOptimizationTests(unittest.TestCase):
             html = response.get_data(as_text=True)
 
             self.assertEqual(response.status_code, 200)
-            self.assertIn('/static/favicon.svg?v=20260919-2', html)
-            self.assertIn('/static/fls.css?v=20260919-2', html)
-            self.assertIn('/static/fls.js?v=20260919-2', html)
-            self.assertIn('/static/fls_theme.css?v=20260919-2', html)
+            self.assertIn('/static/favicon.svg?v=20260919-3', html)
+            self.assertIn('/static/fls.css?v=20260919-3', html)
+            self.assertIn('/static/fls.js?v=20260919-3', html)
+            self.assertIn('/static/fls_theme.css?v=20260919-3', html)
 
     def test_favicon_is_served_as_static_asset(self):
         with isolated_app() as app:

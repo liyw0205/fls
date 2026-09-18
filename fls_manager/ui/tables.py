@@ -347,14 +347,20 @@ tr.task-selected td {{
 }}
 
 .task-action-more-menu {{
+    position:fixed;
+    z-index:1100;
     display:flex;
-    gap:6px;
-    flex-wrap:wrap;
-    padding:8px;
-    margin-top:6px;
+    flex-direction:column;
+    align-items:stretch;
+    gap:4px;
+    min-width:148px;
+    max-width:calc(100vw - 16px);
+    padding:6px;
+    margin:0;
     border:1px solid #e5e7eb;
-    border-radius:10px;
-    background:#f9fafb;
+    border-radius:8px;
+    background:#fff;
+    box-shadow:0 14px 34px rgba(24,52,56,.16);
 }}
 
 .task-action-more-menu[hidden] {{
@@ -366,7 +372,10 @@ tr.task-selected td {{
 }}
 
 .task-action-more-menu .btn {{
+    width:100%;
     margin:0;
+    text-align:left;
+    white-space:nowrap;
 }}
 
 /* ============================================================
@@ -634,18 +643,62 @@ function toggleTaskActionMenu(button){{
     const willOpen = !!menu.hidden;
     document.querySelectorAll(".task-action-more-menu").forEach(function(item){{
         item.hidden = true;
+        item.classList.remove("fls-action-menu-popover");
     }});
     document.querySelectorAll(".task-action-menu-toggle").forEach(function(item){{
         item.setAttribute("aria-expanded", "false");
     }});
-    menu.hidden = !willOpen;
+    if(!willOpen){{
+        menu.hidden = true;
+        button.setAttribute("aria-expanded", "false");
+        return;
+    }}
+
+    if(menu.parentElement !== document.body) document.body.appendChild(menu);
+    menu.classList.add("fls-action-menu-popover");
+    menu.hidden = false;
+    positionTaskActionMenu(button, menu);
     button.setAttribute("aria-expanded", willOpen ? "true" : "false");
 }}
 
+function positionTaskActionMenu(button, menu){{
+    if(!button || !menu || menu.hidden) return;
+    const rect = button.getBoundingClientRect();
+    const gutter = 8;
+    menu.style.left = "0px";
+    menu.style.top = "0px";
+    const width = menu.offsetWidth;
+    const height = menu.offsetHeight;
+    const left = Math.max(gutter, Math.min(rect.right - width, window.innerWidth - width - gutter));
+    const below = rect.bottom + height + gutter <= window.innerHeight;
+    const top = below ? rect.bottom + gutter : Math.max(gutter, rect.top - height - gutter);
+    menu.style.left = Math.round(left) + "px";
+    menu.style.top = Math.round(top) + "px";
+}}
+
+window.addEventListener("resize", function(){{
+    const open = document.querySelector(".task-action-menu-toggle[aria-expanded='true']");
+    if(!open) return;
+    const menu = document.getElementById(open.getAttribute("aria-controls") || "");
+    positionTaskActionMenu(open, menu);
+}});
+
 document.addEventListener("click", function(event){{
-    if(event.target.closest(".task-action-more")) return;
+    if(event.target.closest(".task-action-more") || event.target.closest(".task-action-more-menu")) return;
     document.querySelectorAll(".task-action-more-menu").forEach(function(item){{
         item.hidden = true;
+        item.classList.remove("fls-action-menu-popover");
+    }});
+    document.querySelectorAll(".task-action-menu-toggle").forEach(function(item){{
+        item.setAttribute("aria-expanded", "false");
+    }});
+}});
+
+document.addEventListener("keydown", function(event){{
+    if(event.key !== "Escape") return;
+    document.querySelectorAll(".task-action-more-menu").forEach(function(item){{
+        item.hidden = true;
+        item.classList.remove("fls-action-menu-popover");
     }});
     document.querySelectorAll(".task-action-menu-toggle").forEach(function(item){{
         item.setAttribute("aria-expanded", "false");

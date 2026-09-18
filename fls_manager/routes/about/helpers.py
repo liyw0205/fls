@@ -162,7 +162,7 @@ def render_update_log_rows(logs):
 <div class="row-actions-danger">
     <form method="post" action="/about/update-version" style="display:inline;">
         <input type="hidden" name="version" value="{h(item.get("full"))}">
-        <button class="btn btn-orange" type="submit" onclick="return confirm('确定更新到该版本吗？更新任务将在后台执行。更新完成后需要手动重启面板。')">
+        <button class="btn btn-orange" type="submit" onclick="return confirm('确定更新到该版本吗？完成后可重启面板使新版本生效。')">
             更新到此版本
         </button>
     </form>
@@ -270,7 +270,7 @@ def refresh_log_worker(job_id):
     info["error"] = ""
     info["updated_at"] = now_str()
 
-    append_job_log(log_file, "===== FLS 更新日志后台刷新 =====")
+    append_job_log(log_file, "===== 正在刷新版本信息 =====")
     append_job_log(log_file, f"时间: {now_str()}")
     append_job_log(log_file, f"工作目录: {BASE_DIR}")
     append_job_log(log_file, "============================================================")
@@ -326,7 +326,7 @@ def update_version_worker(job_id, version):
     info["error"] = ""
     info["updated_at"] = now_str()
 
-    append_job_log(log_file, "===== FLS 版本后台更新 =====")
+    append_job_log(log_file, "===== 正在更新面板版本 =====")
     append_job_log(log_file, f"时间: {now_str()}")
     append_job_log(log_file, f"目标版本: {version}")
     append_job_log(log_file, f"工作目录: {BASE_DIR}")
@@ -400,7 +400,7 @@ def update_version_worker(job_id, version):
         append_job_log(log_file, "")
         append_job_log(log_file, f"===== 更新完成: {now_str()} =====")
         append_job_log(log_file, f"版本变化: {before_version} -> {after_version}")
-        append_job_log(log_file, "已完成更新，请手动重启面板以生效。")
+        append_job_log(log_file, "更新已完成，请重启面板使新版本生效。")
 
     except Exception as e:
         after_version = git_text(["rev-parse", "--short", "HEAD"], default="-")

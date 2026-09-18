@@ -131,7 +131,7 @@
 
     .card {
         padding:12px!important;
-        border-radius:12px!important;
+        border-radius:8px!important;
         width:100%!important;
         max-width:100%!important;
     }
@@ -214,13 +214,17 @@
         padding:12px;
     }
 
+    .environment-status-grid {
+        grid-template-columns:repeat(2,minmax(0,1fr));
+    }
+
     .fls-card-grid {
         grid-template-columns:1fr!important;
         gap:12px!important;
     }
 
     .fls-fold-card {
-        border-radius:14px!important;
+        border-radius:8px!important;
     }
 
     .fls-fold-card summary {
@@ -505,6 +509,12 @@
         min-height:520px;
         font-size:13px;
         border-radius:10px;
+    }
+}
+
+@media (max-width: 420px) {
+    .environment-status-grid {
+        grid-template-columns:1fr;
     }
 }
 
