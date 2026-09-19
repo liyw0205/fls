@@ -1,0 +1,102 @@
+name: Build fixed FLS proot runtimes
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "proot-runtime"
+
+permissions:
+  contents: write
+
+env:
+  RUNTIME_TAG: proot-runtime
+
+jobs:
+  build-runtime:
+    name: Build ${{ matrix.profile }} runtime (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            platform: linux/arm64
+            termux_arch: aarch64
+            profile: python
+          - arch: arm64
+            platform: linux/arm64
+            termux_arch: aarch64
+            profile: all
+          - arch: armv7
+            platform: linux/arm/v7
+            termux_arch: arm
+            profile: python
+          - arch: armv7
+            platform: linux/arm/v7
+            termux_arch: arm
+            profile: all
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Enable cross-architecture emulation
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64,arm
+
+      - name: Build proot runtime archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          bash packaging/proot/build-runtime.sh \
+            --arch "${{ matrix.arch }}" \
+            --platform "${{ matrix.platform }}" \
+            --termux-arch "${{ matrix.termux_arch }}" \
+            --profile "${{ matrix.profile }}" \
+            --output "dist/fls-proot-${{ matrix.profile }}-${{ matrix.arch }}.tar.gz"
+
+      - name: Validate runtime archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="dist/fls-proot-${{ matrix.profile }}-${{ matrix.arch }}.tar.gz"
+          test -s "$archive"
+          tar -tzf "$archive" | grep -Fx 'bin/proot'
+          tar -tzf "$archive" | grep -Fx 'rootfs/usr/bin/python3'
+          tar -tzf "$archive" | grep -Fx 'rootfs/opt/fls-venv/bin/python'
+
+      - name: Upload runtime artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fls-proot-${{ matrix.profile }}-${{ matrix.arch }}
+          path: dist/fls-proot-${{ matrix.profile }}-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+
+  release-runtime:
+    name: Publish fixed runtime release
+    runs-on: ubuntu-latest
+    needs: build-runtime
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/tags/proot-runtime'
+    steps:
+      - name: Download runtime artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: fls-proot-*
+          merge-multiple: true
+          path: dist
+
+      - name: Create or update runtime release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: proot-runtime
+          name: FLS proot runtime (proot-runtime)
+          body: "固定标签运行时资源，供 KernelSU / Magisk 模块安装时下载。"
+          files: |
+            dist/fls-proot-python-arm64.tar.gz
+            dist/fls-proot-all-arm64.tar.gz
+            dist/fls-proot-python-armv7.tar.gz
+            dist/fls-proot-all-armv7.tar.gz
+          overwrite_files: true

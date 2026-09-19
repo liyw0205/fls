@@ -434,13 +434,16 @@ su -c 'cat /data/data/com.termux/files/home/fls/log/fls-manager-daemon.log'
 
 ## 四、构建 KernelSU / Magisk proot 模块
 
-仓库内置 GitHub Actions 工作流：
+仓库内置两个 GitHub Actions 工作流：
 
 ```text
 .github/workflows/package-module.yml
+.github/workflows/build-proot.yml
 ```
 
-工作流会生成一个同时兼容 KernelSU 和 Magisk 的模块 ZIP，以及四个按 Android ABI 区分的 proot 运行时资源：
+`package-module.yml` 只生成一个同时兼容 KernelSU 和 Magisk 的模块 ZIP。模块 ZIP 的根目录直接包含 `module.prop`、`customize.sh`、`service.sh`、`action.sh`、`version.json`、`changelog.md`、`webroot/index.html` 和 `fls/` 程序目录，不包含另一个模块 ZIP 或 `payload/` 包装层。
+
+`build-proot.yml` 单独生成并发布固定标签 `proot-runtime` 下的四个运行时资源：
 
 ```text
 fls-proot-python-arm64.tar.gz
@@ -449,32 +452,30 @@ fls-proot-python-armv7.tar.gz
 fls-proot-all-armv7.tar.gz
 ```
 
-模块不依赖 Termux。首次开机启动时，模块根据设备 ABI 从同一 GitHub Release 下载运行时并解压到 `/data/fls/runtime`，将项目同步到 `/data/fls/project`，然后在容器内启动 FLS。`python` 运行时包含 Python、FLS 所需依赖和证书；`all` 额外包含 Git、curl、wget、编译工具、网络诊断工具等常用 Linux 工具。
+模块不依赖 Termux。安装模块时 `customize.sh` 会根据设备 ABI 和 `/data/fls/profile` 从 `proot-runtime` Release 下载运行时并解压到 `/data/fls/runtime`，将项目同步到 `/data/fls/project`，然后在容器内启动 FLS。`python` 运行时包含 Python、FLS 所需依赖和证书；`all` 额外包含 Git、curl、wget、编译工具、网络诊断工具等常用 Linux 工具。安装时只覆盖程序文件，保留 `/data/fls` 中已有的配置、任务、日志和用户脚本；若安装阶段网络不可用，`service.sh` 会在首次启动时重试。
 
 `/data/fls` 会在模块卸载时保留，以便重新安装模块时复用运行时、配置、任务和日志。模块升级只在模块版本变化时同步项目源码，不会覆盖 `/data/fls/project/data`、`log` 或用户脚本。
 
 ### 手动构建
 
-进入 GitHub 仓库的 **Actions -> Build KernelSU Magisk module -> Run workflow**，构建结果会作为 Artifact 提供下载。手动构建的模块默认指向 Release 的 `latest` 资源，因此正式安装建议使用带标签的 Release。
+进入 GitHub 仓库的 **Actions -> Package KernelSU Magisk module -> Run workflow**，构建结果会作为 Artifact 提供下载。正式发布模块时，先更新 `version.json` 中的 `versionCode` 和 `version`，再推送相同版本的 `v*` 标签；`module.prop` 会从 `version.json` 生成，KernelSU/Magisk 通过 `updateJson` 检测更新。四个 proot 运行时只需在 **Actions -> Build fixed FLS proot runtimes** 中单独运行，发布到固定标签 `proot-runtime`。
 
 ### 发布构建
 
-推送语义化版本标签即可同时生成 Artifact 和 GitHub Release：
+推送与 `version.json.version` 一致的版本标签即可生成模块 Artifact 和 GitHub Release：
 
 ```bash
-git tag v1.0.0
-git push origin v1.0.0
+git tag v20260920.1
+git push origin v20260920.1
 ```
 
 生成文件：
 
 ```text
 fls-manager-module.zip
-fls-proot-python-arm64.tar.gz
-fls-proot-all-arm64.tar.gz
-fls-proot-python-armv7.tar.gz
-fls-proot-all-armv7.tar.gz
 ```
+
+四个 `fls-proot-*.tar.gz` 文件只会出现在 `proot-runtime` 固定标签的运行时 Release 中，不会重复打包进模块 Release。
 
 安装模块后可通过以下路径手动控制 FLS。默认使用 `python` 运行时；安装前或切换运行时前可写入 `/data/fls/profile` 为 `all`，然后重启设备让模块服务重新下载运行时：
 

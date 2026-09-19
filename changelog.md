@@ -1,5 +1,12 @@
 # Changelog
 
+## 20260920.1
+
+- 修正 KernelSU / Magisk 模块 ZIP 的根目录结构，避免嵌套模块目录导致无法安装。
+- 将 `version.json`、`changelog.md`、`action.sh` 和 `webroot/index.html` 纳入模块包。
+- 模块安装时检查并下载固定标签的 proot 运行时，同时保留 `/data/fls` 中的配置、日志和用户脚本。
+- 将四个 proot 运行时拆分到独立工作流，避免每次模块打包重复构建。
+
 ## 20260920
 
 - 新增 KernelSU / Magisk 通用模块 GitHub Actions 打包流程。

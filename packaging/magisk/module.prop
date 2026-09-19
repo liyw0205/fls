@@ -4,3 +4,4 @@ version=0.0.0
 versionCode=0
 author=liyw0205
 description=FLS script manager with an Android proot Python runtime for KernelSU and Magisk
+updateJson=https://raw.githubusercontent.com/liyw0205/fls/main/version.json
