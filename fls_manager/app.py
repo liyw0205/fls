@@ -2,7 +2,7 @@ import os
 import uuid
 from datetime import timedelta
 
-from flask import Flask, request, session
+from flask import Flask, request
 
 from .paths import DATA_DIR
 
@@ -96,7 +96,7 @@ def create_app():
 
     @app.after_request
     def frontend_open_after_request(response):
-        """Run the first-open side effects only for an actual rendered page."""
+        """Run frontend-open side effects for every actual rendered page."""
         requested_with = (request.headers.get("X-Requested-With") or "").lower()
 
         if (
@@ -105,7 +105,6 @@ def create_app():
             or response.status_code >= 300
             or response.mimetype != "text/html"
             or requested_with in ("xmlhttprequest", "fls-ajax")
-            or session.get("frontend_open_notified")
         ):
             return response
 
@@ -113,7 +112,6 @@ def create_app():
         if not token or not auth_session_valid(token) or not auth_security_verified():
             return response
 
-        session["frontend_open_notified"] = True
         dispatch_frontend_open_event()
         return response
 

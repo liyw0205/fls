@@ -59,18 +59,18 @@ class FrontendOpenEventTests(unittest.TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response.headers.get("Location"), "/")
 
-    def test_first_rendered_page_dispatches_once(self):
+    def test_each_rendered_page_dispatches(self):
         with isolated_app() as app:
             client = app.test_client()
             self._set_session(client)
 
             with patch("fls_manager.app.dispatch_frontend_open_event") as dispatch:
                 first = client.get("/")
-                second = client.get("/tasks")
+                refreshed = client.get("/")
 
             self.assertEqual(first.status_code, 200)
-            self.assertEqual(second.status_code, 200)
-            dispatch.assert_called_once_with()
+            self.assertEqual(refreshed.status_code, 200)
+            self.assertEqual(dispatch.call_count, 2)
 
     def test_ajax_reconnect_does_not_dispatch_until_a_real_page_is_opened(self):
         with isolated_app() as app:
@@ -142,7 +142,7 @@ class FrontendOpenEventTests(unittest.TestCase):
             ), patch("fls_manager.frontend_events._log_frontend_event") as record:
                 _frontend_open_worker("127.0.0.1", "test-agent")
 
-            record.assert_called_once_with("首次访问通知已发送：1/2 个通道成功")
+            record.assert_called_once_with("页面打开通知已发送：1/2 个通道成功")
 
 
 if __name__ == "__main__":

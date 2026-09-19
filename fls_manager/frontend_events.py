@@ -35,9 +35,9 @@ def _frontend_open_worker(ip, user_agent):
         )
         total = len(results or [])
         success = sum(1 for item in (results or []) if item.get("ok"))
-        _log_frontend_event(f"首次访问通知已发送：{success}/{total} 个通道成功")
+        _log_frontend_event(f"页面打开通知已发送：{success}/{total} 个通道成功")
     except Exception as exc:
-        _log_frontend_event(f"首次访问通知发送异常：{exc}")
+        _log_frontend_event(f"页面打开通知发送异常：{exc}")
 
 
 def _start_update_log_refresh():
