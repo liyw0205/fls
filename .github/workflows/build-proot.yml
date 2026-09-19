@@ -2,9 +2,6 @@ name: Build fixed FLS proot runtimes
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - "proot-runtime"
 
 permissions:
   contents: write

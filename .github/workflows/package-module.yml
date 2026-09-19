@@ -3,8 +3,12 @@ name: Package KernelSU Magisk module
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     tags:
       - "v*"
+    paths:
+      - version.json
 
 permissions:
   contents: write
