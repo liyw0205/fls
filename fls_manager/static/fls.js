@@ -256,7 +256,7 @@ function flsOpenDisclosureModal(details){
 }
 
 async function flsFetchUpdateInfo(){
-    const response = await fetch("/api/about/update-info", {
+    const response = await fetch("/api/about/update-info?wait=1", {
         cache:"no-store",
         headers:{"X-Requested-With":"XMLHttpRequest"},
         credentials:"same-origin"

@@ -60,7 +60,11 @@ def about_refresh_log():
 
 @bp.route("/api/about/update-info")
 def about_update_info():
-    state = update_log_state()
+    wait_for_completion = request.args.get("wait") == "1"
+    state = update_log_state(
+        wait_for_completion=wait_for_completion,
+        timeout=10 if wait_for_completion else 0,
+    )
     include_logs = request.args.get("logs") == "1"
     logs = []
 

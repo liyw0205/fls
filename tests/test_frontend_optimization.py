@@ -127,7 +127,8 @@ class FrontendOptimizationTests(unittest.TestCase):
     def test_update_notice_uses_cached_state_and_reuses_about_update_view(self):
         js = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
 
-        self.assertIn('"/api/about/update-info"', js)
+        self.assertIn("/api/about/update-info", js)
+        self.assertIn('"/api/about/update-info?wait=1"', js)
         self.assertIn('fetch("/about"', js)
         self.assertIn('querySelector("#about-version")', js)
         self.assertIn('querySelector("#about-updates")', js)
@@ -188,6 +189,25 @@ class FrontendOptimizationTests(unittest.TestCase):
             self.assertTrue(response.get_json()["checking"])
             self.assertEqual(response.get_json()["logs"], [])
             version_info.assert_not_called()
+
+    def test_update_info_waits_for_the_current_cache_refresh_once(self):
+        with isolated_app() as app:
+            with patch("fls_manager.routes.about.version.update_log_state") as update_state:
+                update_state.return_value = {
+                    "checking": False,
+                    "available": False,
+                    "version": "",
+                    "current_version": "abc1234",
+                    "checked_at": "2026-09-19 12:00:00",
+                    "error": "",
+                }
+                response = app.test_client().get(
+                    "/api/about/update-info?wait=1",
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            update_state.assert_called_once_with(wait_for_completion=True, timeout=10)
 
     def test_dashboard_uses_theme_stat_classes(self):
         html = (ROOT / "fls_manager" / "routes" / "dashboard.py").read_text(encoding="utf-8")
