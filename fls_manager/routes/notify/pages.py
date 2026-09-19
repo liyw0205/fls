@@ -10,11 +10,12 @@ def notify_page():
     rows = ""
 
     if not items:
-        rows = empty_table_row(6, "暂无通知", '<a class="btn btn-primary" href="/notify/new">新增通知</a>')
+        rows = empty_table_row(7, "暂无通知", '<a class="btn btn-primary" href="/notify/new">新增通知</a>')
     else:
         for item in items:
             item_id = item.get("id")
             cname = channel_name(item.get("channel"))
+            log_mode = notify_log_mode_name(item)
             enabled_badge = (
                 '<span class="badge green status-badge status-enabled" role="status">启用</span>'
                 if item.get("enabled", True) else
@@ -32,6 +33,7 @@ def notify_page():
 <tr>
     <td><b>{h(item.get("name", ""))}</b></td>
     <td>{h(cname)}</td>
+    <td>{h(log_mode)}</td>
     <td>{enabled_badge}</td>
     <td>{default_badge}</td>
     <td>{h(item.get("updated_at", "-"))}</td>
@@ -68,7 +70,7 @@ def notify_page():
 
     table = table_card(
         "通知列表",
-        ("名称", "渠道", "状态", "全局默认", "更新时间", "操作"),
+        ("名称", "渠道", "通知模式", "状态", "全局默认", "更新时间", "操作"),
         rows,
     )
 

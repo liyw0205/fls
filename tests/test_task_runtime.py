@@ -1005,6 +1005,48 @@ class NotifyRuntimeTests(unittest.TestCase):
                 self.assertEqual(notify.send_by_ids("Title", "content", ["__none__"]), [])
                 send_one.assert_not_called()
 
+    def test_send_by_ids_uses_each_channel_log_mode(self):
+        with isolated_fls_modules():
+            from fls_manager import notify
+
+            items = [
+                {"id": "full", "name": "Full", "enabled": True, "log_mode": "full"},
+                {"id": "trimmed", "name": "Trimmed", "enabled": True, "log_mode": "trimmed"},
+            ]
+            content = ("a" * 2000) + ("b" * 1000) + ("c" * 1500)
+
+            with mock.patch.object(notify, "enabled_notify_items", return_value=items), \
+                    mock.patch.object(
+                        notify,
+                        "get_notify_item",
+                        side_effect=lambda item_id: next(
+                            (item for item in items if item["id"] == item_id),
+                            None,
+                        ),
+                    ), mock.patch.object(
+                        notify,
+                        "send_one",
+                        return_value=(True, "ok"),
+                    ) as send_one, mock.patch("builtins.print"):
+                results = notify.send_by_ids("Title", content, ["full", "trimmed"])
+
+            self.assertEqual(
+                [result["id"] for result in results],
+                ["full", "trimmed", "full", "trimmed", "full"],
+            )
+            self.assertEqual(send_one.call_count, 5)
+            self.assertEqual(send_one.call_args_list[0].args[1:], ("Title [1/3]", "a" * 2000))
+            self.assertEqual(send_one.call_args_list[1].args[1:], ("Title [1/2]", "a" * 2000))
+            self.assertEqual(
+                send_one.call_args_list[2].args[1:],
+                ("Title [2/3]", ("b" * 1000) + ("c" * 1000)),
+            )
+            self.assertEqual(
+                send_one.call_args_list[3].args[1:],
+                ("Title [2/2]", ("c" * 1500) + "\n已裁剪日志1000字符"),
+            )
+            self.assertEqual(send_one.call_args_list[4].args[1:], ("Title [3/3]", "c" * 500))
+
     def test_send_one_webhook_uses_requests_request(self):
         with isolated_fls_modules():
             from fls_manager import notify

@@ -17,6 +17,8 @@ from ...notify import (
     default_notify_ids,
     save_default_notify_ids,
     unique_notify_name,
+    normalize_notify_log_mode,
+    notify_log_mode_name,
     send_one,
 )
 
@@ -38,6 +40,9 @@ def notify_item_from_form(old=None):
         "name": unique_notify_name(channel, request.form.get("name", ""), old.get("id", "")),
         "channel": channel,
         "enabled": request.form.get("enabled", "1") == "1",
+        "log_mode": normalize_notify_log_mode(
+            request.form.get("log_mode", old.get("log_mode", "full"))
+        ),
         "config": config,
         "created_at": old.get("created_at") or now_str(),
         "updated_at": now_str(),
@@ -85,6 +90,9 @@ def notify_form(item=None):
     meta = NOTIFY_CHANNELS[channel]
     config = item.get("config", {}) or {}
     checked = "checked" if item.get("enabled", True) else ""
+    log_mode = normalize_notify_log_mode(item.get("log_mode"))
+    full_log_checked = "selected" if log_mode == "full" else ""
+    trimmed_log_checked = "selected" if log_mode == "trimmed" else ""
 
     quick_links = ""
     for key, m in NOTIFY_CHANNELS.items():
@@ -149,6 +157,14 @@ def notify_form(item=None):
         <div class="form-item">
             <label>通知渠道</label>
             <select name="channel" aria-label="通知渠道">{channel_options(channel)}</select>
+        </div>
+        <div class="form-item">
+            <label>通知模式</label>
+            <select name="log_mode" aria-label="通知模式">
+                <option value="full" {full_log_checked}>完整日志</option>
+                <option value="trimmed" {trimmed_log_checked}>裁剪日志</option>
+            </select>
+            <div class="help">完整日志会每 2000 字符继续发送；裁剪日志超过 4000 字符时只发送开头 2000 字符和末尾 1500 字符。</div>
         </div>
     </div>
     <br>

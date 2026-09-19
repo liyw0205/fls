@@ -156,6 +156,7 @@ class NotifyChannelTests(unittest.TestCase):
                     "config": {},
                     "id": "generated-id",
                     "enabled": True,
+                    "log_mode": "full",
                     "name": "Telegram Bot",
                 },
             )
@@ -166,6 +167,7 @@ class NotifyChannelTests(unittest.TestCase):
                     "channel": "bark",
                     "name": "Bark One",
                     "enabled": False,
+                    "log_mode": "full",
                     "config": {"BARK_PUSH": "token"},
                 },
             )
@@ -230,6 +232,26 @@ class NotifyChannelTests(unittest.TestCase):
             self.assertEqual(
                 notify.split_content(with_separator),
                 ["a" * 1998, "second"],
+            )
+
+    def test_trimmed_notify_content_keeps_log_ends_and_reports_removed_count(self):
+        with isolated_fls_modules():
+            from fls_manager import notify
+
+            item = {"log_mode": "trimmed"}
+            within_limit = "a" * 4000
+            self.assertEqual(
+                notify.notify_content_chunks(item, within_limit),
+                ["a" * 2000, "a" * 2000],
+            )
+
+            oversized = ("a" * 2000) + ("b" * 1000) + ("c" * 1500)
+            self.assertEqual(
+                notify.notify_content_chunks(item, oversized),
+                [
+                    "a" * 2000,
+                    ("c" * 1500) + "\n已裁剪日志1000字符",
+                ],
             )
 
     def test_send_one_serverj_uses_post_form(self):

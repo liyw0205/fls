@@ -228,10 +228,37 @@ class NotificationIsolationTests(unittest.TestCase):
             self.assertEqual(items[0]["name"], "Mock bark")
             self.assertEqual(items[0]["config"]["BARK_PUSH"], "fixture-token")
             self.assertEqual(items[0]["channel"], "bark")
+            self.assertEqual(items[0]["log_mode"], "full")
             send_one.assert_called_once()
             self.assertEqual(send_one.call_args.args[0], items[0])
             self.assertEqual(send_one.call_args.args[1], "FLS 通知测试")
             self.assertTrue(paths.CONFIG_FILE.exists())
+
+    def test_notify_log_mode_saves_and_renders_in_management(self):
+        with isolated_app() as (app, base_dir):
+            client = app.test_client()
+            headers = {"X-Token": TOKEN}
+
+            response = client.post(
+                "/notify/new",
+                data={
+                    "name": "Trimmed bark",
+                    "channel": "bark",
+                    "log_mode": "trimmed",
+                    "BARK_PUSH": "fixture-token",
+                },
+                headers=headers,
+            )
+
+            self.assertEqual(response.status_code, 302)
+            item = read_json(base_dir / "data" / "config.json")["notify_items"][0]
+            self.assertEqual(item["log_mode"], "trimmed")
+
+            page = client.get("/notify", headers=headers).get_data(as_text=True)
+            form = client.get(f"/notify/edit/{item['id']}", headers=headers).get_data(as_text=True)
+            self.assertIn("通知模式", page)
+            self.assertIn("裁剪日志", page)
+            self.assertIn('<option value="trimmed" selected>裁剪日志</option>', form)
 
 
 class ProxyQualityIsolationTests(unittest.TestCase):

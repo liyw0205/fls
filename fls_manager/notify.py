@@ -19,6 +19,26 @@ from .config import load_config, save_config
 from .utils import now_str
 
 
+NOTIFY_LOG_MODES = {
+    "full": "完整日志",
+    "trimmed": "裁剪日志",
+}
+
+
+def normalize_notify_log_mode(value):
+    value = str(value or "").strip()
+    return value if value in NOTIFY_LOG_MODES else "full"
+
+
+def notify_log_mode(item):
+    item = item if isinstance(item, dict) else {}
+    return normalize_notify_log_mode(item.get("log_mode"))
+
+
+def notify_log_mode_name(item):
+    return NOTIFY_LOG_MODES[notify_log_mode(item)]
+
+
 NOTIFY_CHANNELS = {
     "bark": {
         "name": "Bark",
@@ -166,6 +186,11 @@ def notify_items():
             item["enabled"] = True
             changed = True
 
+        log_mode = normalize_notify_log_mode(item.get("log_mode"))
+        if item.get("log_mode") != log_mode:
+            item["log_mode"] = log_mode
+            changed = True
+
         if not isinstance(item.get("config"), dict):
             item["config"] = {}
             changed = True
@@ -266,7 +291,7 @@ def split_content(content, limit=2000):
 
     while len(text) > limit:
         start = min(1800, max(0, len(text) - 1))
-        end = min(2100, len(text))
+        end = min(limit, len(text))
         best = -1
         best_distance = 999999
 
@@ -285,6 +310,20 @@ def split_content(content, limit=2000):
         parts.append(text)
 
     return parts or [""]
+
+
+def notify_content_chunks(item, content):
+    """Prepare channel-specific notification content within the 2000-character limit."""
+    text = str(content or "")
+
+    if notify_log_mode(item) != "trimmed" or len(text) <= 4000:
+        return split_content(text, 2000)
+
+    trimmed_count = len(text) - 3500
+    return [
+        text[:2000],
+        text[-1500:] + f"\n已裁剪日志{trimmed_count}字符",
+    ]
 
 
 def parse_headers(headers):
@@ -696,29 +735,36 @@ def send_by_ids(title, content, ids=None):
     if not real_ids:
         return []
 
-    chunks = split_content(content, 2000)
     results = []
+    plans = []
 
-    for idx, chunk in enumerate(chunks, 1):
-        if len(chunks) > 1:
-            part_title = f"{title} [{idx}/{len(chunks)}]"
-        else:
-            part_title = title
+    for item_id in real_ids:
+        item = get_notify_item(item_id)
 
-        for item_id in real_ids:
-            item = get_notify_item(item_id)
+        if not item:
+            results.append({
+                "id": item_id,
+                "name": item_id,
+                "ok": False,
+                "msg": "通知不存在",
+            })
+            continue
 
-            if not item:
-                results.append({
-                    "id": item_id,
-                    "name": item_id,
-                    "ok": False,
-                    "msg": "通知不存在",
-                })
+        plans.append((item_id, item, notify_content_chunks(item, content)))
+
+    # Keep normal notifications in their existing part-by-part send order.
+    max_parts = max((len(chunks) for _, _, chunks in plans), default=0)
+    for part_index in range(max_parts):
+        for item_id, item, chunks in plans:
+            if part_index >= len(chunks):
                 continue
 
-            ok, msg = send_one(item, part_title, chunk)
+            if len(chunks) > 1:
+                part_title = f"{title} [{part_index + 1}/{len(chunks)}]"
+            else:
+                part_title = title
 
+            ok, msg = send_one(item, part_title, chunks[part_index])
             results.append({
                 "id": item_id,
                 "name": item.get("name", item_id),
