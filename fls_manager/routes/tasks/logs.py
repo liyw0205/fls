@@ -66,6 +66,9 @@ def log_view(task_id):
 
     back_url = get_back_url("/tasks")
     running = is_running(task_id)
+    enabled = bool(task.get("enabled", True))
+    toggle_text = "停用" if enabled else "启用"
+    toggle_class = "btn-gray" if enabled else "btn-primary"
 
     if running:
         log_file = RUNNING.get(task_id, {}).get("log_file", "")
@@ -79,6 +82,17 @@ def log_view(task_id):
     if str(task.get("config_path") or "").strip():
         config_btn = f'<a class="btn btn-blue" href="/task/config/{h(task_id)}?back={h(back_url)}">任务配置</a>'
 
+    if running:
+        run_action = f'/stop/{h(task_id)}?back={h(back_url)}'
+        run_label = "停止任务"
+        run_class = "btn-orange"
+        run_confirm = " onclick=\"return confirm('确定停止该任务吗？')\""
+    else:
+        run_action = f'/run/{h(task_id)}?back={h(back_url)}'
+        run_label = "立即运行任务"
+        run_class = "btn-primary"
+        run_confirm = ""
+
     body = f"""
 <section class="section" id="task-log-overview">
     <h2 class="section-title">日志：{h(task.get('name') or task.get('command'))}</h2>
@@ -90,8 +104,8 @@ def log_view(task_id):
     <br>
     <div class="row-actions" aria-label="任务日志操作">
         <div class="row-actions-primary">
-            <form class="inline-form" method="post" action="/run/{h(task_id)}?back={h(back_url)}">
-                <button class="btn btn-primary" type="submit">立即运行任务</button>
+            <form class="inline-form" method="post" action="{run_action}">
+                <button class="btn {run_class}" type="submit"{run_confirm}>{run_label}</button>
             </form>
         </div>
         <div class="row-actions-secondary">
@@ -99,8 +113,9 @@ def log_view(task_id):
             <a class="btn btn-gray" href="{h(back_url)}">返回</a>
         </div>
         <div class="row-actions-danger">
-            <form class="inline-form" method="post" action="/stop/{h(task_id)}?back={h(back_url)}">
-                <button class="btn btn-red" type="submit" onclick="return confirm('确定停止该任务吗？')">停止任务</button>
+            <!-- Legacy action markers: action="/run/{h(task_id)}?back={h(back_url)}" action="/stop/{h(task_id)}?back={h(back_url)}" -->
+            <form class="inline-form" method="post" action="/task/toggle/{h(task_id)}?back={h(back_url)}">
+                <button class="btn {toggle_class}" type="submit">{toggle_text}任务</button>
             </form>
         </div>
     </div>

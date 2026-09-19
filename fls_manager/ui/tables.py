@@ -34,10 +34,7 @@ def collapsible_code(value, limit=80, max_lines=2):
     )
 
 
-def _task_action_buttons(task_id, enabled, config_path="", pinned=False, include_primary=True):
-    toggle_text = "停用" if enabled else "启用"
-    toggle_class = "btn-gray" if enabled else "btn-primary"
-
+def _task_action_buttons(task_id, enabled, config_path="", pinned=False, include_primary=True, running=False):
     pin_text = "取消置顶" if pinned else "置顶"
     pin_class = "btn-gray" if pinned else "btn-blue"
 
@@ -47,7 +44,14 @@ def _task_action_buttons(task_id, enabled, config_path="", pinned=False, include
 
     menu_id = f"task-action-menu-{task_id}{'-mobile' if not include_primary else ''}"
 
-    primary_btn = f'''<button class="btn btn-primary" type="button" onclick="taskAjaxAction('run','{h(task_id)}',this)">立即运行任务</button>''' if include_primary else ""
+    if running:
+        primary_btn = f'''<button class="btn btn-orange" type="button" onclick="taskAjaxAction('stop','{h(task_id)}',this)">停止任务</button>'''
+    else:
+        primary_btn = f'''<button class="btn btn-primary" type="button" onclick="taskAjaxAction('run','{h(task_id)}',this)">立即运行任务</button>'''
+    if not include_primary:
+        primary_btn = ""
+    toggle_text = "停用" if enabled else "启用"
+    toggle_class = "btn-gray" if enabled else "btn-primary"
     return f"""
 <!-- Compatibility markers for legacy action selectors: taskAjaxAction('copy','{h(task_id)}'), taskAjaxAction('pin','{h(task_id)}'), taskAjaxAction('stop','{h(task_id)}') -->
 <div class="task-actions row-actions" data-task-id="{h(task_id)}">
@@ -62,11 +66,10 @@ def _task_action_buttons(task_id, enabled, config_path="", pinned=False, include
         <div id="{h(menu_id)}" class="task-action-more-menu" hidden>
             <button class="btn {pin_class}" type="button" onclick="taskAjaxAction('pin','{h(task_id)}',this)">{pin_text}任务</button>
             <button class="btn btn-blue" type="button" onclick="taskAjaxAction('copy','{h(task_id)}',this)">复制任务</button>
-            <button class="btn {toggle_class}" type="button" onclick="taskAjaxAction('toggle','{h(task_id)}',this)">{h(toggle_text)}任务</button>
         </div>
     </div>
     <div class="row-actions-danger">
-        <button class="btn btn-orange" type="button" onclick="taskAjaxAction('stop','{h(task_id)}',this)">停止任务</button>
+        <button class="btn {toggle_class}" type="button" onclick="taskAjaxAction('toggle','{h(task_id)}',this)">{h(toggle_text)}任务</button>
         <button class="btn btn-gray" type="button" onclick="taskAjaxAction('delete','{h(task_id)}',this)">删除任务</button>
     </div>
 </div>
@@ -139,8 +142,8 @@ def tasks_table(tasks):
             pinned_badge = '<span class="badge orange">置顶</span>' if pinned else ""
 
             config_path = row["config_path"]
-            actions = _task_action_buttons(task_id, enabled, config_path, pinned)
-            mobile_actions = _task_action_buttons(task_id, enabled, config_path, pinned, include_primary=False)
+            actions = _task_action_buttons(task_id, enabled, config_path, pinned, running=running)
+            mobile_actions = _task_action_buttons(task_id, enabled, config_path, pinned, include_primary=False, running=running)
 
             remark_html = ""
             if remark:
@@ -201,7 +204,11 @@ def tasks_table(tasks):
     </div>
 
     <div class="task-mobile-primary-action">
-        <button class="btn btn-primary" type="button" onclick="taskAjaxAction('run','{h(task_id)}',this)">立即运行任务</button>
+        {(
+            f'<button class="btn btn-orange" type="button" onclick="taskAjaxAction(\'stop\',\'{h(task_id)}\',this)">停止任务</button>'
+            if running else
+            f'<button class="btn btn-primary" type="button" onclick="taskAjaxAction(\'run\',\'{h(task_id)}\',this)">立即运行任务</button>'
+        )}
     </div>
 
     <details class="detail-disclosure task-mobile-details">

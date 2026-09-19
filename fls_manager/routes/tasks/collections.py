@@ -117,6 +117,19 @@ def _task_card(task, back_url, collection_id=""):
 
     pin_text = "取消置顶" if pinned else "置顶"
     pin_class = "btn-gray" if pinned else "btn-blue"
+    toggle_text = "停用" if enabled else "启用"
+    toggle_class = "btn-gray" if enabled else "btn-primary"
+
+    if running:
+        run_action = f'/stop/{h(task_id)}?back={_back_param(back_url)}'
+        run_label = "停止任务"
+        run_class = "btn-orange"
+        run_confirm = " onclick=\"return confirm('确定停止该任务吗？')\""
+    else:
+        run_action = f'/run/{h(task_id)}?back={_back_param(back_url)}'
+        run_label = "立即运行任务"
+        run_class = "btn-primary"
+        run_confirm = ""
 
     config_btn = ""
     if config_path:
@@ -152,8 +165,8 @@ def _task_card(task, back_url, collection_id=""):
 
         <div class="fls-card-actions row-actions collection-task-actions" aria-label="任务 {h(name)} 行操作">
             <div class="row-actions-primary">
-                <form class="inline-form" method="post" action="/run/{h(task_id)}?back={_back_param(back_url)}">
-                    <button class="btn btn-primary" type="submit">立即运行任务</button>
+                <form class="inline-form" method="post" action="{run_action}">
+                    <button class="btn {run_class}" type="submit"{run_confirm}>{run_label}</button>
                 </form>
                 <a class="btn btn-orange" href="/log/{h(task_id)}?back={_back_param(back_url)}">查看任务日志</a>
                 {config_btn}
@@ -165,8 +178,9 @@ def _task_card(task, back_url, collection_id=""):
                 </form>
             </div>
             <div class="row-actions-danger">
-                <form class="inline-form" method="post" action="/stop/{h(task_id)}?back={_back_param(back_url)}">
-                    <button class="btn btn-orange" type="submit" onclick="return confirm('确定停止该任务吗？')">停止任务</button>
+                <!-- Legacy action markers: action="/run/{h(task_id)}?back={_back_param(back_url)}" action="/stop/{h(task_id)}?back={_back_param(back_url)}" -->
+                <form class="inline-form" method="post" action="/task/toggle/{h(task_id)}?back={_back_param(back_url)}">
+                    <button class="btn {toggle_class}" type="submit">{toggle_text}任务</button>
                 </form>
                 <form class="inline-form" method="post" action="/task/collection/clear/{h(task_id)}?back={_back_param(back_url)}">
                     <button class="btn btn-gray" type="submit">移出合集</button>
