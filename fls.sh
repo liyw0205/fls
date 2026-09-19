@@ -330,6 +330,11 @@ validate_python_files() {
 ensure_python_env() {
   ensure_repo
 
+  if [ -n "${FLS_PYTHON:-}" ] && [ -x "$FLS_PYTHON" ]; then
+    echo "$FLS_PYTHON"
+    return 0
+  fi
+
   py_sys="$(ensure_python_cmd)"
 
   if [ -x "$VENV_DIR/bin/python" ]; then

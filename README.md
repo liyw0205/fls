@@ -43,6 +43,7 @@ FLS 是一个基于 Flask 的轻量级脚本任务管理面板，支持通过 We
 - 支持 **Linux systemd 自启**
 - 支持 **Termux:Boot 自启**
 - 支持 **KernelSU / Magisk `/data/adb/service.d/` 自启**
+- 支持通过 GitHub Actions 打包 KernelSU / Magisk 通用模块 ZIP
 - 支持 **Windows 计划任务自启**
 - 自带 **启动 / 停止 / 重启 / 状态 / 日志 / 更新 / 强制 clone / 自启管理** 脚本
 
@@ -57,6 +58,9 @@ fls/
 ├─ fls.ps1
 ├─ fls.bat
 ├─ fls-a.sh
+├─ packaging/
+│  ├─ magisk/                 # KernelSU / Magisk 模块模板
+│  └─ proot/                  # Android proot 运行时构建脚本
 ├─ fls_manager/
 │  ├─ app.py
 │  ├─ auth.py
@@ -361,7 +365,7 @@ sh fls.sh start
 
 ---
 
-## 三、KernelSU / Magisk 启动 Termux 中的 FLS
+## 三、KernelSU / Magisk 手动启动 Termux 中的 FLS
 
 适用于：
 
@@ -428,9 +432,68 @@ su -c 'cat /data/adb/fls-a.log'
 su -c 'cat /data/data/com.termux/files/home/fls/log/fls-manager-daemon.log'
 ```
 
+## 四、构建 KernelSU / Magisk proot 模块
+
+仓库内置 GitHub Actions 工作流：
+
+```text
+.github/workflows/package-module.yml
+```
+
+工作流会生成一个同时兼容 KernelSU 和 Magisk 的模块 ZIP，以及四个按 Android ABI 区分的 proot 运行时资源：
+
+```text
+fls-proot-python-arm64.tar.gz
+fls-proot-all-arm64.tar.gz
+fls-proot-python-armv7.tar.gz
+fls-proot-all-armv7.tar.gz
+```
+
+模块不依赖 Termux。首次开机启动时，模块根据设备 ABI 从同一 GitHub Release 下载运行时并解压到 `/data/fls/runtime`，将项目同步到 `/data/fls/project`，然后在容器内启动 FLS。`python` 运行时包含 Python、FLS 所需依赖和证书；`all` 额外包含 Git、curl、wget、编译工具、网络诊断工具等常用 Linux 工具。
+
+`/data/fls` 会在模块卸载时保留，以便重新安装模块时复用运行时、配置、任务和日志。模块升级只在模块版本变化时同步项目源码，不会覆盖 `/data/fls/project/data`、`log` 或用户脚本。
+
+### 手动构建
+
+进入 GitHub 仓库的 **Actions -> Build KernelSU Magisk module -> Run workflow**，构建结果会作为 Artifact 提供下载。手动构建的模块默认指向 Release 的 `latest` 资源，因此正式安装建议使用带标签的 Release。
+
+### 发布构建
+
+推送语义化版本标签即可同时生成 Artifact 和 GitHub Release：
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+生成文件：
+
+```text
+fls-manager-module.zip
+fls-proot-python-arm64.tar.gz
+fls-proot-all-arm64.tar.gz
+fls-proot-python-armv7.tar.gz
+fls-proot-all-armv7.tar.gz
+```
+
+安装模块后可通过以下路径手动控制 FLS。默认使用 `python` 运行时；安装前或切换运行时前可写入 `/data/fls/profile` 为 `all`，然后重启设备让模块服务重新下载运行时：
+
+```bash
+su -c 'mkdir -p /data/fls && printf all > /data/fls/profile'
+su -c 'reboot'
+```
+
+手动控制 FLS：
+
+```bash
+su -c 'sh /data/adb/fls-a.sh status'
+su -c 'sh /data/adb/fls-a.sh restart'
+su -c 'sh /data/adb/fls-a.sh log'
+```
+
 ---
 
-## 四、Windows 安装
+## 五、Windows 安装
 
 ### 1. 安装基础环境
 
