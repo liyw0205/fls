@@ -56,6 +56,52 @@ body {
     background:#50b8a8;
 }
 
+.fls-update-notice-slot {
+    min-height:0;
+    padding:0 12px;
+}
+
+.fls-update-notice-slot:empty {
+    display:none;
+}
+
+.fls-update-notice {
+    position:relative;
+    width:100%;
+    min-height:30px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    padding:6px 28px 6px 10px;
+    border:1px solid #efb5af;
+    border-radius:6px;
+    background:#fff8f7;
+    color:var(--red);
+    font-size:12px;
+    font-weight:800;
+    line-height:1.2;
+    cursor:pointer;
+}
+
+.fls-update-notice:hover,
+.fls-update-notice:focus-visible {
+    border-color:#d96960;
+    background:#ffefed;
+}
+
+.fls-update-notice-new {
+    position:absolute;
+    top:-7px;
+    right:7px;
+    padding:2px 4px;
+    border-radius:4px;
+    background:var(--red);
+    color:#fff;
+    font-size:10px;
+    font-weight:800;
+    line-height:1;
+}
+
 .nav {
     padding:16px 12px;
 }

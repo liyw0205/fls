@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,10 +59,11 @@ class FrontendOptimizationTests(unittest.TestCase):
             html = response.get_data(as_text=True)
 
             self.assertEqual(response.status_code, 200)
-            self.assertIn('/static/favicon.svg?v=20260919-3', html)
-            self.assertIn('/static/fls.css?v=20260919-3', html)
-            self.assertIn('/static/fls.js?v=20260919-3', html)
-            self.assertIn('/static/fls_theme.css?v=20260919-3', html)
+            self.assertIn('/static/favicon.svg?v=20260919-4', html)
+            self.assertIn('/static/fls.css?v=20260919-4', html)
+            self.assertIn('/static/fls.js?v=20260919-4', html)
+            self.assertIn('/static/fls_theme.css?v=20260919-4', html)
+            self.assertIn('id="flsUpdateNoticeSlot"', html)
 
     def test_favicon_is_served_as_static_asset(self):
         with isolated_app() as app:
@@ -120,6 +122,68 @@ class FrontendOptimizationTests(unittest.TestCase):
         self.assertIn(".fls-disclosure-modal", css)
         self.assertIn(".fls-floating-panel", css)
         self.assertIn("--sidebar:#ffffff", css)
+        self.assertIn(".fls-update-notice", css)
+
+    def test_update_notice_uses_read_only_status_api_and_update_log_modal(self):
+        js = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+
+        self.assertIn('"/api/about/update-info"', js)
+        self.assertIn("flsOpenUpdateLogModal", js)
+        self.assertIn("fls-update-notice-new", js)
+        self.assertIn("localStorage.getItem(FLS_UPDATE_NOTICE_CACHE_KEY)", js)
+        self.assertIn("loadState(true)", js)
+        self.assertIn("if(!info.checking && info.ok)", js)
+        self.assertNotIn("maxAttempts", js)
+
+    def test_update_info_api_returns_cached_status_and_logs_on_demand(self):
+        with isolated_app() as app:
+            from fls_manager.routes.about.state import set_update_log_state
+
+            set_update_log_state(
+                checking=False,
+                available=True,
+                version="abc1234",
+                current_version="def5678",
+                checked_at="2026-09-19 12:00:00",
+                error="",
+            )
+            logs = [{"short": "abc1234", "date": "2026-09-19", "subject": "更新"}]
+            with patch(
+                "fls_manager.routes.about.version.get_version_info",
+                return_value={"logs": logs},
+            ):
+                response = app.test_client().get(
+                    "/api/about/update-info?logs=1",
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json(), {
+                "ok": True,
+                "checking": False,
+                "available": True,
+                "version": "abc1234",
+                "current_version": "def5678",
+                "checked_at": "2026-09-19 12:00:00",
+                "error": "",
+                "logs": logs,
+            })
+
+    def test_update_info_api_does_not_read_logs_while_refresh_is_running(self):
+        with isolated_app() as app:
+            from fls_manager.routes.about.state import set_update_log_state
+
+            set_update_log_state(checking=True, available=False, error="")
+            with patch("fls_manager.routes.about.version.get_version_info") as version_info:
+                response = app.test_client().get(
+                    "/api/about/update-info?logs=1",
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.get_json()["checking"])
+            self.assertEqual(response.get_json()["logs"], [])
+            version_info.assert_not_called()
 
     def test_dashboard_uses_theme_stat_classes(self):
         html = (ROOT / "fls_manager" / "routes" / "dashboard.py").read_text(encoding="utf-8")

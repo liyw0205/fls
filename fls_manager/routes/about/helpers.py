@@ -25,7 +25,11 @@ from ...config import (
     set_panel_time_calibration,
     reset_panel_time_calibration,
 )
-from .state import ABOUT_JOBS
+from .state import (
+    ABOUT_JOBS,
+    ABOUT_STATE_LOCK,
+    set_update_log_state,
+)
 
 
 # ============================================================
@@ -143,6 +147,66 @@ def get_version_info():
             })
 
     return info
+
+
+def get_remote_update_info():
+    """Compare HEAD with the remote default branch after a completed fetch."""
+    result = {
+        "available": False,
+        "version": "",
+        "current_version": "",
+        "error": "",
+    }
+
+    if not git_available():
+        result["error"] = "系统未安装 git"
+        return result
+
+    if not is_git_repo():
+        result["error"] = f"当前目录不是 Git 仓库：{BASE_DIR}"
+        return result
+
+    current = git_text(["rev-parse", "HEAD"], default="")
+    current_short = git_text(["rev-parse", "--short", "HEAD"], default="")
+    result["current_version"] = current_short
+
+    if not current:
+        result["error"] = "无法读取当前版本"
+        return result
+
+    remote_ref = git_text(
+        ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+        default="",
+    )
+    if not remote_ref:
+        for candidate in ("origin/main", "origin/master"):
+            ok, _ = run_git(["rev-parse", "--verify", candidate], timeout=10)
+            if ok:
+                remote_ref = candidate
+                break
+
+    if not remote_ref:
+        result["error"] = "未找到远程默认分支"
+        return result
+
+    remote_full = git_text(["rev-parse", "--verify", remote_ref], default="")
+    remote_short = git_text(["rev-parse", "--short", remote_ref], default="")
+    if not remote_full:
+        result["error"] = "无法读取远程版本"
+        return result
+
+    if current == remote_full:
+        return result
+
+    is_ancestor, _ = run_git(
+        ["merge-base", "--is-ancestor", "HEAD", remote_ref],
+        timeout=15,
+    )
+    if is_ancestor:
+        result["available"] = True
+        result["version"] = remote_short
+
+    return result
 
 
 def render_update_log_rows(logs):
@@ -292,6 +356,16 @@ def refresh_log_worker(job_id):
         if not ok:
             raise RuntimeError(out or "git fetch 失败")
 
+        remote_update = get_remote_update_info()
+        set_update_log_state(
+            checking=False,
+            available=bool(remote_update.get("available")),
+            version=remote_update.get("version", ""),
+            current_version=remote_update.get("current_version", ""),
+            checked_at=now_str(),
+            error=remote_update.get("error", ""),
+        )
+
         info["running"] = False
         info["status"] = "刷新完成"
         info["returncode"] = 0
@@ -302,6 +376,7 @@ def refresh_log_worker(job_id):
         append_job_log(log_file, "返回关于页即可看到最新更新日志。")
 
     except Exception as e:
+        set_update_log_state(checking=False, checked_at=now_str(), error=str(e))
         info["running"] = False
         info["status"] = "刷新失败"
         info["returncode"] = 1
@@ -423,18 +498,19 @@ def start_about_job(action, title, target, args=()):
     job_id = uuid.uuid4().hex
     log_file = about_job_log_file(job_id, action)
 
-    ABOUT_JOBS[job_id] = {
-        "id": job_id,
-        "action": action,
-        "title": title,
-        "log_file": str(log_file),
-        "running": True,
-        "status": "准备中",
-        "returncode": None,
-        "error": "",
-        "start_time": time.time(),
-        "updated_at": now_str(),
-    }
+    with ABOUT_STATE_LOCK:
+        ABOUT_JOBS[job_id] = {
+            "id": job_id,
+            "action": action,
+            "title": title,
+            "log_file": str(log_file),
+            "running": True,
+            "status": "准备中",
+            "returncode": None,
+            "error": "",
+            "start_time": time.time(),
+            "updated_at": now_str(),
+        }
 
     th = threading.Thread(
         target=target,
@@ -445,6 +521,39 @@ def start_about_job(action, title, target, args=()):
     th.start()
 
     return job_id
+
+
+def start_refresh_log_job(title="刷新更新日志"):
+    """Start one refresh job at a time so concurrent first visits do not race git."""
+    if not git_available():
+        set_update_log_state(
+            checking=False,
+            checked_at=now_str(),
+            error="系统未安装 git",
+        )
+        return "", False
+
+    if not is_git_repo():
+        set_update_log_state(
+            checking=False,
+            checked_at=now_str(),
+            error=f"当前目录不是 Git 仓库：{BASE_DIR}",
+        )
+        return "", False
+
+    with ABOUT_STATE_LOCK:
+        for info in ABOUT_JOBS.values():
+            if info.get("action") == "refresh-log" and info.get("running"):
+                return info.get("id", ""), False
+
+        set_update_log_state(checking=True, error="")
+        job_id = start_about_job(
+            action="refresh-log",
+            title=title,
+            target=refresh_log_worker,
+        )
+
+    return job_id, True
 
 
 # ============================================================

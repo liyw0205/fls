@@ -2,12 +2,19 @@ import os
 import uuid
 from datetime import timedelta
 
-from flask import Flask
+from flask import Flask, request, session
 
 from .paths import DATA_DIR
 
 from .csrf import csrf_before_request
-from .auth import auth_before_request, FLS_AUTH_REMEMBER_SECONDS
+from .auth import (
+    auth_before_request,
+    auth_security_verified,
+    auth_session_valid,
+    FLS_AUTH_REMEMBER_SECONDS,
+)
+from .config import fls_get_admin_token
+from .frontend_events import dispatch_frontend_open_event
 from .routes.auth_routes import bp as auth_bp
 from .routes.dashboard import bp as dashboard_bp
 from .routes.tasks import bp as tasks_bp
@@ -86,6 +93,29 @@ def create_app():
 
     app.before_request(csrf_before_request)
     app.before_request(auth_before_request)
+
+    @app.after_request
+    def frontend_open_after_request(response):
+        """Run the first-open side effects only for an actual rendered page."""
+        requested_with = (request.headers.get("X-Requested-With") or "").lower()
+
+        if (
+            request.method != "GET"
+            or response.status_code < 200
+            or response.status_code >= 300
+            or response.mimetype != "text/html"
+            or requested_with in ("xmlhttprequest", "fls-ajax")
+            or session.get("frontend_open_notified")
+        ):
+            return response
+
+        token = fls_get_admin_token()
+        if not token or not auth_session_valid(token) or not auth_security_verified():
+            return response
+
+        session["frontend_open_notified"] = True
+        dispatch_frontend_open_event()
+        return response
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(dashboard_bp)

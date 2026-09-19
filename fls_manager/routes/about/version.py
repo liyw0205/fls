@@ -1,6 +1,6 @@
 import re
 
-from flask import request, redirect, url_for
+from flask import request, redirect, url_for, jsonify
 
 from . import bp
 from .helpers import (
@@ -9,7 +9,9 @@ from .helpers import (
     start_about_job,
     refresh_log_worker,
     update_version_worker,
+    get_version_info,
 )
+from .state import set_update_log_state, update_log_state
 from ...ui.layout import layout
 from ...ui.components import page_header_card
 from ...utils import h
@@ -38,6 +40,9 @@ def about_refresh_log():
         )
         return layout("刷新失败", "about", body)
 
+    # Keep the manual endpoint's explicit job creation behavior. The automatic
+    # first-open path uses start_refresh_log_job() to coalesce concurrent visits.
+    set_update_log_state(checking=True, error="")
     job_id = start_about_job(
         action="refresh-log",
         title="刷新更新日志",
@@ -51,6 +56,27 @@ def about_refresh_log():
             back="/about",
         )
     )
+
+
+@bp.route("/api/about/update-info")
+def about_update_info():
+    state = update_log_state()
+    include_logs = request.args.get("logs") == "1"
+    logs = []
+
+    if include_logs and not state.get("checking"):
+        logs = get_version_info().get("logs") or []
+
+    return jsonify({
+        "ok": not bool(state.get("error")),
+        "checking": bool(state.get("checking")),
+        "available": bool(state.get("available")),
+        "version": str(state.get("version") or ""),
+        "current_version": str(state.get("current_version") or ""),
+        "checked_at": str(state.get("checked_at") or ""),
+        "error": str(state.get("error") or ""),
+        "logs": logs,
+    })
 
 
 @bp.route("/about/update-version", methods=["POST"])

@@ -87,18 +87,6 @@ def clear_login_fail(ip):
     LOGIN_FAIL_STATE.pop(ip, None)
 
 
-def send_login_success_notice():
-    try:
-        ip = request.headers.get("X-Forwarded-For", request.remote_addr or "")
-        ua = request.headers.get("User-Agent", "")
-        send_all_enabled(
-            "FLS 面板登录通知",
-            f"时间：{now_str()}\nIP：{ip}\nUser-Agent：{ua}",
-        )
-    except Exception as e:
-        print(f"[Auth] 登录通知发送失败: {e}")
-
-
 def create_and_send_security_code():
     ip = client_ip()
     ua = request.headers.get("User-Agent", "")
@@ -174,8 +162,6 @@ def login():
                 remember=remember,
                 security_verified=True,
             )
-
-            send_login_success_notice()
 
             return redirect(request.args.get("next") or url_for("dashboard.dashboard"))
 
@@ -266,7 +252,6 @@ def verify():
                 session["security_verified"] = True
                 clear_random_code()
                 clear_login_fail(ip)
-                send_login_success_notice()
                 return redirect(url_for("dashboard.dashboard"))
 
             # 随机验证码错误，计入失败次数
@@ -286,7 +271,6 @@ def verify():
             if verify_totp(secret, code):
                 session["security_verified"] = True
                 clear_login_fail(ip)
-                send_login_success_notice()
                 return redirect(url_for("dashboard.dashboard"))
 
             # 2FA 错误，计入失败次数

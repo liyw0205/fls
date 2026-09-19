@@ -244,6 +244,175 @@ function flsOpenDisclosureModal(details){
     close.focus({preventScroll:true});
 }
 
+function flsUpdateLogText(value){
+    return String(value || "-");
+}
+
+function flsUpdateLogCell(text){
+    const cell = document.createElement("td");
+    cell.textContent = flsUpdateLogText(text);
+    return cell;
+}
+
+async function flsFetchUpdateInfo(includeLogs){
+    const suffix = includeLogs ? "?logs=1" : "";
+    const response = await fetch("/api/about/update-info" + suffix, {
+        cache:"no-store",
+        headers:{"X-Requested-With":"XMLHttpRequest"},
+        credentials:"same-origin"
+    });
+
+    if(!response.ok) throw new Error("无法读取更新状态");
+    return response.json();
+}
+
+function flsRenderUpdateNotice(info){
+    const slot = document.getElementById("flsUpdateNoticeSlot");
+    if(!slot) return;
+
+    slot.replaceChildren();
+    if(!info || !info.available || !info.version) return;
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "fls-update-notice";
+    button.setAttribute("aria-label", "查看版本 " + info.version + " 的更新日志");
+    button.title = "查看更新日志";
+    button.append(document.createTextNode(info.version));
+
+    const badge = document.createElement("span");
+    badge.className = "fls-update-notice-new";
+    badge.textContent = "new";
+    button.appendChild(badge);
+    button.addEventListener("click", flsOpenUpdateLogModal);
+    slot.appendChild(button);
+}
+
+async function flsOpenUpdateLogModal(){
+    let info;
+    try {
+        info = await flsFetchUpdateInfo(true);
+    } catch(e) {
+        flsToast("无法读取更新日志", "error");
+        return;
+    }
+
+    if(info.checking){
+        flsToast("正在刷新更新日志，请稍后再试", "info");
+        return;
+    }
+
+    const details = document.createElement("details");
+    details.className = "fls-update-log-fold";
+    const summary = document.createElement("summary");
+    summary.textContent = "更新日志";
+    details.appendChild(summary);
+
+    const intro = document.createElement("p");
+    intro.className = "help";
+    intro.textContent = info.available
+        ? "发现新版本 " + flsUpdateLogText(info.version) + "，以下为最近的版本变化。"
+        : "当前没有可更新的版本。";
+    details.appendChild(intro);
+
+    const wrap = document.createElement("div");
+    wrap.className = "table-wrap";
+    const table = document.createElement("table");
+    const head = document.createElement("thead");
+    const headRow = document.createElement("tr");
+    ["版本", "时间", "更新内容"].forEach(function(label){
+        const cell = document.createElement("th");
+        cell.textContent = label;
+        headRow.appendChild(cell);
+    });
+    head.appendChild(headRow);
+    table.appendChild(head);
+
+    const body = document.createElement("tbody");
+    const logs = Array.isArray(info.logs) ? info.logs : [];
+    if(logs.length){
+        logs.forEach(function(item){
+            const row = document.createElement("tr");
+            row.appendChild(flsUpdateLogCell(item.short));
+            row.appendChild(flsUpdateLogCell(item.date));
+            row.appendChild(flsUpdateLogCell(item.subject));
+            body.appendChild(row);
+        });
+    } else {
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 3;
+        cell.textContent = "暂无可显示的更新日志";
+        row.appendChild(cell);
+        body.appendChild(row);
+    }
+    table.appendChild(body);
+    wrap.appendChild(table);
+    details.appendChild(wrap);
+
+    document.body.appendChild(details);
+    flsOpenDisclosureModal(details);
+    details.remove();
+}
+
+const FLS_UPDATE_NOTICE_CACHE_KEY = "fls-update-notice-20260919-4";
+
+function flsReadUpdateNoticeCache(){
+    try {
+        const raw = localStorage.getItem(FLS_UPDATE_NOTICE_CACHE_KEY);
+        const value = raw ? JSON.parse(raw) : null;
+        return value && typeof value === "object" ? value : null;
+    } catch(e) {
+        return null;
+    }
+}
+
+function flsWriteUpdateNoticeCache(info){
+    if(!info || info.checking) return;
+
+    try {
+        localStorage.setItem(FLS_UPDATE_NOTICE_CACHE_KEY, JSON.stringify({
+            available:!!info.available,
+            version:String(info.version || ""),
+            current_version:String(info.current_version || ""),
+            checked_at:String(info.checked_at || ""),
+            saved_at:Date.now()
+        }));
+    } catch(e) {
+        // Storage can be unavailable in private browsing contexts.
+    }
+}
+
+function flsInitUpdateNotice(){
+    if(window.__FLS_UPDATE_NOTICE_INITIALIZED__) return;
+    window.__FLS_UPDATE_NOTICE_INITIALIZED__ = true;
+
+    const cached = flsReadUpdateNoticeCache();
+    if(cached) flsRenderUpdateNotice(cached);
+
+    async function loadState(allowOneRetry){
+        try {
+            const info = await flsFetchUpdateInfo(false);
+
+            if(info.checking && allowOneRetry){
+                setTimeout(function(){ loadState(false); }, 2500);
+                return;
+            }
+
+            if(!info.checking && info.ok){
+                flsWriteUpdateNoticeCache(info);
+                flsRenderUpdateNotice(info);
+            }
+        } catch(e) {
+            // Older servers or temporary network failures keep the cached state.
+        }
+    }
+
+    // One initial read and, only while the server's first-open check is running,
+    // one delayed retry. This is intentionally not a long-running poller.
+    loadState(true);
+}
+
 document.addEventListener("click", function(event){
     const summary = event.target.closest && event.target.closest("summary");
     const details = summary && summary.parentElement;
@@ -255,9 +424,13 @@ document.addEventListener("click", function(event){
 }, true);
 
 if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", function(){ flsConvertFeedbackCards(document); });
+    document.addEventListener("DOMContentLoaded", function(){
+        flsConvertFeedbackCards(document);
+        flsInitUpdateNotice();
+    });
 } else {
     flsConvertFeedbackCards(document);
+    flsInitUpdateNotice();
 }
 
 if(!window.__FLS_ALERT_PATCHED__){

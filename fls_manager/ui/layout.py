@@ -59,10 +59,10 @@ def layout(title, active, body):
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <meta name="csrf-token" content="__CSRF_TOKEN__">
 
-<link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=20260919-3">
-<link rel="stylesheet" href="/static/fls.css?v=20260919-3">
-<link rel="stylesheet" href="/static/fls_responsive.css?v=20260919-3">
-<link rel="stylesheet" href="/static/fls_theme.css?v=20260919-3">
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=20260919-4">
+<link rel="stylesheet" href="/static/fls.css?v=20260919-4">
+<link rel="stylesheet" href="/static/fls_responsive.css?v=20260919-4">
+<link rel="stylesheet" href="/static/fls_theme.css?v=20260919-4">
 
 </head>
 
@@ -74,6 +74,7 @@ def layout(title, active, body):
 <div class="app">
     <aside class="sidebar" id="sidebar">
         <div class="brand"><span></span>FLS 面板</div>
+        <div class="fls-update-notice-slot" id="flsUpdateNoticeSlot" aria-live="polite"></div>
         <nav class="nav" aria-label="主导航">__NAV__</nav>
     </aside>
 
@@ -89,7 +90,7 @@ def layout(title, active, body):
     </main>
 </div>
 
-<script src="/static/fls.js?v=20260919-3"></script>
+<script src="/static/fls.js?v=20260919-4"></script>
 </body>
 </html>
 '''
