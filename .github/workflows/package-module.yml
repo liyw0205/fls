@@ -87,6 +87,19 @@ jobs:
         run: |
           set -euo pipefail
 
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          info = json.loads(Path("version.json").read_text(encoding="utf-8"))
+          required = ("versionCode", "version", "zipUrl", "changelog")
+          missing = [key for key in required if not info.get(key)]
+          if missing or not isinstance(info["versionCode"], int):
+              raise SystemExit(f"invalid version.json, missing: {missing}")
+          if not Path("changelog.md").is_file():
+              raise SystemExit("changelog.md is missing")
+          PY
+
           rm -rf staging "$MODULE_ZIP"
           mkdir -p staging/payload/fls
 

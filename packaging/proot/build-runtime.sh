@@ -74,7 +74,8 @@ docker run --rm --platform "$PLATFORM" \
         /opt/fls-venv/bin/python -m pip install --no-cache-dir --disable-pip-version-check \
             Flask requests APScheduler PySocks
         rm -rf /var/lib/apt/lists/* /root/.cache /tmp/*
-        rm -f /etc/hostname
+        # Docker may expose /etc/hostname as a read-only mount; it is harmless in the archive.
+        rm -f /etc/hostname 2>/dev/null || true
         tar --numeric-owner --xattrs --acls --exclude=./out -czf /out/rootfs.tar.gz -C / .
     '
 
