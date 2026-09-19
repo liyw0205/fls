@@ -421,6 +421,36 @@ is_running_pid() {
   return 1
 }
 
+module_status_update() {
+  prop_file="${FLS_MODULE_PROP:-}"
+  [ -n "$prop_file" ] || return 0
+  [ -f "$prop_file" ] || return 0
+
+  status_pid="$(get_pid)"
+  if is_running_pid "$status_pid"; then
+    status_text="🟢 运行中"
+    status_port="${FLS_PORT:-}"
+    if [ -z "$status_port" ] && [ -r "/proc/$status_pid/environ" ]; then
+      status_port="$(tr '\0' '\n' < "/proc/$status_pid/environ" 2>/dev/null | sed -n 's/^FLS_PORT=//p' | head -n 1)"
+    fi
+    [ -n "$status_port" ] || status_port="$(read_config_value port "$DEFAULT_PORT")"
+  else
+    status_text="🔴 已停止"
+    status_pid="-"
+    status_port="$(read_config_value port "$DEFAULT_PORT")"
+  fi
+
+  status_tmp="${prop_file}.tmp.$$"
+  status_description="description=$status_text | 端口: $status_port | PID: $status_pid"
+  awk -v replacement="$status_description" '
+    BEGIN { replaced = 0 }
+    /^description=/ { print replacement; replaced = 1; next }
+    { print }
+    END { if (!replaced) print replacement }
+  ' "$prop_file" > "$status_tmp" 2>/dev/null && cat "$status_tmp" > "$prop_file"
+  rm -f "$status_tmp" 2>/dev/null || true
+}
+
 find_running_pids() {
   if command -v pgrep >/dev/null 2>&1; then
     pgrep -x "fls-manager" 2>/dev/null || true
@@ -502,6 +532,7 @@ start_fls() {
   if is_running_pid "$old_pid"; then
     say "FLS Manager 已在运行，PID: $old_pid"
     say "如需应用新的临时端口/Token，请执行：sh fls.sh restart -p 端口 -t Token"
+    module_status_update
     return 0
   fi
 
@@ -542,9 +573,11 @@ start_fls() {
     say "启动成功，PID: $pid"
     say "访问地址：http://服务器IP:$port_show"
     say "如首次使用，请访问面板完成 Token 设置"
+    module_status_update
   else
     err "启动失败，请查看日志：$DAEMON_LOG"
     tail -n 100 "$DAEMON_LOG" 2>/dev/null || true
+    module_status_update
     exit 1
   fi
 }
@@ -567,6 +600,7 @@ stop_fls() {
   if [ -z "$pids" ]; then
     say "FLS Manager 未运行"
     rm -f "$PID_FILE"
+    module_status_update
     return 0
   fi
 
@@ -586,6 +620,7 @@ stop_fls() {
 
   rm -f "$PID_FILE"
   say "已停止"
+  module_status_update
 }
 
 restart_fls() {
@@ -648,6 +683,7 @@ status_fls() {
   fi
 
   echo "===================================================="
+  module_status_update
 }
 
 tail_log() {

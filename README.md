@@ -1,271 +1,150 @@
 # FLS
 
 <p align="center">
+  <img src="https://raw.githubusercontent.com/liyw0205/fls/main/fls_manager/static/favicon-generated.png" alt="FLS 面板图标" width="128" height="128">
+</p>
+
+<p align="center">
   <b>FLS = Flask Lightweight Script Manager</b><br>
-  一个轻量级、开箱即用的脚本任务管理面板
+  一个轻量级的脚本任务管理面板
 </p>
 
 <p align="center">
   <a href="https://github.com/liyw0205/fls/stargazers"><img src="https://img.shields.io/github/stars/liyw0205/fls?style=flat-square" alt="stars"></a>
-  <a href="https://github.com/liyw0205/fls/network/members"><img src="https://img.shields.io/github/forks/liyw0205/fls?style=flat-square" alt="forks"></a>
-  <a href="https://github.com/liyw0205/fls/issues"><img src="https://img.shields.io/github/issues/liyw0205/fls?style=flat-square" alt="issues"></a>
+  <a href="https://github.com/liyw0205/fls/releases"><img src="https://img.shields.io/github/v/release/liyw0205/fls?style=flat-square" alt="release"></a>
   <a href="https://github.com/liyw0205/fls/blob/main/LICENSE"><img src="https://img.shields.io/github/license/liyw0205/fls?style=flat-square" alt="license"></a>
-  <img src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20Termux-blue?style=flat-square" alt="platform">
+  <img src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20Android%20%7C%20Termux-blue?style=flat-square" alt="platform">
   <img src="https://img.shields.io/badge/python-3.x-brightgreen?style=flat-square" alt="python">
 </p>
 
----
+FLS 提供 Web 面板来管理脚本、定时任务、日志、依赖、代理、通知和备份。项目地址：
+<https://github.com/liyw0205/fls>
 
-## 项目简介
+## 先看部署区别
 
-FLS 是一个基于 Flask 的轻量级脚本任务管理面板，支持通过 Web 页面管理脚本、定时任务、日志、代理、依赖、通知、备份恢复等功能。
+仓库中有两条 Android 容器链路，它们的运行位置和用途完全不同：
 
-项目地址：
+| 入口 | 适用环境 | 容器/项目位置 | 是否依赖 Termux | 用途 |
+| --- | --- | --- | --- | --- |
+| `fls-t.sh` | Termux，或 Android 外部 shell 调用 Termux | 运行时 `$HOME/.fls-runtime`，项目 `$HOME/fls` | 是 | Termux 专用 proot 部署 |
+| `fls-a.sh` | KernelSU / Magisk 模块环境 | 运行时 `/data/fls/runtime`，项目 `/data/fls/project` | 否 | 独立的 `/data/fls` proot 部署 |
 
-- GitHub：<https://github.com/liyw0205/fls>
+`fls-t.sh` 可以从 Android 外部调用，但它仍然连接到 Termux 的 HOME/PREFIX；这不等于
+KernelSU/Magisk 容器。`fls-a.sh` 使用模块安装的独立运行时，不读取 Termux 的 Python、项目或
+数据目录。
 
----
+模块构建使用 `packaging/magisk/fls-a.sh`，安装后复制为 `/data/adb/fls-a.sh`；仓库根目录的
+`fls-a.sh` 与模块入口保持相同实现，便于查看和手动测试。两者都不是 Termux 入口。
 
-## 功能特点
+## 功能
 
-- 支持 **Python / Shell / Node.js / TypeScript / PowerShell / Batch / PHP / Ruby / Perl / Lua / Java Jar**
-- 支持 **Cron 定时任务**
-- 支持 **任务超时控制**
-- 支持 **随机延迟启动**
-- 支持 **脚本拉取 / 导入 / 在线编辑 / 改名**
-- 支持 **日志查看 / 日志管理 / 自动清理**
-- 支持 **代理管理**
-- 支持 **依赖管理**
-- 支持 **通知推送**
-- 支持 **备份恢复**
-- 支持 **Linux / Windows / Termux**
-- 支持 **KernelSU / Magisk 调用 Termux 环境启动**
-- 支持 **Linux systemd 自启**
-- 支持 **Termux:Boot 自启**
-- 支持 **KernelSU / Magisk `/data/adb/service.d/` 自启**
-- 支持通过 GitHub Actions 打包 KernelSU / Magisk 通用模块 ZIP
-- 支持 **Windows 计划任务自启**
-- 自带 **启动 / 停止 / 重启 / 状态 / 日志 / 更新 / 强制 clone / 自启管理** 脚本
-
----
+- Python、Shell、Node.js、TypeScript、PowerShell、Batch、PHP、Ruby、Perl、Lua、Jar 任务
+- Cron 定时、超时控制、随机延迟、任务合集、任务启停和运行日志
+- 在线脚本导入、编辑、依赖管理、代理管理、通知推送、备份恢复
+- Linux、Windows、Termux 原生运行
+- Termux proot 运行时和 KernelSU/Magisk 独立 proot 运行时
+- Linux systemd、Termux:Boot、KernelSU/Magisk `service.d`、Windows 计划任务自启
+- GitHub Actions 打包 KernelSU/Magisk 模块和固定 proot 运行时
 
 ## 项目结构
 
 ```text
 fls/
-├─ fls-manager.py
-├─ fls.sh
-├─ fls.ps1
-├─ fls.bat
-├─ fls-a.sh
-├─ fls-t.sh
-├─ packaging/
-│  ├─ magisk/                 # KernelSU / Magisk 模块模板
-│  └─ proot/                  # Android proot 运行时构建脚本
-├─ fls_manager/
-│  ├─ app.py
-│  ├─ auth.py
-│  ├─ command.py
-│  ├─ config.py
-│  ├─ logs.py
-│  ├─ models.py
-│  ├─ notify.py
-│  ├─ paths.py
-│  ├─ proxy.py
-│  ├─ scheduler.py
-│  ├─ state.py
-│  ├─ task_runner.py
-│  ├─ ui/
-│  └─ routes/
-├─ data/
-├─ log/
-├─ scripts/
-└─ .venv/
+├─ fls-manager.py                 # 面板主入口
+├─ fls.sh                         # Linux/Termux 原生控制脚本
+├─ fls.ps1                        # Windows PowerShell 控制脚本
+├─ fls.bat                        # Windows CMD 入口
+├─ fls-t.sh                       # Termux proot 入口
+├─ fls-a.sh                       # /data/fls 容器入口
+├─ fls_manager/                   # Flask 面板代码
+├─ data/                          # 配置、任务、通知等运行数据
+├─ log/                           # 面板和任务日志
+├─ scripts/                       # 用户脚本
+├─ packaging/magisk/              # KernelSU/Magisk 模块模板
+├─ packaging/proot/               # proot 运行时构建脚本
+└─ .github/workflows/             # 模块和运行时工作流
 ```
 
-### 目录说明
+运行中的数据目录会被保留。更新程序时不要删除 `data/`、`log/` 和 `scripts/`。
 
-- `fls-manager.py`：主入口文件
-- `fls_manager/`：模块化核心代码
-- `fls.sh`：Linux / Termux 启停脚本
-- `fls.ps1`：Windows PowerShell 启停脚本
-- `fls.bat`：Windows CMD 启停入口
-- `fls-a.sh`：KernelSU / Magisk / adb root 环境调用 Termux 的启动脚本
-- `fls-t.sh`：Termux 专用 proot 启停脚本，支持 Termux 内和 Android 外部调用
-- `data/`：配置、任务、代理、通知等数据
-- `log/`：运行日志
-- `scripts/`：脚本目录
-- `.venv/`：Python 虚拟环境
+## Linux 安装
 
----
-
-## 脚本说明
-
-### `fls-manager.py`
-
-主程序入口，负责启动模块化 FLS Web 面板。
-
----
-
-### `fls.sh`
-
-Linux / Termux 启停脚本。
-
-支持：
+以 Debian/Ubuntu 为例：
 
 ```bash
+apt update
+apt install -y python3 python3-pip python3-venv git
+git clone https://github.com/liyw0205/fls.git
+cd fls
+chmod +x fls.sh
 sh fls.sh start
-sh fls.sh stop
-sh fls.sh restart
-sh fls.sh status
-sh fls.sh log
-sh fls.sh update
-sh fls.sh clone
-sh fls.sh bstart
-sh fls.sh rstart
-sh fls.sh ensure-repo
 ```
 
-临时参数：
+默认访问 `http://服务器IP:5700`。临时指定端口和 Token：
 
 ```bash
 sh fls.sh start -p 5701 -t 123456
-sh fls.sh restart -p 5701 -t 123456
 ```
 
-说明：
+`fls.sh` 支持 `start`、`stop`、`restart`、`status`、`log`、`update`、`clone`、
+`ensure-repo`、`bstart` 和 `rstart`。`FLS_BASE_DIR` 可以指定项目目录，`FLS_PYTHON` 可以
+指定 Python 解释器。
 
-- 无参数时只显示帮助，不进入交互菜单。
-- `ensure-repo` 会检查程序是否完整，不完整时才拉取仓库。
-- `update` 会执行 `git pull` 更新程序。
-- `clone` 会强制重新 clone 仓库并覆盖程序文件。
-- `bstart` 会生成自启配置并重启 FLS。
-- `rstart` 会移除自启配置并重启 FLS。
+## Termux：`fls-t.sh`
 
----
+这是 Termux 专用的 proot 部署。运行时会从固定的 `proot-runtime` Release 下载到
+`$HOME/.fls-runtime`，项目默认位于 `$HOME/fls`，不会写入 `/data/fls`。
 
-### `fls.ps1`
-
-Windows PowerShell 启停脚本。
-
-支持：
-
-```powershell
-.\fls.ps1 start
-.\fls.ps1 stop
-.\fls.ps1 restart
-.\fls.ps1 status
-.\fls.ps1 log
-.\fls.ps1 update
-.\fls.ps1 clone
-.\fls.ps1 bstart
-.\fls.ps1 rstart
-.\fls.ps1 ensure-repo
-.\fls.ps1 menu
-```
-
-说明：
-
-- Windows 版本保留前台菜单。
-- 双击或无参数默认进入菜单。
-- 可以关闭窗口退出菜单，不影响已后台启动的 FLS 面板进程。
-- `bstart` 会创建 Windows 计划任务实现开机自启。
-- `rstart` 会移除 Windows 计划任务并重启 FLS。
-
----
-
-### `fls.bat`
-
-Windows CMD 启停入口。
-
-支持：
-
-```bat
-fls.bat start
-fls.bat stop
-fls.bat restart
-fls.bat status
-fls.bat log
-fls.bat update
-fls.bat clone
-fls.bat bstart
-fls.bat rstart
-fls.bat ensure-repo
-fls.bat menu
-```
-
-说明：
-
-- `fls.bat` 会调用同目录下的 `fls.ps1`。
-- 建议将 `fls.bat` 和 `fls.ps1` 放在同一目录。
-
----
-
-### `fls-a.sh`
-
-KernelSU / Magisk / adb root 环境调用 Termux 运行 FLS 的脚本。
-
-支持：
+### Termux 内安装
 
 ```bash
-sh fls-a.sh start
-sh fls-a.sh stop
-sh fls-a.sh restart
-sh fls-a.sh status
-sh fls-a.sh log
-sh fls-a.sh update
-sh fls-a.sh clone
-sh fls-a.sh bstart
-sh fls-a.sh rstart
-sh fls-a.sh ensure-repo
+pkg update -y
+pkg install -y curl git
+git clone https://github.com/liyw0205/fls.git "$HOME/fls"
+sh "$HOME/fls/fls-t.sh" start
 ```
 
-说明：
-
-- 手动无参数执行时，只显示帮助，不进入菜单。
-- 放入 `/data/adb/service.d/` 后无参数默认执行 `start`。
-- 如果 Termux 中没有 FLS 文件，会自动在 Termux 环境中安装 git 并 `git clone` 完整仓库。
-- `bstart` 会生成 `/data/adb/service.d/fls-a.sh` 自启脚本并重启 FLS。
-- `rstart` 会移除 `/data/adb/service.d/fls-a.sh` 自启脚本并重启 FLS。
-- 不提供交互菜单，避免 Android 文件管理器或后台环境断开输入后造成异常。
-
----
-
-### `fls-t.sh`
-
-Termux 专用的 FLS proot 入口，与模块用的 `fls-a.sh` 分开维护。它既可以在
-Termux 内执行，也可以从 KernelSU/Magisk/adb root 等 Android shell 外部调用。
+首次执行会按 ABI 下载 `python` 运行时。需要更多 Linux 工具时选择 `all`：
 
 ```bash
-# Termux 内
-sh ~/fls/fls-t.sh start
-sh ~/fls/fls-t.sh status
+printf '%s\n' all > "$HOME/.fls-profile"
+sh "$HOME/fls/fls-t.sh" restart
+```
 
-# Android 外部 shell（默认定位 com.termux）
+### Android 外部调用 Termux
+
+模块安装后可直接使用 `/data/adb/fls-t.sh`；也可以把仓库中的脚本放到该路径：
+
+```bash
 su -c 'sh /data/adb/fls-t.sh start'
 su -c 'sh /data/adb/fls-t.sh status'
 ```
 
-首次执行时，脚本会从 GitHub Release 的固定 `proot-runtime` 标签下载与设备架构匹配的
-`python` 运行时，解压到 Termux 的 `$HOME/.fls-runtime`；不会写入 `/data/fls`，也不要求
-Termux 预先安装 Python。项目默认位于 `$HOME/fls`，项目更新、重新 clone 时会保留
-`data/`、`log/` 和 `scripts/`。
-
-默认使用轻量 `python` 运行时。如需安装包含更多 Linux 工具的运行时：
+脚本默认定位 `com.termux` 的 HOME/PREFIX。其他包名或多用户路径使用环境变量覆盖：
 
 ```bash
-printf '%s\n' all > "$HOME/.fls-profile"
-sh ~/fls/fls-t.sh restart
+su -c 'TERMUX_PACKAGE=com.termux TERMUX_HOME=/data/data/com.termux/files/home \
+  TERMUX_PREFIX=/data/data/com.termux/files/usr sh /data/adb/fls-t.sh restart'
 ```
 
-可通过 `TERMUX_PACKAGE`、`TERMUX_HOME`、`TERMUX_PREFIX` 覆盖外部调用的 Termux 路径，
-通过 `FLS_PROOT_PROFILE=python|all` 临时选择运行时。支持的命令与 `fls.sh` 一致，另外
-`bstart`/`rstart` 管理 Termux:Boot 自启：
+常用变量：
+
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `TERMUX_PACKAGE` | `com.termux` | Termux 包名 |
+| `TERMUX_HOME` | 根据包名推导 | Termux HOME |
+| `TERMUX_PREFIX` | 根据包名推导 | Termux PREFIX |
+| `FLS_BASE_DIR` | `$TERMUX_HOME/fls` | Termux 容器中的项目目录 |
+| `FLS_RUNTIME_DIR` | `$TERMUX_HOME/.fls-runtime` | Termux 容器运行时 |
+| `FLS_PROOT_PROFILE` | `python` | `python` 或 `all` |
+| `FLS_REPO_URL` | FLS GitHub 仓库 | 项目仓库地址 |
+
+支持命令：
 
 ```bash
-sh fls-t.sh start
+sh fls-t.sh start [-p 5700] [-t 123456]
 sh fls-t.sh stop
-sh fls-t.sh restart
+sh fls-t.sh restart [-p 5700] [-t 123456]
 sh fls-t.sh status
 sh fls-t.sh log
 sh fls-t.sh update
@@ -275,236 +154,45 @@ sh fls-t.sh bstart
 sh fls-t.sh rstart
 ```
 
----
+`bstart`/`rstart` 管理的是 Termux:Boot；它们不创建 KernelSU/Magisk 的
+`service.d` 服务。
 
-## 命令说明
+## KernelSU / Magisk：`fls-a.sh`
 
-### 基础命令
+该入口使用模块自己的 proot 和 Python，不需要安装或启动 Termux。模块安装完成后：
 
-| 命令 | 说明 |
-|---|---|
-| `start` | 启动 FLS |
-| `stop` | 停止 FLS |
-| `restart` | 重启 FLS |
-| `status` | 查看运行状态 |
-| `log` / `logs` | 查看实时日志 |
-| `update` | 使用 `git pull` 更新程序 |
-| `clone` | 强制重新 clone 仓库并覆盖程序文件 |
-| `bstart` | 生成自启配置并重启 |
-| `rstart` | 移除自启配置并重启 |
-| `ensure-repo` | 检查程序完整性，不完整才 clone |
-| `menu` | Windows 前台菜单 |
+- 控制脚本：`/data/adb/fls-a.sh`
+- 模块目录：通常为 `/data/adb/modules/fls-manager`
+- 运行时：`/data/fls/runtime`
+- 项目：`/data/fls/project`
+- 数据：`/data/fls/project/data`
+- 日志：`/data/fls/project/log` 和 `/data/fls/fls-a.log`
 
----
-
-### `ensure-repo` 和 `clone` 的区别
-
-| 命令 | 行为 | 是否强制重新拉取 |
-|---|---|---|
-| `ensure-repo` | 检查本地程序是否完整，不完整才 clone | 否 |
-| `clone` | 不管本地是否完整，都重新 clone 并覆盖程序文件 | 是 |
-
-建议：
-
-- 首次安装或文件缺失：使用 `ensure-repo`
-- 本地仓库异常、文件混乱、`git pull` 失败：使用 `clone`
-- 正常更新：使用 `update`
-
----
-
-## 安装教程
-
----
-
-## 一、Linux 安装
-
-适用于：
-
-- Debian / Ubuntu
-- CentOS / Rocky / AlmaLinux
-- Alpine
-- 其他 Linux 环境
-
-### 1. 安装基础环境
-
-Debian / Ubuntu：
+安装模块后手动控制：
 
 ```bash
-apt update
-apt install -y python3 python3-pip python3-venv git
-```
-
-CentOS / Rocky / AlmaLinux：
-
-```bash
-yum install -y python3 python3-pip git
-```
-
-Alpine：
-
-```bash
-apk add --no-cache python3 py3-pip py3-virtualenv git
-```
-
-### 2. 下载项目
-
-```bash
-git clone https://github.com/liyw0205/fls.git
-cd fls
-chmod +x fls.sh
-```
-
-### 3. 启动
-
-```bash
-sh fls.sh start
-```
-
-### 4. 访问
-
-默认地址：
-
-```text
-http://服务器IP:5700
-```
-
-如果指定端口：
-
-```bash
-sh fls.sh start -p 5701
-```
-
-则访问：
-
-```text
-http://服务器IP:5701
-```
-
----
-
-## 二、Termux 安装
-
-### 1. 使用 Termux proot 运行时（推荐）
-
-只需安装下载工具和 Git（项目已经存在时 Git 可选）：
-
-```bash
-pkg update -y
-pkg install -y curl git
-```
-
-拉取项目并启动。第一次启动会自动下载 Release 运行时到 `$HOME/.fls-runtime`：
-
-```bash
-git clone https://github.com/liyw0205/fls.git "$HOME/fls"
-sh "$HOME/fls/fls-t.sh" start
-```
-
-如不使用 Git，可让脚本在缺少 Git 时通过仓库压缩包拉取；运行时仍会按需下载。
-
-### 2. 直接使用系统 Python（可选）
-
-如果希望沿用 Termux 自己的 Python 环境，也可以继续使用原来的入口：
-
-```bash
-pkg install -y python git
-git clone https://github.com/liyw0205/fls.git "$HOME/fls"
-cd "$HOME/fls"
-sh fls.sh start
-```
-
-### 3. 从 Android 外部调用
-
-```bash
-su -c 'sh /data/adb/fls-t.sh start'
-su -c 'sh /data/adb/fls-t.sh status'
-```
-
-外部调用默认使用 `/data/data/com.termux/files/home`，不依赖当前 root shell 的 `HOME`。
-如果 Termux 使用了其他包名或多用户路径，设置 `TERMUX_PACKAGE`、`TERMUX_HOME` 和
-`TERMUX_PREFIX` 后再调用。
-
----
-
-## 三、KernelSU / Magisk 手动启动 Termux 中的 FLS
-
-适用于：
-
-- KernelSU
-- Magisk
-- adb shell root
-- 需要开机自启 FLS 的 Android 环境
-
-### 1. 前提
-
-请先安装并初始化 Termux。
-
-如果希望 `fls-a.sh` 自动 clone 项目，需要 Termux 可正常使用 `pkg`。
-
-### 2. 放置脚本
-
-将 `fls-a.sh` 放到任意可执行位置，例如：
-
-```text
-/data/adb/fls-a.sh
-```
-
-赋予权限：
-
-```bash
-chmod 755 /data/adb/fls-a.sh
-```
-
-### 3. 手动测试
-
-```bash
+su -c 'sh /data/adb/fls-a.sh status'
 su -c 'sh /data/adb/fls-a.sh start'
+su -c 'sh /data/adb/fls-a.sh stop'
+su -c 'sh /data/adb/fls-a.sh restart -p 5701 -t 123456'
+su -c 'sh /data/adb/fls-a.sh log'
+su -c 'sh /data/adb/fls-a.sh update'
 ```
 
-### 4. 生成开机自启
+模块服务启动时会把项目同步到 `/data/fls/project`，保留该目录中的 `data/`、`log/` 和
+`scripts/`。模块卸载也不会删除 `/data/fls`，重新安装时可继续复用数据。
+
+### 运行时选择
+
+默认使用轻量 `python` 运行时。安装前或切换运行时前写入 `all`，然后重启设备或手动重启
+服务：
 
 ```bash
-su -c 'sh /data/adb/fls-a.sh bstart'
+su -c 'mkdir -p /data/fls && printf all > /data/fls/profile'
+su -c 'sh /data/adb/fls-a.sh restart'
 ```
 
-执行后会生成：
-
-```text
-/data/adb/service.d/fls-a.sh
-```
-
-### 5. 移除开机自启
-
-```bash
-su -c 'sh /data/adb/service.d/fls-a.sh rstart'
-```
-
-### 6. 查看日志
-
-查看 `fls-a.sh` 日志：
-
-```bash
-su -c 'cat /data/adb/fls-a.log'
-```
-
-查看 FLS 主进程日志：
-
-```bash
-su -c 'cat /data/data/com.termux/files/home/fls/log/fls-manager-daemon.log'
-```
-
-## 四、构建 KernelSU / Magisk proot 模块
-
-仓库内置两个 GitHub Actions 工作流：
-
-```text
-.github/workflows/package-module.yml
-.github/workflows/build-proot.yml
-```
-
-`package-module.yml` 只生成一个同时兼容 KernelSU 和 Magisk 的模块 ZIP。模块 ZIP 的根目录直接包含 `module.prop`、`customize.sh`、`service.sh`、`action.sh`、`fls-a.sh`、`fls-t.sh`、`version.json`、`changelog.md`、`webroot/index.html` 和 `fls/` 程序目录，不包含另一个模块 ZIP 或 `payload/` 包装层。
-
-`build-proot.yml` 单独生成并发布固定标签 `proot-runtime` 下的四个运行时资源：
+运行时资源来自固定标签 `proot-runtime`：
 
 ```text
 fls-proot-python-arm64.tar.gz
@@ -513,798 +201,120 @@ fls-proot-python-armv7.tar.gz
 fls-proot-all-armv7.tar.gz
 ```
 
-模块不依赖 Termux。安装模块时 `customize.sh` 会根据设备 ABI 和 `/data/fls/profile` 从 `proot-runtime` Release 下载运行时并解压到 `/data/fls/runtime`，将项目同步到 `/data/fls/project`，然后在容器内启动 FLS。`python` 运行时包含 Python、FLS 所需依赖和证书；`all` 额外包含 Git、curl、wget、编译工具、网络诊断工具等常用 Linux 工具。安装时只覆盖程序文件，保留 `/data/fls` 中已有的配置、任务、日志和用户脚本；若安装阶段网络不可用，`service.sh` 会在首次启动时重试。
+### 模块说明状态
 
-`/data/fls` 会在模块卸载时保留，以便重新安装模块时复用运行时、配置、任务和日志。模块升级只在模块版本变化时同步项目源码，不会覆盖 `/data/fls/project/data`、`log` 或用户脚本。
-
-### 手动构建
-
-进入 GitHub 仓库的 **Actions -> Package KernelSU Magisk module -> Run workflow**，构建结果会作为 Artifact 提供下载。正式发布模块时，先更新 `version.json` 中的 `versionCode` 和 `version`，再推送相同版本的 `v*` 标签；`module.prop` 会从 `version.json` 生成，KernelSU/Magisk 通过 `updateJson` 检测更新。四个 proot 运行时只需在 **Actions -> Build fixed FLS proot runtimes** 中单独运行，发布到固定标签 `proot-runtime`。
-
-### 发布构建
-
-推送与 `version.json.version` 一致的版本标签即可生成模块 Artifact 和 GitHub Release：
-
-```bash
-git tag v20260920.1
-git push origin v20260920.1
-```
-
-生成文件：
+模块的 `/data/adb/modules/fls-manager/module.prop` 中的 `description` 会在面板启动、停止、
+重启和状态查询时更新，显示：
 
 ```text
-fls-manager-module.zip
+🟢 运行中 | 端口: 5700 | PID: 12345
+🔴 已停止 | 端口: 5700 | PID: -
 ```
 
-四个 `fls-proot-*.tar.gz` 文件只会出现在 `proot-runtime` 固定标签的运行时 Release 中，不会重复打包进模块 Release。
+这段说明是 KernelSU/Magisk 模块管理页面显示的当前面板状态，不代表 Termux 容器状态。
 
-安装模块后可通过以下路径手动控制 FLS。默认使用 `python` 运行时；安装前或切换运行时前可写入 `/data/fls/profile` 为 `all`，然后重启设备让模块服务重新下载运行时：
+## Windows
 
-```bash
-su -c 'mkdir -p /data/fls && printf all > /data/fls/profile'
-su -c 'reboot'
-```
-
-手动控制 FLS：
-
-```bash
-su -c 'sh /data/adb/fls-a.sh status'
-su -c 'sh /data/adb/fls-a.sh restart'
-su -c 'sh /data/adb/fls-a.sh log'
-```
-
----
-
-## 五、Windows 安装
-
-### 1. 安装基础环境
-
-需要安装：
-
-- Python：<https://www.python.org/downloads/windows/>
-- Git：<https://git-scm.com/download/win>
-
-也可以让脚本尝试通过 `winget` 自动安装 Git。
-
-### 2. 下载项目
+安装 Python 和 Git 后：
 
 ```powershell
 git clone https://github.com/liyw0205/fls.git
 cd fls
-```
-
-### 3. PowerShell 启动
-
-```powershell
 .\fls.ps1 start
 ```
 
-如果遇到执行策略限制：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\fls.ps1 start
-```
-
-### 4. CMD 启动
-
-```bat
-fls.bat start
-```
-
-### 5. Windows 菜单
-
-双击：
-
-```text
-fls.bat
-```
-
-或执行：
-
-```powershell
-.\fls.ps1 menu
-```
-
-可以进入前台菜单。
-
----
-
-## 首次使用说明
-
-### 默认端口
-
-默认端口：
-
-```text
-5700
-```
-
-临时指定端口：
-
-Linux / Termux：
-
-```bash
-sh fls.sh start -p 5701
-```
-
-Windows PowerShell：
-
-```powershell
-.\fls.ps1 start -p 5701
-```
-
-Windows CMD：
-
-```bat
-fls.bat start -p 5701
-```
-
-KernelSU / Magisk：
-
-```bash
-su -c 'sh /data/adb/service.d/fls-a.sh start -p 5701'
-```
-
----
-
-### 登录 Token
-
-#### 方式 1：启动时临时指定
-
-Linux / Termux：
-
-```bash
-sh fls.sh start -t 123456
-```
-
-Windows PowerShell：
-
-```powershell
-.\fls.ps1 start -t 123456
-```
-
-Windows CMD：
-
-```bat
-fls.bat start -t 123456
-```
-
-KernelSU / Magisk：
-
-```bash
-su -c 'FLS_TOKEN=123456 sh /data/adb/service.d/fls-a.sh start'
-```
-
-#### 方式 2：首次访问网页设置
-
-如果未预设 Token，首次访问会进入：
-
-```text
-/setup
-```
-
-根据页面提示设置登录 Token 即可。
-
----
-
-## 常用命令
-
-### Linux / Termux
-
-```bash
-sh fls.sh start
-sh fls.sh stop
-sh fls.sh restart
-sh fls.sh status
-sh fls.sh log
-sh fls.sh update
-sh fls.sh clone
-sh fls.sh bstart
-sh fls.sh rstart
-sh fls.sh ensure-repo
-```
-
-### Windows PowerShell
-
-```powershell
-.\fls.ps1 start
-.\fls.ps1 stop
-.\fls.ps1 restart
-.\fls.ps1 status
-.\fls.ps1 log
-.\fls.ps1 update
-.\fls.ps1 clone
-.\fls.ps1 bstart
-.\fls.ps1 rstart
-.\fls.ps1 ensure-repo
-```
-
-### Windows CMD
-
-```bat
-fls.bat start
-fls.bat stop
-fls.bat restart
-fls.bat status
-fls.bat log
-fls.bat update
-fls.bat clone
-fls.bat bstart
-fls.bat rstart
-fls.bat ensure-repo
-```
-
-### KernelSU / Magisk
-
-```bash
-su -c 'sh /data/adb/service.d/fls-a.sh start'
-su -c 'sh /data/adb/service.d/fls-a.sh stop'
-su -c 'sh /data/adb/service.d/fls-a.sh restart'
-su -c 'sh /data/adb/service.d/fls-a.sh status'
-su -c 'sh /data/adb/service.d/fls-a.sh update'
-su -c 'sh /data/adb/service.d/fls-a.sh clone'
-su -c 'sh /data/adb/service.d/fls-a.sh bstart'
-su -c 'sh /data/adb/service.d/fls-a.sh rstart'
-```
-
----
-
-## 更新与维护
-
-### update：正常更新
-
-执行 `git pull` 更新当前仓库：
-
-Linux / Termux：
-
-```bash
-sh fls.sh update
-```
-
-Windows：
-
-```powershell
-.\fls.ps1 update
-```
-
-KernelSU / Magisk：
-
-```bash
-su -c 'sh /data/adb/service.d/fls-a.sh update'
-```
-
-更新后如面板正在运行，建议重启：
-
-```bash
-sh fls.sh restart
-```
-
----
-
-### clone：强制重新 clone
-
-当本地仓库异常、文件缺失、`git pull` 失败时，可以强制重新 clone 覆盖程序文件。
-
-Linux / Termux：
-
-```bash
-sh fls.sh clone
-```
-
-Windows：
-
-```powershell
-.\fls.ps1 clone
-```
-
-KernelSU / Magisk：
-
-```bash
-su -c 'sh /data/adb/service.d/fls-a.sh clone'
-```
-
-说明：
-
-- 会重新拉取仓库代码。
-- 会覆盖程序文件。
-- 通常会保留 `data/`、`log/`、`scripts/`、`.venv/` 等本地数据目录。
-- 如果面板正在运行，建议执行后重启。
-
----
-
-### ensure-repo：检查/拉取程序
-
-用于检查程序文件是否完整。
-
-Linux / Termux：
-
-```bash
-sh fls.sh ensure-repo
-```
-
-Windows：
-
-```powershell
-.\fls.ps1 ensure-repo
-```
-
-KernelSU / Magisk：
-
-```bash
-su -c 'sh /data/adb/service.d/fls-a.sh ensure-repo'
-```
-
-说明：
-
-- 如果本地程序完整，则不做处理。
-- 如果缺少 `fls-manager.py` 或 `fls_manager/`，才会自动 clone 仓库。
-
----
-
-## 自启管理
-
-### bstart：生成自启并重启
-
-Linux systemd：
-
-```bash
-sudo sh fls.sh bstart
-```
-
-Termux：
-
-```bash
-sh fls.sh bstart
-```
-
-KernelSU / Magisk：
-
-```bash
-su -c 'sh /data/adb/fls-a.sh bstart'
-```
-
-Windows：
-
-```powershell
-.\fls.ps1 bstart
-```
-
-说明：
-
-- Linux 会生成并启用：
-
-```text
-/etc/systemd/system/fls.service
-```
-
-- Termux 会生成 Termux:Boot 脚本：
-
-```text
-~/.termux/boot/fls-start.sh
-```
-
-- KernelSU / Magisk 会生成：
-
-```text
-/data/adb/service.d/fls-a.sh
-```
-
-- Windows 会生成计划任务：
-
-```text
-FLS Manager
-```
-
-生成自启后会立即重启 FLS。
-
----
-
-### rstart：移除自启并重启
-
-Linux：
-
-```bash
-sudo sh fls.sh rstart
-```
-
-Termux：
-
-```bash
-sh fls.sh rstart
-```
-
-KernelSU / Magisk：
-
-```bash
-su -c 'sh /data/adb/service.d/fls-a.sh rstart'
-```
-
-Windows：
-
-```powershell
-.\fls.ps1 rstart
-```
-
-说明：
-
-- 会移除对应平台的自启配置。
-- 移除后会立即重启 FLS。
-- 注意：`rstart` 不是停止 FLS，而是移除自启后重启当前服务。
-
----
-
-## 任务命令说明
-
-### `task` 模式
-
-表示运行脚本目录中的脚本，或运行绝对路径脚本。
+也可以执行 `fls.bat start`，双击 `fls.bat` 或执行 `.\fls.ps1 menu` 打开交互菜单。支持
+`start`、`stop`、`restart`、`status`、`log`、`update`、`clone`、`ensure-repo`、
+`bstart` 和 `rstart`。
+
+## 配置与登录
+
+- 默认端口：`5700`
+- 启动参数：`-p/--port` 和 `-t/--token`
+- 也可以使用环境变量 `FLS_PORT`、`FLS_TOKEN`、`FLS_BASE_DIR`、`FLS_PYTHON`
+- 未配置 Token 时，首次访问会进入 `/setup` 设置
 
 示例：
 
-```text
-task 1.py
-task folder/main.py
-task demo.sh arg1 arg2
-task demo.js
-task demo.ts
-task run.ps1
-task run.bat
-task demo.php
-task demo.rb
-task demo.pl
-task demo.lua
-task app.jar
-task /root/test.py
+```bash
+FLS_PORT=5701 FLS_TOKEN=123456 sh fls.sh restart
 ```
 
-### 系统命令模式
-
-不以 `task` 开头时，作为系统命令直接执行。
-
-示例：
+面板启动后访问：
 
 ```text
-python3 /root/other.py
-bash /root/test.sh
-node /root/demo.js
+http://设备IP:端口
 ```
 
----
+## GitHub Actions 与发布
 
-## 支持的脚本类型
+### 模块工作流
 
-当前支持：
+`.github/workflows/package-module.yml` 只生成 `fls-manager-module.zip`。ZIP 根目录直接包含：
 
-- `.py`
-- `.sh`
-- `.js`
-- `.ts`
-- `.ps1`
-- `.bat`
-- `.php`
-- `.rb`
-- `.pl`
-- `.lua`
-- `.jar`
+```text
+module.prop
+customize.sh
+service.sh
+action.sh
+uninstall.sh
+runtime.sh
+runtime.env
+fls-a.sh
+fls-t.sh
+version.json
+changelog.md
+webroot/index.html
+fls/
+```
 
-可在面板 **配置页** 中启用或禁用。
+不会再包一层 ZIP，也不会生成 `payload/` 嵌套目录。普通推送只有 `version.json` 发生变化时
+才自动打包；`workflow_dispatch` 可以手动打包；推送 `v*` 标签时才创建模块 Release。
 
----
+### 固定 proot 工作流
 
-## FLS 内置命令：fls_kill
+`.github/workflows/build-proot.yml` 只支持手动触发，四个运行时统一发布到固定标签
+`proot-runtime`，不会因为普通提交重复构建。模块安装时按架构和 `/data/fls/profile` 下载
+已有资源。
 
-FLS 支持在任务命令中直接使用内置命令 `fls_kill`，用于清理残留进程、端口或后台服务。
+### 版本文件
 
-支持参数：
+`version.json` 的 `versionCode` 和 `version` 用于 KernelSU/Magisk 更新判断；
+`changelog.md` 是更新日志。发布模块时应保持版本标签与 `version.json.version` 一致：
 
 ```bash
-fls_kill -p 3000                 # 按端口清理
-fls_kill -n apiService           # 按进程名 / 命令关键字清理
-fls_kill -f kgcheckin/api/app.js # 按文件或路径清理
-fls_kill -d 12345                # 按 PID 清理
+git tag v20260920.3
+git push origin v20260920.3
 ```
 
-常见用法：
+## 数据和更新
 
-```bash
-cd kgcheckin || exit 1
-
-cleanup() {
-  fls_kill -p 3000
-}
-
-trap cleanup EXIT INT TERM HUP
-
-fls_kill -p 3000
-
-npm run main
-```
-
-说明：
-
-- `fls_kill` 是 FLS 内置命令，只能在 FLS 任务命令中使用。
-- 推荐优先使用 `-p` 按端口清理，最安全。
-- `-n` 是按命令关键字匹配，请避免写过于宽泛的名称，例如 `fls_kill -n node`，防止误杀其他进程。
-
----
-
-## Web 面板功能
-
-- **仪表盘**
-- **任务管理**
-- **全局变量**
-- **代理管理**
-- **脚本管理**
-- **依赖管理**
-- **日志管理**
-- **通知管理**
-- **备份恢复**
-- **配置管理**
-- **环境状态查看**
-
----
-
-## 通知支持
-
-支持以下通知渠道：
-
-- Bark
-- Server 酱
-- PushPlus
-- Telegram Bot
-- 企业微信机器人
-- 钉钉机器人
-- 飞书机器人
-- SMTP 邮件
-- Ntfy
-- WxPusher
-- Gotify
-- PushDeer
-- 自定义 Webhook
-
-说明：
-
-- 可配置多个通知实例
-- 同一渠道可配置多份
-- 任务可选择不通知、使用全局默认通知或指定通知渠道
-
----
-
-## 数据文件说明
-
-- `data/tasks.json`：任务数据
-- `data/global_env.json`：全局变量
-- `data/proxies.json`：代理配置
-- `data/config.json`：系统配置
-- `data/fls-manager.pid`：主进程 PID
-- `data/secret_key.txt`：Flask Session 密钥
-
----
-
-## 日志说明
-
-日志目录：
+源码更新只替换程序文件，不应覆盖：
 
 ```text
+data/
 log/
+scripts/
 ```
 
-包括：
+Termux 容器执行 `sh fls-t.sh update` 或 `clone`；KernelSU/Magisk 容器执行
+`sh /data/adb/fls-a.sh update` 或 `clone`。两条链路的项目和数据目录互相独立，更新时不要把
+Termux 的 `$HOME/fls` 与 `/data/fls/project` 混用。
 
-- 任务日志
-- 主进程日志
-- 依赖安装日志
-- 系统环境安装日志
-- 备份恢复日志
+## 开发与测试
 
-查看主进程日志：
-
-Linux / Termux：
+本地测试：
 
 ```bash
-sh fls.sh log
+PYTHONPATH=. pytest -q
+python3 -m compileall -q fls_manager
+git diff --check
 ```
 
-Windows：
-
-```powershell
-.\fls.ps1 log
-```
-
-KernelSU / Magisk：
-
-```bash
-su -c 'sh /data/adb/service.d/fls-a.sh log'
-```
-
----
-
-## 备份恢复
-
-支持格式：
-
-- `.tar.gz`
-- `.tgz`
-- `.tar`
-- `.zip`
-
-说明：
-
-- 备份时会自动导出依赖列表
-- 恢复时可选择同时恢复 Python 依赖
-
----
-
-## 常见问题
-
-### 1. 启动失败怎么办？
-
-查看日志：
-
-Linux / Termux：
-
-```bash
-sh fls.sh log
-```
-
-Windows PowerShell：
-
-```powershell
-.\fls.ps1 log
-```
-
-Windows CMD：
-
-```bat
-fls.bat log
-```
-
-KernelSU / Magisk：
-
-```bash
-su -c 'cat /data/adb/fls-a.log'
-su -c 'cat /data/data/com.termux/files/home/fls/log/fls-manager-daemon.log'
-```
-
----
-
-### 2. 提示没有 git
-
-安装 Git：
-
-Linux：
-
-```bash
-apt install -y git
-```
-
-Termux：
-
-```bash
-pkg install -y git
-```
-
-Windows：
-
-<https://git-scm.com/download/win>
-
----
-
-### 3. 端口无法访问
-
-请检查：
-
-- 程序是否已启动
-- 防火墙是否放行端口
-- 云服务器安全组是否放行端口
-- 是否使用了其他端口启动
-- 是否监听在正确的主机地址
-
----
-
-### 4. 首次访问要求设置 Token
-
-正常现象。
-
-如果未设置登录 Token，首次访问会自动进入：
-
-```text
-/setup
-```
-
----
-
-### 5. 为什么任务运行后没有通知？
-
-请检查：
-
-- 是否在通知管理中创建并启用了通知
-- 是否设置了全局默认通知
-- 任务是否选择了“不通知”
-- 通知渠道配置是否正确
-
----
-
-### 6. Android 上为什么不提供 menu？
-
-`fls-a.sh` 主要面向 KernelSU / Magisk / adb root 等非交互环境。
-
-为了避免文件管理器后台被杀、标准输入断开后造成脚本残留或异常占用，不提供交互菜单。
-
-请直接使用：
-
-```bash
-start
-stop
-restart
-status
-log
-update
-clone
-bstart
-rstart
-```
-
-等一次性命令。
-
----
-
-### 7. `update` 和 `clone` 应该用哪个？
-
-建议：
-
-- 正常更新：使用 `update`
-- 本地仓库损坏或文件混乱：使用 `clone`
-- 只是检查程序是否存在：使用 `ensure-repo`
-
----
-
-### 8. `bstart` 和 `rstart` 是什么意思？
-
-- `bstart`：boot start，生成自启配置并重启 FLS。
-- `rstart`：remove start，移除自启配置并重启 FLS。
-
-注意：
-
-```text
-rstart 不是停止程序，而是移除自启后重启当前 FLS。
-```
-
-如果只想停止 FLS，请使用：
-
-```bash
-sh fls.sh stop
-```
-
-或：
-
-```powershell
-.\fls.ps1 stop
-```
-
----
-
-## AI 说明
-
-本项目在开发过程中使用了 AI 辅助生成、重构、润色和整理部分代码与文档，最终内容由项目维护者审阅、整合与维护。
-
-详见：[AI-NOTICE.md](./AI-NOTICE.md)
-
----
-
-## 作者信息
-
-- 作者：**余生只有凄渺**
-- QQ群：**923184177**
-
----
+Web 界面变更应在当前 Termux 浏览器环境同时验证手机端和桌面端：登录、侧边栏切换、任务
+启动/停止、日志弹窗、模块状态显示和更新提示，并检查布局错位、按钮重复触发、功能互相
+干扰及错误状态。测试完成后再提交代码和工作流变更。
 
 ## License
 
-本项目采用 [MIT License](./LICENSE) 开源。
-
----
-
-## Star 支持
-
-如果这个项目对你有帮助，欢迎点一个 **Star** ⭐
+详见 [`LICENSE`](LICENSE)。
