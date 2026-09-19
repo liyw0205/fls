@@ -1,6 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
-  <title>FLS</title>
-  <rect width="64" height="64" rx="14" fill="#111827"/>
-  <path d="M16 14h32v9H26v8h19v9H26v10h-10z" fill="#18a058"/>
-  <circle cx="48" cy="48" r="6" fill="#f59e0b"/>
-</svg>

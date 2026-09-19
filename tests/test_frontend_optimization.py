@@ -59,21 +59,21 @@ class FrontendOptimizationTests(unittest.TestCase):
             html = response.get_data(as_text=True)
 
             self.assertEqual(response.status_code, 200)
-            self.assertIn('/static/favicon.svg?v=20260919-5', html)
+            self.assertIn('/static/favicon-generated.png?v=20260920-1', html)
             self.assertIn('/static/fls.css?v=20260919-5', html)
             self.assertIn('/static/fls.js?v=20260919-5', html)
             self.assertIn('/static/fls_theme.css?v=20260919-5', html)
             self.assertIn('id="flsUpdateNoticeSlot"', html)
 
-    def test_favicon_is_served_as_static_asset(self):
+    def test_generated_favicon_is_served_as_static_asset(self):
         with isolated_app() as app:
-            response = app.test_client().get("/static/favicon.svg")
+            response = app.test_client().get("/static/favicon-generated.png")
             data = response.get_data()
             response.close()
 
             self.assertEqual(response.status_code, 200)
-            self.assertIn("image/svg+xml", response.content_type)
-            self.assertIn(b"<title>FLS</title>", data)
+            self.assertIn("image/png", response.content_type)
+            self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
 
     def test_long_pages_expose_section_navigation_targets(self):
         with isolated_app() as app:

@@ -190,6 +190,28 @@ def check_static_asset(client, path, required_tokens):
     return name, errors
 
 
+def check_binary_asset(client, path, content_type, signature):
+    name = f"static {path}"
+    errors = []
+
+    try:
+        response = client.get(path)
+    except Exception as exc:
+        return fail_item(name, f"request raised {type(exc).__name__}: {exc}")
+
+    if response.status_code >= 500:
+        errors.append(f"returned HTTP {response.status_code}")
+    elif response.status_code != 200:
+        errors.append(f"expected HTTP 200, got {response.status_code}")
+
+    if content_type not in response.content_type:
+        errors.append(f"expected content type containing {content_type}, got {response.content_type}")
+    if not response.get_data().startswith(signature):
+        errors.append("unexpected binary signature")
+
+    return name, errors
+
+
 def run_smoke():
     results = []
 
@@ -231,10 +253,11 @@ def run_smoke():
                 )
             )
             results.append(
-                check_static_asset(
+                check_binary_asset(
                     client,
-                    "/static/favicon.svg",
-                    ("<title>FLS</title>", "viewBox"),
+                    "/static/favicon-generated.png",
+                    "image/png",
+                    b"\x89PNG\r\n\x1a\n",
                 )
             )
         finally:
