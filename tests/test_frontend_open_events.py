@@ -132,6 +132,18 @@ class FrontendOpenEventTests(unittest.TestCase):
             self.assertFalse(state["checking"])
             self.assertIn("不是 Git 仓库", state["error"])
 
+    def test_notification_worker_records_send_result(self):
+        with isolated_app():
+            from fls_manager.frontend_events import _frontend_open_worker
+
+            with patch(
+                "fls_manager.frontend_events.send_all_enabled",
+                return_value=[{"ok": True}, {"ok": False}],
+            ), patch("fls_manager.frontend_events._log_frontend_event") as record:
+                _frontend_open_worker("127.0.0.1", "test-agent")
+
+            record.assert_called_once_with("首次访问通知已发送：1/2 个通道成功")
+
 
 if __name__ == "__main__":
     unittest.main()
