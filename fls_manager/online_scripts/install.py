@@ -5,10 +5,8 @@ import shutil
 import threading
 import subprocess
 
-import requests
-
 from ..paths import SCRIPT_DIR
-from ..utils import now_str
+from ..utils import now_str, LazyModule, prune_completed_records
 from ..proxy import (
     requests_proxy_dict,
     apply_proxy_env,
@@ -18,6 +16,8 @@ from ..proxy import (
 from .constants import ONLINE_INSTALL_RUNNING, ONLINE_INSTALL_STOPPING
 from .logs import append_log
 from .tasks import import_task_if_needed
+
+requests = LazyModule("requests")
 
 
 def get_running_install_by_script_id(script_id):

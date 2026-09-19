@@ -10,7 +10,7 @@ from flask import Blueprint, redirect, url_for
 
 from ..paths import BASE_DIR, LOG_DIR
 from ..state import DEPS_RUNNING
-from ..utils import now_str, safe_name
+from ..utils import now_str, safe_name, prune_completed_records
 
 bp = Blueprint("runtime", __name__)
 
@@ -177,12 +177,14 @@ def install_runtime(runtime):
         log_fp.write(f"生成安装命令失败: {e}\n".encode("utf-8"))
         log_fp.close()
 
+        prune_completed_records(DEPS_RUNNING, finished_key="finished")
         DEPS_RUNNING[install_id] = {
             "process": None,
             "package": runtime,
             "log_file": str(log_file),
             "log_fp": None,
             "start_time": time.time(),
+            "finished": True,
         }
 
         return redirect(url_for("deps.deps_install_log", install_id=install_id, back="/panel/status"))
@@ -205,12 +207,14 @@ def install_runtime(runtime):
             env=os.environ.copy()
         )
 
+        prune_completed_records(DEPS_RUNNING, finished_key="finished")
         DEPS_RUNNING[install_id] = {
             "process": proc,
             "package": runtime,
             "log_file": str(log_file),
             "log_fp": log_fp,
             "start_time": time.time(),
+            "finished": False,
         }
 
     except Exception as e:

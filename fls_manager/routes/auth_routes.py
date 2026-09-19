@@ -24,6 +24,7 @@ bp = Blueprint("auth", __name__)
 LOGIN_FAIL_STATE = {}
 LOGIN_LOCK_SECONDS = 300
 LOGIN_FAIL_LIMIT = 3
+LOGIN_FAIL_MAX_RECORDS = 256
 
 
 def client_ip():
@@ -36,6 +37,18 @@ def client_ip():
 
 def login_fail_info(ip):
     now = int(time.time())
+
+    for old_ip, old_info in list(LOGIN_FAIL_STATE.items()):
+        lock_until = int(old_info.get("lock_until", 0) or 0)
+        if lock_until and lock_until <= now:
+            LOGIN_FAIL_STATE.pop(old_ip, None)
+
+    if ip not in LOGIN_FAIL_STATE and len(LOGIN_FAIL_STATE) >= LOGIN_FAIL_MAX_RECORDS:
+        entries = list(LOGIN_FAIL_STATE.items())
+        entries.sort(key=lambda item: int(item[1].get("lock_until", 0) or 0))
+        if entries:
+            LOGIN_FAIL_STATE.pop(entries[0][0], None)
+
     info = LOGIN_FAIL_STATE.get(ip) or {
         "count": 0,
         "lock_until": 0,

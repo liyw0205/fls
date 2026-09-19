@@ -2,10 +2,10 @@ import time
 import re
 import shutil
 import subprocess
-import requests
-
 from .models import load_proxies
-from .utils import h
+from .utils import h, LazyModule
+
+requests = LazyModule("requests")
 
 
 GITHUB_QUALITY_RAW_URL = "https://github.com/liyw0205/fls-scripts/raw/refs/heads/main/index.json"

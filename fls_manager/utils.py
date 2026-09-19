@@ -1,4 +1,5 @@
 import html
+import importlib
 import re
 from datetime import datetime
 from urllib.parse import urlparse
@@ -106,3 +107,54 @@ def env_to_text(env):
     if not env:
         return ""
     return "\n".join([f'{k}="{str(v)}"' for k, v in env.items()])
+
+
+class LazyModule:
+    """Expose a module-like object while importing the real module on first use."""
+
+    def __init__(self, module_name):
+        self._module_name = module_name
+        self._module = None
+
+    def _load(self):
+        if self._module is None:
+            self._module = importlib.import_module(self._module_name)
+        return self._module
+
+    def __getattr__(self, name):
+        return getattr(self._load(), name)
+
+    def __dir__(self):
+        return dir(self._load())
+
+
+def prune_completed_records(records, max_completed=100, running_key="running", finished_key=None):
+    """Keep active records and only the newest completed records in memory."""
+    if not isinstance(records, dict):
+        return 0
+
+    try:
+        limit = max(0, int(max_completed))
+    except (TypeError, ValueError):
+        limit = 100
+
+    completed = []
+    for record_id, info in list(records.items()):
+        if not isinstance(info, dict):
+            continue
+
+        if running_key in info:
+            done = not bool(info.get(running_key))
+        elif finished_key:
+            done = bool(info.get(finished_key))
+        else:
+            done = False
+
+        if done:
+            completed.append(record_id)
+
+    remove_count = max(0, len(completed) - limit)
+    for record_id in completed[:remove_count]:
+        records.pop(record_id, None)
+
+    return remove_count

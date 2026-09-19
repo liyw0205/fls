@@ -17,7 +17,7 @@ from .helpers import (
 )
 
 from ...paths import LOG_DIR
-from ...utils import h, now_str, safe_name, get_back_url
+from ...utils import h, now_str, safe_name, get_back_url, prune_completed_records
 from ...ui.layout import layout
 from ...ui.components import page_header_card
 from ...ui.log_controls import log_controls
@@ -127,6 +127,8 @@ def scripts_debug_run(rel_path):
     debug_id = uuid.uuid4().hex
     log_file = script_debug_log_file(debug_id, target.name)
     log_fp = open(log_file, "ab", buffering=0)
+
+    prune_completed_records(SCRIPT_DEBUG_RUNNING)
 
     task = debug_task_for_script(rel, target, debug_id)
 

@@ -13,10 +13,10 @@ from email.mime.text import MIMEText
 from email.header import Header
 from email.utils import formataddr
 
-import requests
-
 from .config import load_config, save_config
-from .utils import now_str
+from .utils import now_str, LazyModule
+
+requests = LazyModule("requests")
 
 
 NOTIFY_LOG_MODES = {

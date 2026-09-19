@@ -17,7 +17,7 @@ from flask import request, Response, redirect, url_for, jsonify, abort
 from ...paths import BASE_DIR, DATA_DIR, SCRIPT_DIR, LOG_DIR
 from ...ui.layout import layout
 from ...ui.components import page_header, empty_table_row
-from ...utils import h, now_str, safe_name
+from ...utils import h, now_str, safe_name, prune_completed_records
 from ...scheduler import reload_scheduler
 
 BACKUP_DIR = DATA_DIR / "backups"
@@ -239,6 +239,7 @@ def create_backup_worker(job_id, items):
 def start_backup_job(items):
     job_id = uuid.uuid4().hex
 
+    prune_completed_records(BACKUP_JOBS)
     BACKUP_JOBS[job_id] = {
         "id": job_id,
         "items": list(items or []),

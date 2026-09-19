@@ -9,11 +9,9 @@ import shlex
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 
-import requests
-
 from ...ui.layout import layout
 from ...ui.components import empty_table_row
-from ...utils import h, now_str, safe_name
+from ...utils import h, now_str, safe_name, LazyModule, prune_completed_records
 from ...logs import tail_file
 from ...paths import BASE_DIR, DATA_DIR, LOG_DIR, SCRIPT_DIR
 from ...constants import MAIN_PROCESS_NAME, TASK_PROCESS_PREFIX
@@ -30,6 +28,8 @@ from .state import (
     ABOUT_STATE_LOCK,
     set_update_log_state,
 )
+
+requests = LazyModule("requests")
 
 
 # ============================================================
@@ -499,6 +499,7 @@ def start_about_job(action, title, target, args=()):
     log_file = about_job_log_file(job_id, action)
 
     with ABOUT_STATE_LOCK:
+        prune_completed_records(ABOUT_JOBS)
         ABOUT_JOBS[job_id] = {
             "id": job_id,
             "action": action,

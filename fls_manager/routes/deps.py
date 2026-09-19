@@ -9,7 +9,7 @@ from flask import Blueprint, request, redirect, url_for, jsonify
 
 from ..paths import BASE_DIR, LOG_DIR
 from ..state import DEPS_RUNNING
-from ..utils import h, now_str, safe_name, get_back_url
+from ..utils import h, now_str, safe_name, get_back_url, prune_completed_records
 from ..logs import tail_file
 from ..ui.layout import layout
 from ..ui.components import page_header_card, page_header, table_card, empty_table_row
@@ -227,6 +227,7 @@ def deps_install():
         log_fp.close()
         return f"启动安装失败：{h(e)}。下一步：检查 Python、pip 和日志目录权限后重试", 500
 
+    prune_completed_records(DEPS_RUNNING, finished_key="finished")
     DEPS_RUNNING[install_id] = {
         "process": proc,
         "package": name,

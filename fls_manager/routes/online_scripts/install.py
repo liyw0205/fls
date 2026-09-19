@@ -136,6 +136,7 @@ def online_scripts_install(script_id):
         item.get("name") or item.get("id"),
     )
 
+    prune_completed_records(ONLINE_INSTALL_RUNNING)
     ONLINE_INSTALL_RUNNING[install_id] = {
         "id": install_id,
         "script_id": script_id,

@@ -8,10 +8,8 @@ import subprocess
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
-import requests
-
 from ...paths import SCRIPT_DIR
-from ...utils import h, now_str
+from ...utils import h, now_str, LazyModule
 from ...command import build_command
 from ...ui.components import empty_state, empty_table_row
 from ...proxy import (
@@ -19,6 +17,8 @@ from ...proxy import (
     requests_proxy_dict,
     build_git_command_with_github_proxy,
 )
+
+requests = LazyModule("requests")
 
 
 def script_safe_path(rel_path=""):

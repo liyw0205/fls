@@ -3,10 +3,8 @@ import threading
 import uuid
 from pathlib import Path
 
-import requests
-
 from ..config import load_config
-from ..utils import now_str
+from ..utils import now_str, LazyModule
 from ..proxy import requests_proxy_dict, github_proxy_url
 from .constants import (
     DEFAULT_ONLINE_SCRIPT_SOURCE,
@@ -15,6 +13,8 @@ from .constants import (
 )
 from .logs import append_log, online_refresh_log_file
 from .tasks import normalize_online_task_crons
+
+requests = LazyModule("requests")
 
 
 def get_online_script_source():

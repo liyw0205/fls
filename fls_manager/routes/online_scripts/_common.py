@@ -5,10 +5,9 @@ import time
 from math import ceil
 from urllib.parse import quote
 
-import requests
 from flask import Blueprint, request, redirect, url_for, abort, jsonify
 
-from ...utils import h, get_back_url
+from ...utils import h, get_back_url, LazyModule, prune_completed_records
 from ...ui.components import message_card, page_header_card, pagination_card, summary_item, data_toolbar
 from ...ui.layout import layout
 from ...ui.log_controls import log_controls
@@ -61,6 +60,8 @@ from ...online_scripts.docs import (
 )
 
 from ...online_scripts.render import render_online_script_rows
+
+requests = LazyModule("requests")
 
 
 def online_scripts_page_links(q, page, pages):

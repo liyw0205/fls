@@ -919,6 +919,21 @@ class LogBoundaryTests(unittest.TestCase):
 
             self.assertEqual(logs.tail_file(log_file, lines=2), "�\nthree")
 
+    def test_tail_file_caps_unbounded_line_requests(self):
+        with isolated_fls_modules() as base_dir:
+            from fls_manager import logs
+
+            log_file = base_dir / "log" / "large-tail.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_file.write_text("\n".join(f"line-{i}" for i in range(6000)), encoding="utf-8")
+
+            result = logs.tail_file(log_file, lines=10**9)
+            lines = result.splitlines()
+
+            self.assertEqual(len(lines), logs.MAX_TAIL_LINES)
+            self.assertEqual(lines[0], "line-1000")
+            self.assertEqual(lines[-1], "line-5999")
+
     def test_parse_task_name_from_log_reads_header_only(self):
         with isolated_fls_modules() as base_dir:
             from fls_manager import logs

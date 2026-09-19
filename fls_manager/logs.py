@@ -7,6 +7,8 @@ from .utils import safe_name
 from .config import load_config
 from .sensitive import mask_sensitive_text
 
+MAX_TAIL_LINES = 5000
+
 def log_file_for_task(task):
     display_name = task.get("name") or Path(task.get("command", "task")).stem or "未命名任务"
     name = safe_name(display_name)
@@ -26,6 +28,14 @@ def latest_log_for_task(task):
 def tail_file(file_path, lines=800):
     if not file_path or not Path(file_path).exists():
         return "暂无日志"
+
+    try:
+        lines = int(lines)
+    except (TypeError, ValueError):
+        lines = 800
+
+    lines = max(1, min(lines, MAX_TAIL_LINES))
+
     p = Path(file_path)
     try:
         with p.open("rb") as f:
