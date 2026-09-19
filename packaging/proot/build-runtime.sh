@@ -76,7 +76,12 @@ docker run --rm --platform "$PLATFORM" \
         rm -rf /var/lib/apt/lists/* /root/.cache /tmp/*
         # Docker may expose /etc/hostname as a read-only mount; it is harmless in the archive.
         rm -f /etc/hostname 2>/dev/null || true
-        tar --numeric-owner --xattrs --acls --exclude=./out -czf /out/rootfs.tar.gz -C / .
+        # Never archive container pseudo-filesystems or the bind-mounted output
+        # directory. They are dynamic mounts, not part of the guest rootfs.
+        tar --numeric-owner --xattrs --acls \
+            --exclude=./proc --exclude=./sys --exclude=./dev \
+            --exclude=./run --exclude=./out --exclude=./etc/hostname \
+            -czf /out/rootfs.tar.gz -C / .
     '
 
 packages=(proot libandroid-shmem libtalloc)
@@ -102,6 +107,7 @@ chmod 0755 "$work/runtime/bin/proot" "$work/runtime/libexec/proot/loader" "$work
 
 mkdir -p "$work/runtime/rootfs"
 tar -xzf "$work/rootfs.tar.gz" -C "$work/runtime/rootfs"
+mkdir -p "$work/runtime/rootfs"/{proc,sys,dev,run}
 rm -f "$work/runtime/rootfs/etc/resolv.conf"
 printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > "$work/runtime/rootfs/etc/resolv.conf"
 printf '%s\n' "$PROFILE" > "$work/runtime/.profile"
