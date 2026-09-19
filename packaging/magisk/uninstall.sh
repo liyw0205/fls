@@ -2,6 +2,7 @@
 
 MODDIR="${0%/*}"
 FLS_A="/data/adb/fls-a.sh"
+FLS_T="/data/adb/fls-t.sh"
 
 if [ -x "$FLS_A" ]; then
     sh "$FLS_A" stop >/dev/null 2>&1 || true
@@ -10,6 +11,10 @@ fi
 # Runtime, project data and logs intentionally remain in /data/fls for reinstall/upgrade reuse.
 if [ -f "$FLS_A" ] && cmp -s "$MODDIR/fls-a.sh" "$FLS_A" 2>/dev/null; then
     rm -f "$FLS_A"
+fi
+
+if [ -f "$FLS_T" ] && cmp -s "$MODDIR/fls-t.sh" "$FLS_T" 2>/dev/null; then
+    rm -f "$FLS_T"
 fi
 
 SERVICE_D="/data/adb/service.d/fls-a.sh"

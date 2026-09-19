@@ -1,5 +1,12 @@
 # Changelog
 
+## 20260920.2
+
+- 新增独立的 `fls-t.sh`，支持 Termux 内和 Android 外部调用。
+- Termux proot 运行时改为下载到 `$HOME/.fls-runtime`，项目更新时保留用户数据。
+- 模块 Web 入口支持保存 IP/端口、重置默认地址并在新窗口打开面板。
+- KernelSU/Magisk 模块同步安装 `fls-t.sh`，并补充打包校验。
+
 ## 20260920.1
 
 - 修正 KernelSU / Magisk 模块 ZIP 的根目录结构，避免嵌套模块目录导致无法安装。

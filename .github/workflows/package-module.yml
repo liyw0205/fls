@@ -66,6 +66,7 @@ jobs:
              packaging/magisk/runtime.sh \
              packaging/magisk/runtime.env \
              packaging/magisk/fls-a.sh staging/
+          cp fls-t.sh staging/fls-t.sh
           cp -R packaging/magisk/webroot staging/webroot
 
           python3 - <<'PY'
@@ -104,6 +105,7 @@ jobs:
           test -s staging/changelog.md
           test -s staging/customize.sh
           test -s staging/action.sh
+          test -s staging/fls-t.sh
           test -f staging/webroot/index.html
           test -f staging/fls/fls-manager.py
           test -f staging/fls/fls.sh
@@ -136,6 +138,7 @@ jobs:
               "service.sh",
               "uninstall.sh",
               "action.sh",
+              "fls-t.sh",
               "runtime.sh",
               "runtime.env",
               "version.json",

@@ -117,3 +117,13 @@ fls_install_bridge() {
         chmod 755 "$target" 2>/dev/null || true
     fi
 }
+
+fls_install_termux_script() {
+    module_dir="$1"
+    target="$2"
+    [ -f "$module_dir/fls-t.sh" ] || return 1
+    if [ ! -f "$target" ] || ! cmp -s "$module_dir/fls-t.sh" "$target" 2>/dev/null; then
+        cp "$module_dir/fls-t.sh" "$target" 2>/dev/null || return 1
+        chmod 755 "$target" 2>/dev/null || true
+    fi
+}

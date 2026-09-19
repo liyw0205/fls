@@ -58,6 +58,7 @@ fls/
 ├─ fls.ps1
 ├─ fls.bat
 ├─ fls-a.sh
+├─ fls-t.sh
 ├─ packaging/
 │  ├─ magisk/                 # KernelSU / Magisk 模块模板
 │  └─ proot/                  # Android proot 运行时构建脚本
@@ -90,6 +91,7 @@ fls/
 - `fls.ps1`：Windows PowerShell 启停脚本
 - `fls.bat`：Windows CMD 启停入口
 - `fls-a.sh`：KernelSU / Magisk / adb root 环境调用 Termux 的启动脚本
+- `fls-t.sh`：Termux 专用 proot 启停脚本，支持 Termux 内和 Android 外部调用
 - `data/`：配置、任务、代理、通知等数据
 - `log/`：运行日志
 - `scripts/`：脚本目录
@@ -229,6 +231,52 @@ sh fls-a.sh ensure-repo
 
 ---
 
+### `fls-t.sh`
+
+Termux 专用的 FLS proot 入口，与模块用的 `fls-a.sh` 分开维护。它既可以在
+Termux 内执行，也可以从 KernelSU/Magisk/adb root 等 Android shell 外部调用。
+
+```bash
+# Termux 内
+sh ~/fls/fls-t.sh start
+sh ~/fls/fls-t.sh status
+
+# Android 外部 shell（默认定位 com.termux）
+su -c 'sh /data/adb/fls-t.sh start'
+su -c 'sh /data/adb/fls-t.sh status'
+```
+
+首次执行时，脚本会从 GitHub Release 的固定 `proot-runtime` 标签下载与设备架构匹配的
+`python` 运行时，解压到 Termux 的 `$HOME/.fls-runtime`；不会写入 `/data/fls`，也不要求
+Termux 预先安装 Python。项目默认位于 `$HOME/fls`，项目更新、重新 clone 时会保留
+`data/`、`log/` 和 `scripts/`。
+
+默认使用轻量 `python` 运行时。如需安装包含更多 Linux 工具的运行时：
+
+```bash
+printf '%s\n' all > "$HOME/.fls-profile"
+sh ~/fls/fls-t.sh restart
+```
+
+可通过 `TERMUX_PACKAGE`、`TERMUX_HOME`、`TERMUX_PREFIX` 覆盖外部调用的 Termux 路径，
+通过 `FLS_PROOT_PROFILE=python|all` 临时选择运行时。支持的命令与 `fls.sh` 一致，另外
+`bstart`/`rstart` 管理 Termux:Boot 自启：
+
+```bash
+sh fls-t.sh start
+sh fls-t.sh stop
+sh fls-t.sh restart
+sh fls-t.sh status
+sh fls-t.sh log
+sh fls-t.sh update
+sh fls-t.sh clone
+sh fls-t.sh ensure-repo
+sh fls-t.sh bstart
+sh fls-t.sh rstart
+```
+
+---
+
 ## 命令说明
 
 ### 基础命令
@@ -336,32 +384,45 @@ http://服务器IP:5701
 
 ## 二、Termux 安装
 
-### 1. 安装基础环境
+### 1. 使用 Termux proot 运行时（推荐）
+
+只需安装下载工具和 Git（项目已经存在时 Git 可选）：
 
 ```bash
 pkg update -y
+pkg install -y curl git
+```
+
+拉取项目并启动。第一次启动会自动下载 Release 运行时到 `$HOME/.fls-runtime`：
+
+```bash
+git clone https://github.com/liyw0205/fls.git "$HOME/fls"
+sh "$HOME/fls/fls-t.sh" start
+```
+
+如不使用 Git，可让脚本在缺少 Git 时通过仓库压缩包拉取；运行时仍会按需下载。
+
+### 2. 直接使用系统 Python（可选）
+
+如果希望沿用 Termux 自己的 Python 环境，也可以继续使用原来的入口：
+
+```bash
 pkg install -y python git
-```
-
-建议额外安装：
-
-```bash
-pkg install -y clang make openssl libffi
-```
-
-### 2. 下载项目
-
-```bash
-git clone https://github.com/liyw0205/fls.git
-cd fls
-chmod +x fls.sh
-```
-
-### 3. 启动
-
-```bash
+git clone https://github.com/liyw0205/fls.git "$HOME/fls"
+cd "$HOME/fls"
 sh fls.sh start
 ```
+
+### 3. 从 Android 外部调用
+
+```bash
+su -c 'sh /data/adb/fls-t.sh start'
+su -c 'sh /data/adb/fls-t.sh status'
+```
+
+外部调用默认使用 `/data/data/com.termux/files/home`，不依赖当前 root shell 的 `HOME`。
+如果 Termux 使用了其他包名或多用户路径，设置 `TERMUX_PACKAGE`、`TERMUX_HOME` 和
+`TERMUX_PREFIX` 后再调用。
 
 ---
 
@@ -441,7 +502,7 @@ su -c 'cat /data/data/com.termux/files/home/fls/log/fls-manager-daemon.log'
 .github/workflows/build-proot.yml
 ```
 
-`package-module.yml` 只生成一个同时兼容 KernelSU 和 Magisk 的模块 ZIP。模块 ZIP 的根目录直接包含 `module.prop`、`customize.sh`、`service.sh`、`action.sh`、`version.json`、`changelog.md`、`webroot/index.html` 和 `fls/` 程序目录，不包含另一个模块 ZIP 或 `payload/` 包装层。
+`package-module.yml` 只生成一个同时兼容 KernelSU 和 Magisk 的模块 ZIP。模块 ZIP 的根目录直接包含 `module.prop`、`customize.sh`、`service.sh`、`action.sh`、`fls-a.sh`、`fls-t.sh`、`version.json`、`changelog.md`、`webroot/index.html` 和 `fls/` 程序目录，不包含另一个模块 ZIP 或 `payload/` 包装层。
 
 `build-proot.yml` 单独生成并发布固定标签 `proot-runtime` 下的四个运行时资源：
 

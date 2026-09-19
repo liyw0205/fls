@@ -27,7 +27,7 @@ extract_entry() {
 }
 
 mkdir -p "$MODPATH" "$FLS_ROOT" "$FLS_PROJECT_DIR"
-for entry in module.prop runtime.env runtime.sh fls-a.sh service.sh uninstall.sh action.sh version.json changelog.md; do
+for entry in module.prop runtime.env runtime.sh fls-a.sh fls-t.sh service.sh uninstall.sh action.sh version.json changelog.md; do
     extract_entry "$entry"
 done
 extract_entry "webroot/*"
@@ -43,6 +43,9 @@ fls_sync_project "$MODPATH/fls" "$MODPATH/module.prop" ||
 
 if ! fls_install_bridge "$MODPATH" "/data/adb/fls-a.sh"; then
     abort_install "FLS Android 调用脚本安装失败"
+fi
+if ! fls_install_termux_script "$MODPATH" "/data/adb/fls-t.sh"; then
+    abort_install "FLS Termux 调用脚本安装失败"
 fi
 
 print_line "- 检查 proot 运行时（固定标签：${FLS_RUNTIME_TAG:-proot-runtime}）"

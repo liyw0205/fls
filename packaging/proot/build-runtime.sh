@@ -78,7 +78,7 @@ docker run --rm --platform "$PLATFORM" \
         rm -f /etc/hostname 2>/dev/null || true
         # Never archive container pseudo-filesystems or the bind-mounted output
         # directory. They are dynamic mounts, not part of the guest rootfs.
-        tar --numeric-owner --xattrs --acls \
+        tar --hard-dereference --numeric-owner --xattrs --acls \
             --exclude=./proc --exclude=./sys --exclude=./dev \
             --exclude=./run --exclude=./out --exclude=./etc/hostname \
             -czf /out/rootfs.tar.gz -C / .
@@ -115,6 +115,6 @@ printf '%s\n' "$ARCH" > "$work/runtime/.arch"
 
 mkdir -p "$(dirname "$OUTPUT")"
 # Keep the final archive compatible with Android toybox/busybox tar.
-tar --numeric-owner -czf "$OUTPUT" -C "$work/runtime" \
+tar --hard-dereference --numeric-owner -czf "$OUTPUT" -C "$work/runtime" \
     bin lib libexec rootfs .profile .arch
 printf 'runtime=%s\nprofile=%s\narch=%s\n' "$OUTPUT" "$PROFILE" "$ARCH"
