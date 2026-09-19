@@ -59,10 +59,10 @@ def layout(title, active, body):
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <meta name="csrf-token" content="__CSRF_TOKEN__">
 
-<link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=20260919-4">
-<link rel="stylesheet" href="/static/fls.css?v=20260919-4">
-<link rel="stylesheet" href="/static/fls_responsive.css?v=20260919-4">
-<link rel="stylesheet" href="/static/fls_theme.css?v=20260919-4">
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=20260919-5">
+<link rel="stylesheet" href="/static/fls.css?v=20260919-5">
+<link rel="stylesheet" href="/static/fls_responsive.css?v=20260919-5">
+<link rel="stylesheet" href="/static/fls_theme.css?v=20260919-5">
 
 </head>
 
@@ -90,7 +90,7 @@ def layout(title, active, body):
     </main>
 </div>
 
-<script src="/static/fls.js?v=20260919-4"></script>
+<script src="/static/fls.js?v=20260919-5"></script>
 </body>
 </html>
 '''

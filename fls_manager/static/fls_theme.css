@@ -57,12 +57,31 @@ body {
 }
 
 .fls-update-notice-slot {
-    min-height:0;
     padding:0 12px;
+    display:grid;
+    gap:6px;
 }
 
-.fls-update-notice-slot:empty {
-    display:none;
+.fls-version-current {
+    min-height:30px;
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:8px;
+    padding:6px 10px;
+    border:1px solid var(--border);
+    border-radius:6px;
+    background:#f8fbfa;
+    color:var(--muted);
+    font-size:12px;
+    font-weight:700;
+    line-height:1.2;
+}
+
+.fls-version-current code {
+    color:var(--text);
+    font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size:12px;
 }
 
 .fls-update-notice {
@@ -100,6 +119,19 @@ body {
     font-size:10px;
     font-weight:800;
     line-height:1;
+}
+
+.fls-update-page-modal-content {
+    display:grid;
+    gap:12px;
+}
+
+.fls-update-page-modal-content .card {
+    margin:0;
+}
+
+.fls-update-modal-heading {
+    margin-bottom:14px;
 }
 
 .nav {

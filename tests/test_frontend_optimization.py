@@ -59,10 +59,10 @@ class FrontendOptimizationTests(unittest.TestCase):
             html = response.get_data(as_text=True)
 
             self.assertEqual(response.status_code, 200)
-            self.assertIn('/static/favicon.svg?v=20260919-4', html)
-            self.assertIn('/static/fls.css?v=20260919-4', html)
-            self.assertIn('/static/fls.js?v=20260919-4', html)
-            self.assertIn('/static/fls_theme.css?v=20260919-4', html)
+            self.assertIn('/static/favicon.svg?v=20260919-5', html)
+            self.assertIn('/static/fls.css?v=20260919-5', html)
+            self.assertIn('/static/fls.js?v=20260919-5', html)
+            self.assertIn('/static/fls_theme.css?v=20260919-5', html)
             self.assertIn('id="flsUpdateNoticeSlot"', html)
 
     def test_favicon_is_served_as_static_asset(self):
@@ -124,16 +124,20 @@ class FrontendOptimizationTests(unittest.TestCase):
         self.assertIn("--sidebar:#ffffff", css)
         self.assertIn(".fls-update-notice", css)
 
-    def test_update_notice_uses_read_only_status_api_and_update_log_modal(self):
+    def test_update_notice_uses_cached_state_and_reuses_about_update_view(self):
         js = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
 
         self.assertIn('"/api/about/update-info"', js)
+        self.assertIn('fetch("/about"', js)
+        self.assertIn('querySelector("#about-version")', js)
+        self.assertIn('querySelector("#about-updates")', js)
         self.assertIn("flsOpenUpdateLogModal", js)
         self.assertIn("fls-update-notice-new", js)
+        self.assertIn("fls-version-current", js)
         self.assertIn("localStorage.getItem(FLS_UPDATE_NOTICE_CACHE_KEY)", js)
-        self.assertIn("loadState(true)", js)
-        self.assertIn("if(!info.checking && info.ok)", js)
-        self.assertNotIn("maxAttempts", js)
+        self.assertIn("flsCheckUpdateNoticeCache();", js)
+        self.assertIn("window.__FLS_UPDATE_NOTICE_RESOLVED__", js)
+        self.assertNotIn("setTimeout(function(){ loadState", js)
 
     def test_update_info_api_returns_cached_status_and_logs_on_demand(self):
         with isolated_app() as app:

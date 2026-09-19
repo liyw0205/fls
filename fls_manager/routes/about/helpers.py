@@ -541,12 +541,18 @@ def start_refresh_log_job(title="刷新更新日志"):
         )
         return "", False
 
+    current_version = git_text(["rev-parse", "--short", "HEAD"], default="")
+
     with ABOUT_STATE_LOCK:
         for info in ABOUT_JOBS.values():
             if info.get("action") == "refresh-log" and info.get("running"):
                 return info.get("id", ""), False
 
-        set_update_log_state(checking=True, error="")
+        set_update_log_state(
+            checking=True,
+            current_version=current_version,
+            error="",
+        )
         job_id = start_about_job(
             action="refresh-log",
             title=title,

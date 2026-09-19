@@ -199,13 +199,13 @@ function flsCloseDisclosureModal(){
     return true;
 }
 
-function flsOpenDisclosureModal(details){
+function flsOpenModalContent(titleText, content, trigger){
     flsCloseDisclosureModal();
 
     const modal = document.createElement("div");
     modal.className = "fls-disclosure-modal";
     modal.setAttribute("role", "presentation");
-    modal.__flsTrigger = details.querySelector("summary");
+    modal.__flsTrigger = trigger || null;
 
     const dialog = document.createElement("section");
     dialog.className = "fls-disclosure-dialog";
@@ -216,7 +216,7 @@ function flsOpenDisclosureModal(details){
     head.className = "fls-disclosure-dialog-head";
     const title = document.createElement("div");
     title.className = "fls-disclosure-dialog-title";
-    title.textContent = (details.querySelector("summary")?.textContent || "查看详情").trim();
+    title.textContent = String(titleText || "查看详情").trim();
     const close = document.createElement("button");
     close.type = "button";
     close.className = "fls-disclosure-dialog-close";
@@ -229,9 +229,7 @@ function flsOpenDisclosureModal(details){
 
     const body = document.createElement("div");
     body.className = "fls-disclosure-dialog-body";
-    Array.from(details.children).forEach(function(child){
-        if(child.tagName !== "SUMMARY") body.appendChild(child.cloneNode(true));
-    });
+    body.appendChild(content);
 
     dialog.appendChild(head);
     dialog.appendChild(body);
@@ -242,21 +240,23 @@ function flsOpenDisclosureModal(details){
     document.body.appendChild(modal);
     document.body.classList.add("fls-modal-open");
     close.focus({preventScroll:true});
+    return modal;
 }
 
-function flsUpdateLogText(value){
-    return String(value || "-");
+function flsOpenDisclosureModal(details){
+    const content = document.createDocumentFragment();
+    Array.from(details.children).forEach(function(child){
+        if(child.tagName !== "SUMMARY") content.appendChild(child.cloneNode(true));
+    });
+    return flsOpenModalContent(
+        (details.querySelector("summary")?.textContent || "查看详情").trim(),
+        content,
+        details.querySelector("summary")
+    );
 }
 
-function flsUpdateLogCell(text){
-    const cell = document.createElement("td");
-    cell.textContent = flsUpdateLogText(text);
-    return cell;
-}
-
-async function flsFetchUpdateInfo(includeLogs){
-    const suffix = includeLogs ? "?logs=1" : "";
-    const response = await fetch("/api/about/update-info" + suffix, {
+async function flsFetchUpdateInfo(){
+    const response = await fetch("/api/about/update-info", {
         cache:"no-store",
         headers:{"X-Requested-With":"XMLHttpRequest"},
         credentials:"same-origin"
@@ -271,6 +271,17 @@ function flsRenderUpdateNotice(info){
     if(!slot) return;
 
     slot.replaceChildren();
+
+    const current = document.createElement("div");
+    current.className = "fls-version-current";
+    const label = document.createElement("span");
+    label.textContent = "当前版本";
+    const value = document.createElement("code");
+    value.textContent = String((info && info.current_version) || "--");
+    current.appendChild(label);
+    current.appendChild(value);
+    slot.appendChild(current);
+
     if(!info || !info.available || !info.version) return;
 
     const button = document.createElement("button");
@@ -288,74 +299,58 @@ function flsRenderUpdateNotice(info){
     slot.appendChild(button);
 }
 
-async function flsOpenUpdateLogModal(){
-    let info;
+async function flsOpenUpdateLogModal(event){
+    const trigger = event && event.currentTarget;
+    let response;
     try {
-        info = await flsFetchUpdateInfo(true);
+        response = await fetch("/about", {
+            cache:"no-store",
+            headers:{"X-Requested-With":"XMLHttpRequest"},
+            credentials:"same-origin"
+        });
     } catch(e) {
         flsToast("无法读取更新日志", "error");
         return;
     }
 
-    if(info.checking){
-        flsToast("正在刷新更新日志，请稍后再试", "info");
+    if(!response.ok){
+        flsToast("无法读取更新日志", "error");
         return;
     }
 
-    const details = document.createElement("details");
-    details.className = "fls-update-log-fold";
-    const summary = document.createElement("summary");
-    summary.textContent = "更新日志";
-    details.appendChild(summary);
-
-    const intro = document.createElement("p");
-    intro.className = "help";
-    intro.textContent = info.available
-        ? "发现新版本 " + flsUpdateLogText(info.version) + "，以下为最近的版本变化。"
-        : "当前没有可更新的版本。";
-    details.appendChild(intro);
-
-    const wrap = document.createElement("div");
-    wrap.className = "table-wrap";
-    const table = document.createElement("table");
-    const head = document.createElement("thead");
-    const headRow = document.createElement("tr");
-    ["版本", "时间", "更新内容"].forEach(function(label){
-        const cell = document.createElement("th");
-        cell.textContent = label;
-        headRow.appendChild(cell);
-    });
-    head.appendChild(headRow);
-    table.appendChild(head);
-
-    const body = document.createElement("tbody");
-    const logs = Array.isArray(info.logs) ? info.logs : [];
-    if(logs.length){
-        logs.forEach(function(item){
-            const row = document.createElement("tr");
-            row.appendChild(flsUpdateLogCell(item.short));
-            row.appendChild(flsUpdateLogCell(item.date));
-            row.appendChild(flsUpdateLogCell(item.subject));
-            body.appendChild(row);
-        });
-    } else {
-        const row = document.createElement("tr");
-        const cell = document.createElement("td");
-        cell.colSpan = 3;
-        cell.textContent = "暂无可显示的更新日志";
-        row.appendChild(cell);
-        body.appendChild(row);
+    const about = new DOMParser().parseFromString(await response.text(), "text/html");
+    const versionCard = about.querySelector("#about-version");
+    const updates = about.querySelector("#about-updates");
+    if(!versionCard || !updates){
+        flsToast("更新日志内容不可用", "error");
+        return;
     }
-    table.appendChild(body);
-    wrap.appendChild(table);
-    details.appendChild(wrap);
 
-    document.body.appendChild(details);
-    flsOpenDisclosureModal(details);
-    details.remove();
+    const content = document.createElement("div");
+    content.className = "fls-update-page-modal-content";
+    const versionCopy = versionCard.cloneNode(true);
+    versionCopy.removeAttribute("id");
+    content.appendChild(versionCopy);
+
+    const updateCard = document.createElement("section");
+    updateCard.className = updates.className;
+    updateCard.classList.remove("fls-update-log-fold");
+    const summary = updates.querySelector("summary");
+    if(summary){
+        const heading = document.createElement("div");
+        heading.className = "fls-update-modal-heading";
+        while(summary.firstChild) heading.appendChild(summary.firstChild);
+        updateCard.appendChild(heading);
+    }
+    Array.from(updates.children).forEach(function(child){
+        if(child !== summary) updateCard.appendChild(child.cloneNode(true));
+    });
+    content.appendChild(updateCard);
+
+    flsOpenModalContent("当前版本 / 更新日志", content, trigger);
 }
 
-const FLS_UPDATE_NOTICE_CACHE_KEY = "fls-update-notice-20260919-4";
+const FLS_UPDATE_NOTICE_CACHE_KEY = "fls-update-notice-20260919-5";
 
 function flsReadUpdateNoticeCache(){
     try {
@@ -383,34 +378,44 @@ function flsWriteUpdateNoticeCache(info){
     }
 }
 
+function flsMergeUpdateNoticeInfo(primary, fallback){
+    primary = primary || {};
+    fallback = fallback || {};
+    return {
+        available:!!primary.available,
+        version:String(primary.version || ""),
+        current_version:String(primary.current_version || fallback.current_version || ""),
+        checked_at:String(primary.checked_at || fallback.checked_at || "")
+    };
+}
+
+async function flsCheckUpdateNoticeCache(){
+    if(window.__FLS_UPDATE_NOTICE_CHECKING__ || window.__FLS_UPDATE_NOTICE_RESOLVED__) return;
+    window.__FLS_UPDATE_NOTICE_CHECKING__ = true;
+
+    try {
+        const info = await flsFetchUpdateInfo();
+        const cached = flsReadUpdateNoticeCache();
+        const rendered = flsMergeUpdateNoticeInfo(info, cached);
+        flsRenderUpdateNotice(rendered);
+
+        if(!info.checking && info.ok){
+            flsWriteUpdateNoticeCache(info);
+            window.__FLS_UPDATE_NOTICE_RESOLVED__ = true;
+        }
+    } catch(e) {
+        // Keep the browser cache visible. The next sidebar open can retry.
+    } finally {
+        window.__FLS_UPDATE_NOTICE_CHECKING__ = false;
+    }
+}
+
 function flsInitUpdateNotice(){
     if(window.__FLS_UPDATE_NOTICE_INITIALIZED__) return;
     window.__FLS_UPDATE_NOTICE_INITIALIZED__ = true;
 
     const cached = flsReadUpdateNoticeCache();
-    if(cached) flsRenderUpdateNotice(cached);
-
-    async function loadState(allowOneRetry){
-        try {
-            const info = await flsFetchUpdateInfo(false);
-
-            if(info.checking && allowOneRetry){
-                setTimeout(function(){ loadState(false); }, 2500);
-                return;
-            }
-
-            if(!info.checking && info.ok){
-                flsWriteUpdateNoticeCache(info);
-                flsRenderUpdateNotice(info);
-            }
-        } catch(e) {
-            // Older servers or temporary network failures keep the cached state.
-        }
-    }
-
-    // One initial read and, only while the server's first-open check is running,
-    // one delayed retry. This is intentionally not a long-running poller.
-    loadState(true);
+    flsRenderUpdateNotice(cached);
 }
 
 document.addEventListener("click", function(event){
@@ -529,7 +534,10 @@ function flsIsDrawerViewport(){
 }
 
 function flsSyncMenuViewport(){
-    if (!flsIsDrawerViewport()) toggleMenu(false);
+    if (!flsIsDrawerViewport()) {
+        toggleMenu(false);
+        flsCheckUpdateNoticeCache();
+    }
 }
 
 function toggleMenu(show){
@@ -555,6 +563,7 @@ function toggleMenu(show){
             const firstLink = sidebar.querySelector("a");
             if(firstLink) firstLink.focus({preventScroll:true});
         }
+        flsCheckUpdateNoticeCache();
     } else {
         sidebar.classList.remove("open");
         mask.classList.remove("show");
