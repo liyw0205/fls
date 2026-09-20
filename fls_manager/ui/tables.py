@@ -393,6 +393,9 @@ tr.task-selected td {{
    手机任务卡片：默认折叠
    ============================================================ */
 .task-mobile-card {{
+    display:grid;
+    grid-template-columns:minmax(0,1fr) minmax(112px,38%);
+    align-items:stretch;
     background:#fff;
     border:1px solid #e5e7eb;
     border-radius:14px;
@@ -403,6 +406,8 @@ tr.task-selected td {{
 }}
 
 .mobile-list-summary {{
+    grid-column:1;
+    grid-row:1;
     padding:14px;
 }}
 
@@ -414,19 +419,64 @@ tr.task-selected td {{
 }}
 
 .task-mobile-primary-action {{
+    grid-column:2;
+    grid-row:1;
     padding:0 14px 10px;
+    border-left:1px solid #e5e7eb;
 }}
 
 .task-mobile-primary-action .btn {{
     width:100%;
     margin:0;
+    white-space:normal;
+    line-height:1.25;
 }}
 
 .task-mobile-actions {{
+    grid-column:2;
+    grid-row:2;
     padding:0 14px 14px;
+    border-left:1px solid #e5e7eb;
+}}
+
+.task-mobile-actions .task-actions {{
+    flex-direction:column;
+    align-items:stretch;
+    gap:6px;
+}}
+
+.task-mobile-actions .row-actions-primary,
+.task-mobile-actions .row-actions-secondary,
+.task-mobile-actions .row-actions-danger {{
+    width:100%;
+    flex-direction:column;
+    align-items:stretch;
+    gap:6px;
+}}
+
+.task-mobile-actions .row-actions-danger {{
+    padding-top:6px;
+    border-top:1px solid #e5e7eb;
+}}
+
+.task-mobile-actions .task-actions .btn,
+.task-mobile-actions .task-action-more,
+.task-mobile-actions .task-action-more .btn {{
+    width:100%;
+    min-width:0;
+    margin:0;
+    white-space:normal;
+    line-height:1.25;
 }}
 
 .task-mobile-card-body {{
+}}
+
+.task-mobile-details {{
+    grid-column:1;
+    grid-row:2;
+    width:100%;
+    margin:0;
 }}
 
 .task-mobile-head {{
@@ -546,6 +596,11 @@ tr.task-selected td {{
 
     .task-mobile-card-body {{
         padding:0 12px 12px;
+    }}
+
+    .task-mobile-actions {{
+        padding-left:10px;
+        padding-right:10px;
     }}
 
     .task-mobile-title {{
