@@ -213,6 +213,8 @@ summary {
     color:#111827;
     font-size:30px;
     line-height:1.2;
+    overflow-wrap:anywhere;
+    word-break:break-word;
 }
 
 .page-header .card-title {
@@ -225,6 +227,8 @@ summary {
     color:var(--muted);
     font-size:14px;
     line-height:1.65;
+    overflow-wrap:anywhere;
+    word-break:break-word;
 }
 
 .page-header-actions,
@@ -557,6 +561,8 @@ button[aria-busy="true"] {
 
 input, textarea, select {
     width:100%;
+    min-width:0;
+    max-width:100%;
     border:1px solid var(--border);
     border-radius:10px;
     padding:10px 12px;
@@ -588,6 +594,8 @@ textarea {
     color:var(--muted);
     font-size:13px;
     line-height:1.7;
+    overflow-wrap:anywhere;
+    word-break:break-word;
 }
 
 .code {

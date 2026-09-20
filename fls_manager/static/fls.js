@@ -831,8 +831,9 @@ function flsFixedActionOverlapsFields(box){
     if(!box || getComputedStyle(box).display === "none") return false;
     const boxRect = box.getBoundingClientRect();
     return Array.from(document.querySelectorAll(
-        "input,select,textarea,button[type=submit],.form-item:last-child"
+        "input,select,textarea,button[type=submit],.form-item:last-child,.pagination,p,li,pre,h1,h2,h3,.help,.page-description"
     )).some(function(el){
+        if(box.contains(el)) return false;
         const style = getComputedStyle(el);
         const rect = el.getBoundingClientRect();
         return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0 &&

@@ -60,9 +60,9 @@ class FrontendOptimizationTests(unittest.TestCase):
 
             self.assertEqual(response.status_code, 200)
             self.assertIn('/static/favicon-generated.png?v=20260920-1', html)
-            self.assertIn('/static/fls.css?v=20260920-1', html)
-            self.assertIn('/static/fls.js?v=20260920-1', html)
-            self.assertIn('/static/fls_theme.css?v=20260920-1', html)
+            self.assertIn('/static/fls.css?v=20260920-2', html)
+            self.assertIn('/static/fls.js?v=20260920-2', html)
+            self.assertIn('/static/fls_theme.css?v=20260920-2', html)
             self.assertIn('id="flsUpdateNoticeSlot"', html)
 
     def test_generated_favicon_is_served_as_static_asset(self):

@@ -161,9 +161,12 @@ def online_script_doc(script_id):
     border:1px solid #e5e7eb;
     border-radius:14px;
     padding:18px;
+    min-width:0;
+    max-width:100%;
     line-height:1.75;
     color:#111827;
     overflow:auto;
+    overflow-wrap:anywhere;
 }}
 
 .fls-doc-md h1,
@@ -228,6 +231,7 @@ def online_script_doc(script_id):
     color:#d1d5db;
     border-radius:12px;
     padding:14px;
+    max-width:100%;
     overflow:auto;
     white-space:pre;
 }}
