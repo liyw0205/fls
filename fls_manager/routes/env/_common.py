@@ -80,7 +80,7 @@ def collect_task_env_rows():
     <td><input type="checkbox" name="items" value="{h(task.get('id'))}::{h(k)}" checked style="width:auto;"></td>
     <td>{h(task_name)}</td>
     <td><b>{h(k)}</b></td>
-    <td><code>{h(display_value)}</code></td>
+            <td>{collapsible_text(display_value, 50)}</td>
     <td>{exists_badge}</td>
 </tr>
 """

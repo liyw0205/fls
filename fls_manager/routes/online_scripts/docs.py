@@ -111,13 +111,13 @@ def online_script_doc(script_id):
             err = str(e)
 
             if mode == "auto":
-                detected = "请求失败，尝试网页窗口"
+                detected = "请求失败"
                 doc_html = f"""
-<div class="fls-doc-window">
-    <iframe src="{h(real_url)}" class="fls-doc-iframe"></iframe>
-</div>
-<div class="help" style="margin-top:10px;">
-    文档内容加载失败，已尝试用网页窗口打开。若仍无法显示，请点击“打开原文”。
+<div class="card">
+    <div class="card-title">文档暂时无法加载</div>
+    <div class="help">
+        自动读取失败，未自动嵌入不可用的远程页面。请切换查看模式重试，或点击“打开原文”在新页面访问。
+    </div>
 </div>
 """
 
