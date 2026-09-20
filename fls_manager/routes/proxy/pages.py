@@ -61,17 +61,15 @@ def proxy_page():
 
             mobile_cards += f"""
 <article class="fls-fold-card mobile-list-item proxy-mobile-item" data-proxy-id="{h(proxy_id)}">
-    <div class="fls-card-head">
+    <div class="proxy-mobile-content">
+      <div class="fls-card-head">
         <div class="fls-card-main">
             <div class="fls-card-title-main">{h(proxy_name)}</div>
             <div class="fls-card-sub">{h(ptype)}：{h(addr)}</div>
         </div>
         <div class="fls-card-badges">{badge}</div>
-    </div>
-    <div class="fls-card-actions fls-card-primary-action">
-        <button class="btn btn-primary" type="button" onclick="flsProxyTest('{h(proxy_id)}', this)">测试代理连接</button>
-    </div>
-    <details class="detail-disclosure">
+      </div>
+      <details class="detail-disclosure">
         <summary>查看代理详情</summary>
         <div class="fls-card-body">
             <div class="fls-info-grid">
@@ -80,12 +78,18 @@ def proxy_page():
                 <div class="fls-info-item"><div class="fls-info-label">创建时间</div><div class="fls-info-value">{h(p.get("created_at", "-"))}</div></div>
             </div>
         </div>
-    </details>
-    <div class="fls-card-actions">
+      </details>
+    </div>
+    <div class="proxy-mobile-action-rail">
+      <div class="fls-card-actions fls-card-primary-action">
+        <button class="btn btn-primary" type="button" onclick="flsProxyTest('{h(proxy_id)}', this)">测试代理连接</button>
+      </div>
+      <div class="fls-card-actions">
         <div class="row-actions" aria-label="代理 {h(proxy_name)} 行操作">
             <div class="row-actions-secondary">{secondary_actions}</div>
             <div class="row-actions-danger">{danger_actions}</div>
         </div>
+      </div>
     </div>
 </article>
 """

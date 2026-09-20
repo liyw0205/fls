@@ -404,37 +404,27 @@
         align-items:start!important;
     }
 
-    .proxy-mobile-item > .fls-card-head {
+    .proxy-mobile-content {
         grid-column:1;
         grid-row:1;
+        min-width:0;
     }
 
-    .proxy-mobile-item > .fls-card-primary-action {
+    .proxy-mobile-action-rail {
         grid-column:2;
         grid-row:1;
-        padding-left:10px;
+        min-width:0;
         border-left:1px solid #e5e7eb;
     }
 
-    .proxy-mobile-item > .detail-disclosure {
-        grid-column:1;
-        grid-row:2;
-        width:100%;
-        margin:0;
-        align-self:start;
-    }
-
-    .proxy-mobile-item > .fls-card-actions:not(.fls-card-primary-action) {
-        grid-column:2;
-        grid-row:2;
+    .proxy-mobile-action-rail .fls-card-actions {
         min-width:0;
         padding-left:10px;
-        border-left:1px solid #e5e7eb;
     }
 
-    .proxy-mobile-item > .fls-card-actions:not(.fls-card-primary-action) .row-actions,
-    .proxy-mobile-item > .fls-card-actions:not(.fls-card-primary-action) .row-actions-secondary,
-    .proxy-mobile-item > .fls-card-actions:not(.fls-card-primary-action) .row-actions-danger {
+    .proxy-mobile-action-rail .fls-card-actions .row-actions,
+    .proxy-mobile-action-rail .fls-card-actions .row-actions-secondary,
+    .proxy-mobile-action-rail .fls-card-actions .row-actions-danger {
         width:100%;
         min-width:0;
         flex-direction:column;
@@ -442,12 +432,12 @@
         gap:6px;
     }
 
-    .proxy-mobile-item > .fls-card-actions:not(.fls-card-primary-action) .row-actions-danger {
+    .proxy-mobile-action-rail .fls-card-actions .row-actions-danger {
         padding-top:6px;
         border-top:1px solid #e5e7eb;
     }
 
-    .proxy-mobile-item > .fls-card-actions:not(.fls-card-primary-action) .btn {
+    .proxy-mobile-action-rail .fls-card-actions .btn {
         width:100%;
         min-width:0;
         white-space:normal;

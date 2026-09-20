@@ -194,7 +194,8 @@ def tasks_table(tasks):
 
             mobile_cards += f"""
 <article class="task-mobile-card mobile-list-item" data-task-id="{h(task_id)}">
-    <div class="mobile-list-summary">
+    <div class="task-mobile-content">
+      <div class="mobile-list-summary">
         <div class="task-mobile-head">
             <div class="task-mobile-select">
                 <input class="task-select-checkbox" type="checkbox" data-task-id="{h(task_id)}" onchange="taskSyncSelection(this)" onclick="event.stopPropagation()" aria-label="选择任务 {h(name)}">
@@ -209,13 +210,9 @@ def tasks_table(tasks):
             </div>
         </div>
         <div class="task-mobile-recent">最近运行：{h(next_run_text)}</div>
-    </div>
+      </div>
 
-    <div class="task-mobile-primary-action">
-        {mobile_primary_action}
-    </div>
-
-    <details class="detail-disclosure task-mobile-details">
+      <details class="detail-disclosure task-mobile-details">
         <summary>查看任务详情</summary>
         <div class="task-mobile-card-body">
           <div class="task-mobile-info">
@@ -252,9 +249,15 @@ def tasks_table(tasks):
             </div>
           </div>
         </div>
-    </details>
+      </details>
+    </div>
 
-    <div class="task-mobile-actions">{mobile_actions}</div>
+    <div class="task-mobile-action-rail">
+      <div class="task-mobile-primary-action">
+        {mobile_primary_action}
+      </div>
+      <div class="task-mobile-actions">{mobile_actions}</div>
+    </div>
 </article>
 """
 
@@ -405,9 +408,20 @@ tr.task-selected td {{
     overflow:hidden;
 }}
 
-.mobile-list-summary {{
+.task-mobile-content {{
     grid-column:1;
     grid-row:1;
+    min-width:0;
+}}
+
+.task-mobile-action-rail {{
+    grid-column:2;
+    grid-row:1;
+    min-width:0;
+    border-left:1px solid #e5e7eb;
+}}
+
+.mobile-list-summary {{
     padding:14px;
 }}
 
@@ -419,10 +433,7 @@ tr.task-selected td {{
 }}
 
 .task-mobile-primary-action {{
-    grid-column:2;
-    grid-row:1;
     padding:0 14px 10px;
-    border-left:1px solid #e5e7eb;
 }}
 
 .task-mobile-primary-action .btn {{
@@ -433,10 +444,7 @@ tr.task-selected td {{
 }}
 
 .task-mobile-actions {{
-    grid-column:2;
-    grid-row:2;
     padding:0 14px 14px;
-    border-left:1px solid #e5e7eb;
 }}
 
 .task-mobile-actions .task-actions {{
@@ -473,8 +481,6 @@ tr.task-selected td {{
 }}
 
 .task-mobile-details {{
-    grid-column:1;
-    grid-row:2;
     width:100%;
     margin:0;
     align-self:start;
