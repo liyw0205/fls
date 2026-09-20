@@ -144,6 +144,14 @@ def tasks_table(tasks):
             config_path = row["config_path"]
             actions = _task_action_buttons(task_id, enabled, config_path, pinned, running=running)
             mobile_actions = _task_action_buttons(task_id, enabled, config_path, pinned, include_primary=False, running=running)
+            if running:
+                mobile_primary_action = (
+                    f'''<button class="btn btn-orange" type="button" onclick="taskAjaxAction('stop','{h(task_id)}',this)">停止任务</button>'''
+                )
+            else:
+                mobile_primary_action = (
+                    f'''<button class="btn btn-primary" type="button" onclick="taskAjaxAction('run','{h(task_id)}',this)">立即运行任务</button>'''
+                )
 
             remark_html = ""
             if remark:
@@ -204,11 +212,7 @@ def tasks_table(tasks):
     </div>
 
     <div class="task-mobile-primary-action">
-        {(
-            f'<button class="btn btn-orange" type="button" onclick="taskAjaxAction(\'stop\',\'{h(task_id)}\',this)">停止任务</button>'
-            if running else
-            f'<button class="btn btn-primary" type="button" onclick="taskAjaxAction(\'run\',\'{h(task_id)}\',this)">立即运行任务</button>'
-        )}
+        {mobile_primary_action}
     </div>
 
     <details class="detail-disclosure task-mobile-details">
