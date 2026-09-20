@@ -61,9 +61,9 @@ def layout(title, active, body):
 
 <link rel="icon" type="image/png" href="/static/favicon-generated.png?v=20260920-1">
 <link rel="apple-touch-icon" href="/static/favicon-generated.png?v=20260920-1">
-<link rel="stylesheet" href="/static/fls.css?v=20260920-3&actions=1">
-<link rel="stylesheet" href="/static/fls_responsive.css?v=20260920-3&actions=1">
-<link rel="stylesheet" href="/static/fls_theme.css?v=20260920-3&actions=1">
+<link rel="stylesheet" href="/static/fls.css?v=20260920-3&actions=2">
+<link rel="stylesheet" href="/static/fls_responsive.css?v=20260920-3&actions=2">
+<link rel="stylesheet" href="/static/fls_theme.css?v=20260920-3&actions=2">
 
 </head>
 
@@ -91,7 +91,7 @@ def layout(title, active, body):
     </main>
 </div>
 
-<script src="/static/fls.js?v=20260920-3&actions=1"></script>
+<script src="/static/fls.js?v=20260920-3&actions=2"></script>
 </body>
 </html>
 '''

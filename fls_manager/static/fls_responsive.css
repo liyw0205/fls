@@ -1,6 +1,11 @@
 /* Responsive layout is selected by CSS media queries. JavaScript owns only
    menu state and action behavior; it does not stamp viewport classes on body. */
 
+/* Mobile-only card fallbacks stay hidden on desktop. */
+#proxyMobileList {
+    display:none;
+}
+
 @media (max-width: 767px) {
     .fls-toast-box {
         left:10px;
