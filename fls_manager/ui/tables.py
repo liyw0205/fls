@@ -477,6 +477,7 @@ tr.task-selected td {{
     grid-row:2;
     width:100%;
     margin:0;
+    align-self:start;
 }}
 
 .task-mobile-head {{

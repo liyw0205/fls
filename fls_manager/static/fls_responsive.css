@@ -312,8 +312,9 @@
 
     #pullDesktopTable .script-tree-row {
         display:grid!important;
-        grid-template-columns:minmax(0,1fr)!important;
+        grid-template-columns:minmax(0,1fr) minmax(112px,38%)!important;
         gap:8px!important;
+        align-items:start!important;
         width:100%!important;
         padding:10px 0!important;
         margin:0!important;
@@ -333,6 +334,20 @@
         display:block!important;
     }
 
+    #pullDesktopTable .script-tree-name {
+        grid-column:1;
+        grid-row:1;
+        min-width:0;
+    }
+
+    #pullDesktopTable .script-tree-actions {
+        grid-column:2;
+        grid-row:1;
+        min-width:0;
+        padding-left:10px!important;
+        border-left:1px solid #e5e7eb!important;
+    }
+
     #pullDesktopTable .script-tree-name > a {
         display:inline-flex!important;
         align-items:center;
@@ -350,6 +365,31 @@
     #pullDesktopTable .script-tree-actions .row-actions {
         width:100%;
         min-width:0;
+        flex-direction:column;
+        align-items:stretch;
+        gap:6px;
+    }
+
+    #pullDesktopTable .script-tree-actions .row-actions-primary,
+    #pullDesktopTable .script-tree-actions .row-actions-secondary,
+    #pullDesktopTable .script-tree-actions .row-actions-danger {
+        width:100%;
+        flex-direction:column;
+        align-items:stretch;
+        gap:6px;
+    }
+
+    #pullDesktopTable .script-tree-actions .row-actions-danger {
+        padding-top:6px;
+        border-top:1px solid #e5e7eb;
+    }
+
+    #pullDesktopTable .script-tree-actions .btn {
+        width:100%;
+        min-width:0;
+        margin:0;
+        white-space:normal;
+        line-height:1.25;
     }
 
     .proxy-mobile-item .fls-card-actions .btn {

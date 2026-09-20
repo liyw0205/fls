@@ -111,11 +111,11 @@ def render_rows(current_rel=""):
         parent_rel = "" if parent.resolve() == SCRIPT_DIR.resolve() else script_rel_path(parent)
 
         rows += f"""
-<tr>
+<tr class="script-tree-row script-tree-parent">
     <td><span class="badge gray">返回</span></td>
-    <td><a href="{h(script_url(parent_rel))}" style="font-weight:900;font-size:16px;">..</a></td>
+    <td class="script-tree-name"><a href="{h(script_url(parent_rel))}" style="font-weight:900;font-size:16px;">..</a></td>
     <td>-</td><td>-</td><td>{h(str(parent))}</td>
-    <td><a class="btn btn-gray" href="{h(script_url(parent_rel))}">返回上级</a></td>
+    <td class="script-tree-actions"><a class="btn btn-gray" href="{h(script_url(parent_rel))}">返回上级</a></td>
 </tr>
 """
 
