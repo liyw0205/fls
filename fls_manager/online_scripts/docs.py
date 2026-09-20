@@ -8,7 +8,7 @@ def markdown_inline(text):
     text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
     text = re.sub(
         r"!\[([^\]]*)\]\((https?://[^)]+)\)",
-        r'<img alt="\1" src="\2" style="max-width:100%;border-radius:10px;margin:8px 0;">',
+        r'<img alt="\1" src="\2" loading="lazy" referrerpolicy="no-referrer" style="max-width:100%;border-radius:10px;margin:8px 0;">',
         text,
     )
     text = re.sub(
