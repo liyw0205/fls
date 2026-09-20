@@ -752,8 +752,8 @@ body.fls-modal-open {
 }
 
 .fls-form-float-actions {
-    top:76px;
-    bottom:auto;
+    top:auto;
+    bottom:18px;
     right:18px;
     z-index:900;
     border-color:var(--border);
@@ -932,9 +932,9 @@ body.fls-has-floating-actions .content {
     }
 
     .fls-form-float-actions {
-        top:62px;
+        top:auto;
         right:10px;
-        bottom:auto;
+        bottom:calc(env(safe-area-inset-bottom, 0px) + 12px);
         max-width:calc(100vw - 20px);
     }
 

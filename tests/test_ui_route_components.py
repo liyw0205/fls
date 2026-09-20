@@ -76,7 +76,7 @@ class UiRouteComponentTests(unittest.TestCase):
         self.assertIn("failures", js)
         self.assertIn("删除失败", js)
 
-    def test_scripts_new_renders_info_message_card(self):
+    def test_scripts_new_get_does_not_render_empty_result_message(self):
         with isolated_app() as (app, _base_dir):
             response = app.test_client().get(
                 "/pull/new",
@@ -86,8 +86,8 @@ class UiRouteComponentTests(unittest.TestCase):
             html = response.get_data(as_text=True)
 
             self.assertEqual(response.status_code, 200)
-            self.assertIn('style="color:#6b7280;"', html)
-            self.assertIn("暂无操作", html)
+            self.assertNotIn('style="color:#6b7280;"', html)
+            self.assertNotIn("暂无操作", html)
 
     def test_scripts_page_renders_command_example_code_card(self):
         with isolated_app() as (app, _base_dir):

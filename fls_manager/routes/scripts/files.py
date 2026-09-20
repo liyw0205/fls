@@ -65,6 +65,8 @@ def scripts_new():
         f"当前目录：{h(current_rel or 'scripts 根目录')}",
     )
 
+    message_html = message_card(msg, msg_kind, strong=msg_strong) if msg else ""
+
     body = f"""
 <form method="post">
 <input type="hidden" name="current_rel" value="{h(current_rel)}">
@@ -98,7 +100,7 @@ def scripts_new():
     <a class="btn btn-gray" href="{h(script_url(current_rel))}">返回</a>
 </section>
 </form>
-{message_card(msg or "暂无操作", msg_kind, strong=msg_strong)}
+{message_html}
 """
     return layout("新建脚本", "pull", body)
 
@@ -151,6 +153,8 @@ def scripts_view():
         """,
     )
 
+    message_html = message_card(msg, msg_kind, strong=msg_strong) if msg else ""
+
     body = f"""
 <form method="post">
 {header}
@@ -164,7 +168,7 @@ def scripts_view():
     >{h(content)}</textarea>
 </section>
 </form>
-{message_card(msg or "暂无保存操作", msg_kind, strong=msg_strong)}
+{message_html}
 """
     return layout("查看 / 编辑文件", "pull", body)
 
@@ -209,6 +213,8 @@ def scripts_rename():
         f"当前路径：{h(target)}",
     )
 
+    message_html = message_card(msg, msg_kind, strong=msg_strong) if msg else ""
+
     body = f"""
 <form method="post">
 {header}
@@ -223,7 +229,7 @@ def scripts_rename():
     <a class="btn btn-gray" href="/pull">返回</a>
 </section>
 </form>
-{message_card(msg or "暂无操作", msg_kind, strong=msg_strong)}
+{message_html}
 """
     return layout("改名", "pull", body)
 

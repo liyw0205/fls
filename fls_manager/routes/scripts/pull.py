@@ -28,7 +28,7 @@ from ...proxy import proxy_select_options, apply_proxy_env
 
 
 def pull_result_card(msg, kind="info", strong=False):
-    return message_card(msg or "暂无操作", kind, strong=strong, title="结果")
+    return message_card(msg, kind, strong=strong, title="结果") if msg else ""
 
 
 @bp.route("/pull/fetch", methods=["GET", "POST"])
