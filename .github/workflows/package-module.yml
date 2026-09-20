@@ -2,13 +2,7 @@ name: Package KernelSU Magisk module
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    tags:
-      - "v*"
-    paths:
-      - version.json
+  push: {}
 
 permissions:
   contents: write
@@ -17,8 +11,55 @@ env:
   MODULE_ZIP: fls-manager-module.zip
 
 jobs:
+  version-check:
+    name: Check version.json changes
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+    steps:
+      - name: Checkout repository history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect version.json change
+        id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Manual dispatch: package the current version."
+            exit 0
+          fi
+
+          before="${{ github.event.before }}"
+          after="${{ github.sha }}"
+
+          if [[ -z "$before" || "$before" =~ ^0+$ ]]; then
+            if git rev-parse --verify "${after}^" >/dev/null 2>&1; then
+              before="${after}^"
+            else
+              before=""
+            fi
+          fi
+
+          if [[ -z "$before" ]]; then
+            changed=true
+          elif git diff --quiet "$before" "$after" -- version.json; then
+            changed=false
+          else
+            changed=true
+          fi
+
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          echo "version.json changed: $changed"
+
   package-module:
     name: Package fls-manager-module.zip
+    needs: version-check
+    if: needs.version-check.outputs.changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository

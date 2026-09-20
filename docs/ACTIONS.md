@@ -6,7 +6,8 @@
 
 文件：`.github/workflows/package-module.yml`
 
-- 普通 `main` 推送只有 `version.json` 变化时才运行。
+- 每次提交（任意分支）和标签推送都会触发工作流。
+- 工作流会比较本次提交前后的 `version.json`，只有文件发生变化时才执行模块打包；未变化的提交会保留为跳过状态。
 - `workflow_dispatch` 可以手动运行。
 - 推送 `v*` 标签时打包并创建模块 Release。
 - 输出只有 `fls-manager-module.zip`，不会再套一层 ZIP 或 `payload/` 目录。
