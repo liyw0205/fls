@@ -396,6 +396,115 @@
         margin:0;
     }
 
+    /* Proxy cards have the same two-level action set as task cards. Keep
+       descriptive details on the left and reserve a compact action rail. */
+    .proxy-mobile-item {
+        display:grid!important;
+        grid-template-columns:minmax(0,1fr) minmax(112px,38%)!important;
+        align-items:start!important;
+    }
+
+    .proxy-mobile-item > .fls-card-head {
+        grid-column:1;
+        grid-row:1;
+    }
+
+    .proxy-mobile-item > .fls-card-primary-action {
+        grid-column:2;
+        grid-row:1;
+        padding-left:10px;
+        border-left:1px solid #e5e7eb;
+    }
+
+    .proxy-mobile-item > .detail-disclosure {
+        grid-column:1;
+        grid-row:2;
+        width:100%;
+        margin:0;
+        align-self:start;
+    }
+
+    .proxy-mobile-item > .fls-card-actions:not(.fls-card-primary-action) {
+        grid-column:2;
+        grid-row:2;
+        min-width:0;
+        padding-left:10px;
+        border-left:1px solid #e5e7eb;
+    }
+
+    .proxy-mobile-item > .fls-card-actions:not(.fls-card-primary-action) .row-actions,
+    .proxy-mobile-item > .fls-card-actions:not(.fls-card-primary-action) .row-actions-secondary,
+    .proxy-mobile-item > .fls-card-actions:not(.fls-card-primary-action) .row-actions-danger {
+        width:100%;
+        min-width:0;
+        flex-direction:column;
+        align-items:stretch;
+        gap:6px;
+    }
+
+    .proxy-mobile-item > .fls-card-actions:not(.fls-card-primary-action) .row-actions-danger {
+        padding-top:6px;
+        border-top:1px solid #e5e7eb;
+    }
+
+    .proxy-mobile-item > .fls-card-actions:not(.fls-card-primary-action) .btn {
+        width:100%;
+        min-width:0;
+        white-space:normal;
+        line-height:1.25;
+    }
+
+    /* Collection task cards use one inner wrapper; its details stay left
+       while the task controls share the same right-side rail. */
+    .collection-task-card > div:first-child {
+        display:grid;
+        grid-template-columns:minmax(0,1fr) minmax(112px,38%);
+        align-items:start;
+    }
+
+    .collection-task-card > div:first-child > .fls-card-head {
+        grid-column:1;
+        grid-row:1;
+    }
+
+    .collection-task-card > div:first-child > .fls-card-section {
+        grid-column:1;
+        grid-row:2;
+    }
+
+    .collection-task-card > div:first-child > .collection-task-actions {
+        grid-column:2;
+        grid-row:1 / span 2;
+        min-width:0;
+        padding-left:10px;
+        border-left:1px solid #e5e7eb;
+        flex-direction:column;
+        align-items:stretch;
+        gap:6px;
+    }
+
+    .collection-task-card .collection-task-actions .row-actions-primary,
+    .collection-task-card .collection-task-actions .row-actions-secondary,
+    .collection-task-card .collection-task-actions .row-actions-danger {
+        width:100%;
+        flex-direction:column;
+        align-items:stretch;
+        gap:6px;
+    }
+
+    .collection-task-card .collection-task-actions .row-actions-danger {
+        padding-top:6px;
+        border-top:1px solid #e5e7eb;
+    }
+
+    .collection-task-card .collection-task-actions .btn {
+        width:100%;
+        min-width:0;
+        margin:0;
+        white-space:normal;
+        line-height:1.25;
+    }
+
     .page-deps .table-wrap table {
         display:block!important;
         min-width:0!important;
