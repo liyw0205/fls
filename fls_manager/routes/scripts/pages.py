@@ -1,7 +1,7 @@
 from flask import request
 
 from . import bp
-from .helpers import script_safe_path, script_url, breadcrumb, render_mobile_rows, render_rows
+from .helpers import script_safe_path, script_url, breadcrumb, render_rows
 
 from ...paths import SCRIPT_DIR
 from ...utils import h
@@ -40,8 +40,8 @@ def scripts_page():
         "脚本文件",
         ("类型", "名称 / 相对路径", "大小", "修改时间", "绝对路径", "操作"),
         render_rows(current_rel),
+        class_name="script-tree-section",
     )
-    mobile_list = render_mobile_rows(current_rel)
     command_example = code_card(
         "任务命令示例",
         """
@@ -54,10 +54,6 @@ task /root/fls/scripts/demo.sh arg1 arg2
     body = f"""
 {header}
 <div id="pullDesktopTable">{table}</div>
-<section class="section" id="pullMobileList">
-    <h2 class="section-title">脚本列表</h2>
-    <div class="mobile-list">{mobile_list}</div>
-</section>
 {command_example}
 """
     return layout("脚本", "pull", body)

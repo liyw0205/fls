@@ -280,18 +280,79 @@
         margin:0!important;
     }
 
-    #proxyDesktopTable,
-    #pullDesktopTable {
+    #proxyDesktopTable {
         display:none!important;
     }
 
-    #proxyMobileList,
-    #pullMobileList {
+    #proxyMobileList {
         display:block!important;
     }
 
-    .proxy-mobile-item .fls-card-actions .btn,
-    .script-mobile-item .fls-card-actions .btn {
+    /* Scripts use one directory tree at every viewport. On small screens
+       metadata columns collapse while the name and row actions remain. */
+    #pullDesktopTable .table-wrap {
+        overflow:visible!important;
+    }
+
+    #pullDesktopTable .table-wrap table {
+        display:block!important;
+        min-width:0!important;
+        width:100%!important;
+        border-collapse:collapse!important;
+    }
+
+    #pullDesktopTable .table-wrap thead {
+        display:none!important;
+    }
+
+    #pullDesktopTable .table-wrap tbody {
+        display:block!important;
+        width:100%!important;
+    }
+
+    #pullDesktopTable .script-tree-row {
+        display:grid!important;
+        grid-template-columns:minmax(0,1fr)!important;
+        gap:8px!important;
+        width:100%!important;
+        padding:10px 0!important;
+        margin:0!important;
+        border-bottom:1px solid #e5e7eb!important;
+    }
+
+    #pullDesktopTable .script-tree-row > td {
+        display:none!important;
+        width:100%!important;
+        min-width:0!important;
+        border:0!important;
+        padding:0!important;
+    }
+
+    #pullDesktopTable .script-tree-row > td.script-tree-name,
+    #pullDesktopTable .script-tree-row > td.script-tree-actions {
+        display:block!important;
+    }
+
+    #pullDesktopTable .script-tree-name > a {
+        display:inline-flex!important;
+        align-items:center;
+        max-width:100%;
+        min-height:34px;
+        font-size:15px;
+        line-height:1.35;
+    }
+
+    #pullDesktopTable .script-tree-name .help {
+        margin-top:2px;
+        overflow-wrap:anywhere;
+    }
+
+    #pullDesktopTable .script-tree-actions .row-actions {
+        width:100%;
+        min-width:0;
+    }
+
+    .proxy-mobile-item .fls-card-actions .btn {
         margin:0;
     }
 

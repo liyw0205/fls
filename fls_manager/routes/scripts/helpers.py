@@ -171,14 +171,15 @@ def render_rows(current_rel=""):
 </div>
 """
 
+        row_class = "script-tree-directory" if is_dir else "script-tree-file"
         rows += f"""
-<tr>
+<tr class="script-tree-row {row_class}">
     <td>{badge}</td>
-    <td>{name_html}<div class="help">{h(rel)}</div></td>
+    <td class="script-tree-name">{name_html}<div class="help">{h(rel)}</div></td>
     <td>{h(size_text)}</td>
     <td>{h(mtime)}</td>
     <td>{h(str(item))}</td>
-    <td>{buttons}</td>
+    <td class="script-tree-actions">{buttons}</td>
 </tr>
 """
 
