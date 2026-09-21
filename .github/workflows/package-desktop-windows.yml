@@ -103,16 +103,16 @@ jobs:
           $staging = Join-Path $env:RUNNER_TEMP "fls-desktop-staging"
           $testDir = Join-Path $env:RUNNER_TEMP "fls-desktop-installed"
           Remove-Item -Recurse -Force $testDir -ErrorAction SilentlyContinue
-          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $staging "install.ps1") -InstallDir $testDir -NoStart
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File (Join-Path $staging "install.ps1") -InstallDir $testDir -NoStart
           if ($LASTEXITCODE -ne 0) { throw "发布包安装测试失败" }
-          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $testDir "fls.ps1") status
+          & pwsh -NoProfile -ExecutionPolicy Bypass -File (Join-Path $testDir "fls.ps1") status
           if ($LASTEXITCODE -ne 0) { throw "安装后的 fls.ps1 status 测试失败" }
           foreach ($path in @("fls-manager.py", "fls_manager", "fls.ps1", "fls.bat", ".venv\Scripts\python.exe", "data", "log", "scripts")) {
             if (-not (Test-Path (Join-Path $testDir $path))) { throw "安装结果缺少 $path" }
           }
 
           try {
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $testDir "fls.ps1") start
+            & pwsh -NoProfile -ExecutionPolicy Bypass -File (Join-Path $testDir "fls.ps1") start
             if ($LASTEXITCODE -ne 0) { throw "安装后的 FLS 启动失败" }
             $healthy = $false
             for ($i = 0; $i -lt 15; $i++) {
@@ -127,7 +127,7 @@ jobs:
             }
             if (-not $healthy) { throw "安装后的 FLS 面板健康检查失败" }
           } finally {
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $testDir "fls.ps1") stop
+            & pwsh -NoProfile -ExecutionPolicy Bypass -File (Join-Path $testDir "fls.ps1") stop
           }
 
       - name: Create desktop ZIP
