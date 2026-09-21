@@ -30,5 +30,5 @@ Name: "{group}\FLS Manager"; Filename: "{app}\fls.bat"; Parameters: "start"; Wor
 Name: "{group}\FLS Manager 状态"; Filename: "{app}\fls.bat"; Parameters: "status"; WorkingDir: "{app}"
 
 [Run]
-Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{tmp}\fls-payload\install.ps1"" -InstallDir ""{app}"""; StatusMsg: "正在安装 Python 环境和 FLS 依赖..."; Flags: waituntilterminated runasoriginaluser
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{tmp}\fls-payload\install.ps1"" -InstallDir ""{app}"" -NoStart"; StatusMsg: "正在安装 Python 环境和 FLS 依赖..."; Flags: waituntilterminated runasoriginaluser
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\fls.ps1"" start"; StatusMsg: "正在启动 FLS Manager..."; Flags: postinstall nowait skipifsilent runasoriginaluser

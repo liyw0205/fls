@@ -127,9 +127,21 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $testDir = Join-Path $env:RUNNER_TEMP "fls-installed-by-exe"
+          $installerLog = Join-Path $env:RUNNER_TEMP "fls-installer.log"
           Remove-Item -Recurse -Force $testDir -ErrorAction SilentlyContinue
-          & ".\$env:INSTALLER_EXE" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR="$testDir"
-          if ($LASTEXITCODE -ne 0) { throw "EXE 安装程序执行失败：$LASTEXITCODE" }
+          Remove-Item -Force $installerLog -ErrorAction SilentlyContinue
+          $installer = Join-Path (Get-Location) $env:INSTALLER_EXE
+          $process = Start-Process -FilePath $installer -ArgumentList @(
+            "/VERYSILENT",
+            "/SUPPRESSMSGBOXES",
+            "/NORESTART",
+            "/DIR=$testDir",
+            "/LOG=$installerLog"
+          ) -WorkingDirectory (Get-Location) -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            if (Test-Path $installerLog) { Get-Content $installerLog }
+            throw "EXE 安装程序执行失败：$($process.ExitCode)"
+          }
 
           foreach ($path in @("fls-manager.py", "fls_manager", "fls.ps1", "fls.bat", ".venv\Scripts\python.exe", "data", "log", "scripts")) {
             if (-not (Test-Path (Join-Path $testDir $path))) { throw "安装结果缺少 $path" }
