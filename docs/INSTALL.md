@@ -20,8 +20,21 @@ sh fls.sh start
 
 ## Windows
 
-安装 [Python](https://www.python.org/downloads/windows/) 和
-[Git](https://git-scm.com/download/win)，然后执行：
+发布包安装（推荐）：
+
+```powershell
+.\install.ps1
+```
+
+它会检测 Python 3.10+，在 `%LOCALAPPDATA%\FLS` 创建虚拟环境并安装依赖；升级时保留
+`data/`、`log/` 和 `scripts/`。如果需要自定义目录：
+
+```powershell
+.\install.ps1 -InstallDir "D:\Apps\FLS" -NoStart
+```
+
+源码目录开发运行需要安装 [Python](https://www.python.org/downloads/windows/)；Git 仅用于
+源码目录的更新和重新拉取：
 
 ```powershell
 git clone https://github.com/liyw0205/fls.git
@@ -30,6 +43,17 @@ cd fls
 ```
 
 也可以执行 `fls.bat start`。双击 `fls.bat` 或执行 `.\fls.ps1 menu` 可以打开前台菜单。
+
+## Linux 一键安装
+
+在源码、发布包目录执行：
+
+```bash
+sh install.sh
+```
+
+脚本默认安装到 `~/.local/share/fls`，保留已有 `data/`、`log/` 和 `scripts/`。设置
+`FLS_NO_START=1` 可只安装不启动，设置 `FLS_INSTALL_DIR` 可修改安装目录。
 
 ## Android 选择
 

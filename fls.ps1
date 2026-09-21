@@ -132,11 +132,11 @@ function Clone-Repo-ToDir($Target) {
 }
 
 function Ensure-Repo {
-    Ensure-Git
-
     if (Repo-Ready) {
         return
     }
+
+    Ensure-Git
 
     Say "未检测到完整模块化 FLS 程序"
     Say "仓库地址：$RepoUrl"
@@ -646,20 +646,11 @@ function Tail-Log {
 }
 
 function Update-Repo {
-    Ensure-Git
-
     if (-not (Test-Path (Join-Path $BaseDir ".git"))) {
-        Say "当前目录不是 Git 仓库，将重新拉取覆盖程序文件"
-
-        try {
-            Clone-Repo-ToDir $BaseDir
-            Say "更新完成"
-            return
-        } catch {
-            ErrMsg $_.Exception.Message
-            exit 1
-        }
+        throw "当前是桌面发布包，不包含 Git 仓库；请下载新的 FLS 发布包并重新运行 install.ps1"
     }
+
+    Ensure-Git
 
     Say "准备更新 FLS 仓库..."
     Push-Location $BaseDir

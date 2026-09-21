@@ -1,6 +1,18 @@
 # Actions 与发布
 
-仓库有两个互相独立的工作流：模块打包和固定 proot 运行时构建。
+仓库有三个互相独立的工作流：KernelSU/Magisk 模块打包、固定 proot 运行时构建和
+Windows 桌面包打包。
+
+## Windows 桌面包
+
+文件：`.github/workflows/package-desktop-windows.yml`
+
+- 每次提交都会检查 `version.json`；只有版本文件变化时才生成 Windows x64 ZIP。
+- `workflow_dispatch` 可手动打包；推送 `v*` 标签时会强制打包并创建 Release。
+- 产物为 `fls-manager-desktop-windows-x64.zip`，包含 `install.ps1`、`fls.ps1` 和
+  `fls.bat`，不包含运行数据、日志、虚拟环境或 Git 元数据。
+- `install.ps1` 默认安装到 `%LOCALAPPDATA%\FLS`，升级时保留 `data/`、`log/` 和
+  `scripts/`。
 
 ## 模块打包
 

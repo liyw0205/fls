@@ -38,6 +38,12 @@ cd fls
 sh fls.sh start
 ```
 
+也可以使用 Linux 一键安装脚本：
+
+```bash
+sh install.sh
+```
+
 ### Termux
 
 ```bash
@@ -56,6 +62,22 @@ su -c 'sh /data/adb/fls-a.sh start'
 ```
 
 ### Windows
+
+下载 Windows Release 后，在压缩包根目录执行一次安装脚本：
+
+```powershell
+.\install.ps1
+```
+
+安装脚本会在 `%LOCALAPPDATA%\FLS` 创建独立虚拟环境，后续升级会保留
+`data/`、`log/` 和 `scripts/`。也可以指定安装目录或只安装不启动：
+
+```powershell
+.\install.ps1 -InstallDir "D:\Apps\FLS"
+.\install.ps1 -NoStart
+```
+
+源码目录也可以直接运行：
 
 ```powershell
 git clone https://github.com/liyw0205/fls.git
@@ -84,6 +106,8 @@ fls/
 ├─ fls-t.sh             # Termux proot 入口
 ├─ fls-a.sh             # /data/fls 容器入口
 ├─ fls.ps1 / fls.bat    # Windows 入口
+├─ install.ps1          # Windows 发布包安装器
+├─ install.sh           # Linux 一键安装器
 ├─ fls_manager/         # Flask 面板代码
 ├─ data/ log/ scripts/  # 运行数据、日志和用户脚本
 └─ packaging/           # KernelSU/Magisk 和 proot 构建文件
