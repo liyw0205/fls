@@ -483,6 +483,9 @@ function Start-Fls([string[]]$ArgsList) {
 
     $env:FLS_BASE_DIR = $BaseDir
     $env:FLS_PYTHON = $py.Text
+    # Keep scheduler and task logs UTF-8 on Windows locales such as cp1252.
+    $env:PYTHONUTF8 = "1"
+    $env:PYTHONIOENCODING = "utf-8"
 
     if ($opts.Token) {
         $env:FLS_TOKEN = $opts.Token
