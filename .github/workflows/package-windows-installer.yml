@@ -9,6 +9,7 @@ permissions:
 
 env:
   INSTALLER_EXE: FLS-Manager-Setup-Windows-x64.exe
+  INSTALLER_CHECKSUMS: SHA256SUMS-windows-installer
 
 jobs:
   version-check:
@@ -74,7 +75,7 @@ jobs:
           $staging = Join-Path $env:RUNNER_TEMP "fls-installer-staging"
           $archive = Join-Path $env:RUNNER_TEMP "fls-source.tar"
           Remove-Item -Recurse -Force $staging -ErrorAction SilentlyContinue
-          Remove-Item -Force $archive, $env:INSTALLER_EXE, SHA256SUMS -ErrorAction SilentlyContinue
+          Remove-Item -Force $archive, $env:INSTALLER_EXE, $env:INSTALLER_CHECKSUMS -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force -Path $staging | Out-Null
 
           git archive HEAD -o $archive
@@ -171,7 +172,7 @@ jobs:
         shell: pwsh
         run: |
           $hash = (Get-FileHash $env:INSTALLER_EXE -Algorithm SHA256).Hash.ToLower()
-          "$hash  $env:INSTALLER_EXE" | Set-Content -Path SHA256SUMS -Encoding ASCII
+          "$hash  $env:INSTALLER_EXE" | Set-Content -Path $env:INSTALLER_CHECKSUMS -Encoding ASCII
 
       - name: Upload EXE artifact
         uses: actions/upload-artifact@v4
@@ -179,25 +180,38 @@ jobs:
           name: fls-manager-windows-installer
           path: |
             ${{ env.INSTALLER_EXE }}
-            SHA256SUMS
+            ${{ env.INSTALLER_CHECKSUMS }}
           if-no-files-found: error
 
   release:
     name: Publish Windows EXE installer release
     needs: package-installer
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      needs.package-installer.result == 'success' &&
+      (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' ||
+      startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Validate release version
+      - name: Resolve release tag
+        id: release
         shell: bash
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
           expected="$(python3 -c 'import json; print(json.load(open("version.json", encoding="utf-8"))["version"])')"
-          test "$version" = "$expected"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tag="$GITHUB_REF_NAME"
+            test "${tag#v}" = "$expected" || {
+              echo "tag version (${tag#v}) must match version.json ($expected)" >&2
+              exit 1
+            }
+          else
+            tag="v$expected"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Publishing release $tag"
 
       - name: Download EXE artifact
         uses: actions/download-artifact@v4
@@ -208,9 +222,11 @@ jobs:
       - name: Add EXE installer to GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: FLS Manager ${{ github.ref_name }} (Windows)
+          tag_name: ${{ steps.release.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: FLS Manager ${{ steps.release.outputs.tag }} (Windows)
           body_path: changelog.md
+          overwrite_files: true
           files: |
             dist/FLS-Manager-Setup-Windows-x64.exe
-            dist/SHA256SUMS
+            dist/${{ env.INSTALLER_CHECKSUMS }}

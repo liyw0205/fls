@@ -9,7 +9,7 @@ Windows 桌面包打包和 Windows EXE 安装包打包。
 
 - 采用 Inno Setup 生成 `FLS-Manager-Setup-Windows-x64.exe`，不是 ZIP 改名。
 - 每次提交检查 `version.json`，只有版本变化时编译；`workflow_dispatch` 可强制运行。
-- 推送 `v*` 标签时将 EXE 和 `SHA256SUMS` 添加到 GitHub Release。
+- `workflow_dispatch`、主分支版本变更和推送 `v*` 标签时，将 EXE 和校验文件添加到对应 GitHub Release。
 - 安装程序默认目录为 `%LOCALAPPDATA%\FLS`，安装阶段调用 `install.ps1` 创建虚拟环境并
   安装 Python 依赖。
 - Windows Runner 会静默安装 EXE、启动面板、访问 `127.0.0.1:5700` 后停止服务。
@@ -19,7 +19,7 @@ Windows 桌面包打包和 Windows EXE 安装包打包。
 文件：`.github/workflows/package-desktop-windows.yml`
 
 - 每次提交都会检查 `version.json`；只有版本文件变化时才生成 Windows x64 ZIP。
-- `workflow_dispatch` 可手动打包；推送 `v*` 标签时会强制打包并创建 Release。
+- `workflow_dispatch`、主分支版本变更和推送 `v*` 标签时会打包并创建/更新对应 Release。
 - 产物为 `fls-manager-desktop-windows-x64.zip`，包含 `install.ps1`、`fls.ps1` 和
   `fls.bat`，不包含运行数据、日志、虚拟环境或 Git 元数据。
 - `install.ps1` 默认安装到 `%LOCALAPPDATA%\FLS`，升级时保留 `data/`、`log/` 和
@@ -32,7 +32,7 @@ Windows 桌面包打包和 Windows EXE 安装包打包。
 - 每次提交（任意分支）和标签推送都会触发工作流。
 - 工作流会比较本次提交前后的 `version.json`，只有文件发生变化时才执行模块打包；未变化的提交会保留为跳过状态。
 - `workflow_dispatch` 可以手动运行。
-- 推送 `v*` 标签时打包并创建模块 Release。
+- `workflow_dispatch`、主分支版本变更和推送 `v*` 标签时打包并创建/更新模块 Release。
 - 输出只有 `fls-manager-module.zip`，不会再套一层 ZIP 或 `payload/` 目录。
 
 模块 ZIP 根目录包含：
@@ -81,12 +81,14 @@ fls-proot-all-armv7.tar.gz
 `changelog.md` 保存发布说明。发布流程示例：
 
 ```bash
-# 先更新 version.json 和 changelog.md
+# 先更新 version.json 和 changelog.md；推送主分支即可自动创建/更新 Release
 git add version.json changelog.md
-git commit -m "chore: release 20260920.4"
+git commit -m "chore: release 20260922.1"
 git push origin main
-git tag v20260920.4
-git push origin v20260920.4
+
+# 也可以使用匹配 version.json.version 的标签触发
+git tag v20260922.1
+git push origin v20260922.1
 ```
 
 ## 手动触发

@@ -9,6 +9,7 @@ permissions:
 
 env:
   DESKTOP_ZIP: fls-manager-desktop-windows-x64.zip
+  DESKTOP_CHECKSUMS: SHA256SUMS-windows-desktop
 
 jobs:
   version-check:
@@ -74,7 +75,7 @@ jobs:
           $staging = Join-Path $env:RUNNER_TEMP "fls-desktop-staging"
           $archive = Join-Path $env:RUNNER_TEMP "fls-source.tar"
           Remove-Item -Recurse -Force $staging -ErrorAction SilentlyContinue
-          Remove-Item -Force $archive, $env:DESKTOP_ZIP -ErrorAction SilentlyContinue
+          Remove-Item -Force $archive, $env:DESKTOP_ZIP, $env:DESKTOP_CHECKSUMS -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force -Path $staging | Out-Null
 
           git archive HEAD -o $archive
@@ -153,7 +154,7 @@ jobs:
         shell: pwsh
         run: |
           $hash = (Get-FileHash $env:DESKTOP_ZIP -Algorithm SHA256).Hash.ToLower()
-          "$hash  $env:DESKTOP_ZIP" | Set-Content -Path SHA256SUMS -Encoding ASCII
+          "$hash  $env:DESKTOP_ZIP" | Set-Content -Path $env:DESKTOP_CHECKSUMS -Encoding ASCII
 
       - name: Upload desktop artifact
         uses: actions/upload-artifact@v4
@@ -161,25 +162,38 @@ jobs:
           name: fls-manager-desktop-windows-x64
           path: |
             ${{ env.DESKTOP_ZIP }}
-            SHA256SUMS
+            ${{ env.DESKTOP_CHECKSUMS }}
           if-no-files-found: error
 
   release:
     name: Publish Windows desktop release
     needs: package-windows
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      needs.package-windows.result == 'success' &&
+      (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' ||
+      startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Validate release version
+      - name: Resolve release tag
+        id: release
         shell: bash
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
           expected="$(python3 -c 'import json; print(json.load(open("version.json", encoding="utf-8"))["version"])')"
-          test "$version" = "$expected"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tag="$GITHUB_REF_NAME"
+            test "${tag#v}" = "$expected" || {
+              echo "tag version (${tag#v}) must match version.json ($expected)" >&2
+              exit 1
+            }
+          else
+            tag="v$expected"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Publishing release $tag"
 
       - name: Download desktop artifact
         uses: actions/download-artifact@v4
@@ -190,9 +204,11 @@ jobs:
       - name: Create or update GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: FLS Manager ${{ github.ref_name }} (Windows)
+          tag_name: ${{ steps.release.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: FLS Manager ${{ steps.release.outputs.tag }} (Windows)
           body_path: changelog.md
+          overwrite_files: true
           files: |
             dist/fls-manager-desktop-windows-x64.zip
-            dist/SHA256SUMS
+            dist/${{ env.DESKTOP_CHECKSUMS }}

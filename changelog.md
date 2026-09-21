@@ -1,5 +1,11 @@
 # Changelog
 
+## 20260922.1
+
+- 模块、Windows 桌面包和 Windows EXE 安装包统一自动上传到对应版本 Release。
+- 手动运行或主分支版本变更时使用 `version.json` 自动生成 Release 标签。
+- Windows 桌面包和 EXE 安装包使用独立的 SHA256 校验文件名，避免 Release 资源冲突。
+
 ## 20260921.1
 
 - 每次 `main` 提交都会触发模块工作流，但只有 `version.json` 发生变化时才打包。
