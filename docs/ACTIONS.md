@@ -1,7 +1,18 @@
 # Actions 与发布
 
-仓库有三个互相独立的工作流：KernelSU/Magisk 模块打包、固定 proot 运行时构建和
-Windows 桌面包打包。
+仓库有四个互相独立的工作流：KernelSU/Magisk 模块打包、固定 proot 运行时构建、
+Windows 桌面包打包和 Windows EXE 安装包打包。
+
+## Windows EXE 安装包
+
+文件：`.github/workflows/package-windows-installer.yml`
+
+- 采用 Inno Setup 生成 `FLS-Manager-Setup-Windows-x64.exe`，不是 ZIP 改名。
+- 每次提交检查 `version.json`，只有版本变化时编译；`workflow_dispatch` 可强制运行。
+- 推送 `v*` 标签时将 EXE 和 `SHA256SUMS` 添加到 GitHub Release。
+- 安装程序默认目录为 `%LOCALAPPDATA%\FLS`，安装阶段调用 `install.ps1` 创建虚拟环境并
+  安装 Python 依赖。
+- Windows Runner 会静默安装 EXE、启动面板、访问 `127.0.0.1:5700` 后停止服务。
 
 ## Windows 桌面包
 

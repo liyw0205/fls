@@ -1,0 +1,204 @@
+name: Package Windows EXE installer
+
+on:
+  workflow_dispatch:
+  push: {}
+
+permissions:
+  contents: write
+
+env:
+  INSTALLER_EXE: FLS-Manager-Setup-Windows-x64.exe
+
+jobs:
+  version-check:
+    name: Check version.json changes
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+    steps:
+      - name: Checkout repository history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect version.json change
+        id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" || "${{ github.ref }}" == refs/tags/v* ]]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          before="${{ github.event.before }}"
+          after="${{ github.sha }}"
+          if [[ -z "$before" || "$before" =~ ^0+$ ]]; then
+            if git rev-parse --verify "${after}^" >/dev/null 2>&1; then
+              before="${after}^"
+            else
+              before=""
+            fi
+          fi
+
+          if [[ -z "$before" ]]; then
+            changed=true
+          elif git diff --quiet "$before" "$after" -- version.json; then
+            changed=false
+          else
+            changed=true
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          echo "version.json changed: $changed"
+
+  package-installer:
+    name: Build and test Windows EXE installer
+    needs: version-check
+    if: needs.version-check.outputs.changed == 'true'
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare release payload
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $info = Get-Content version.json -Raw -Encoding UTF8 | ConvertFrom-Json
+          if ([int]$info.versionCode -lt 1 -or [string]::IsNullOrWhiteSpace([string]$info.version)) {
+            throw "version.json 的 version/versionCode 无效"
+          }
+          if (-not (Test-Path changelog.md)) { throw "changelog.md 缺失" }
+
+          $staging = Join-Path $env:RUNNER_TEMP "fls-installer-staging"
+          $archive = Join-Path $env:RUNNER_TEMP "fls-source.tar"
+          Remove-Item -Recurse -Force $staging -ErrorAction SilentlyContinue
+          Remove-Item -Force $archive, $env:INSTALLER_EXE, SHA256SUMS -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+
+          git archive HEAD -o $archive
+          tar -xf $archive -C $staging
+
+          foreach ($path in @(".git", ".github", ".tmp", ".venv", "data", "log", "logs", "tests", "tools", "docs", "install.sh", "__pycache__", ".pytest_cache", "packaging")) {
+            $target = Join-Path $staging $path
+            if (Test-Path $target) { Remove-Item -Recurse -Force $target }
+          }
+
+          foreach ($path in @("fls.ps1", "fls.bat", "install.ps1", "fls-manager.py", "fls_manager", "scripts", "README.md", "version.json", "changelog.md")) {
+            if (-not (Test-Path (Join-Path $staging $path))) { throw "发布载荷缺少 $path" }
+          }
+
+          $env:FLS_SOURCE_DIR = $staging
+          $env:FLS_OUTPUT_DIR = (Get-Location).Path
+          $env:FLS_APP_VERSION = [string]$info.version
+          "FLS_SOURCE_DIR=$env:FLS_SOURCE_DIR" | Out-File -FilePath "$env:GITHUB_ENV" -Append -Encoding utf8
+          "FLS_OUTPUT_DIR=$env:FLS_OUTPUT_DIR" | Out-File -FilePath "$env:GITHUB_ENV" -Append -Encoding utf8
+          "FLS_APP_VERSION=$env:FLS_APP_VERSION" | Out-File -FilePath "$env:GITHUB_ENV" -Append -Encoding utf8
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $iscc = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) {
+            choco install innosetup --no-progress -y
+            $iscc = @(
+              "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+              "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+            ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $iscc) { throw "未找到 Inno Setup 6 编译器" }
+          "FLS_ISCC=$iscc" | Out-File -FilePath "$env:GITHUB_ENV" -Append -Encoding utf8
+
+      - name: Compile installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & $env:FLS_ISCC /Qp "packaging\windows\fls-installer.iss"
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup 编译失败" }
+          if (-not (Test-Path $env:INSTALLER_EXE)) { throw "安装程序未生成：$env:INSTALLER_EXE" }
+
+      - name: Test installer on Windows runner
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $testDir = Join-Path $env:RUNNER_TEMP "fls-installed-by-exe"
+          Remove-Item -Recurse -Force $testDir -ErrorAction SilentlyContinue
+          & ".\$env:INSTALLER_EXE" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR="$testDir"
+          if ($LASTEXITCODE -ne 0) { throw "EXE 安装程序执行失败：$LASTEXITCODE" }
+
+          foreach ($path in @("fls-manager.py", "fls_manager", "fls.ps1", "fls.bat", ".venv\Scripts\python.exe", "data", "log", "scripts")) {
+            if (-not (Test-Path (Join-Path $testDir $path))) { throw "安装结果缺少 $path" }
+          }
+
+          $entry = Join-Path $testDir "fls.ps1"
+          try {
+            & pwsh -NoProfile -ExecutionPolicy Bypass -File $entry start
+            if ($LASTEXITCODE -ne 0) { throw "安装后的 FLS 启动失败" }
+            $healthy = $false
+            for ($i = 0; $i -lt 15; $i++) {
+              try {
+                $response = Invoke-WebRequest -Uri "http://127.0.0.1:5700/" -UseBasicParsing -TimeoutSec 3
+                if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 500) {
+                  $healthy = $true
+                  break
+                }
+              } catch {}
+              Start-Sleep -Seconds 1
+            }
+            if (-not $healthy) { throw "安装后的 FLS 面板健康检查失败" }
+          } finally {
+            & pwsh -NoProfile -ExecutionPolicy Bypass -File $entry stop
+          }
+
+      - name: Create SHA256 checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash $env:INSTALLER_EXE -Algorithm SHA256).Hash.ToLower()
+          "$hash  $env:INSTALLER_EXE" | Set-Content -Path SHA256SUMS -Encoding ASCII
+
+      - name: Upload EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fls-manager-windows-installer
+          path: |
+            ${{ env.INSTALLER_EXE }}
+            SHA256SUMS
+          if-no-files-found: error
+
+  release:
+    name: Publish Windows EXE installer release
+    needs: package-installer
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          expected="$(python3 -c 'import json; print(json.load(open("version.json", encoding="utf-8"))["version"])')"
+          test "$version" = "$expected"
+
+      - name: Download EXE artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: fls-manager-windows-installer
+          path: dist
+
+      - name: Add EXE installer to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: FLS Manager ${{ github.ref_name }} (Windows)
+          body_path: changelog.md
+          files: |
+            dist/FLS-Manager-Setup-Windows-x64.exe
+            dist/SHA256SUMS
