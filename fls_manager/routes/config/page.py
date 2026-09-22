@@ -6,6 +6,9 @@ from ...ui.components import table_card, page_header
 def config_page():
     if request.method == "POST":
         old_cfg = load_config()
+        theme = str(request.form.get("theme", "default") or "default").strip().lower()
+        if theme not in THEME_OPTIONS:
+            theme = "default"
 
         # ============================================================
         # 脚本类型
@@ -89,6 +92,7 @@ def config_page():
         # ============================================================
         cfg = {
             "admin_token": new_admin_token,
+            "theme": theme,
 
             "security_verify_enabled": security_verify_enabled,
             "security_verify_type": security_verify_type,
@@ -150,6 +154,16 @@ def config_page():
 
     def checked(k):
         return "checked" if types.get(k) else ""
+
+    current_theme = str(cfg.get("theme", "default") or "default")
+    if current_theme not in THEME_OPTIONS:
+        current_theme = "default"
+
+    theme_options = "".join(
+        f'<option value="{h(key)}"{" selected" if key == current_theme else ""}>'
+        f'{h(label)}</option>'
+        for key, label in THEME_OPTIONS.items()
+    )
 
     rows = ""
 
@@ -219,6 +233,7 @@ def config_page():
 <nav class="fls-section-nav" aria-label="配置区块导航">
     <span class="fls-section-nav-label">配置区块</span>
     <a href="#config-login">登录</a>
+    <a href="#config-theme">主题</a>
     <a href="#config-security">安全验证</a>
     <a href="#config-online">在线脚本</a>
     <a href="#config-logs">日志清理</a>
@@ -243,6 +258,19 @@ def config_page():
         <label>面板端口，保存后重启生效</label>
         <input name="port" type="number" min="1" max="65535" value="{h(cfg.get('port', 5700))}" aria-label="面板端口">
         <div class="help">当前进程实际监听端口：{h(get_port())}</div>
+    </div>
+</section>
+
+<section class="section fls-section fls-form-section" id="config-theme">
+    <h2 class="section-title">主题选择</h2>
+    <div class="form-item">
+        <label for="panelTheme">面板主题</label>
+        <select name="theme" id="panelTheme" aria-label="面板主题">
+            {theme_options}
+        </select>
+        <div class="help">
+            默认主题保留当前的新拟物界面；编辑杂志风使用暖米色、衬线标题和细线排版；玻璃拟态使用深色毛玻璃层次。保存后刷新页面生效。
+        </div>
     </div>
 </section>
 

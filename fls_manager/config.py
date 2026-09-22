@@ -7,6 +7,8 @@ from .constants import DEFAULT_HOST, DEFAULT_PORT, LOG_CLEANUP_INTERVAL_MINUTES,
 
 DEFAULT_CONFIG = {
     "admin_token": "",
+    # 页面主题：default 保留当前拟物主题。
+    "theme": "default",
     # 登录后安全验证
     # security_verify_type:
     #   code = 随机验证码
@@ -48,6 +50,12 @@ DEFAULT_CONFIG = {
         "lua": bool(shutil.which("lua")),
         "jar": bool(shutil.which("java")),
     },
+}
+
+THEME_OPTIONS = {
+    "default": "默认主题",
+    "editorial": "编辑杂志风",
+    "glassmorphism": "玻璃拟态",
 }
 
 
@@ -102,6 +110,8 @@ def normalize_config_data(cfg):
     merged.update(cfg)
 
     merged["admin_token"] = str(merged.get("admin_token", "") or "").strip()
+    theme = str(merged.get("theme", "default") or "default").strip().lower()
+    merged["theme"] = theme if theme in THEME_OPTIONS else "default"
     merged["security_verify_enabled"] = _coerce_bool(
         merged.get("security_verify_enabled", False),
         False,

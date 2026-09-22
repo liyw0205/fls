@@ -1,6 +1,7 @@
 import re
 
 from ..csrf import csrf_token
+from ..config import load_config, THEME_OPTIONS
 from ..utils import h
 
 
@@ -21,6 +22,9 @@ def inject_csrf_inputs(body, token):
 def layout(title, active, body):
     token = csrf_token()
     body = inject_csrf_inputs(body, token)
+    theme = str(load_config().get("theme", "default") or "default").strip().lower()
+    if theme not in THEME_OPTIONS:
+        theme = "default"
 
     nav = [
         ("dashboard", "/", "仪表盘"),
@@ -63,7 +67,7 @@ def layout(title, active, body):
 <link rel="apple-touch-icon" href="/static/favicon-generated.png?v=20260920-1">
 <link rel="stylesheet" href="/static/fls.css?v=20260920-3&actions=2">
 <link rel="stylesheet" href="/static/fls_responsive.css?v=20260920-3&actions=2">
-<link rel="stylesheet" href="/static/fls_theme.css?v=20260920-3&actions=2">
+<link rel="stylesheet" href="/static/fls_theme.css?v=20260920-3&actions=2&theme=neumorphism&rev=20260922-1">
 
 </head>
 
@@ -96,7 +100,7 @@ def layout(title, active, body):
 </html>
 '''
 
-    body_classes = f"page-{active}"
+    body_classes = f"page-{active} fls-theme-{theme}"
     # Collections share task-specific table rules while keeping their own
     # navigation identity and body hook.
     if active == "collections":

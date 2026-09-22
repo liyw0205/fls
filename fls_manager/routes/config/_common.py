@@ -1,7 +1,7 @@
 from .bp import bp
 from flask import request, redirect, url_for
 
-from ...config import load_config, save_config, get_port
+from ...config import load_config, save_config, get_port, THEME_OPTIONS
 from ...scheduler import reload_scheduler
 from ...logs import cleanup_logs
 from ...utils import h
