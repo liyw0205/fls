@@ -1274,7 +1274,7 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertNotIn("Beta", html)
             self.assertNotIn("hidden", html)
 
-    def test_dashboard_keeps_recent_and_abnormal_history_summaries(self):
+    def test_dashboard_keeps_abnormal_history_summary_without_recent_runs(self):
         with isolated_app() as (app, base_dir):
             data_dir = base_dir / "data"
             log_dir = base_dir / "log"
@@ -1320,18 +1320,12 @@ class UiRouteComponentTests(unittest.TestCase):
             html = response.get_data(as_text=True)
 
             self.assertEqual(response.status_code, 200)
-            self.assertIn('<h2 class="section-title">最近运行</h2>', html)
+            self.assertNotIn('<h2 class="section-title">最近运行</h2>', html)
             self.assertIn('<h2 class="section-title">最近异常</h2>', html)
-            self.assertIn("Recent &lt;ok&gt;", html)
+            self.assertNotIn("Recent &lt;ok&gt;", html)
             self.assertIn("Broken &lt;x&gt;", html)
-            self.assertIn('<span class="status-badge status-success" role="status">成功</span>', html)
             self.assertIn('<span class="status-badge status-error" role="status">失败</span>', html)
-            self.assertIn("<td>done &lt;ok&gt;</td>", html)
             self.assertIn("<td>boom &lt;bad&gt;</td>", html)
-            self.assertIn(
-                'href="/logfile/success-history.log?back=/"',
-                html,
-            )
             self.assertIn(
                 'href="/logfile/failed-history.log?back=/"',
                 html,
@@ -1410,7 +1404,8 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertIn('<h2 class="section-title">面板信息</h2>', html)
             self.assertIn("<th>项目</th>", html)
-            self.assertIn("<th>值</th>", html)
+            self.assertIn("<th></th>", html)
+            self.assertNotIn("<th>值</th>", html)
             self.assertIn("<td><b>项目仓库</b></td>", html)
             self.assertIn("https://github.com/liyw0205/fls", html)
             self.assertIn("<td><b>控制脚本</b></td>", html)

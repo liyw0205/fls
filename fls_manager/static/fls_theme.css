@@ -723,6 +723,24 @@ td {
     padding:18px;
 }
 
+.fls-panel-confirm-dialog {
+    width:min(420px,100%);
+}
+
+.fls-panel-confirm-content {
+    display:flex;
+    flex-direction:column;
+    gap:16px;
+}
+
+.fls-panel-confirm-content .help {
+    margin:0;
+}
+
+.fls-panel-confirm-actions {
+    justify-content:flex-end;
+}
+
 body.fls-modal-open {
     overflow:hidden;
 }

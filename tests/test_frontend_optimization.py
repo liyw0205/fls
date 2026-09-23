@@ -105,6 +105,9 @@ class FrontendOptimizationTests(unittest.TestCase):
             self.assertIn('id="dashboard-panel-control"', dashboard_html)
             self.assertIn('action="/about/restart-panel"', dashboard_html)
             self.assertIn('action="/about/stop-panel"', dashboard_html)
+            self.assertNotIn('<h2 class="section-title">面板控制</h2>', dashboard_html)
+            self.assertNotIn("重启或停止面板会影响当前访问", dashboard_html)
+            self.assertNotIn("查看任务摘要、最近活动和面板运行状态。", dashboard_html)
             self.assertLess(
                 dashboard_html.index('id="dashboard-panel-control"'),
                 dashboard_html.index('id="dashboard-summary"'),
@@ -133,6 +136,15 @@ class FrontendOptimizationTests(unittest.TestCase):
         self.assertIn("body.fls-menu-open .fls-form-float-actions", css)
         self.assertIn("document.body.classList.add(\"fls-menu-open\")", js)
         self.assertIn('e.key === "Escape"', js)
+
+    def test_panel_control_uses_custom_confirmation_modal(self):
+        js = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+        css = (ROOT / "fls_manager" / "static" / "fls_theme.css").read_text(encoding="utf-8")
+
+        self.assertIn("flsConfirmPanelControl", js)
+        self.assertIn("确认停止面板", js)
+        self.assertIn("确认重启面板", js)
+        self.assertIn(".fls-panel-confirm-dialog", css)
 
     def test_navigation_cache_has_limits_and_explicit_refresh(self):
         js = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")

@@ -243,6 +243,57 @@ function flsOpenModalContent(titleText, content, trigger){
     return modal;
 }
 
+function flsConfirmPanelControl(button, action){
+    const form = button && button.closest ? button.closest("form") : null;
+    if(!form) return true;
+
+    const isStop = String(action || "") === "stop";
+    const title = isStop ? "确认停止面板" : "确认重启面板";
+    const message = isStop
+        ? "停止后面板将无法继续提供服务，需要手动重新启动。"
+        : "重启期间页面会短暂无法访问，当前任务和操作可能受到影响。";
+
+    const content = document.createElement("div");
+    content.className = "fls-panel-confirm-content";
+
+    const text = document.createElement("p");
+    text.className = "help";
+    text.textContent = message;
+    content.appendChild(text);
+
+    const actions = document.createElement("div");
+    actions.className = "action-row fls-panel-confirm-actions";
+
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "btn btn-gray";
+    cancel.textContent = "取消";
+    cancel.addEventListener("click", flsCloseDisclosureModal);
+
+    const confirm = document.createElement("button");
+    confirm.type = "button";
+    confirm.className = isStop ? "btn btn-red" : "btn btn-orange";
+    confirm.textContent = isStop ? "确认停止" : "确认重启";
+    confirm.addEventListener("click", function(){
+        flsCloseDisclosureModal();
+        if(typeof form.requestSubmit === "function"){
+            form.requestSubmit(button);
+        }else{
+            form.submit();
+        }
+    });
+
+    actions.appendChild(cancel);
+    actions.appendChild(confirm);
+    content.appendChild(actions);
+
+    const modal = flsOpenModalContent(title, content, button);
+    modal.classList.add("fls-panel-confirm-modal");
+    const dialog = modal.querySelector(".fls-disclosure-dialog");
+    if(dialog) dialog.classList.add("fls-panel-confirm-dialog");
+    return false;
+}
+
 function flsOpenDisclosureModal(details){
     const content = document.createDocumentFragment();
     Array.from(details.children).forEach(function(child){

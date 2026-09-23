@@ -154,7 +154,7 @@ def about():
 """
     panel_info_table = table_card(
         "面板信息",
-        ["项目", "值"],
+        ["项目", ""],
         panel_info_rows,
     )
     task_command_card = code_card(
