@@ -5,6 +5,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$PythonDownloadUrl = "https://www.python.org/downloads/windows/"
 
 if (-not $InstallDir) {
     if (-not $env:LOCALAPPDATA) {
@@ -93,7 +94,14 @@ function Find-Python {
         } catch {}
     }
 
-    Fail "未找到 Python 3.10 或更高版本，请先安装 Python 并勾选 Add Python to PATH"
+    Say "未检测到 Python 3.10 或更高版本。"
+    Say "不会自动下载 Python，将打开 Python 官方 Windows 下载页面。"
+    try {
+        Start-Process $PythonDownloadUrl | Out-Null
+    } catch {
+        Say "无法自动打开浏览器，请手动访问：$PythonDownloadUrl"
+    }
+    Fail "请安装 Python 3.10 或更高版本，并勾选 Add Python to PATH，然后重新运行安装程序"
 }
 
 function Invoke-Python($Spec, [string[]]$Arguments) {

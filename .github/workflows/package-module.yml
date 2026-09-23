@@ -242,6 +242,10 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "Publishing release $tag"
 
+      - name: Prepare version-specific release notes
+        shell: bash
+        run: python3 tools/release_notes.py --output release-notes.md
+
       - name: Download module artifact
         uses: actions/download-artifact@v4
         with:
@@ -254,6 +258,6 @@ jobs:
           tag_name: ${{ steps.release.outputs.tag }}
           target_commitish: ${{ github.sha }}
           name: FLS Manager ${{ steps.release.outputs.tag }}
-          body_path: changelog.md
+          body_path: release-notes.md
           overwrite_files: true
           files: dist/fls-manager-module.zip
