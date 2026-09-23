@@ -200,7 +200,7 @@ ps -eo pid,ppid,comm,args | grep fls
 
     header = page_header(
         "关于 FLS",
-        help_html="查看版本、更新日志、时间校准和面板控制；危险动作单独确认。",
+        help_html="查看版本、更新日志、时间校准和面板运行信息。",
     )
     body = f"""
 {header}
@@ -230,7 +230,7 @@ ps -eo pid,ppid,comm,args | grep fls
 
 <nav class="fls-section-nav" aria-label="关于页区块导航">
     <span class="fls-section-nav-label">关于页面</span>
-    <a href="#about-intro">面板控制</a>
+    <a href="#about-intro">面板说明</a>
     <a href="#about-time">时间校准</a>
     <a href="#about-version">版本信息</a>
     <a href="#about-updates">更新日志</a>
@@ -243,24 +243,6 @@ ps -eo pid,ppid,comm,args | grep fls
     <div class="help">
         <p><b>FLS 面板</b> 是一个轻量级脚本任务管理面板，可用于管理 Python、Shell、Node.js 等脚本任务。</p>
         <p>支持任务管理、Cron 定时、脚本导入、日志查看、依赖管理、代理配置、通知管理、备份恢复和面板配置。</p>
-    </div>
-
-    <br>
-
-    <div class="row-actions" aria-label="面板控制危险操作">
-        <div class="row-actions-danger">
-            <form method="post" action="/about/restart-panel" style="display:inline;">
-                <button class="btn btn-orange" type="submit" onclick="return confirm('确定重启面板吗？重启期间页面会短暂无法访问。')">
-                    重启面板
-                </button>
-            </form>
-
-            <form method="post" action="/about/stop-panel" style="display:inline;">
-                <button class="btn btn-red" type="submit" onclick="return confirm('确定停止面板吗？停止后需要手动重新启动。')">
-                    停止面板
-                </button>
-            </form>
-        </div>
     </div>
 </section>
 

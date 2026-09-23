@@ -95,6 +95,35 @@ class FrontendOptimizationTests(unittest.TestCase):
                         self.assertIn(f'id="{target}"', html)
                         self.assertIn(f'href="#{target}"', html)
 
+    def test_panel_controls_are_on_dashboard_and_theme_selector_is_in_config(self):
+        with isolated_app() as app:
+            client = app.test_client()
+
+            dashboard = client.get("/", headers={"X-Token": TOKEN})
+            dashboard_html = dashboard.get_data(as_text=True)
+            self.assertEqual(dashboard.status_code, 200)
+            self.assertIn('id="dashboard-panel-control"', dashboard_html)
+            self.assertIn('action="/about/restart-panel"', dashboard_html)
+            self.assertIn('action="/about/stop-panel"', dashboard_html)
+            self.assertLess(
+                dashboard_html.index('id="dashboard-panel-control"'),
+                dashboard_html.index('id="dashboard-summary"'),
+            )
+
+            about = client.get("/about", headers={"X-Token": TOKEN})
+            about_html = about.get_data(as_text=True)
+            self.assertEqual(about.status_code, 200)
+            self.assertNotIn('action="/about/restart-panel"', about_html)
+            self.assertNotIn('action="/about/stop-panel"', about_html)
+
+            config = client.get("/config", headers={"X-Token": TOKEN})
+            config_html = config.get_data(as_text=True)
+            self.assertEqual(config.status_code, 200)
+            self.assertIn('id="config-theme"', config_html)
+            self.assertIn('<option value="default" selected>默认主题</option>', config_html)
+            self.assertIn('<option value="editorial">编辑杂志风</option>', config_html)
+            self.assertIn('<option value="glassmorphism">玻璃拟态</option>', config_html)
+
     def test_shell_layering_tokens_are_present(self):
         css = (ROOT / "fls_manager" / "static" / "fls.css").read_text(encoding="utf-8")
         js = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")

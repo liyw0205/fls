@@ -15,7 +15,7 @@ from ...paths import BASE_DIR
 @bp.route("/about/restart-panel", methods=["GET", "POST"])
 def about_restart_panel():
     if request.method == "GET":
-        return redirect(url_for("about.about"))
+        return redirect(url_for("dashboard.dashboard"))
 
     script = fls_control_script()
 
@@ -26,9 +26,9 @@ def about_restart_panel():
         <span style="color:#dc2626;font-weight:800;">未找到 FLS 控制脚本：{h(script)}</span><br>
         Windows 请确认存在：<code>{h(BASE_DIR / "fls.bat")}</code> 或 <code>{h(BASE_DIR / "fls.ps1")}</code><br>
         Linux / Termux 请确认存在：<code>{h(BASE_DIR / "fls.sh")}</code><br>
-        下一步：补齐控制脚本后返回关于页重试。
+        下一步：补齐控制脚本后返回仪表盘重试。
 """,
-            actions_html='<a class="btn btn-gray" href="/about">返回关于页</a>',
+            actions_html='<a class="btn btn-gray" href="/">返回仪表盘</a>',
         )
         return layout("重启失败", "about", body), 400
 
@@ -48,9 +48,8 @@ def about_restart_panel():
         控制脚本：<code>{h(script)}</code>
 """,
         actions_html="""
-<a class="btn btn-gray" href="/about">返回关于页</a>
 <a class="btn btn-primary" href="/">返回仪表盘</a>
-<a class="btn btn-blue" href="/logfile/fls-manager-daemon.log?back=/about">查看面板日志</a>
+<a class="btn btn-blue" href="/logfile/fls-manager-daemon.log?back=/">查看面板日志</a>
 """,
     ) + """
 
@@ -60,13 +59,13 @@ setTimeout(function(){
 }, 10000);
 </script>
 """
-    return layout("正在重启面板", "about", body)
+    return layout("正在重启面板", "dashboard", body)
 
 
 @bp.route("/about/stop-panel", methods=["GET", "POST"])
 def about_stop_panel():
     if request.method == "GET":
-        return redirect(url_for("about.about"))
+        return redirect(url_for("dashboard.dashboard"))
 
     script = fls_control_script()
 
@@ -77,9 +76,9 @@ def about_stop_panel():
         <span style="color:#dc2626;font-weight:800;">未找到 FLS 控制脚本：{h(script)}</span><br>
         Windows 请确认存在：<code>{h(BASE_DIR / "fls.bat")}</code> 或 <code>{h(BASE_DIR / "fls.ps1")}</code><br>
         Linux / Termux 请确认存在：<code>{h(BASE_DIR / "fls.sh")}</code><br>
-        下一步：补齐控制脚本后返回关于页重试。
+        下一步：补齐控制脚本后返回仪表盘重试。
 """,
-            actions_html='<a class="btn btn-gray" href="/about">返回关于页</a>',
+            actions_html='<a class="btn btn-gray" href="/">返回仪表盘</a>',
         )
         return layout("停止失败", "about", body), 400
 
@@ -99,6 +98,6 @@ def about_stop_panel():
         控制脚本：<code>{h(script)}</code><br>
         停止后需要你手动重新启动面板，或等待系统自启服务拉起。
 """,
-        actions_html='<a class="btn btn-blue" href="/logfile/fls-manager-daemon.log?back=/about">查看面板日志</a>',
+        actions_html='<a class="btn btn-blue" href="/logfile/fls-manager-daemon.log?back=/">查看面板日志</a>',
     )
-    return layout("正在停止面板", "about", body)
+    return layout("正在停止面板", "dashboard", body)

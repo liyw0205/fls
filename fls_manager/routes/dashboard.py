@@ -746,8 +746,30 @@ def dashboard():
         help_html="查看任务摘要、最近活动和面板运行状态。",
         actions_html='<a class="btn btn-primary" href="/task/new">新建任务</a><a class="btn btn-gray" href="/panel/status">查看面板状态</a>',
     )
+    panel_control_section = section(
+        "面板控制",
+        """
+<div class="help">重启或停止面板会影响当前访问，请确认没有正在进行的重要操作。</div>
+<div class="row-actions" aria-label="面板控制危险操作">
+    <div class="row-actions-danger">
+        <form method="post" action="/about/restart-panel" class="inline-form">
+            <button class="btn btn-orange" type="submit" onclick="return confirm('确定重启面板吗？重启期间页面会短暂无法访问。')">
+                重启面板
+            </button>
+        </form>
+        <form method="post" action="/about/stop-panel" class="inline-form">
+            <button class="btn btn-red" type="submit" onclick="return confirm('确定停止面板吗？停止后需要手动重新启动。')">
+                停止面板
+            </button>
+        </form>
+    </div>
+</div>
+""",
+        section_id="dashboard-panel-control",
+    )
     body = f"""
 {header}
+{panel_control_section}
 <section class="section" id="dashboard-summary">
 <div class="grid">
     <div class="stat">
