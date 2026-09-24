@@ -22,6 +22,11 @@ from ...scheduler import reload_scheduler
 
 BACKUP_DIR = DATA_DIR / "backups"
 BACKUP_JOBS = {}
+BACKUP_CANCEL_EVENTS = {}
+
+
+class BackupCancelled(Exception):
+    pass
 
 
 # ============================================================
@@ -117,23 +122,49 @@ def list_backup_files():
     return files
 
 
-def write_dependencies_file(path):
+def write_dependencies_file(path, cancel_event=None):
     try:
-        result = subprocess.run(
+        process = subprocess.Popen(
             [sys.executable, "-m", "pip", "freeze"],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            timeout=120,
         )
+        deadline = time.monotonic() + 120
+        while True:
+            try:
+                output, _ = process.communicate(timeout=0.2)
+                break
+            except subprocess.TimeoutExpired:
+                if cancel_event is not None and cancel_event.is_set():
+                    process.terminate()
+                    try:
+                        process.communicate(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.communicate()
+                    raise BackupCancelled("备份任务已取消")
+                if time.monotonic() < deadline:
+                    continue
+                process.terminate()
+                try:
+                    output, _ = process.communicate(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.communicate()
+                raise subprocess.TimeoutExpired(
+                    [sys.executable, "-m", "pip", "freeze"], 120
+                )
 
-        deps_text = result.stdout or ""
+        deps_text = output or ""
 
-        if result.returncode != 0:
+        if process.returncode != 0:
             deps_text = "# pip freeze 执行失败，以下为输出：\n" + deps_text
 
         Path(path).write_text(deps_text, encoding="utf-8")
 
+    except BackupCancelled:
+        raise
     except Exception as e:
         Path(path).write_text(
             "# pip freeze 执行失败：{}\n".format(e),
@@ -160,7 +191,25 @@ def tar_filter_exclude_backups(tarinfo):
 # 后台创建备份
 # ============================================================
 
-def create_backup_worker(job_id, items):
+def _check_backup_cancelled(cancel_event):
+    if cancel_event.is_set():
+        raise BackupCancelled("备份任务已取消")
+
+
+def _backup_tar_filter(cancel_event):
+    def apply_filter(tarinfo):
+        _check_backup_cancelled(cancel_event)
+        filtered = tar_filter_exclude_backups(tarinfo)
+        if filtered is None:
+            return None
+        if not (filtered.isfile() or filtered.isdir()):
+            raise RuntimeError("备份目录包含不支持的文件类型")
+        return filtered
+
+    return apply_filter
+
+
+def create_backup_worker(job_id, items, cancel_event):
     info = BACKUP_JOBS.get(job_id)
 
     if not info:
@@ -173,7 +222,9 @@ def create_backup_worker(job_id, items):
     info["error"] = ""
     info["updated_at"] = now_str()
 
+    target = None
     try:
+        _check_backup_cancelled(cancel_event)
         if not items:
             raise RuntimeError("未选择备份内容")
 
@@ -195,23 +246,25 @@ def create_backup_worker(job_id, items):
         deps_tmp.close()
 
         try:
-            write_dependencies_file(deps_tmp.name)
+            write_dependencies_file(deps_tmp.name, cancel_event)
 
             with tarfile.open(target, "w:gz") as tar:
                 if "data" in items and DATA_DIR.exists():
                     tar.add(
                         DATA_DIR,
                         arcname="data",
-                        filter=tar_filter_exclude_backups,
+                        filter=_backup_tar_filter(cancel_event),
                     )
 
                 if "scripts" in items and SCRIPT_DIR.exists():
                     tar.add(
                         SCRIPT_DIR,
                         arcname="scripts",
+                        filter=_backup_tar_filter(cancel_event),
                     )
 
                 if Path(deps_tmp.name).exists():
+                    _check_backup_cancelled(cancel_event)
                     tar.add(deps_tmp.name, arcname="dependencies.txt")
 
         finally:
@@ -220,6 +273,7 @@ def create_backup_worker(job_id, items):
             except Exception:
                 pass
 
+        _check_backup_cancelled(cancel_event)
         stat = target.stat()
 
         info["running"] = False
@@ -229,17 +283,33 @@ def create_backup_worker(job_id, items):
         info["size_text"] = fmt_size(stat.st_size)
         info["updated_at"] = now_str()
 
+    except BackupCancelled:
+        if target is not None:
+            try:
+                target.unlink(missing_ok=True)
+            except Exception:
+                pass
+        info["running"] = False
+        info["status"] = "已取消"
+        info["error"] = ""
+        info["updated_at"] = now_str()
     except Exception as e:
         info["running"] = False
         info["status"] = "失败"
         info["error"] = str(e)
         info["updated_at"] = now_str()
+    finally:
+        BACKUP_CANCEL_EVENTS.pop(job_id, None)
 
 
 def start_backup_job(items):
     job_id = uuid.uuid4().hex
 
     prune_completed_records(BACKUP_JOBS)
+    for old_id in list(BACKUP_CANCEL_EVENTS):
+        if old_id not in BACKUP_JOBS:
+            BACKUP_CANCEL_EVENTS.pop(old_id, None)
+    cancel_event = threading.Event()
     BACKUP_JOBS[job_id] = {
         "id": job_id,
         "items": list(items or []),
@@ -253,10 +323,11 @@ def start_backup_job(items):
         "created_at": now_str(),
         "updated_at": now_str(),
     }
+    BACKUP_CANCEL_EVENTS[job_id] = cancel_event
 
     th = threading.Thread(
         target=create_backup_worker,
-        args=(job_id, items),
+        args=(job_id, items, cancel_event),
         daemon=True,
         name=f"fls-backup-{job_id[:8]}",
     )

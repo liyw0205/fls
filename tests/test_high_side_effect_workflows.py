@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -72,6 +73,9 @@ def cleanup_side_effect_state():
         backup_jobs = getattr(backup_common, "BACKUP_JOBS", None)
         if backup_jobs is not None:
             backup_jobs.clear()
+        backup_cancel_events = getattr(backup_common, "BACKUP_CANCEL_EVENTS", None)
+        if backup_cancel_events is not None:
+            backup_cancel_events.clear()
 
     about_state = sys.modules.get("fls_manager.routes.about.state")
     if about_state is not None:
@@ -461,6 +465,58 @@ class BackupIsolationTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.get_json(), {"ok": True, "job_id": "job-fixture"})
             start_backup_job.assert_called_once_with(["data", "scripts"])
+
+    def test_backup_cancel_api_sets_the_job_cancel_event(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.routes.backup._common import (
+                BACKUP_CANCEL_EVENTS,
+                BACKUP_JOBS,
+            )
+
+            cancel_event = threading.Event()
+            BACKUP_JOBS["cancel-fixture"] = {"running": True}
+            BACKUP_CANCEL_EVENTS["cancel-fixture"] = cancel_event
+
+            response = app.test_client().post(
+                "/api/backup/cancel/cancel-fixture",
+                headers={"X-Token": TOKEN},
+            )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.get_json()["ok"])
+            self.assertEqual(BACKUP_JOBS["cancel-fixture"]["status"], "正在取消")
+            self.assertTrue(cancel_event.is_set())
+
+    def test_backup_filter_rejects_links(self):
+        with isolated_app():
+            from fls_manager.routes.backup._common import _backup_tar_filter
+
+            link = tarfile.TarInfo("data/escape")
+            link.type = tarfile.SYMTYPE
+            link.linkname = "../../outside"
+
+            with self.assertRaisesRegex(RuntimeError, "不支持的文件类型"):
+                _backup_tar_filter(threading.Event())(link)
+
+    def test_backup_worker_finishes_cancelled_jobs_without_an_archive(self):
+        with isolated_app() as (_app, base_dir):
+            from fls_manager.routes.backup._common import (
+                BACKUP_CANCEL_EVENTS,
+                BACKUP_JOBS,
+                create_backup_worker,
+            )
+
+            cancel_event = threading.Event()
+            cancel_event.set()
+            BACKUP_JOBS["cancelled-fixture"] = {"running": True}
+            BACKUP_CANCEL_EVENTS["cancelled-fixture"] = cancel_event
+
+            create_backup_worker("cancelled-fixture", ["data"], cancel_event)
+
+            self.assertEqual(BACKUP_JOBS["cancelled-fixture"]["status"], "已取消")
+            self.assertFalse(BACKUP_JOBS["cancelled-fixture"]["running"])
+            self.assertNotIn("cancelled-fixture", BACKUP_CANCEL_EVENTS)
+            self.assertFalse((base_dir / "data" / "backups").exists())
 
     def test_backup_import_restores_isolated_dirs_and_mocks_dependency_install(self):
         with isolated_app() as (app, base_dir):
