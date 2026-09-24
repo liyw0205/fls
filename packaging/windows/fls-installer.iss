@@ -1,6 +1,7 @@
 ﻿#define SourceDir GetEnv("FLS_SOURCE_DIR")
 #define OutputDir GetEnv("FLS_OUTPUT_DIR")
 #define AppVersion GetEnv("FLS_APP_VERSION")
+#define ChineseMessagesFile GetEnv("FLS_CHINESE_MESSAGES_FILE")
 
 [Setup]
 AppId={{5C2A4EA8-2DAA-4B9C-AB68-6D3C0D0E0F15}
@@ -23,7 +24,7 @@ CloseApplications=yes
 ChangesEnvironment=no
 
 [Languages]
-Name: "chinesesimp"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+Name: "chinesesimp"; MessagesFile: "{#ChineseMessagesFile}"
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{tmp}\fls-payload"; Flags: recursesubdirs createallsubdirs ignoreversion

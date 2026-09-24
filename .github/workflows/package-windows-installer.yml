@@ -115,6 +115,26 @@ jobs:
           if (-not $iscc) { throw "未找到 Inno Setup 6 编译器" }
           "FLS_ISCC=$iscc" | Out-File -FilePath "$env:GITHUB_ENV" -Append -Encoding utf8
 
+      - name: Prepare Simplified Chinese installer messages
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $revision = "dd21bddcca863d260ddbdc7c7083175d2c3b47bf"
+          $url = "https://api.github.com/repos/jrsoftware/issrc/contents/Files/Languages/ChineseSimplified.isl?ref=$revision"
+          $response = Invoke-RestMethod -Uri $url -Headers @{
+            Accept = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+            "User-Agent" = "fls-release-workflow"
+          }
+          $content = [Convert]::FromBase64String(($response.content -replace "\s", ""))
+          $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($content)).ToLowerInvariant()
+          if ($hash -ne "e0b0b350e2245f3c5e65586dfe43d574f6e7f06f2261149aba284954b3fc9a8d") {
+            throw "简体中文安装消息文件 SHA256 校验失败"
+          }
+          $messagesFile = Join-Path $env:RUNNER_TEMP "ChineseSimplified.isl"
+          [IO.File]::WriteAllBytes($messagesFile, $content)
+          "FLS_CHINESE_MESSAGES_FILE=$messagesFile" | Out-File -FilePath "$env:GITHUB_ENV" -Append -Encoding utf8
+
       - name: Compile installer
         shell: pwsh
         run: |
