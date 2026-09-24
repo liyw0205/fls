@@ -18,7 +18,6 @@ OutputBaseFilename=FLS-Manager-Setup-Windows-x64
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-DefaultLanguageName=chinesesimp
 UninstallDisplayName=FLS Manager
 CloseApplications=yes
 ChangesEnvironment=no
