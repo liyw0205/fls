@@ -51,26 +51,30 @@ def _task_action_buttons(task_id, enabled, config_path="", pinned=False, include
     if not include_primary:
         primary_btn = ""
     toggle_text = "停用" if enabled else "启用"
-    toggle_class = "btn-gray" if enabled else "btn-primary"
+    toggle_class = "btn-gray" if enabled else "btn-blue"
+
+    log_btn = f'<a class="btn btn-blue" href="/log/{h(task_id)}?back=/tasks">查看任务日志</a>'
+    primary_group = f'<div class="row-actions-primary">{primary_btn}{log_btn}</div>' if include_primary else ""
+    menu_log = "" if include_primary else log_btn
+    toggle_label = f"{toggle_text}任务" if include_primary else toggle_text
+    delete_label = "删除任务" if include_primary else "删除"
     return f"""
 <!-- Compatibility markers for legacy action selectors: taskAjaxAction('copy','{h(task_id)}'), taskAjaxAction('pin','{h(task_id)}'), taskAjaxAction('stop','{h(task_id)}') -->
 <div class="task-actions row-actions" data-task-id="{h(task_id)}">
-    <div class="row-actions-primary">
-    {primary_btn}
-    <a class="btn btn-orange" href="/log/{h(task_id)}?back=/tasks">查看任务日志</a>
-    <a class="btn btn-blue" href="/task/edit/{h(task_id)}?back=/tasks">编辑任务</a>
-    {config_btn}
-    </div>
+    {primary_group}
     <div class="row-actions-secondary task-action-more">
         <button class="btn btn-gray task-action-menu-toggle" type="button" aria-expanded="false" aria-controls="{h(menu_id)}" onclick="toggleTaskActionMenu(this)">更多操作</button>
         <div id="{h(menu_id)}" class="task-action-more-menu" hidden>
+            {menu_log}
+            <a class="btn btn-blue" href="/task/edit/{h(task_id)}?back=/tasks">编辑任务</a>
+            {config_btn}
             <button class="btn {pin_class}" type="button" onclick="taskAjaxAction('pin','{h(task_id)}',this)">{pin_text}任务</button>
             <button class="btn btn-blue" type="button" onclick="taskAjaxAction('copy','{h(task_id)}',this)">复制任务</button>
         </div>
     </div>
     <div class="row-actions-danger">
-        <button class="btn {toggle_class}" type="button" onclick="taskAjaxAction('toggle','{h(task_id)}',this)">{h(toggle_text)}任务</button>
-        <button class="btn btn-gray" type="button" onclick="taskAjaxAction('delete','{h(task_id)}',this)">删除任务</button>
+        <button class="btn {toggle_class}" type="button" aria-label="{h(toggle_text)}任务" onclick="taskAjaxAction('toggle','{h(task_id)}',this)">{h(toggle_label)}</button>
+        <button class="btn btn-gray" type="button" aria-label="删除任务" onclick="taskAjaxAction('delete','{h(task_id)}',this)">{delete_label}</button>
     </div>
 </div>
 """
@@ -155,7 +159,9 @@ def tasks_table(tasks):
 
             remark_html = ""
             if remark:
-                remark_html = f'<div class="help" style="margin-top:4px;">备注：{h(remark)}</div>'
+                remark_html = f'<div class="help task-remark-preview">备注：{h(remark)}</div>'
+
+            remark_detail = f'<div class="task-mobile-item"><div class="task-mobile-label">备注</div><div class="task-mobile-value">{h(remark)}</div></div>' if remark else ""
 
             command_html = collapsible_code(command, limit=90, max_lines=2)
             # The mobile task details already provide one disclosure boundary;
@@ -165,29 +171,33 @@ def tasks_table(tasks):
                 f'<code style="white-space:pre-wrap;word-break:break-word;">{h(command)}</code>'
             )
 
-            remark_mobile = ""
-            if remark:
-                remark_mobile = f"""
-            <div class="task-mobile-item">
-                <div class="task-mobile-label">备注</div>
-                <div class="task-mobile-value">{h(remark)}</div>
-            </div>
-"""
-
             desktop_rows += f"""
 <tr data-task-id="{h(task_id)}">
     <td class="task-select-cell">
         <input class="task-select-checkbox" type="checkbox" data-task-id="{h(task_id)}" onchange="taskSyncSelection(this)" aria-label="选择任务 {h(name)}">
     </td>
-    <td><b>{h(name)}</b> {pinned_badge}{remark_html}</td>
-    <td>{command_html}</td>
+    <td class="task-name-cell">
+        <b class="task-name-preview">{h(name)}</b> {pinned_badge}{remark_html}
+        <details class="detail-disclosure task-desktop-details">
+            <summary>任务详情</summary>
+            <div class="task-mobile-info">
+                <div class="task-mobile-item"><div class="task-mobile-label">任务名</div><div class="task-mobile-value">{h(name)}</div></div>
+                {remark_detail}
+                <div class="task-mobile-item"><div class="task-mobile-label">命令</div><div class="task-mobile-value code-like">{mobile_command_html}</div></div>
+                <div class="task-mobile-item"><div class="task-mobile-label">Cron / 下次执行</div><div class="task-mobile-value">{h(cron)} / {h(next_run_text)}</div></div>
+                <div class="task-mobile-item"><div class="task-mobile-label">运行次数 / PID</div><div class="task-mobile-value">{run_count} / {h(pid)}</div></div>
+                <div class="task-mobile-item"><div class="task-mobile-label">进程名</div><div class="task-mobile-value">{h(process_name)}</div></div>
+            </div>
+        </details>
+    </td>
+    <td class="task-detail-column">{command_html}</td>
     <td>{h(cron)}</td>
     <td>{h(next_run_text)}</td>
     <td>{enabled_badge}</td>
     <td>{status_badge}</td>
-    <td>{run_count}</td>
-    <td>{h(pid)}</td>
-    <td>{h(process_name)}</td>
+    <td class="task-detail-column">{run_count}</td>
+    <td class="task-detail-column">{h(pid)}</td>
+    <td class="task-detail-column">{h(process_name)}</td>
     <td>{actions}</td>
 </tr>
 """
@@ -202,22 +212,22 @@ def tasks_table(tasks):
             </div>
             <div class="task-mobile-main">
                 <div class="task-mobile-title">{h(name)} {pinned_badge}</div>
-                {f'<div class="help" style="margin-top:4px;">备注：{h(remark)}</div>' if remark else ''}
+                {remark_html}
             </div>
             <div class="task-mobile-badges">
                 {enabled_badge}
                 {status_badge}
             </div>
         </div>
-        <div class="task-mobile-recent">最近运行：{h(next_run_text)}</div>
+        <div class="task-mobile-recent">下次运行：{h(next_run_text)}</div>
       </div>
 
       <details class="detail-disclosure task-mobile-details">
         <summary>查看任务详情</summary>
         <div class="task-mobile-card-body">
           <div class="task-mobile-info">
-            {remark_mobile}
-
+            <div class="task-mobile-item"><div class="task-mobile-label">任务名</div><div class="task-mobile-value">{h(name)}</div></div>
+            {remark_detail}
             <div class="task-mobile-item">
                 <div class="task-mobile-label">命令</div>
                 <div class="task-mobile-value code-like">{mobile_command_html}</div>
@@ -397,13 +407,13 @@ tr.task-selected td {{
    ============================================================ */
 .task-mobile-card {{
     display:grid;
-    grid-template-columns:minmax(0,1fr) minmax(112px,38%);
+    grid-template-columns:minmax(0,1fr) minmax(120px,36%);
     align-items:stretch;
     background:#fff;
     border:1px solid #e5e7eb;
     border-radius:14px;
     padding:0;
-    margin-bottom:14px;
+    margin-bottom:10px;
     box-shadow:0 4px 16px rgba(0,0,0,.04);
     overflow:hidden;
 }}
@@ -422,7 +432,7 @@ tr.task-selected td {{
 }}
 
 .mobile-list-summary {{
-    padding:14px;
+    padding:11px;
 }}
 
 .task-mobile-recent {{
@@ -433,7 +443,7 @@ tr.task-selected td {{
 }}
 
 .task-mobile-primary-action {{
-    padding:0 14px 10px;
+    padding:8px 9px 0;
 }}
 
 .task-mobile-primary-action .btn {{
@@ -444,26 +454,30 @@ tr.task-selected td {{
 }}
 
 .task-mobile-actions {{
-    padding:0 14px 14px;
+    padding:7px 9px 9px;
 }}
 
 .task-mobile-actions .task-actions {{
     flex-direction:column;
     align-items:stretch;
-    gap:6px;
+    gap:4px;
 }}
 
 .task-mobile-actions .row-actions-primary,
 .task-mobile-actions .row-actions-secondary,
 .task-mobile-actions .row-actions-danger {{
+    display:grid;
+    grid-template-columns:repeat(2,minmax(0,1fr));
+    padding-left:0;
+    border-left:0;
     width:100%;
     flex-direction:column;
     align-items:stretch;
-    gap:6px;
+    gap:4px;
 }}
 
 .task-mobile-actions .row-actions-danger {{
-    padding-top:6px;
+    padding-top:4px;
     border-top:1px solid #e5e7eb;
 }}
 
@@ -487,10 +501,10 @@ tr.task-selected td {{
 }}
 
 .task-mobile-head {{
-    display:flex;
-    justify-content:space-between;
-    align-items:flex-start;
-    gap:10px;
+    display:grid;
+    grid-template-columns:16px minmax(0,1fr);
+    align-items:start;
+    gap:6px 8px;
 }}
 
 .task-mobile-select {{
@@ -504,19 +518,20 @@ tr.task-selected td {{
 }}
 
 .task-mobile-title {{
-    font-size:17px;
-    font-weight:900;
+    font-size:16px;
+    font-weight:700;
     color:#111827;
     line-height:1.35;
     word-break:break-word;
 }}
 
 .task-mobile-badges {{
+    grid-column:2;
     display:flex;
     gap:6px;
     flex-wrap:wrap;
-    justify-content:flex-end;
-    min-width:72px;
+    justify-content:flex-start;
+    min-width:0;
 }}
 
 .task-mobile-info {{
@@ -592,22 +607,22 @@ tr.task-selected td {{
 
     .mobile-list-summary,
     .task-mobile-actions {{
-        padding-left:12px;
-        padding-right:12px;
+        padding-left:9px;
+        padding-right:9px;
     }}
 
     .task-mobile-primary-action {{
-        padding-left:12px;
-        padding-right:12px;
+        padding-left:9px;
+        padding-right:9px;
     }}
 
     .task-mobile-card-body {{
-        padding:0 12px 12px;
+        padding:0 9px 9px;
     }}
 
     .task-mobile-actions {{
-        padding-left:10px;
-        padding-right:10px;
+        padding-left:8px;
+        padding-right:8px;
     }}
 
     .task-mobile-title {{
@@ -636,7 +651,7 @@ tr.task-selected td {{
         flex:1 1 calc(33.333% - 8px);
         min-width:72px;
         margin:2px 0;
-        padding:8px 6px;
+        padding:6px 5px;
     }}
 }}
 
@@ -651,6 +666,12 @@ tr.task-selected td {{
 
     .task-action-more {{
         flex:1 1 calc(50% - 8px);
+    }}
+}}
+
+@media(min-width:381px) and (max-width:767px) {{
+    .task-mobile-card {{
+        grid-template-columns:minmax(0,1fr) minmax(128px,36%);
     }}
 }}
 </style>
@@ -685,14 +706,14 @@ tr.task-selected td {{
                         <input class="task-select-all" type="checkbox" onchange="taskToggleAll(this.checked)" aria-label="全选任务">
                     </th>
                     <th>任务名</th>
-                    <th>命令</th>
+                    <th class="task-detail-column">命令</th>
                     <th>Cron</th>
                     <th>下次执行</th>
                     <th>启用</th>
                     <th>状态</th>
-                    <th>运行次数</th>
-                    <th>PID</th>
-                    <th>进程名</th>
+                    <th class="task-detail-column">运行次数</th>
+                    <th class="task-detail-column">PID</th>
+                    <th class="task-detail-column">进程名</th>
                     <th>操作</th>
                 </tr>
             </thead>

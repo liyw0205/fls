@@ -43,6 +43,7 @@ class PageProbe(HTMLParser):
         super().__init__()
         self.has_viewport = False
         self.has_css = False
+        self.has_density_css = False
         self.has_js = False
         self.body_classes = set()
 
@@ -57,6 +58,8 @@ class PageProbe(HTMLParser):
             href = attr.get("href", "")
             if "stylesheet" in rel and "/static/fls.css?v=" in href:
                 self.has_css = True
+            if "stylesheet" in rel and "/static/fls_density.css?v=" in href:
+                self.has_density_css = True
 
         if tag == "script" and "/static/fls.js?v=" in attr.get("src", ""):
             self.has_js = True
@@ -149,6 +152,9 @@ def check_page(client, path, expected_body_class):
 
     if not probe.has_css:
         errors.append("missing /static/fls.css?v= stylesheet")
+
+    if not probe.has_density_css:
+        errors.append("missing /static/fls_density.css?v= stylesheet")
 
     if not probe.has_js:
         errors.append("missing /static/fls.js?v= script")
@@ -243,6 +249,13 @@ def run_smoke():
                     client,
                     "/static/fls_responsive.css",
                     ("@media (max-width: 767px)", "@media (min-width: 768px) and (max-width: 1199px)", "#proxyMobileList", "#tasksMobileCards"),
+                )
+            )
+            results.append(
+                check_static_asset(
+                    client,
+                    "/static/fls_density.css",
+                    ("--fls-section-gap", "--fls-item-padding", "#tasksTable", "#pullDesktopTable", "script-tree-more:not([open])", "@media (max-width:767px)"),
                 )
             )
             results.append(

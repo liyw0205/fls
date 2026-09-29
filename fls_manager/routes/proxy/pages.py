@@ -40,6 +40,11 @@ def proxy_page():
             <button class="btn btn-red" type="submit" onclick="return confirm('确定删除代理吗？')">删除代理</button>
         </form>
 '''
+            mobile_toggle_action = f'''
+        <form class="inline-form" method="post" action="/proxy/toggle/{h(proxy_id)}">
+            <button class="btn {toggle_class}" type="submit">{toggle_text}</button>
+        </form>
+'''
             action_html = f'''
 <div class="row-actions" aria-label="代理 {h(proxy_name)} 行操作">
     <div class="row-actions-primary">{primary_action}</div>
@@ -86,7 +91,16 @@ def proxy_page():
       </div>
       <div class="fls-card-actions">
         <div class="row-actions" aria-label="代理 {h(proxy_name)} 行操作">
-            <div class="row-actions-secondary">{secondary_actions}</div>
+            <div class="row-actions-secondary">
+                <details class="detail-disclosure proxy-mobile-more">
+                    <summary>更多操作</summary>
+                    <div class="proxy-mobile-more-actions">
+                        <a class="btn btn-blue" href="/proxy/edit/{h(proxy_id)}">编辑代理设置</a>
+                        <button class="btn btn-blue" type="button" onclick="flsProxyQuality('{h(proxy_id)}', this)">检测代理质量</button>
+                        {mobile_toggle_action}
+                    </div>
+                </details>
+            </div>
             <div class="row-actions-danger">{danger_actions}</div>
         </div>
       </div>

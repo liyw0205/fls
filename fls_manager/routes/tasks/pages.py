@@ -92,13 +92,15 @@ def _render_collection_cards(collections, all_tasks):
         task_count = task_count_map.get(cid, 0)
 
         cards += f"""
-<div class="fls-summary-item" id="collection-{h(cid)}">
+<div class="fls-summary-item task-collection-preview" id="collection-{h(cid)}">
+    <div class="task-collection-copy">
     <div class="fls-summary-label">{h(cname)}</div>
     <div class="help">{h(cremark or "暂无备注")}</div>
-    <div style="margin-top:8px;line-height:1.7;">
+    <div>
         任务：<b>{task_count}</b>
     </div>
-    <div class="action-row" style="margin-top:10px;">
+    </div>
+    <div class="action-row">
         <a class="btn btn-blue" href="/collections#collection-{h(cid)}">查看</a>
         <a class="btn btn-orange" href="/collection/edit/{h(cid)}">编辑任务合集</a>
     </div>
@@ -111,7 +113,7 @@ def _render_collection_cards(collections, all_tasks):
             '<a class="btn btn-primary" href="/collection/new">新建任务合集</a>',
         )
 
-    return f'<div class="fls-summary-grid">{cards}</div>'
+    return f'<div class="fls-summary-grid task-collection-previews">{cards}</div>'
 
 
 def _task_from_post(base=None):

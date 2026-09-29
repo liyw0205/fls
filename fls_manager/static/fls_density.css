@@ -1,0 +1,227 @@
+/* Shared density layer. Themes continue to own colors and surface treatments. */
+:root {
+    --fls-font-ui:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC","Microsoft YaHei",sans-serif;
+    --fls-section-gap:18px;
+    --fls-item-padding:14px;
+    --fls-layout-gap:12px;
+    --fls-control-height:36px;
+}
+
+body[class*="fls-theme-"] {
+    font-family:var(--fls-font-ui);
+    font-size:14px;
+}
+
+body[class*="fls-theme-"] :is(.brand,.page-title,.section-title,.card-title,.fls-summary-label,.fls-info-label,.task-mobile-label) {
+    letter-spacing:0;
+}
+body[class*="fls-theme-"] .page-eyebrow { letter-spacing:0; }
+
+body[class*="fls-theme-"] .content {
+    padding:22px 26px 36px!important;
+}
+
+body[class*="fls-theme-"] .page-header {
+    gap:16px;
+    margin-bottom:var(--fls-section-gap);
+    padding-bottom:12px;
+}
+
+body[class*="fls-theme-"] .page-title { font-size:26px; }
+body[class*="fls-theme-"] .page-description { margin-top:6px; line-height:1.5; }
+body[class*="fls-theme-"] .section { margin-bottom:var(--fls-section-gap); }
+body[class*="fls-theme-"] .section-header { margin-bottom:10px; }
+body[class*="fls-theme-"] :is(.section-title,.card-title) { font-size:16px; font-weight:700; }
+body[class*="fls-theme-"] .card-title { margin-bottom:10px; }
+
+body[class*="fls-theme-"] .card {
+    padding:var(--fls-item-padding)!important;
+    margin-bottom:var(--fls-layout-gap);
+}
+
+body[class*="fls-theme-"] :is(.grid,.fls-card-grid,.fls-summary-grid) {
+    gap:var(--fls-layout-gap);
+    margin-bottom:var(--fls-layout-gap);
+}
+
+body[class*="fls-theme-"] :is(.stat,.fls-summary-item,.fls-fold-card) {
+    padding:var(--fls-item-padding);
+}
+
+body[class*="fls-theme-"] :is(.card,.stat,.fls-fold-card,.task-mobile-card,.fls-summary-item) {
+    border-radius:8px;
+}
+
+body[class*="fls-theme-"] .task-mobile-card { padding:0; }
+body[class*="fls-theme-"] .stat .num { margin-top:4px; font-size:24px; }
+body[class*="fls-theme-"] .data-toolbar { gap:8px; margin-bottom:10px; padding:10px; }
+body[class*="fls-theme-"] .table-wrap :is(th,td) { padding:9px 10px; font-size:13px; }
+
+body[class*="fls-theme-"] .btn {
+    min-height:var(--fls-control-height);
+    padding:6px 10px;
+    margin:0;
+    font-family:inherit;
+    font-weight:600;
+}
+
+body[class*="fls-theme-"] :is(.row-actions,.row-actions-primary,.row-actions-secondary,.row-actions-danger) {
+    gap:6px;
+}
+
+body[class*="fls-theme-"] .fls-card-primary-action { margin-top:8px; padding-top:8px; }
+body[class*="fls-theme-"] .fls-card-head { gap:8px; }
+body[class*="fls-theme-"] .fls-card-title-main { font-size:16px; font-weight:700; line-height:1.35; }
+body[class*="fls-theme-"] .fls-card-sub { line-height:1.45; }
+body[class*="fls-theme-"] .fls-info-grid { gap:8px; }
+body[class*="fls-theme-"] .fls-info-item { padding:8px; }
+body[class*="fls-theme-"] .mobile-list { gap:8px; }
+body[class*="fls-theme-"] .detail-disclosure { margin-top:6px; }
+body[class*="fls-theme-"] .detail-disclosure > summary { padding:7px 9px; min-height:32px; }
+
+/* Full names, notes and technical fields remain available in the detail dialog. */
+.task-name-preview,
+.task-mobile-title,
+.task-remark-preview {
+    display:-webkit-box;
+    -webkit-box-orient:vertical;
+    -webkit-line-clamp:2;
+    overflow:hidden;
+    overflow-wrap:anywhere;
+}
+.task-remark-preview {
+    -webkit-line-clamp:1;
+    margin-top:4px;
+    line-height:1.45;
+}
+.task-mobile-title { font-weight:700; }
+.task-mobile-details .task-mobile-item:first-child,
+.task-desktop-details .task-mobile-item:first-child { grid-column:1 / -1; }
+
+body[class*="fls-theme-"] :is(.script-tree-more,.proxy-mobile-more) { margin:0; }
+body[class*="fls-theme-"] :is(.script-tree-more,.proxy-mobile-more) > summary {
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    min-height:var(--fls-control-height);
+    padding:6px 8px;
+    color:var(--text);
+    font-size:13px;
+    line-height:1.25;
+    white-space:nowrap;
+    list-style:none;
+}
+body[class*="fls-theme-"] :is(.script-tree-more,.proxy-mobile-more) > summary::after { display:none; }
+body[class*="fls-theme-"] :is(.script-tree-more,.proxy-mobile-more) > summary::-webkit-details-marker { display:none; }
+.script-tree-more:not([open]) > .script-tree-more-actions,
+.proxy-mobile-more:not([open]) > .proxy-mobile-more-actions { display:none; }
+.script-tree-more-actions,
+.proxy-mobile-more-actions { display:grid; gap:8px; }
+
+body[class*="fls-theme-"] .task-collection-previews { grid-template-columns:1fr!important; }
+body[class*="fls-theme-"] .task-collection-preview {
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:12px;
+}
+.task-collection-copy { min-width:0; flex:1; }
+.task-collection-preview .action-row { flex:0 0 auto; }
+.task-collection-preview .help { overflow-wrap:anywhere; }
+.task-collection-preview .fls-summary-label { font-weight:700; }
+
+.page-online_scripts #online-list .fls-card-grid { grid-template-columns:minmax(0,1fr); }
+.page-online_scripts #online-list .fls-fold-card {
+    display:grid;
+    grid-template-columns:minmax(0,1fr) minmax(260px,45%);
+    gap:8px 18px;
+    align-items:start;
+}
+.page-online_scripts #online-list .fls-card-head { grid-column:1; }
+.page-online_scripts #online-list .fls-card-primary-action {
+    grid-column:2;
+    grid-row:1 / 3;
+    padding:0;
+    margin:0;
+    border:0;
+}
+.page-online_scripts #online-list .detail-disclosure { grid-column:1; margin:0; }
+
+@media (min-width:768px) {
+    body.page-tasks #tasksTable { min-width:0; table-layout:fixed; }
+    #tasksTable .task-detail-column { display:none; }
+    body.page-tasks #tasksTable .task-select-cell { width:36px; min-width:36px; }
+    body.page-tasks #tasksTable :is(th,td):nth-child(2) { width:auto; min-width:0; }
+    #tasksTable :is(th,td):nth-child(4) { width:90px; }
+    #tasksTable :is(th,td):nth-child(5) { width:118px; }
+    #tasksTable :is(th,td):nth-child(6),
+    #tasksTable :is(th,td):nth-child(7) { width:72px; }
+    body.page-tasks #tasksTable :is(th,td):last-child { width:246px; min-width:246px; }
+    #tasksTable .task-actions { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); min-width:0; gap:6px; }
+    #tasksTable .row-actions-primary { grid-column:1 / -1; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); }
+    #tasksTable .row-actions-danger { grid-column:2 / -1; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); padding:0; border:0; }
+    #tasksTable .task-action-more { margin:0; min-width:0; }
+    #tasksTable .task-actions .btn { width:100%; padding:6px 4px; margin:0; font-size:12px; }
+    #tasksTable .task-desktop-details { background:none; box-shadow:none; border:0; margin:3px 0 0; }
+    #tasksTable .task-desktop-details > summary { padding:5px 0; font-size:12px; }
+}
+
+@media (min-width:768px) and (max-width:1199px) {
+    #tasksTable :is(th,td):nth-child(4) { display:none; }
+    #tasksTable :is(th,td):nth-child(5) { width:104px; }
+    #tasksTable :is(th,td):nth-child(6),
+    #tasksTable :is(th,td):nth-child(7) { width:64px; }
+    body.page-tasks #tasksTable :is(th,td):last-child { width:228px; min-width:228px; }
+}
+
+@media (max-width:767px) {
+    :root {
+        --fls-section-gap:14px;
+        --fls-item-padding:10px;
+        --fls-layout-gap:8px;
+        --fls-control-height:44px;
+    }
+    body[class*="fls-theme-"] .content { padding:12px 12px 32px!important; }
+    body[class*="fls-theme-"] .page-header { gap:10px; padding-bottom:10px; }
+    body[class*="fls-theme-"] .page-title { font-size:23px; }
+    body[class*="fls-theme-"] .page-description { font-size:13px; line-height:1.45; }
+    body[class*="fls-theme-"] .btn { padding:6px 8px; }
+    body[class*="fls-theme-"] .task-mobile-head { gap:6px 8px; }
+    body[class*="fls-theme-"] .task-mobile-recent { margin-top:6px; }
+    body[class*="fls-theme-"] .task-mobile-actions .row-actions-danger { gap:6px; }
+    .task-mobile-actions .row-actions-danger .btn { font-size:12px; min-width:0; }
+
+    /* Use the same directory tree, with a two-row action area rather than a vertical stack. */
+    #pullDesktopTable .script-tree-row {
+        grid-template-columns:minmax(0,1fr) minmax(128px,38%)!important;
+        gap:8px!important;
+        padding:8px 0!important;
+    }
+    #pullDesktopTable .script-tree-actions { padding-left:7px!important; }
+    #pullDesktopTable .script-tree-actions .row-actions {
+        display:grid!important;
+        grid-template-columns:repeat(2,minmax(0,1fr));
+        gap:6px;
+    }
+    #pullDesktopTable .script-tree-actions .row-actions-primary { grid-column:1 / -1; }
+    #pullDesktopTable .script-tree-actions .row-actions-danger { padding:0; border:0; }
+    #pullDesktopTable .script-tree-actions .btn,
+    #pullDesktopTable .script-tree-actions .script-tree-more > summary { min-height:44px; padding:5px 4px; font-size:12px; }
+    #pullDesktopTable .script-tree-name > a { font-size:14px; overflow-wrap:anywhere; }
+
+    .proxy-mobile-action-rail .fls-card-actions { padding:6px 8px 0; }
+    body[class*="fls-theme-"] .proxy-mobile-action-rail .btn { min-height:44px; padding:5px 6px; font-size:12px; }
+
+    body[class*="fls-theme-"] .task-collection-preview { gap:8px; }
+    .task-collection-preview .action-row { display:grid; grid-template-columns:1fr; gap:6px; }
+    .task-collection-preview .action-row .btn { font-size:12px; }
+
+    .page-online_scripts #online-list .fls-fold-card { grid-template-columns:minmax(0,1fr); }
+    .page-online_scripts #online-list .fls-card-primary-action { grid-column:1; grid-row:auto; }
+}
+
+@media (min-width:768px) and (max-width:1023px) {
+    #tasksTable :is(th,td):nth-child(4),
+    #tasksTable :is(th,td):nth-child(5) { display:none; }
+    body.page-tasks #tasksTable :is(th,td):last-child { width:184px; min-width:184px; }
+}

@@ -63,6 +63,8 @@ class FrontendOptimizationTests(unittest.TestCase):
             self.assertIn('/static/fls.css?v=20260920-3', html)
             self.assertIn('/static/fls.js?v=20260920-3', html)
             self.assertIn('/static/fls_theme.css?v=20260920-3', html)
+            self.assertIn('theme=neumorphism&rev=20260930-1', html)
+            self.assertIn('/static/fls_density.css?v=20260930-2', html)
             self.assertIn('id="flsUpdateNoticeSlot"', html)
 
     def test_generated_favicon_is_served_as_static_asset(self):
@@ -136,6 +138,15 @@ class FrontendOptimizationTests(unittest.TestCase):
         self.assertIn("body.fls-menu-open .fls-form-float-actions", css)
         self.assertIn("document.body.classList.add(\"fls-menu-open\")", js)
         self.assertIn('e.key === "Escape"', js)
+
+    def test_density_styles_preserve_table_details_and_mobile_targets(self):
+        css = (ROOT / "fls_manager" / "static" / "fls_density.css").read_text(encoding="utf-8")
+
+        self.assertIn("--fls-section-gap", css)
+        self.assertIn("#tasksTable .task-detail-column", css)
+        self.assertIn(".task-desktop-details", css)
+        self.assertIn("#pullDesktopTable .script-tree-actions .row-actions", css)
+        self.assertIn("--fls-control-height:44px", css)
 
     def test_panel_control_uses_custom_confirmation_modal(self):
         js = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")

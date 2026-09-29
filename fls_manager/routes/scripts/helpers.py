@@ -144,7 +144,12 @@ def render_rows(current_rel=""):
             buttons = f"""
 <div class="row-actions" aria-label="脚本目录 {h(item.name)} 行操作">
     <div class="row-actions-primary"><a class="btn btn-primary" href="{h(script_url(rel))}">打开目录</a></div>
-    <div class="row-actions-secondary"><a class="btn btn-orange" href="{h(rename_url(rel))}">重命名目录</a></div>
+    <div class="row-actions-secondary">
+        <details class="detail-disclosure script-tree-more">
+            <summary>更多操作</summary>
+            <div class="script-tree-more-actions"><a class="btn btn-orange" href="{h(rename_url(rel))}">重命名目录</a></div>
+        </details>
+    </div>
     <div class="row-actions-danger">
         <form class="inline-form" method="post" action="{h(delete_url(rel))}">
             <button class="btn btn-red" type="submit" onclick="return confirm('确定删除 {h(rel)} 吗？')">删除目录</button>
@@ -159,9 +164,14 @@ def render_rows(current_rel=""):
 <div class="row-actions" aria-label="脚本 {h(item.name)} 行操作">
     <div class="row-actions-primary"><a class="btn btn-primary" href="{h(view_url(rel))}">查看脚本</a></div>
     <div class="row-actions-secondary">
-        <a class="btn btn-blue" href="{h(script_debug_url(rel))}">调试脚本</a>
-        <a class="btn btn-blue" href="{h(download_url(rel))}">下载脚本</a>
-        <a class="btn btn-orange" href="{h(rename_url(rel))}">重命名脚本</a>
+        <details class="detail-disclosure script-tree-more">
+            <summary>更多操作</summary>
+            <div class="script-tree-more-actions">
+                <a class="btn btn-blue" href="{h(script_debug_url(rel))}">调试脚本</a>
+                <a class="btn btn-blue" href="{h(download_url(rel))}">下载脚本</a>
+                <a class="btn btn-orange" href="{h(rename_url(rel))}">重命名脚本</a>
+            </div>
+        </details>
     </div>
     <div class="row-actions-danger">
         <form class="inline-form" method="post" action="{h(delete_url(rel))}">

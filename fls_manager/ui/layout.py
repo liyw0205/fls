@@ -67,7 +67,8 @@ def layout(title, active, body):
 <link rel="apple-touch-icon" href="/static/favicon-generated.png?v=20260920-1">
 <link rel="stylesheet" href="/static/fls.css?v=20260920-3&actions=2">
 <link rel="stylesheet" href="/static/fls_responsive.css?v=20260920-3&actions=2">
-<link rel="stylesheet" href="/static/fls_theme.css?v=20260920-3&actions=2&theme=neumorphism&rev=20260922-1">
+<link rel="stylesheet" href="/static/fls_theme.css?v=20260920-3&actions=2&theme=neumorphism&rev=20260930-1">
+<link rel="stylesheet" href="/static/fls_density.css?v=20260930-2">
 
 </head>
 

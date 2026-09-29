@@ -44,7 +44,22 @@ def seed_browser_fixture(base_dir):
                     "collection_id": "browser-collection",
                     "config_path": "browser-config.yml",
                     "pinned": False,
-                }
+                },
+                {
+                    "id": "browser-task-list",
+                    "name": "每日签到任务",
+                    "command": "echo browser fixture",
+                    "enabled": True,
+                    "config_path": "browser-config.yml",
+                    "remark": "检查任务摘要和常用操作",
+                },
+                {
+                    "id": "browser-task-long",
+                    "name": "长名称任务-" + "LongTaskName" * 5,
+                    "command": "echo " + "long-argument-" * 20,
+                    "enabled": False,
+                    "remark": "长备注用于验证手机端换行与详情完整性。" * 6,
+                },
             ],
             ensure_ascii=False,
         ),
@@ -133,6 +148,7 @@ def seed_browser_fixture(base_dir):
     script_dir.mkdir(parents=True, exist_ok=True)
     (script_dir / "browser.py").write_text("print('browser fixture')\n", encoding="utf-8")
     (script_dir / "browser-config.yml").write_text("enabled: true\n", encoding="utf-8")
+    (script_dir / "nested-scripts").mkdir(exist_ok=True)
     (log_dir / "browser-task-fixture.log").write_text(
         "===== 启动任务: 浏览器回归任务 =====\nbrowser fixture\n",
         encoding="utf-8",
@@ -713,7 +729,7 @@ async function runActionAudit(page, audit) {
           const body = document.body;
           const topbar = document.querySelector(".topbar");
           const menu = document.querySelector("#flsFloatMenuBtn");
-          const rect = topbar ? topbar.getBoundingClientRect() : null;
+          const topbarRect = topbar ? topbar.getBoundingClientRect() : null;
           const visible = el => {
             if (!el || el.disabled || el.type === "hidden") return false;
             const style = getComputedStyle(el);
@@ -795,17 +811,48 @@ async function runActionAudit(page, audit) {
               wrapper.scrollLeft = before;
             });
           }
+          const rect = el => {
+            const r = el.getBoundingClientRect();
+            return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height};
+          };
+          const mobileTasks = Array.from(document.querySelectorAll("#tasksMobileCards .task-mobile-card")).map(card => {
+            const title = card.querySelector(".task-mobile-title");
+            const badges = card.querySelector(".task-mobile-badges");
+            const rail = card.querySelector(".task-mobile-action-rail");
+            const railRect = rail ? rect(rail) : null;
+            return {
+              card:rect(card),
+              title:title ? rect(title) : null,
+              badges:badges ? rect(badges) : null,
+              rail:railRect,
+              railButtons:Array.from(rail?.querySelectorAll(".btn") || []).filter(isVisible).map(rect)
+            };
+          });
+          const scriptRows = Array.from(document.querySelectorAll("#pullDesktopTable .script-tree-row")).map(row => ({
+            name:rect(row.querySelector(".script-tree-name")),
+            actions:rect(row.querySelector(".script-tree-actions")),
+            row:rect(row)
+          }));
+          const proxyItems = Array.from(document.querySelectorAll("#proxyMobileList .proxy-mobile-item")).map(item => {
+            const rail = item.querySelector(".proxy-mobile-action-rail");
+            return {item:rect(item),rail:rail ? rect(rail) : null,buttons:Array.from(rail?.querySelectorAll(".btn") || []).filter(isVisible).map(rect)};
+          });
+          const onlineCards = Array.from(document.querySelectorAll("#online-list .fls-fold-card")).map(rect);
           return {
             bodyClass: body ? body.className : "",
             scrollWidth: document.documentElement.scrollWidth,
             innerWidth: window.innerWidth,
-            topbar: rect ? {top: rect.top, bottom: rect.bottom, height: rect.height} : null,
+            topbar: topbarRect ? {top: topbarRect.top, bottom: topbarRect.bottom, height: topbarRect.height} : null,
             menu: menu ? {x: menu.getBoundingClientRect().x, y: menu.getBoundingClientRect().y} : null,
             nestedCards: document.querySelectorAll(".card .card").length,
             maxConsecutiveCards,
             formCardCount,
             formSectionCount,
             tableActionVisibilityFailures,
+            mobileTasks,
+            scriptRows,
+            proxyItems,
+            onlineCards,
             primaryActionOverages,
             detailsMaxDepth: Math.max(0, ...Array.from(document.querySelectorAll("details")).map(detailsDepth)),
             focusFailures: focusRulePresent ? 0 : 1,
@@ -844,6 +891,34 @@ async function runActionAudit(page, audit) {
         }
         if (state.tableActionVisibilityFailures) {
           issue(result, "table-action-visibility", String(state.tableActionVisibilityFailures));
+        }
+        if (path === "/tasks" && width <= 767) {
+          for (const item of state.mobileTasks) {
+            if (!item.title || !item.badges || item.title.bottom > item.badges.top + 1) {
+              issue(result, "task-title-status-overlap", JSON.stringify(item));
+              break;
+            }
+            if (!item.rail || item.railButtons.some(button => button.left < item.rail.left - 1 || button.right > item.rail.right + 1)) {
+              issue(result, "task-actions-outside-rail", JSON.stringify(item));
+              break;
+            }
+            if (item.card.height > 320) {
+              issue(result, "task-row-density", String(Math.round(item.card.height)));
+              break;
+            }
+          }
+        }
+        if (path === "/pull" && width <= 767) {
+          const overlap = state.scriptRows.find(row => row.name.right > row.actions.left + 1);
+          if (overlap) issue(result, "script-tree-column-overlap", JSON.stringify(overlap));
+        }
+        if (path === "/proxy" && width <= 767) {
+          for (const item of state.proxyItems) {
+            if (!item.rail || item.buttons.some(button => button.left < item.rail.left - 1 || button.right > item.rail.right + 1)) {
+              issue(result, "proxy-actions-outside-rail", JSON.stringify(item));
+              break;
+            }
+          }
         }
         const formPage = path === "/config" ||
           path.startsWith("/notify/") ||
@@ -955,6 +1030,50 @@ async function runActionAudit(page, audit) {
       await page.goto(process.env.FLS_BASE_URL + "/tasks", {
         waitUntil: "domcontentloaded", timeout: 8000
       });
+      const taskMenuSelector = width <= 767
+        ? "#tasksMobileCards .task-action-menu-toggle"
+        : "#tasksTable .task-action-menu-toggle";
+      if (await page.locator(taskMenuSelector).count()) {
+        await page.locator(taskMenuSelector).first().click({timeout:2000});
+        const menuState = await page.evaluate(() => {
+          const button = document.querySelector(".task-action-menu-toggle[aria-expanded='true']");
+          const menu = button && document.getElementById(button.getAttribute("aria-controls"));
+          const rect = menu && menu.getBoundingClientRect();
+          return {open:!!button && !!menu && !menu.hidden,inside:!!rect && rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight,items:menu?.querySelectorAll("a,button").length || 0};
+        });
+        const expectedMenuItems = width <= 767 ? 4 : 2;
+        if (!menuState.open || !menuState.inside || menuState.items < expectedMenuItems) {
+          issue(interaction, "task-more-menu", JSON.stringify(menuState));
+        }
+        await page.keyboard.press("Escape");
+      }
+      const taskDetailsSelector = width <= 767
+        ? "#tasksMobileCards .task-mobile-details > summary"
+        : "#tasksTable .task-desktop-details > summary";
+      if (await page.locator(taskDetailsSelector).count()) {
+        await page.locator(taskDetailsSelector).first().click({timeout:2000});
+        if (!(await page.locator(".fls-disclosure-modal").count())) issue(interaction, "task-details-modal", "details did not open");
+        await page.keyboard.press("Escape");
+      }
+      if (width <= 767) {
+        await page.goto(process.env.FLS_BASE_URL + "/pull", {waitUntil:"domcontentloaded",timeout:8000});
+        const scriptMore = page.locator("#pullDesktopTable .script-tree-more > summary").first();
+        if (await scriptMore.count()) {
+          await scriptMore.click({timeout:2000});
+          const actions = await page.locator(".fls-disclosure-modal .script-tree-more-actions .btn").count();
+          if (!actions) issue(interaction, "script-more-actions", "modal omitted script operations");
+          await page.keyboard.press("Escape");
+        }
+        await page.goto(process.env.FLS_BASE_URL + "/proxy", {waitUntil:"domcontentloaded",timeout:8000});
+        const proxyMore = page.locator("#proxyMobileList .proxy-mobile-more > summary").first();
+        if (await proxyMore.count()) {
+          await proxyMore.click({timeout:2000});
+          const actions = await page.locator(".fls-disclosure-modal .proxy-mobile-more-actions .btn").count();
+          if (actions !== 3) issue(interaction, "proxy-more-actions", String(actions));
+          await page.keyboard.press("Escape");
+        }
+        await page.goto(process.env.FLS_BASE_URL + "/tasks", {waitUntil:"domcontentloaded",timeout:8000});
+      }
       await page.evaluate(() => { document.documentElement.style.scrollBehavior = "auto"; });
       await page.evaluate(() => window.scrollTo({top: 0, left: 0, behavior: "auto"}));
       if (width <= 1199) {

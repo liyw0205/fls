@@ -107,6 +107,29 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn("task folder/main.py<br>", html)
             self.assertIn("task /root/fls/scripts/demo.sh arg1 arg2", html)
 
+    def test_script_tree_keeps_primary_actions_and_compact_secondary_menu(self):
+        with isolated_app() as (app, base_dir):
+            (base_dir / "scripts" / "nested").mkdir()
+            (base_dir / "scripts" / "nested" / "demo.py").write_text("print('ok')\n", encoding="utf-8")
+            response = app.test_client().get("/pull", headers={"X-Token": TOKEN})
+            html = response.get_data(as_text=True)
+            nested_response = app.test_client().get(
+                "/pull?p=nested",
+                headers={"X-Token": TOKEN},
+            )
+            nested_html = nested_response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(nested_response.status_code, 200)
+            self.assertIn('class="script-tree-row script-tree-directory"', html)
+            self.assertIn('class="detail-disclosure script-tree-more"', html)
+            self.assertIn("重命名目录", html)
+            self.assertIn('class="script-tree-row script-tree-file"', nested_html)
+            self.assertIn('class="detail-disclosure script-tree-more"', nested_html)
+            self.assertIn("更多操作", nested_html)
+            self.assertIn("调试脚本", nested_html)
+            self.assertIn("删除脚本", nested_html)
+
     def test_scripts_new_failure_renders_error_message_and_preserves_form(self):
         with isolated_app() as (app, base_dir):
             with patch(
@@ -855,6 +878,9 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn("taskAjaxAction('copy','task-list')", html)
             self.assertIn("taskAjaxAction('pin','task-list')", html)
             self.assertIn("taskAjaxAction('stop','task-list')", html)
+            self.assertIn('id="task-action-menu-task-list-mobile"', html)
+            self.assertIn('href="/log/task-list?back=/tasks">查看任务日志</a>', html)
+            self.assertIn("下次运行：", html)
             self.assertIn('href="/task/edit/task-list?back=/tasks"', html)
             self.assertIn('href="/task/config/task-list?back=/tasks"', html)
             self.assertNotIn('href="/task/pin/task-list', html)
