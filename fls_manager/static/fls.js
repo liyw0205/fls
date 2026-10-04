@@ -625,9 +625,6 @@ function toggleMenu(show){
         }
     }
 
-    if (typeof flsUpdateFloatingFormVisibility === "function") {
-        flsUpdateFloatingFormVisibility();
-    }
 }
 
 document.addEventListener("keydown", function(e){
@@ -833,51 +830,6 @@ function flsShortFloatButtonText(text){
     return text || "提交";
 }
 
-function flsOriginalButtonsInViewport(){
-    const buttons = window.__FLS_FLOAT_FORM_ORIGINAL_BUTTONS__ || [];
-
-    for(const btn of buttons){
-        if(!btn || !document.body.contains(btn)) continue;
-        if(!flsIsElementVisible(btn)) continue;
-
-        const rect = btn.getBoundingClientRect();
-
-        // 原按钮只要进入视口附近，就隐藏悬浮按钮
-        if(
-            rect.top < window.innerHeight - 20 &&
-            rect.bottom > 0
-        ){
-            return true;
-        }
-    }
-
-    return false;
-}
-
-function flsSidebarIsOpen(){
-    const sidebar = document.getElementById("sidebar");
-    const mask = document.getElementById("mask");
-
-    return (
-        sidebar && sidebar.classList.contains("open")
-    ) || (
-        mask && mask.classList.contains("show")
-    );
-}
-
-function flsUpdateFloatingFormVisibility(){
-    const box = document.getElementById("flsFormFloatActions");
-    if(!box) return;
-
-    if(!box.classList.contains("show")) return;
-
-    if(flsSidebarIsOpen() || flsOriginalButtonsInViewport() || flsFixedActionOverlapsFields(box)){
-        box.classList.add("hide-near-original");
-    }else{
-        box.classList.remove("hide-near-original");
-    }
-}
-
 function flsFixedActionOverlapsFields(box){
     if(!box || getComputedStyle(box).display === "none") return false;
     const boxRect = box.getBoundingClientRect();
@@ -910,9 +862,6 @@ function flsInitFloatingFormActions(root){
 
     box.innerHTML = "";
     box.classList.remove("show");
-    box.classList.remove("hide-near-original");
-
-    window.__FLS_FLOAT_FORM_ORIGINAL_BUTTONS__ = [];
 
     const form = flsPickFloatingForm(root);
 
@@ -926,8 +875,6 @@ function flsInitFloatingFormActions(root){
     if(!buttons.length){
         return;
     }
-
-    window.__FLS_FLOAT_FORM_ORIGINAL_BUTTONS__ = buttons;
 
     const title = document.createElement("span");
     title.className = "fls-form-float-title";
@@ -960,7 +907,6 @@ function flsInitFloatingFormActions(root){
 
     box.classList.add("show");
     document.body.classList.add("fls-has-floating-actions");
-    flsUpdateFloatingFormVisibility();
 }
 
 function flsRefreshFloatingFormActionsSoon(root){
@@ -986,7 +932,6 @@ window.addEventListener("orientationchange", function(){
 });
 
 window.addEventListener("scroll", function(){
-    flsUpdateFloatingFormVisibility();
     flsUpdateLogFloatVisibility();
 }, {passive:true});
 

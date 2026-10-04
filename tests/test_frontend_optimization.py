@@ -61,7 +61,7 @@ class FrontendOptimizationTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertIn('/static/favicon-generated.png?v=20260920-1', html)
             self.assertIn('/static/fls.css?v=20260920-3', html)
-            self.assertIn('/static/fls.js?v=20260920-3', html)
+            self.assertIn('/static/fls.js?v=20260920-3&actions=3', html)
             self.assertIn('/static/fls_theme.css?v=20260920-3', html)
             self.assertIn('theme=neumorphism&rev=20260930-1', html)
             self.assertIn('/static/fls_density.css?v=20260930-2', html)
@@ -138,6 +138,9 @@ class FrontendOptimizationTests(unittest.TestCase):
         self.assertIn("body.fls-menu-open .fls-form-float-actions", css)
         self.assertIn("document.body.classList.add(\"fls-menu-open\")", js)
         self.assertIn('e.key === "Escape"', js)
+        self.assertNotIn("flsOriginalButtonsInViewport", js)
+        self.assertNotIn("flsUpdateFloatingFormVisibility", js)
+        self.assertNotIn("hide-near-original", js)
 
     def test_density_styles_preserve_table_details_and_mobile_targets(self):
         css = (ROOT / "fls_manager" / "static" / "fls_density.css").read_text(encoding="utf-8")

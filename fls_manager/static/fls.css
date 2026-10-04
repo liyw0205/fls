@@ -1008,19 +1008,13 @@ pre.log {
    表单悬浮提交按钮
    - 层级低于侧边栏遮罩和侧边栏
    - 手机端按钮更短
-   - 原按钮进入视口时由 JS 自动隐藏
    ============================================================ */
 .fls-form-float-actions {
     position:fixed;
     right:16px;
     bottom:18px;
 
-    /*
-       重要：
-       mask z-index=20
-       sidebar z-index=30
-       所以这里必须小于 20，避免打开侧边栏还能看到悬浮按钮
-    */
+    /* Keep the shortcut below the navigation mask. */
     z-index:18;
 
     display:none;
@@ -1045,10 +1039,6 @@ pre.log {
 
 body.fls-has-floating-actions .content {
     padding-bottom:110px;
-}
-
-.fls-form-float-actions.hide-near-original {
-    display:none!important;
 }
 
 .fls-form-float-actions .btn {

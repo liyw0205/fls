@@ -725,6 +725,32 @@ async function runActionAudit(page, audit) {
         await page.evaluate(() => { document.documentElement.style.scrollBehavior = "auto"; });
         result.status = response ? response.status() : 0;
         if (result.status !== 200) issue(result, "http", String(result.status));
+        if (path === "/config") {
+          const floating = await page.evaluate(async () => {
+            const box = document.querySelector("#flsFormFloatActions");
+            if (!box) return {missing: true, samples: []};
+            const maxScroll = Math.max(0, document.documentElement.scrollHeight - innerHeight);
+            const samples = [];
+            for (const y of [0, maxScroll * 0.25, maxScroll * 0.5, maxScroll * 0.75, maxScroll, 0]) {
+              window.scrollTo({top: y, behavior: "auto"});
+              await new Promise(resolve => setTimeout(resolve, 70));
+              const rect = box.getBoundingClientRect();
+              samples.push({
+                display: getComputedStyle(box).display,
+                shown: box.classList.contains("show"),
+                hiddenNearOriginal: box.classList.contains("hide-near-original"),
+                x: Math.round(rect.x),
+                y: Math.round(rect.y)
+              });
+            }
+            return {missing: false, samples};
+          });
+          if (floating.missing || floating.samples.some(sample =>
+            sample.display !== "flex" || !sample.shown || sample.hiddenNearOriginal
+          )) {
+            issue(result, "floating-save-stability", JSON.stringify(floating));
+          }
+        }
         const state = await page.evaluate(() => {
           const body = document.body;
           const topbar = document.querySelector(".topbar");
@@ -964,10 +990,11 @@ async function runActionAudit(page, audit) {
                 const r = el.getBoundingClientRect();
                 return style.display !== "none" && style.visibility !== "hidden" && r.width > 0 && r.height > 0;
               });
-            if (!fields.length) return 0;
-            const last = fields.reduce((a, b) => a.getBoundingClientRect().bottom > b.getBoundingClientRect().bottom ? a : b);
-            const lastRect = last.getBoundingClientRect();
-            return overlays.filter(item => lastRect.bottom > item.rect.top && lastRect.top < item.rect.bottom).length;
+            return overlays.filter(item => fields.some(el => {
+              const rect = el.getBoundingClientRect();
+              return rect.left < item.rect.right && rect.right > item.rect.left &&
+                rect.top < item.rect.bottom && rect.bottom > item.rect.top;
+            })).length;
           });
           if (fixedOverlap) issue(result, "fixed-action-overlap", String(fixedOverlap));
         }
