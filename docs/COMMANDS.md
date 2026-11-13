@@ -54,6 +54,29 @@ FLS_PORT=5701 FLS_TOKEN=123456 sh fls.sh restart
 Termux 专用变量见 [TERMUX.md](TERMUX.md)，KernelSU/Magisk 容器变量见
 [ANDROID_MODULE.md](ANDROID_MODULE.md)。
 
+## 依赖与运行器安装
+
+在面板“依赖管理”（`/deps`）安装 Python 包，或在“面板状态”（`/panel/status`）
+安装运行器后，会进入同一个安装日志页。Windows 的运行器安装入口会跳转到官方下载页。
+
+日志页会显示安装中、安装成功、安装失败或启动失败，以及进程退出码。退出码 `0`
+表示安装命令成功结束；其他退出码表示失败，具体原因见日志。启动失败没有退出码，
+页面会保留生成命令或启动进程时的错误。安装后可用“刷新依赖检测结果”检测 Python
+核心依赖；运行器请返回“面板状态”确认可用性。
+
+安装记录保存在面板进程内存中。面板重启或记录被淘汰后，原链接显示“无法追踪”；
+旧记录缺少退出码时显示“结果未知”。这两种状态均不能证明安装成功，请到日志管理
+查找 `deps-install-*.log` 或 `system-install-*.log`，并重新检测依赖或运行器。
+
+日志 API `GET /api/deps/install-log/<install_id>` 保留 `running` 和 `log`，并提供：
+
+| 字段 | 含义 |
+| --- | --- |
+| `status` | `running`、`succeeded`、`failed`、`start_failed`、`unknown` 或 `missing` |
+| `status_label` | 对应的中文状态 |
+| `returncode` | 进程退出码；尚未退出或无法取得时为 `null` |
+| `error` | 失败或无法确认结果的原因；正常运行和成功时为空字符串 |
+
 ## 备份恢复限制
 
 以下面板环境变量在启动时读取，设置后需重启 FLS：

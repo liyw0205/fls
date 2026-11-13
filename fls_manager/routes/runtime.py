@@ -171,21 +171,25 @@ def install_runtime(runtime):
     log_file = install_log_file(install_id, runtime)
     log_fp = open(log_file, "ab", buffering=0)
 
+    prune_completed_records(DEPS_RUNNING, finished_key="finished")
+    info = {
+        "process": None,
+        "package": runtime,
+        "log_file": str(log_file),
+        "log_fp": log_fp,
+        "start_time": time.time(),
+        "finished": False,
+        "returncode": None,
+    }
+    DEPS_RUNNING[install_id] = info
+
     try:
         cmd_text = runtime_install_command(runtime)
     except Exception as e:
         log_fp.write(f"生成安装命令失败: {e}\n".encode("utf-8"))
         log_fp.close()
 
-        prune_completed_records(DEPS_RUNNING, finished_key="finished")
-        DEPS_RUNNING[install_id] = {
-            "process": None,
-            "package": runtime,
-            "log_file": str(log_file),
-            "log_fp": None,
-            "start_time": time.time(),
-            "finished": True,
-        }
+        info.update(finished=True, log_fp=None, error=f"生成安装命令失败：{e}")
 
         return redirect(url_for("deps.deps_install_log", install_id=install_id, back="/panel/status"))
 
@@ -199,7 +203,7 @@ def install_runtime(runtime):
     log_fp.write(header.encode("utf-8"))
 
     try:
-        proc = subprocess.Popen(
+        info["process"] = subprocess.Popen(
             ["sh", "-lc", cmd_text],
             stdout=log_fp,
             stderr=subprocess.STDOUT,
@@ -207,19 +211,10 @@ def install_runtime(runtime):
             env=os.environ.copy()
         )
 
-        prune_completed_records(DEPS_RUNNING, finished_key="finished")
-        DEPS_RUNNING[install_id] = {
-            "process": proc,
-            "package": runtime,
-            "log_file": str(log_file),
-            "log_fp": log_fp,
-            "start_time": time.time(),
-            "finished": False,
-        }
-
     except Exception as e:
         log_fp.write(f"启动安装失败: {e}\n".encode("utf-8"))
         log_fp.close()
+        info.update(finished=True, log_fp=None, error=f"启动安装失败：{e}")
 
     return redirect(url_for("deps.deps_install_log", install_id=install_id, back="/panel/status"))
 
