@@ -12,6 +12,19 @@
 - 环境隔离测试必须在导入 `fls_manager.*` 前设置临时 `FLS_BASE_DIR`。
 - 当前读取时会规范化 `tasks.json`、`task_history.json`、`global_env.json`、`proxies.json`、`collections.json`；配置读取由 `normalize_config_data()` 规范化返回值。
 
+## data/backup_jobs.json
+
+类型：以作业 ID 为键的备份作业快照对象。
+
+- `id`、`items`、`type_text`：作业标识和备份范围。
+- `running`、`status`：当前状态；终态包括 `已完成`、`失败`、`超时`、`已取消`，面板重启后无法确认的运行中作业会归一为 `结果未知`。
+- `filename`、`size`、`size_text`：已完成归档信息；失败、超时和取消会清空这些字段。
+- `error`：失败、超时或结果未知时的原始诊断信息。
+- `created_at`、`updated_at`：作业时间戳。
+
+快照不包含线程、取消事件或进程句柄。最多保留最近 100 个作业；读取到 `running=true` 的旧快照时，
+系统会幂等改写为 `结果未知`，不会声称外部备份进程已经完成或退出。
+
 ## data/tasks.json
 
 类型：任务对象数组。

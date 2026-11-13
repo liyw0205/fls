@@ -213,6 +213,10 @@ async function flsPollBackupJob(jobId, source){{
             html += "<span style='color:#dc2626;font-weight:800;'>" + flsEscapeHtml(flsActionFailure("错误：" + json.error, "查看备份日志并检查备份内容后重试")) + "</span><br>";
         }}
 
+        if(json.running){{
+            html += "<br><button class='btn btn-red' type='button' onclick='flsCancelBackup(" + JSON.stringify(jobId) + ", this)'>取消备份</button>";
+        }}
+
         if(!json.running && json.filename){{
             html += "<br><a class='btn btn-primary' href='/backup/download/" + encodeURIComponent(json.filename) + "'>下载备份</a>";
         }}
@@ -230,6 +234,30 @@ async function flsPollBackupJob(jobId, source){{
 
     }} catch(e) {{
         flsShowBackupJob("<span style='color:#dc2626;font-weight:800;'>" + flsEscapeHtml(flsActionFailure("状态读取失败：" + String(e), "刷新页面后重试")) + "</span>");
+        flsRestoreButton(source);
+    }}
+}}
+
+async function flsCancelBackup(jobId, source){{
+    if(!confirm("确认取消正在执行的备份吗？")) return;
+    if(!flsMarkButtonBusy(source, "取消中...")) return;
+
+    try {{
+        const res = await fetch("/api/backup/cancel/" + encodeURIComponent(jobId), {{
+            method: "POST",
+            credentials: "same-origin",
+            headers: {{"X-Requested-With":"XMLHttpRequest"}}
+        }});
+        const json = await res.json();
+        if(!res.ok || !json.ok){{
+            flsShowBackupJob("<span style='color:#dc2626;font-weight:800;'>" + flsEscapeHtml(flsActionFailure(json.msg || "取消失败", "刷新状态后重试")) + "</span>");
+            flsRestoreButton(source);
+            return;
+        }}
+        flsShowBackupJob(flsEscapeHtml(json.msg || "已请求取消"));
+        await flsPollBackupJob(jobId, source);
+    }} catch(e) {{
+        flsShowBackupJob("<span style='color:#dc2626;font-weight:800;'>" + flsEscapeHtml(flsActionFailure("取消请求失败：" + String(e), "刷新状态后重试")) + "</span>");
         flsRestoreButton(source);
     }}
 }}

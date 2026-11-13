@@ -490,6 +490,109 @@ class BackupSafetyTests(unittest.TestCase):
                 {"ok": False, "msg": "任务不存在"},
             )
 
+    def test_api_backup_job_recovers_persisted_running_as_unknown_after_restart(self):
+        with isolated_fls_env(token="unit-token"):
+            from fls_manager.routes.backup._common import (
+                BACKUP_JOBS,
+                BACKUP_JOBS_FILE,
+            )
+
+            snapshot = {
+                "id": "restart-job",
+                "items": ["data"],
+                "type_text": "仅配置",
+                "running": True,
+                "status": "正在压缩",
+                "filename": "",
+                "size": 0,
+                "size_text": "-",
+                "error": "",
+                "created_at": "2026-07-14 10:00:00",
+                "updated_at": "2026-07-14 10:01:00",
+            }
+            BACKUP_JOBS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            BACKUP_JOBS_FILE.write_text(
+                json.dumps({"restart-job": snapshot}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            BACKUP_JOBS.clear()
+
+            response = load_app().test_client().get(
+                "/api/backup/job/restart-job",
+                headers={"X-Token": "unit-token"},
+            )
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertTrue(payload["ok"])
+            self.assertFalse(payload["running"])
+            self.assertEqual(payload["status"], "结果未知")
+            self.assertIn("面板重启后无法确认", payload["error"])
+            persisted = read_json(BACKUP_JOBS_FILE)["restart-job"]
+            self.assertEqual(persisted["status"], "结果未知")
+            self.assertFalse(persisted["running"])
+
+    def test_api_backup_cancel_rejects_terminal_and_restart_unknown_jobs(self):
+        with isolated_fls_env(token="unit-token"):
+            from fls_manager.routes.backup._common import (
+                BACKUP_JOBS,
+                BACKUP_JOBS_FILE,
+            )
+            import threading
+
+            BACKUP_JOBS["finished-job"] = {
+                "id": "finished-job",
+                "running": False,
+                "status": "失败",
+            }
+            client = load_app().test_client()
+            response = client.post(
+                "/api/backup/cancel/finished-job",
+                headers={"X-Token": "unit-token"},
+            )
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(response.get_json()["msg"], "备份任务已结束")
+
+            # A stale cancellation handle must not make a terminal result cancellable.
+            BACKUP_JOBS["finished-with-handle"] = {
+                "id": "finished-with-handle",
+                "running": False,
+                "status": "已完成",
+            }
+            from fls_manager.routes.backup._common import BACKUP_CANCEL_EVENTS
+            BACKUP_CANCEL_EVENTS["finished-with-handle"] = threading.Event()
+            response = client.post(
+                "/api/backup/cancel/finished-with-handle",
+                headers={"X-Token": "unit-token"},
+            )
+            self.assertEqual(response.status_code, 409)
+            self.assertFalse(BACKUP_CANCEL_EVENTS["finished-with-handle"].is_set())
+
+            BACKUP_JOBS.clear()
+            BACKUP_JOBS_FILE.write_text(
+                json.dumps({"unknown-job": {"id": "unknown-job", "running": True}}),
+                encoding="utf-8",
+            )
+            response = client.post(
+                "/api/backup/cancel/unknown-job",
+                headers={"X-Token": "unit-token"},
+            )
+            self.assertEqual(response.status_code, 409)
+            self.assertIn("状态未知", response.get_json()["msg"])
+
+    def test_backup_page_exposes_cancel_action_and_unknown_result_copy(self):
+        with isolated_fls_env(token="unit-token"):
+            response = load_app().test_client().get(
+                "/backup",
+                headers={"X-Token": "unit-token"},
+            )
+
+            self.assertEqual(response.status_code, 200)
+            html = response.get_data(as_text=True)
+            self.assertIn("flsCancelBackup", html)
+            self.assertIn("/api/backup/cancel/", html)
+            self.assertIn("状态读取失败", html)
+
     def test_api_backup_list_returns_stable_file_fields_in_newest_order(self):
         with isolated_fls_env(token="unit-token"):
             from fls_manager.routes.backup._common import backup_dir

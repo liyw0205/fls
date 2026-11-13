@@ -701,6 +701,145 @@ class BackupIsolationTests(unittest.TestCase):
             self.assertNotIn("cancelled-fixture", BACKUP_CANCEL_EVENTS)
             self.assertFalse((base_dir / "data" / "backups").exists())
 
+    def test_backup_worker_records_dependency_timeout_and_cleans_archive(self):
+        with isolated_app() as (_app, base_dir):
+            from fls_manager.routes.backup._common import (
+                BACKUP_CANCEL_EVENTS,
+                BACKUP_JOBS,
+                BackupTimeout,
+                create_backup_worker,
+            )
+
+            cancel_event = threading.Event()
+            BACKUP_JOBS["timeout-fixture"] = {
+                "id": "timeout-fixture",
+                "running": True,
+                "status": "准备中",
+            }
+            BACKUP_CANCEL_EVENTS["timeout-fixture"] = cancel_event
+
+            with patch(
+                "fls_manager.routes.backup._common.write_dependencies_file",
+                side_effect=BackupTimeout("依赖列表采集超时（超过 1 秒）"),
+            ):
+                create_backup_worker("timeout-fixture", ["data"], cancel_event)
+
+            info = BACKUP_JOBS["timeout-fixture"]
+            self.assertFalse(info["running"])
+            self.assertEqual(info["status"], "超时")
+            self.assertIn("超过 1 秒", info["error"])
+            self.assertFalse(list((base_dir / "data" / "backups").glob("*.tar.gz")))
+            self.assertNotIn("timeout-fixture", BACKUP_CANCEL_EVENTS)
+
+    def test_backup_worker_records_failure_and_cleans_partial_archive(self):
+        with isolated_app() as (_app, base_dir):
+            from fls_manager.routes.backup._common import (
+                BACKUP_CANCEL_EVENTS,
+                BACKUP_JOBS,
+                create_backup_worker,
+            )
+
+            cancel_event = threading.Event()
+            BACKUP_JOBS["failed-fixture"] = {
+                "id": "failed-fixture",
+                "running": True,
+                "status": "准备中",
+            }
+            BACKUP_CANCEL_EVENTS["failed-fixture"] = cancel_event
+
+            with patch(
+                "fls_manager.routes.backup._common.write_dependencies_file",
+                side_effect=RuntimeError("依赖命令不可执行"),
+            ):
+                create_backup_worker("failed-fixture", ["data"], cancel_event)
+
+            info = BACKUP_JOBS["failed-fixture"]
+            self.assertFalse(info["running"])
+            self.assertEqual(info["status"], "失败")
+            self.assertEqual(info["error"], "依赖命令不可执行")
+            self.assertFalse(list((base_dir / "data" / "backups").glob("*.tar.gz")))
+            self.assertNotIn("failed-fixture", BACKUP_CANCEL_EVENTS)
+
+    def test_backup_worker_persists_successful_archive_result(self):
+        with isolated_app() as (_app, base_dir):
+            from fls_manager.routes.backup._common import (
+                BACKUP_CANCEL_EVENTS,
+                BACKUP_JOBS,
+                BACKUP_JOBS_FILE,
+                create_backup_worker,
+            )
+
+            data_dir = base_dir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            (data_dir / "settings.json").write_text("{}", encoding="utf-8")
+            cancel_event = threading.Event()
+            BACKUP_JOBS["success-fixture"] = {
+                "id": "success-fixture",
+                "items": ["data"],
+                "type_text": "仅配置",
+                "running": True,
+                "status": "准备中",
+                "filename": "",
+                "size": 0,
+                "size_text": "-",
+                "error": "",
+            }
+            BACKUP_CANCEL_EVENTS["success-fixture"] = cancel_event
+
+            def write_dependencies(path, _cancel_event):
+                Path(path).write_text("fixture==1\n", encoding="utf-8")
+
+            with patch(
+                "fls_manager.routes.backup._common.write_dependencies_file",
+                side_effect=write_dependencies,
+            ):
+                create_backup_worker("success-fixture", ["data"], cancel_event)
+
+            info = BACKUP_JOBS["success-fixture"]
+            self.assertFalse(info["running"])
+            self.assertEqual(info["status"], "已完成")
+            self.assertTrue(info["filename"].endswith(".tar.gz"))
+            persisted = read_json(BACKUP_JOBS_FILE)["success-fixture"]
+            self.assertEqual(persisted["status"], "已完成")
+            self.assertEqual(persisted["filename"], info["filename"])
+            self.assertTrue((base_dir / "data" / "backups" / info["filename"]).is_file())
+            self.assertNotIn("success-fixture", BACKUP_CANCEL_EVENTS)
+
+    def test_backup_job_snapshots_remain_valid_under_concurrent_updates(self):
+        with isolated_app() as (_app, base_dir):
+            from fls_manager.routes.backup._common import (
+                BACKUP_JOBS_FILE,
+                persist_backup_job,
+            )
+
+            jobs = [
+                {
+                    "id": "concurrent-{}".format(index),
+                    "items": ["data"],
+                    "type_text": "仅配置",
+                    "running": False,
+                    "status": "失败",
+                    "filename": "",
+                    "size": 0,
+                    "size_text": "-",
+                    "error": "fixture-{}".format(index),
+                    "created_at": "2026-07-14 10:00:0{}".format(index),
+                    "updated_at": "2026-07-14 10:00:0{}".format(index),
+                }
+                for index in range(2)
+            ]
+            workers = [threading.Thread(target=persist_backup_job, args=(job,)) for job in jobs]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(timeout=2)
+
+            self.assertTrue(all(not worker.is_alive() for worker in workers))
+            data = read_json(BACKUP_JOBS_FILE)
+            self.assertEqual(set(data), {"concurrent-0", "concurrent-1"})
+            self.assertEqual(data["concurrent-0"]["error"], "fixture-0")
+            self.assertEqual(data["concurrent-1"]["error"], "fixture-1")
+
     def test_backup_import_restores_isolated_dirs_and_mocks_dependency_install(self):
         with isolated_app() as (app, base_dir):
             from fls_manager import paths
