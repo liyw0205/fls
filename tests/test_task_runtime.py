@@ -1,10 +1,12 @@
 import contextlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -72,6 +74,38 @@ def cleanup_runtime_state():
     if scheduler is not None:
         with contextlib.suppress(Exception):
             scheduler.shutdown(wait=False)
+
+
+@contextlib.contextmanager
+def ready_task_process(ignore_sigterm=False):
+    with tempfile.TemporaryDirectory(prefix="fls-task-process-") as temp_dir:
+        ready = Path(temp_dir) / "ready"
+        handler = "SIG_IGN" if ignore_sigterm else "SIG_DFL"
+        code = (
+            "import pathlib, signal, sys, time\n"
+            f"signal.signal(signal.SIGTERM, signal.{handler})\n"
+            "pathlib.Path(sys.argv[1]).touch()\n"
+            "time.sleep(30)\n"
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", code, str(ready)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=os.name != "nt",
+        )
+        try:
+            deadline = time.monotonic() + 3
+            while not ready.exists():
+                if proc.poll() is not None or time.monotonic() >= deadline:
+                    raise AssertionError("Task child did not become ready within 3 seconds")
+                time.sleep(0.01)
+            if proc.poll() is not None:
+                raise AssertionError("Task child exited before the stop request")
+            yield proc
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=3)
 
 
 def write_json(path, data):
@@ -624,7 +658,11 @@ class TaskRuntimeTests(unittest.TestCase):
                 "log_file": str(log_file),
             }
 
-            with mock.patch.object(task_runner, "now_str", return_value="2026-07-03 10:01:00"):
+            with mock.patch.object(
+                task_runner,
+                "terminate_task_process",
+                return_value=(True, ""),
+            ), mock.patch.object(task_runner, "now_str", return_value="2026-07-03 10:01:00"):
                 ok, msg = task_runner.stop_task_now("t1")
 
             self.assertTrue(ok)
@@ -637,6 +675,151 @@ class TaskRuntimeTests(unittest.TestCase):
                 task_runner.stop_task_now("t1"),
                 (False, "任务未运行"),
             )
+
+    def test_terminate_task_process_waits_and_escalates_without_fixed_sleep(self):
+        with isolated_fls_modules():
+            from fls_manager import task_runner
+
+            proc = mock.Mock(
+                pid=4321,
+                poll=mock.Mock(side_effect=[None, -9]),
+                wait=mock.Mock(
+                    side_effect=[
+                        subprocess.TimeoutExpired("task", 1),
+                        -9,
+                    ]
+                ),
+            )
+            fake_os = mock.Mock(name="posix")
+            fake_os.name = "posix"
+            fake_os.getpgid.return_value = 4321
+
+            with mock.patch.object(task_runner, "os", fake_os), mock.patch.object(
+                task_runner.time, "sleep"
+            ) as sleep:
+                result = task_runner.terminate_task_process(proc)
+
+            self.assertEqual(result, (True, ""))
+            self.assertEqual(
+                fake_os.killpg.call_args_list,
+                [
+                    mock.call(4321, task_runner.signal.SIGTERM),
+                    mock.call(4321, task_runner.signal.SIGKILL),
+                ],
+            )
+            self.assertEqual(proc.wait.call_count, 2)
+            sleep.assert_not_called()
+
+    def test_terminate_task_process_returns_real_failure_without_clearing_state(self):
+        with isolated_fls_modules():
+            from fls_manager import task_runner
+
+            proc = mock.Mock(
+                pid=4321,
+                poll=mock.Mock(return_value=None),
+                wait=mock.Mock(
+                    side_effect=subprocess.TimeoutExpired("task", 1)
+                ),
+                terminate=mock.Mock(side_effect=PermissionError("denied")),
+                kill=mock.Mock(side_effect=PermissionError("denied")),
+            )
+            fake_os = mock.Mock(name="nt")
+            fake_os.name = "nt"
+
+            with mock.patch.object(task_runner, "os", fake_os):
+                ok, detail = task_runner.terminate_task_process(proc)
+
+            self.assertFalse(ok)
+            self.assertIn("denied", detail)
+            self.assertIn("无法确认任务进程已退出", detail)
+            self.assertEqual(proc.wait.call_count, 2)
+
+    def test_stop_task_now_preserves_running_state_when_exit_unconfirmed(self):
+        with isolated_fls_modules():
+            from fls_manager import task_runner
+
+            log_file = Path(os.environ["FLS_BASE_DIR"]) / "log" / "stop-failed.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            proc = mock.Mock(pid=4321, poll=mock.Mock(return_value=None))
+            task_runner.RUNNING["t1"] = {
+                "status": "running",
+                "process": proc,
+                "history_id": "history-1",
+                "log_file": str(log_file),
+            }
+
+            with mock.patch.object(
+                task_runner,
+                "terminate_task_process",
+                return_value=(False, "权限拒绝：无法确认任务进程已退出"),
+            ):
+                ok, msg = task_runner.stop_task_now("t1")
+
+            self.assertFalse(ok)
+            self.assertEqual(msg, "停止失败：权限拒绝：无法确认任务进程已退出")
+            self.assertIs(task_runner.RUNNING["t1"]["process"], proc)
+            self.assertTrue(task_runner.is_running("t1"))
+            self.assertIn(("t1", "history-1"), task_runner.STOPPED_MANUALLY)
+            self.assertIn("权限拒绝", log_file.read_text(encoding="utf-8"))
+
+    def test_stop_task_now_reports_already_ended_without_overwriting_result(self):
+        with isolated_fls_modules():
+            from fls_manager import task_runner
+
+            proc = FakeProc(return_code=7)
+            task_runner.RUNNING["t1"] = {
+                "status": "running",
+                "process": proc,
+                "history_id": "history-1",
+            }
+            task_runner.STOPPED_MANUALLY.add(("t1", "history-1"))
+
+            ok, msg = task_runner.stop_task_now("t1")
+
+            self.assertFalse(ok)
+            self.assertEqual(msg, "任务已结束，退出码 7")
+            self.assertNotIn("t1", task_runner.RUNNING)
+            self.assertNotIn(("t1", "history-1"), task_runner.STOPPED_MANUALLY)
+
+    def test_stop_task_now_terminates_real_process_with_bounded_wait(self):
+        with isolated_fls_modules():
+            from fls_manager import task_runner
+
+            with ready_task_process() as proc:
+                task_runner.RUNNING["t1"] = {
+                    "status": "running",
+                    "process": proc,
+                    "history_id": "history-1",
+                }
+                started = time.monotonic()
+                ok, msg = task_runner.stop_task_now("t1")
+                elapsed = time.monotonic() - started
+
+                self.assertEqual((ok, msg), (True, "已结束"))
+                self.assertLess(elapsed, 0.9, f"Stop took {elapsed:.3f}s")
+                self.assertIsNotNone(proc.poll())
+                self.assertNotIn("t1", task_runner.RUNNING)
+
+    @unittest.skipIf(os.name == "nt", "SIGTERM-ignore escalation requires POSIX")
+    def test_stop_task_now_escalates_real_process_with_bounded_wait(self):
+        with isolated_fls_modules():
+            from fls_manager import task_runner
+
+            with ready_task_process(ignore_sigterm=True) as proc:
+                task_runner.RUNNING["t1"] = {
+                    "status": "running",
+                    "process": proc,
+                    "history_id": "history-1",
+                }
+                started = time.monotonic()
+                ok, msg = task_runner.stop_task_now("t1")
+                elapsed = time.monotonic() - started
+
+                self.assertEqual((ok, msg), (True, "已结束"))
+                self.assertGreaterEqual(elapsed, 0.9)
+                self.assertLess(elapsed, 2.5, f"Stop took {elapsed:.3f}s")
+                self.assertEqual(proc.poll(), -signal.SIGKILL)
+                self.assertNotIn("t1", task_runner.RUNNING)
 
     def test_stop_starting_task_releases_reservation_before_closing_log(self):
         with isolated_fls_modules():
@@ -1197,6 +1380,59 @@ class TaskRuntimeTests(unittest.TestCase):
             text = log_file.read_text(encoding="utf-8")
             self.assertIn("任务超时", text)
             self.assertIn("任务设置为不通知", text)
+
+    def test_finish_watcher_timeout_failure_keeps_process_trackable(self):
+        with isolated_fls_modules():
+            from fls_manager import paths, task_runner
+
+            log_file = Path(os.environ["FLS_BASE_DIR"]) / "log" / "timeout-failed.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_fp = open(log_file, "ab", buffering=0)
+            proc = TimeoutProc(return_code=None)
+            task_runner.RUNNING["t1"] = {
+                "status": "running",
+                "process": proc,
+                "history_id": "history-1",
+                "log_file": str(log_file),
+                "log_fp": log_fp,
+            }
+            write_json(
+                paths.TASK_HISTORY_FILE,
+                [{"id": "history-1", "task_id": "t1", "status": "running"}],
+            )
+
+            try:
+                with mock.patch.object(
+                    task_runner,
+                    "load_config",
+                    return_value={"task_timeout_seconds": 5},
+                ), mock.patch.object(
+                    task_runner,
+                    "force_kill_process",
+                    return_value=False,
+                ) as force_kill:
+                    task_runner.task_finish_watcher(
+                        "t1",
+                        {"id": "t1", "name": "Demo"},
+                        proc,
+                        str(log_file),
+                        log_fp,
+                        "history-1",
+                        0,
+                        0,
+                    )
+            finally:
+                with contextlib.suppress(Exception):
+                    log_fp.close()
+
+            force_kill.assert_called_once_with(proc)
+            self.assertIn("t1", task_runner.RUNNING)
+            self.assertEqual(task_runner.RUNNING["t1"]["status"], "running")
+            self.assertIn("无法确认任务进程已退出", task_runner.RUNNING["t1"]["stop_error"])
+            history = read_json(paths.TASK_HISTORY_FILE)
+            self.assertEqual(history[0]["status"], "running")
+            self.assertIn("无法确认任务进程已退出", history[0]["message"])
+            self.assertIn("超时后停止失败", log_file.read_text(encoding="utf-8"))
 
 
 class ProxyRuntimeTests(unittest.TestCase):

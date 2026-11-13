@@ -148,8 +148,9 @@ def stop_task_route(task_id):
     back_url = get_back_url("/tasks")
 
     if not ok and msg != "任务未运行":
+        title = "任务已结束" if msg.startswith("任务已结束") else "停止失败"
         body = f"""
-{message_card(msg, "error", strong=True, title="停止失败")}
+{message_card(msg, "error", strong=True, title=title)}
 <div class="card">
     <a class="btn btn-gray" href="{h(back_url)}">返回</a>
 </div>

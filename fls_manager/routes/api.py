@@ -71,6 +71,12 @@ def _task_action_result(ok, msg):
     if not ok and msg == "任务不存在":
         return jsonify(payload), 404
 
+    if not ok and (
+        msg.startswith("停止失败")
+        or msg.startswith("任务已结束")
+    ):
+        return jsonify(payload), 409
+
     return jsonify(payload)
 
 

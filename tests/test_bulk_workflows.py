@@ -1391,7 +1391,7 @@ class BulkWorkflowTests(unittest.TestCase):
             self.assertEqual(payload["msg"], "任务未运行")
             stop_task_now.assert_called_once_with("t1")
 
-    def test_task_action_stop_business_failure_keeps_200_without_write_or_reload(self):
+    def test_task_action_stop_business_failure_returns_409_without_write_or_reload(self):
         with isolated_app() as (app, _base_dir):
             from fls_manager import paths
 
@@ -1415,12 +1415,34 @@ class BulkWorkflowTests(unittest.TestCase):
 
             payload = response.get_json()
 
-            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.status_code, 409)
             self.assertFalse(payload["ok"])
             self.assertEqual(payload["msg"], "停止失败")
             stop_task_now.assert_called_once_with("t1")
             save_tasks.assert_not_called()
             reload_scheduler.assert_not_called()
+
+    def test_task_action_stop_unconfirmed_process_returns_409_with_exact_reason(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            write_json(paths.TASK_FILE, [sample_task("t1")])
+            with patch(
+                "fls_manager.routes.api.stop_task_now",
+                return_value=(False, "停止失败：权限拒绝：无法确认任务进程已退出"),
+            ) as stop_task_now:
+                response = app.test_client().post(
+                    "/api/task/action/stop/t1",
+                    headers={"X-Token": TOKEN},
+                )
+
+            payload = response.get_json()
+
+            self.assertEqual(response.status_code, 409)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["msg"], "停止失败：权限拒绝：无法确认任务进程已退出")
+            stop_task_now.assert_called_once_with("t1")
+            self.assertEqual([task["id"] for task in read_json(base_dir / "data" / "tasks.json")], ["t1"])
 
     def test_legacy_stop_route_existing_task_redirects_when_not_running(self):
         with isolated_app() as (app, _base_dir):
@@ -1479,6 +1501,28 @@ class BulkWorkflowTests(unittest.TestCase):
                 [task["id"] for task in read_json(base_dir / "data" / "tasks.json")],
                 ["t1"],
             )
+
+    def test_legacy_stop_route_already_ended_renders_exact_result_page(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager import paths
+
+            write_json(paths.TASK_FILE, [sample_task("t1")])
+            with patch(
+                "fls_manager.routes.tasks.actions.stop_task_now",
+                return_value=(False, "任务已结束，退出码 7"),
+            ) as stop_task_now:
+                response = app.test_client().post(
+                    "/stop/t1?back=/tasks",
+                    headers={"X-Token": TOKEN},
+                )
+
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 409)
+            self.assertIn('<div class="card-title">任务已结束</div>', html)
+            self.assertIn("任务已结束，退出码 7", html)
+            self.assertIn('href="/tasks"', html)
+            stop_task_now.assert_called_once_with("t1")
 
     def test_legacy_stop_route_missing_task_aborts_without_stop_call(self):
         with isolated_app() as (app, base_dir):

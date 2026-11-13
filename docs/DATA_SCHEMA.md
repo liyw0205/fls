@@ -61,7 +61,7 @@
 - `task_id`：字符串，任务 ID。
 - `task_name`：字符串，任务名快照。
 - `command`：字符串，任务命令快照。
-- `status`：字符串，常见值包括 `success`、`failed`、`timeout`、`stopped`、`running`、`starting`、`delaying`、`start_failed`。
+- `status`：字符串，常见值包括 `success`、`failed`、`timeout`、`stopped`、`running`、`starting`、`delaying`、`start_failed`。`running`、`starting` 和 `delaying` 只表示面板当前进程仍持有运行状态；面板重启后不能据此确认外部进程仍存活。
 - `source`：字符串，运行来源，例如 `manual`、`cron`、`retry`。
 - `retry_attempt`：整数，当前重试次数。
 - `max_retries`：整数，最大重试次数。

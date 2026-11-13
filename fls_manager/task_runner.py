@@ -255,50 +255,81 @@ def schedule_task_retry(task_id, task_snapshot, retry_attempt, reason, log_file,
     return True, f"{reason}，已计划第 {next_attempt}/{max_retries} 次重试"
 
 
-def force_kill_process(proc):
-    if not proc:
-        return
+def terminate_task_process(proc):
+    """Request termination and return a verified result with the real error."""
+    if proc is None:
+        return False, "任务进程不存在"
 
     try:
         if proc.poll() is not None:
-            return
+            return False, f"任务已结束，退出码 {proc.poll()}"
+    except Exception as e:
+        return False, f"读取任务进程状态失败：{e}"
 
-        if os.name == "nt":
+    errors = []
+
+    if os.name == "nt":
+        try:
+            proc.terminate()
+        except Exception as e:
+            errors.append(f"请求正常终止失败：{e}")
+    else:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except Exception as e:
+            errors.append(f"发送进程组终止信号失败：{e}")
             try:
                 proc.terminate()
-            except Exception:
-                pass
+            except Exception as fallback_error:
+                errors.append(f"请求进程终止失败：{fallback_error}")
 
-            time.sleep(1)
-
-            if proc.poll() is None:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-
-        else:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            except Exception:
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
-
-            time.sleep(1)
-
-            if proc.poll() is None:
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                except Exception:
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
-
-    except Exception:
+    try:
+        proc.wait(timeout=1)
+        if proc.poll() is not None:
+            return True, ""
+    except subprocess.TimeoutExpired:
         pass
+    except Exception as e:
+        errors.append(f"等待正常终止失败：{e}")
+
+    if os.name == "nt":
+        try:
+            proc.kill()
+        except Exception as e:
+            errors.append(f"强制终止失败：{e}")
+    else:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except Exception as e:
+            errors.append(f"发送进程组强制终止信号失败：{e}")
+            try:
+                proc.kill()
+            except Exception as fallback_error:
+                errors.append(f"强制终止进程失败：{fallback_error}")
+
+    try:
+        proc.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        pass
+    except Exception as e:
+        errors.append(f"等待强制终止失败：{e}")
+
+    try:
+        if proc.poll() is not None:
+            return True, ""
+    except Exception as e:
+        errors.append(f"确认任务进程状态失败：{e}")
+
+    detail = "；".join(errors)
+    if detail:
+        detail += "；无法确认任务进程已退出"
+    return False, detail or "无法确认任务进程已退出"
+
+
+def force_kill_process(proc):
+    """Compatibility wrapper for timeout and stale-worker cleanup paths."""
+    ok, detail = terminate_task_process(proc)
+    return ok or detail.startswith("任务已结束")
 
 
 def task_random_delay_seconds(task):
@@ -359,8 +390,39 @@ def task_finish_watcher(task_id, task_snapshot, proc, log_file, log_fp, history_
                 f"\n===== 任务超时: {now_str()}，超过 {timeout_seconds} 秒，开始强制结束 =====\n"
             )
 
-            force_kill_process(proc)
-            return_code = proc.wait()
+            terminated = force_kill_process(proc)
+            try:
+                return_code = proc.poll()
+            except Exception:
+                return_code = None
+
+            if return_code is None and terminated:
+                try:
+                    return_code = proc.wait(timeout=1)
+                except Exception:
+                    return_code = None
+
+            if return_code is None:
+                append_task_log(
+                    log_file,
+                    "===== 超时后停止失败：无法确认任务进程已退出 =====\n",
+                )
+                _update_running_attempt(
+                    task_id,
+                    history_id,
+                    {
+                        "status": "running",
+                        "stop_error": "超时后停止失败：无法确认任务进程已退出",
+                    },
+                )
+                update_task_history(
+                    history_id,
+                    {
+                        "status": "running",
+                        "message": "超时后停止失败：无法确认任务进程已退出",
+                    },
+                )
+                return
 
         stopped_key = (task_id, history_id)
         manual_stopped = stopped_key in STOPPED_MANUALLY
@@ -763,9 +825,25 @@ def stop_task_now(task_id):
 
     if proc:
         try:
-            force_kill_process(proc)
+            return_code = proc.poll()
         except Exception as e:
-            return False, f"结束失败：{e}"
+            return False, f"停止失败：读取任务进程状态失败：{e}"
+
+        if return_code is not None:
+            _pop_running(task_id, history_id=info.get("history_id"))
+            STOPPED_MANUALLY.discard((task_id, info.get("history_id")))
+            return False, f"任务已结束，退出码 {return_code}"
+
+        terminated, detail = terminate_task_process(proc)
+
+        if not terminated:
+            log_file = info.get("log_file")
+            if log_file:
+                append_task_log(
+                    log_file,
+                    f"\n===== 停止任务失败: {now_str()}，{detail} =====\n",
+                )
+            return False, f"停止失败：{detail}"
 
     try:
         log_file = info.get("log_file")
