@@ -15,6 +15,8 @@ from .auth import (
 )
 from .config import fls_get_admin_token
 from .frontend_events import dispatch_frontend_open_event
+from .models import reconcile_task_history_after_restart
+from .task_runner import running_history_ids
 from .routes.auth_routes import bp as auth_bp
 from .routes.dashboard import bp as dashboard_bp
 from .routes.tasks import bp as tasks_bp
@@ -81,6 +83,10 @@ def create_app():
     app = Flask(__name__)
 
     app.secret_key = get_persistent_secret_key()
+
+    # Runtime process handles are in memory; close the false "running" state
+    # left by a previous panel process before serving the first request.
+    reconcile_task_history_after_restart(running_history_ids())
 
     # Cookie 基础配置。
     # remember 登录时，auth.py 会设置 session.permanent；

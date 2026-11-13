@@ -15,17 +15,44 @@ from datetime import datetime
 from flask import request, Response, redirect, url_for, jsonify, abort
 
 from ...paths import BASE_DIR, DATA_DIR, SCRIPT_DIR, LOG_DIR
+from ...storage import read_json, mutate_json
 from ...ui.layout import layout
 from ...ui.components import page_header, empty_table_row
 from ...utils import h, now_str, safe_name, prune_completed_records
 from ...scheduler import reload_scheduler
 
 BACKUP_DIR = DATA_DIR / "backups"
+BACKUP_JOBS_FILE = DATA_DIR / "backup_jobs.json"
 BACKUP_JOBS = {}
 BACKUP_CANCEL_EVENTS = {}
+BACKUP_JOB_LOCK = threading.RLock()
+BACKUP_JOB_LIMIT = 100
+BACKUP_DEPENDENCY_TIMEOUT_SECONDS = 120
+MIB = 1024 * 1024
+
+
+def _positive_env_limit(name, default):
+    try:
+        value = int(os.environ.get(name, ""))
+        return value if value > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+MAX_BACKUP_UPLOAD_BYTES = _positive_env_limit("FLS_BACKUP_MAX_UPLOAD_MB", 512) * MIB
+MAX_BACKUP_EXTRACTED_BYTES = _positive_env_limit("FLS_BACKUP_MAX_EXTRACTED_MB", 2048) * MIB
+MAX_BACKUP_ARCHIVE_ENTRIES = _positive_env_limit("FLS_BACKUP_MAX_ARCHIVE_ENTRIES", 10000)
 
 
 class BackupCancelled(Exception):
+    pass
+
+
+class BackupTimeout(Exception):
+    pass
+
+
+class BackupLimitExceeded(ValueError):
     pass
 
 
@@ -36,6 +63,79 @@ class BackupCancelled(Exception):
 def backup_dir():
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     return BACKUP_DIR
+
+
+def _backup_job_snapshot(info):
+    fields = (
+        "id",
+        "items",
+        "type_text",
+        "running",
+        "status",
+        "filename",
+        "size",
+        "size_text",
+        "error",
+        "created_at",
+        "updated_at",
+    )
+    return {field: info.get(field) for field in fields}
+
+
+def persist_backup_job(info):
+    with BACKUP_JOB_LOCK:
+        snapshot = _backup_job_snapshot(info)
+        job_id = str(snapshot.get("id") or "")
+        if not job_id:
+            return
+
+        def update(data):
+            jobs = data if isinstance(data, dict) else {}
+            jobs = {
+                str(key): value
+                for key, value in jobs.items()
+                if isinstance(value, dict)
+            }
+            jobs[job_id] = snapshot
+            ordered = sorted(
+                jobs.items(),
+                key=lambda pair: str(pair[1].get("updated_at") or pair[1].get("created_at") or ""),
+                reverse=True,
+            )
+            return dict(ordered[:BACKUP_JOB_LIMIT])
+
+        mutate_json(BACKUP_JOBS_FILE, {}, update)
+
+
+def _load_persisted_backup_job(job_id):
+    data = read_json(BACKUP_JOBS_FILE, {})
+    jobs = data if isinstance(data, dict) else {}
+    info = jobs.get(str(job_id or ""))
+    return dict(info) if isinstance(info, dict) else None
+
+
+def get_backup_job(job_id):
+    """Return a live or persisted job, converting lost running handles to unknown."""
+    with BACKUP_JOB_LOCK:
+        info = BACKUP_JOBS.get(job_id)
+        if isinstance(info, dict):
+            return dict(info)
+
+        info = _load_persisted_backup_job(job_id)
+        if not info:
+            return None
+
+        if info.get("running"):
+            info["running"] = False
+            info["status"] = "结果未知"
+            info["error"] = (
+                "面板重启后无法确认备份进程是否完成，请检查备份列表和日志；"
+                "如未生成可用归档，请重新创建备份。"
+            )
+            info["updated_at"] = now_str()
+            persist_backup_job(info)
+
+        return info
 
 
 def backup_safe_file(filename):
@@ -51,6 +151,30 @@ def backup_safe_file(filename):
         raise ValueError("备份文件路径非法")
 
     return target
+
+
+def save_backup_upload(file_storage, target):
+    target = Path(target)
+    total = 0
+    try:
+        with target.open("wb") as output:
+            while True:
+                chunk = file_storage.stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_BACKUP_UPLOAD_BYTES:
+                    raise BackupLimitExceeded(
+                        "备份文件超过上传上限（{} MiB）".format(
+                            MAX_BACKUP_UPLOAD_BYTES // MIB
+                        )
+                    )
+                output.write(chunk)
+    except Exception:
+        target.unlink(missing_ok=True)
+        raise
+
+    return total
 
 
 def fmt_size(n):
@@ -130,7 +254,7 @@ def write_dependencies_file(path, cancel_event=None):
             stderr=subprocess.STDOUT,
             text=True,
         )
-        deadline = time.monotonic() + 120
+        deadline = time.monotonic() + BACKUP_DEPENDENCY_TIMEOUT_SECONDS
         while True:
             try:
                 output, _ = process.communicate(timeout=0.2)
@@ -153,7 +277,8 @@ def write_dependencies_file(path, cancel_event=None):
                     process.kill()
                     process.communicate()
                 raise subprocess.TimeoutExpired(
-                    [sys.executable, "-m", "pip", "freeze"], 120
+                    [sys.executable, "-m", "pip", "freeze"],
+                    BACKUP_DEPENDENCY_TIMEOUT_SECONDS,
                 )
 
         deps_text = output or ""
@@ -165,6 +290,12 @@ def write_dependencies_file(path, cancel_event=None):
 
     except BackupCancelled:
         raise
+    except subprocess.TimeoutExpired as e:
+        raise BackupTimeout(
+            "备份依赖列表采集超时（超过 {} 秒）".format(
+                BACKUP_DEPENDENCY_TIMEOUT_SECONDS
+            )
+        ) from e
     except Exception as e:
         Path(path).write_text(
             "# pip freeze 执行失败：{}\n".format(e),
@@ -209,18 +340,41 @@ def _backup_tar_filter(cancel_event):
     return apply_filter
 
 
+def _update_backup_job(job_id, **updates):
+    with BACKUP_JOB_LOCK:
+        info = BACKUP_JOBS.get(job_id)
+        if not isinstance(info, dict):
+            return None
+        info.update(updates)
+        persist_backup_job(info)
+        return info
+
+
+def _remove_backup_target(target):
+    if target is None:
+        return
+    try:
+        Path(target).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def create_backup_worker(job_id, items, cancel_event):
-    info = BACKUP_JOBS.get(job_id)
+    with BACKUP_JOB_LOCK:
+        info = BACKUP_JOBS.get(job_id)
 
     if not info:
         return
 
     items = list(items or [])
 
-    info["running"] = True
-    info["status"] = "正在压缩"
-    info["error"] = ""
-    info["updated_at"] = now_str()
+    _update_backup_job(
+        job_id,
+        running=True,
+        status="正在压缩",
+        error="",
+        updated_at=now_str(),
+    )
 
     target = None
     try:
@@ -276,62 +430,98 @@ def create_backup_worker(job_id, items, cancel_event):
         _check_backup_cancelled(cancel_event)
         stat = target.stat()
 
-        info["running"] = False
-        info["status"] = "已完成"
-        info["filename"] = target.name
-        info["size"] = stat.st_size
-        info["size_text"] = fmt_size(stat.st_size)
-        info["updated_at"] = now_str()
+        with BACKUP_JOB_LOCK:
+            if cancel_event.is_set():
+                cancelled_after_finish = True
+            else:
+                cancelled_after_finish = False
+                info.update({
+                    "running": False,
+                    "status": "已完成",
+                    "filename": target.name,
+                    "size": stat.st_size,
+                    "size_text": fmt_size(stat.st_size),
+                    "updated_at": now_str(),
+                })
+                persist_backup_job(info)
+
+        if cancelled_after_finish:
+            raise BackupCancelled("备份任务已取消")
 
     except BackupCancelled:
-        if target is not None:
-            try:
-                target.unlink(missing_ok=True)
-            except Exception:
-                pass
-        info["running"] = False
-        info["status"] = "已取消"
-        info["error"] = ""
-        info["updated_at"] = now_str()
+        _remove_backup_target(target)
+        _update_backup_job(
+            job_id,
+            running=False,
+            status="已取消",
+            error="",
+            filename="",
+            size=0,
+            size_text="-",
+            updated_at=now_str(),
+        )
+    except BackupTimeout as e:
+        _remove_backup_target(target)
+        _update_backup_job(
+            job_id,
+            running=False,
+            status="超时",
+            error=str(e),
+            filename="",
+            size=0,
+            size_text="-",
+            updated_at=now_str(),
+        )
     except Exception as e:
-        info["running"] = False
-        info["status"] = "失败"
-        info["error"] = str(e)
-        info["updated_at"] = now_str()
+        _remove_backup_target(target)
+        _update_backup_job(
+            job_id,
+            running=False,
+            status="失败",
+            error=str(e),
+            filename="",
+            size=0,
+            size_text="-",
+            updated_at=now_str(),
+        )
     finally:
-        BACKUP_CANCEL_EVENTS.pop(job_id, None)
+        with BACKUP_JOB_LOCK:
+            BACKUP_CANCEL_EVENTS.pop(job_id, None)
 
 
 def start_backup_job(items):
     job_id = uuid.uuid4().hex
 
-    prune_completed_records(BACKUP_JOBS)
-    for old_id in list(BACKUP_CANCEL_EVENTS):
-        if old_id not in BACKUP_JOBS:
-            BACKUP_CANCEL_EVENTS.pop(old_id, None)
-    cancel_event = threading.Event()
-    BACKUP_JOBS[job_id] = {
-        "id": job_id,
-        "items": list(items or []),
-        "type_text": backup_type_text(items),
-        "running": True,
-        "status": "准备中",
-        "filename": "",
-        "size": 0,
-        "size_text": "-",
-        "error": "",
-        "created_at": now_str(),
-        "updated_at": now_str(),
-    }
-    BACKUP_CANCEL_EVENTS[job_id] = cancel_event
+    with BACKUP_JOB_LOCK:
+        prune_completed_records(BACKUP_JOBS)
+        for old_id in list(BACKUP_CANCEL_EVENTS):
+            if old_id not in BACKUP_JOBS:
+                BACKUP_CANCEL_EVENTS.pop(old_id, None)
+        cancel_event = threading.Event()
+        now = now_str()
+        BACKUP_JOBS[job_id] = {
+            "id": job_id,
+            "items": list(items or []),
+            "type_text": backup_type_text(items),
+            "running": True,
+            "status": "准备中",
+            "filename": "",
+            "size": 0,
+            "size_text": "-",
+            "error": "",
+            "created_at": now,
+            "updated_at": now,
+        }
+        BACKUP_CANCEL_EVENTS[job_id] = cancel_event
+        persist_backup_job(BACKUP_JOBS[job_id])
 
-    th = threading.Thread(
-        target=create_backup_worker,
-        args=(job_id, items, cancel_event),
-        daemon=True,
-        name=f"fls-backup-{job_id[:8]}",
-    )
-    th.start()
+        th = threading.Thread(
+            target=create_backup_worker,
+            args=(job_id, items, cancel_event),
+            daemon=True,
+            name=f"fls-backup-{job_id[:8]}",
+        )
+        th.start()
 
     return job_id
 
@@ -360,9 +550,26 @@ def _archive_member_target(base, name):
 
 def safe_extract_tar(tar, path):
     base = Path(path).resolve()
+    members = tar.getmembers()
+    if len(members) > MAX_BACKUP_ARCHIVE_ENTRIES:
+        raise BackupLimitExceeded(
+            "备份文件条目过多（最多 {} 个）".format(MAX_BACKUP_ARCHIVE_ENTRIES)
+        )
 
-    for member in tar.getmembers():
+    total_size = 0
+
+    for member in members:
         _archive_member_target(base, member.name)
+
+        if member.size < 0:
+            raise RuntimeError("备份文件包含非法大小")
+        total_size += member.size
+        if total_size > MAX_BACKUP_EXTRACTED_BYTES:
+            raise BackupLimitExceeded(
+                "备份文件解压后超过允许大小（{} MiB）".format(
+                    MAX_BACKUP_EXTRACTED_BYTES // MIB
+                )
+            )
 
         if member.issym() or member.islnk():
             raise RuntimeError("备份文件包含不安全链接")
@@ -380,15 +587,33 @@ def safe_extract_tar(tar, path):
 
 def safe_extract_zip(zip_obj, path):
     base = Path(path).resolve()
+    members = zip_obj.infolist()
+    if len(members) > MAX_BACKUP_ARCHIVE_ENTRIES:
+        raise BackupLimitExceeded(
+            "备份文件条目过多（最多 {} 个）".format(MAX_BACKUP_ARCHIVE_ENTRIES)
+        )
 
-    for member in zip_obj.infolist():
+    total_size = 0
+
+    for member in members:
         _archive_member_target(base, member.filename)
+        total_size += member.file_size
+        if total_size > MAX_BACKUP_EXTRACTED_BYTES:
+            raise BackupLimitExceeded(
+                "备份文件解压后超过允许大小（{} MiB）".format(
+                    MAX_BACKUP_EXTRACTED_BYTES // MIB
+                )
+            )
 
     zip_obj.extractall(path)
 
 
 def extract_archive(file_path, dest_dir):
     file_path = Path(file_path)
+    if file_path.stat().st_size > MAX_BACKUP_UPLOAD_BYTES:
+        raise BackupLimitExceeded(
+            "备份文件超过上传上限（{} MiB）".format(MAX_BACKUP_UPLOAD_BYTES // MIB)
+        )
     name = file_path.name.lower()
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)

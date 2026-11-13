@@ -36,6 +36,12 @@ def backup_export():
 
 @bp.route("/backup/import", methods=["POST"])
 def backup_import():
+    if (
+        request.content_length is not None
+        and request.content_length > MAX_BACKUP_UPLOAD_BYTES + MIB
+    ):
+        return "备份导入失败：请求超过上传上限。请调低文件大小或调整服务端备份限制。", 413
+
     f = request.files.get("file")
 
     if not f:
@@ -52,7 +58,7 @@ def backup_import():
     try:
         original = os.path.basename(f.filename or "backup")
         backup_file = Path(tmp_dir) / original
-        f.save(str(backup_file))
+        save_backup_upload(f, backup_file)
 
         extract_dir = Path(tmp_dir) / "extract"
         extract_dir.mkdir(parents=True, exist_ok=True)
@@ -129,6 +135,8 @@ def backup_import():
         )
         return layout("备份导入完成", "backup", body)
 
+    except BackupLimitExceeded as e:
+        return f"备份导入失败：{h(e)}。请调低文件大小或调整服务端备份限制。", 413
     except Exception as e:
         return f"备份导入失败：{h(e)}。下一步：检查备份内容和恢复范围后重试", 400
 

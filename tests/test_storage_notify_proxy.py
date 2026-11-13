@@ -1,4 +1,5 @@
 import contextlib
+import io
 import json
 import os
 import sys
@@ -906,6 +907,92 @@ class ProxyQualityTests(unittest.TestCase):
 
 
 class LogBoundaryTests(unittest.TestCase):
+    def test_tail_file_bounds_bytes_for_a_newline_free_log(self):
+        with isolated_fls_modules() as base_dir:
+            from fls_manager import logs
+
+            log_file = base_dir / "log" / "single-line.log"
+            log_file.touch()
+            data = b"password=" + b"s" * (3 * 1024 * 1024)
+            reads = []
+
+            class CountedFile(io.BytesIO):
+                def read(self, size=-1):
+                    chunk = super().read(size)
+                    reads.append(len(chunk))
+                    return chunk
+
+            with mock.patch.object(Path, "open", return_value=CountedFile(data)):
+                result = logs.tail_file(log_file, lines=10)
+
+            self.assertLessEqual(sum(reads), 1024 * 1024)
+            self.assertIn("日志过长", result)
+            self.assertNotIn("ssss", result)
+
+    def test_tail_file_omits_partial_sensitive_line_and_masks_complete_tail(self):
+        with isolated_fls_modules() as base_dir:
+            from fls_manager import logs, sensitive
+
+            log_file = base_dir / "log" / "sparse.log"
+            with log_file.open("wb") as f:
+                f.write(b"password=")
+                f.seek(32 * 1024 * 1024)
+                f.write(b"partial-secret\nready\npassword=complete-secret\n")
+            original_size = log_file.stat().st_size
+
+            result = logs.tail_file(log_file, lines=10)
+
+            self.assertEqual(result, "\n".join([
+                logs.TAIL_TRUNCATION_NOTICE,
+                "ready",
+                "password=" + sensitive.mask_secret_value("complete-secret"),
+            ]))
+            self.assertNotIn("partial-secret", result)
+            self.assertEqual(log_file.stat().st_size, original_size)
+
+    def test_tail_file_keeps_utf8_crlf_tail_after_byte_truncation(self):
+        with isolated_fls_modules() as base_dir:
+            from fls_manager import logs
+
+            log_file = base_dir / "log" / "utf8.log"
+            log_file.write_bytes(("长" * 5000 + "\r\n正常日志\r\n最后一行\r\n").encode("utf-8"))
+
+            with mock.patch.object(logs, "MAX_TAIL_BYTES", 4096):
+                result = logs.tail_file(log_file, lines=10)
+
+            self.assertEqual(result, logs.TAIL_TRUNCATION_NOTICE + "\n正常日志\n最后一行")
+            self.assertNotIn("�", result)
+
+    def test_tail_file_does_not_truncate_file_at_exact_byte_limit(self):
+        with isolated_fls_modules() as base_dir:
+            from fls_manager import logs
+
+            log_file = base_dir / "log" / "exact.log"
+            content = b"first\nsecond\nlast\n"
+            log_file.write_bytes(content)
+
+            with mock.patch.object(logs, "MAX_TAIL_BYTES", len(content)):
+                self.assertEqual(logs.tail_file(log_file, lines=10), "first\nsecond\nlast")
+
+    def test_tail_file_line_limit_accepts_invalid_and_nonpositive_values(self):
+        with isolated_fls_modules() as base_dir:
+            from fls_manager import logs
+
+            log_file = base_dir / "log" / "parameters.log"
+            log_file.write_bytes(b"one\ntwo\nthree\n")
+            self.assertEqual(logs.tail_file(log_file, lines="invalid"), "one\ntwo\nthree")
+            self.assertEqual(logs.tail_file(log_file, lines=None), "one\ntwo\nthree")
+            self.assertEqual(logs.tail_file(log_file, lines=0), "three")
+            self.assertEqual(logs.tail_file(log_file, lines=-1), "three")
+
+    def test_tail_file_keeps_short_tail_of_file_larger_than_byte_limit(self):
+        with isolated_fls_modules() as base_dir:
+            from fls_manager import logs
+
+            log_file = base_dir / "log" / "many-lines.log"
+            log_file.write_bytes(b"old\n" * logs.MAX_TAIL_BYTES + b"one\ntwo\nthree\n")
+            self.assertEqual(logs.tail_file(log_file, lines=2), "two\nthree")
+
     def test_tail_file_handles_missing_file_and_returns_last_lines(self):
         with isolated_fls_modules() as base_dir:
             from fls_manager import logs

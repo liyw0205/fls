@@ -100,6 +100,189 @@ def add_tar_file(tar, name, content):
 
 
 class DependencyInstallIsolationTests(unittest.TestCase):
+    def test_install_result_tracks_running_and_exit_for_both_installers(self):
+        for runtime in (False, True):
+            for returncode in (0, 17, -15):
+                with self.subTest(runtime=runtime, returncode=returncode):
+                    with isolated_app() as (app, _base_dir):
+                        from fls_manager.state import DEPS_RUNNING
+
+                        proc = SimpleNamespace(poll=MagicMock(return_value=None))
+                        module = "runtime" if runtime else "deps"
+                        client = app.test_client()
+                        with patch(
+                            "fls_manager.routes.runtime.runtime_install_command",
+                            return_value="mock-install",
+                        ), patch(
+                            f"fls_manager.routes.{module}.subprocess.Popen",
+                            return_value=proc,
+                        ):
+                            response = client.post(
+                                "/install/runtime/node" if runtime else "/deps/install",
+                                data={"name": "demo-package"},
+                                headers={"X-Token": TOKEN},
+                            )
+
+                        self.assertEqual(response.status_code, 302)
+                        location = response.headers["Location"]
+                        install_id = urlsplit(location).path.rsplit("/", 1)[1]
+                        info = DEPS_RUNNING[install_id]
+                        fp = info["log_fp"]
+                        api_url = f"/api/deps/install-log/{install_id}"
+                        result = client.get(api_url, headers={"X-Token": TOKEN}).get_json()
+                        self.assertTrue(result["running"])
+                        self.assertEqual(result["status"], "running")
+                        self.assertIsNone(result["returncode"])
+                        self.assertEqual(result["error"], "")
+                        self.assertIn("安装中</b>", client.get(
+                            location, headers={"X-Token": TOKEN}
+                        ).get_data(as_text=True))
+
+                        proc.poll.return_value = returncode
+                        result = client.get(api_url, headers={"X-Token": TOKEN}).get_json()
+                        self.assertFalse(result["running"])
+                        self.assertEqual(result["returncode"], returncode)
+                        expected = "succeeded" if returncode == 0 else "failed"
+                        label = "安装成功" if returncode == 0 else "安装失败"
+                        self.assertEqual(result["status"], expected)
+                        self.assertEqual(result["status_label"], label)
+                        self.assertEqual(bool(result["error"]), returncode != 0)
+                        self.assertTrue(fp.closed)
+                        self.assertTrue(info["finished"])
+                        self.assertIsNone(info["process"])
+                        self.assertIsNone(info["log_fp"])
+                        self.assertIn(f"退出码: {returncode}", result["log"])
+                        poll_count = proc.poll.call_count
+                        page = client.get(location, headers={"X-Token": TOKEN}).get_data(as_text=True)
+                        self.assertIn(f"{label}</b>", page)
+                        self.assertIn(f'id="installReturncode">{returncode}</span>', page)
+                        repeated = client.get(api_url, headers={"X-Token": TOKEN}).get_json()
+                        self.assertEqual(repeated, result)
+                        self.assertEqual(proc.poll.call_count, poll_count)
+                        self.assertEqual(result["log"].count("===== 安装结束:"), 1)
+
+    def test_install_start_failure_keeps_log_and_error_for_both_installers(self):
+        for runtime in (False, True):
+            with self.subTest(runtime=runtime):
+                with isolated_app() as (app, _base_dir):
+                    from fls_manager.state import DEPS_RUNNING
+
+                    client = app.test_client()
+                    module = "runtime" if runtime else "deps"
+                    with patch(
+                        "fls_manager.routes.runtime.runtime_install_command",
+                        return_value="mock-install",
+                    ), patch(
+                        f"fls_manager.routes.{module}.subprocess.Popen",
+                        side_effect=OSError("permission <denied>"),
+                    ) as popen:
+                        response = client.post(
+                            "/install/runtime/node" if runtime else "/deps/install",
+                            data={"name": "demo-package"},
+                            headers={"X-Token": TOKEN},
+                        )
+
+                    self.assertEqual(response.status_code, 302)
+                    location = response.headers["Location"]
+                    install_id = urlsplit(location).path.rsplit("/", 1)[1]
+                    info = DEPS_RUNNING[install_id]
+                    result = client.get(
+                        f"/api/deps/install-log/{install_id}", headers={"X-Token": TOKEN}
+                    ).get_json()
+                    self.assertFalse(result["running"])
+                    self.assertEqual(result["status"], "start_failed")
+                    self.assertEqual(result["status_label"], "启动失败")
+                    self.assertIsNone(result["returncode"])
+                    self.assertIn("permission <denied>", result["error"])
+                    self.assertIn("permission <denied>", result["log"])
+                    self.assertTrue(info["finished"])
+                    self.assertIsNone(info["process"])
+                    self.assertIsNone(info["log_fp"])
+                    self.assertTrue(popen.call_args.kwargs["stdout"].closed)
+                    page = client.get(location, headers={"X-Token": TOKEN}).get_data(as_text=True)
+                    self.assertIn("启动失败</b>", page)
+                    self.assertIn("permission &lt;denied&gt;", page)
+                    self.assertNotIn("permission <denied>", page)
+
+    def test_runtime_command_failure_is_reported_without_starting_process(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.state import DEPS_RUNNING
+
+            client = app.test_client()
+            with patch(
+                "fls_manager.routes.runtime.runtime_install_command",
+                side_effect=RuntimeError("npm 不可用，请先安装 Node.js"),
+            ), patch("fls_manager.routes.runtime.subprocess.Popen") as popen:
+                response = client.post("/install/runtime/typescript", headers={"X-Token": TOKEN})
+
+            self.assertEqual(response.status_code, 302)
+            install_id = urlsplit(response.headers["Location"]).path.rsplit("/", 1)[1]
+            result = client.get(
+                f"/api/deps/install-log/{install_id}", headers={"X-Token": TOKEN}
+            ).get_json()
+            self.assertEqual(result["status"], "start_failed")
+            self.assertIn("生成安装命令失败", result["error"])
+            self.assertIn("npm 不可用", result["log"])
+            self.assertIsNone(DEPS_RUNNING[install_id]["log_fp"])
+            popen.assert_not_called()
+
+    def test_records_without_exit_code_do_not_report_success(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.state import DEPS_RUNNING
+
+            client = app.test_client()
+            for finished in (False, True):
+                with self.subTest(finished=finished):
+                    log_file = base_dir / "log" / "legacy-install.log"
+                    fp = open(log_file, "ab", buffering=0) if not finished else None
+                    DEPS_RUNNING["legacy"] = {
+                        "finished": finished, "process": None, "log_fp": fp,
+                        "log_file": str(log_file), "package": "demo",
+                    }
+                    result = client.get(
+                        "/api/deps/install-log/legacy", headers={"X-Token": TOKEN}
+                    ).get_json()
+                    self.assertFalse(result["running"])
+                    self.assertEqual(result["status"], "unknown")
+                    self.assertEqual(result["status_label"], "结果未知")
+                    self.assertIsNone(result["returncode"])
+                    self.assertIn("退出码", result["error"])
+                    if fp is not None:
+                        self.assertTrue(fp.closed)
+                    self.assertIsNone(DEPS_RUNNING["legacy"]["log_fp"])
+
+    def test_missing_install_record_has_recovery_guidance(self):
+        with isolated_app() as (app, _base_dir):
+            client = app.test_client()
+            with patch("fls_manager.routes.deps.tail_file") as tail:
+                response = client.get(
+                    "/api/deps/install-log/missing", headers={"X-Token": TOKEN}
+                )
+            self.assertEqual(response.status_code, 200)
+            result = response.get_json()
+            self.assertFalse(result["running"])
+            self.assertEqual(result["status"], "missing")
+            self.assertIsNone(result["returncode"])
+            self.assertIn("system-install-*.log", result["log"])
+            self.assertIn("日志管理", result["error"])
+            tail.assert_not_called()
+            page = client.get("/deps/install-log/missing", headers={"X-Token": TOKEN}).get_data(as_text=True)
+            self.assertIn("无法追踪</b>", page)
+
+    def test_log_write_failure_still_closes_handle_and_preserves_exit_code(self):
+        with isolated_app() as (_app, _base_dir):
+            from fls_manager.routes.deps import deps_install_result
+            from fls_manager.state import DEPS_RUNNING
+
+            fp = MagicMock()
+            fp.write.side_effect = OSError("log unavailable")
+            DEPS_RUNNING["finished"] = {
+                "process": SimpleNamespace(poll=lambda: 9),
+                "log_fp": fp, "finished": False,
+            }
+            self.assertEqual(deps_install_result("finished")["returncode"], 9)
+            fp.close.assert_called_once()
+
     def test_deps_install_registers_process_and_redirects_without_real_pip(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.state import DEPS_RUNNING
@@ -517,6 +700,145 @@ class BackupIsolationTests(unittest.TestCase):
             self.assertFalse(BACKUP_JOBS["cancelled-fixture"]["running"])
             self.assertNotIn("cancelled-fixture", BACKUP_CANCEL_EVENTS)
             self.assertFalse((base_dir / "data" / "backups").exists())
+
+    def test_backup_worker_records_dependency_timeout_and_cleans_archive(self):
+        with isolated_app() as (_app, base_dir):
+            from fls_manager.routes.backup._common import (
+                BACKUP_CANCEL_EVENTS,
+                BACKUP_JOBS,
+                BackupTimeout,
+                create_backup_worker,
+            )
+
+            cancel_event = threading.Event()
+            BACKUP_JOBS["timeout-fixture"] = {
+                "id": "timeout-fixture",
+                "running": True,
+                "status": "准备中",
+            }
+            BACKUP_CANCEL_EVENTS["timeout-fixture"] = cancel_event
+
+            with patch(
+                "fls_manager.routes.backup._common.write_dependencies_file",
+                side_effect=BackupTimeout("依赖列表采集超时（超过 1 秒）"),
+            ):
+                create_backup_worker("timeout-fixture", ["data"], cancel_event)
+
+            info = BACKUP_JOBS["timeout-fixture"]
+            self.assertFalse(info["running"])
+            self.assertEqual(info["status"], "超时")
+            self.assertIn("超过 1 秒", info["error"])
+            self.assertFalse(list((base_dir / "data" / "backups").glob("*.tar.gz")))
+            self.assertNotIn("timeout-fixture", BACKUP_CANCEL_EVENTS)
+
+    def test_backup_worker_records_failure_and_cleans_partial_archive(self):
+        with isolated_app() as (_app, base_dir):
+            from fls_manager.routes.backup._common import (
+                BACKUP_CANCEL_EVENTS,
+                BACKUP_JOBS,
+                create_backup_worker,
+            )
+
+            cancel_event = threading.Event()
+            BACKUP_JOBS["failed-fixture"] = {
+                "id": "failed-fixture",
+                "running": True,
+                "status": "准备中",
+            }
+            BACKUP_CANCEL_EVENTS["failed-fixture"] = cancel_event
+
+            with patch(
+                "fls_manager.routes.backup._common.write_dependencies_file",
+                side_effect=RuntimeError("依赖命令不可执行"),
+            ):
+                create_backup_worker("failed-fixture", ["data"], cancel_event)
+
+            info = BACKUP_JOBS["failed-fixture"]
+            self.assertFalse(info["running"])
+            self.assertEqual(info["status"], "失败")
+            self.assertEqual(info["error"], "依赖命令不可执行")
+            self.assertFalse(list((base_dir / "data" / "backups").glob("*.tar.gz")))
+            self.assertNotIn("failed-fixture", BACKUP_CANCEL_EVENTS)
+
+    def test_backup_worker_persists_successful_archive_result(self):
+        with isolated_app() as (_app, base_dir):
+            from fls_manager.routes.backup._common import (
+                BACKUP_CANCEL_EVENTS,
+                BACKUP_JOBS,
+                BACKUP_JOBS_FILE,
+                create_backup_worker,
+            )
+
+            data_dir = base_dir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            (data_dir / "settings.json").write_text("{}", encoding="utf-8")
+            cancel_event = threading.Event()
+            BACKUP_JOBS["success-fixture"] = {
+                "id": "success-fixture",
+                "items": ["data"],
+                "type_text": "仅配置",
+                "running": True,
+                "status": "准备中",
+                "filename": "",
+                "size": 0,
+                "size_text": "-",
+                "error": "",
+            }
+            BACKUP_CANCEL_EVENTS["success-fixture"] = cancel_event
+
+            def write_dependencies(path, _cancel_event):
+                Path(path).write_text("fixture==1\n", encoding="utf-8")
+
+            with patch(
+                "fls_manager.routes.backup._common.write_dependencies_file",
+                side_effect=write_dependencies,
+            ):
+                create_backup_worker("success-fixture", ["data"], cancel_event)
+
+            info = BACKUP_JOBS["success-fixture"]
+            self.assertFalse(info["running"])
+            self.assertEqual(info["status"], "已完成")
+            self.assertTrue(info["filename"].endswith(".tar.gz"))
+            persisted = read_json(BACKUP_JOBS_FILE)["success-fixture"]
+            self.assertEqual(persisted["status"], "已完成")
+            self.assertEqual(persisted["filename"], info["filename"])
+            self.assertTrue((base_dir / "data" / "backups" / info["filename"]).is_file())
+            self.assertNotIn("success-fixture", BACKUP_CANCEL_EVENTS)
+
+    def test_backup_job_snapshots_remain_valid_under_concurrent_updates(self):
+        with isolated_app() as (_app, base_dir):
+            from fls_manager.routes.backup._common import (
+                BACKUP_JOBS_FILE,
+                persist_backup_job,
+            )
+
+            jobs = [
+                {
+                    "id": "concurrent-{}".format(index),
+                    "items": ["data"],
+                    "type_text": "仅配置",
+                    "running": False,
+                    "status": "失败",
+                    "filename": "",
+                    "size": 0,
+                    "size_text": "-",
+                    "error": "fixture-{}".format(index),
+                    "created_at": "2026-07-14 10:00:0{}".format(index),
+                    "updated_at": "2026-07-14 10:00:0{}".format(index),
+                }
+                for index in range(2)
+            ]
+            workers = [threading.Thread(target=persist_backup_job, args=(job,)) for job in jobs]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(timeout=2)
+
+            self.assertTrue(all(not worker.is_alive() for worker in workers))
+            data = read_json(BACKUP_JOBS_FILE)
+            self.assertEqual(set(data), {"concurrent-0", "concurrent-1"})
+            self.assertEqual(data["concurrent-0"]["error"], "fixture-0")
+            self.assertEqual(data["concurrent-1"]["error"], "fixture-1")
 
     def test_backup_import_restores_isolated_dirs_and_mocks_dependency_install(self):
         with isolated_app() as (app, base_dir):

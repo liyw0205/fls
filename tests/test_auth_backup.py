@@ -8,6 +8,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from urllib.parse import urlencode
 import warnings
 import zipfile
 from pathlib import Path
@@ -20,13 +21,22 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @contextlib.contextmanager
 def isolated_fls_env(token=None):
-    keys = ("FLS_BASE_DIR", "FLS_TOKEN", "FLS_SECRET_KEY", "PYTHONDONTWRITEBYTECODE")
+    keys = (
+        "FLS_BASE_DIR",
+        "FLS_TOKEN",
+        "FLS_SECRET_KEY",
+        "FLS_TRUSTED_PROXIES",
+        "FLS_ALLOW_QUERY_TOKEN",
+        "PYTHONDONTWRITEBYTECODE",
+    )
     old_env = {key: os.environ.get(key) for key in keys}
 
     with tempfile.TemporaryDirectory(prefix="fls-test-") as temp_dir:
         os.environ["FLS_BASE_DIR"] = temp_dir
         os.environ["FLS_SECRET_KEY"] = "unit-test-secret"
         os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+        os.environ.pop("FLS_TRUSTED_PROXIES", None)
+        os.environ.pop("FLS_ALLOW_QUERY_TOKEN", None)
 
         if token is None:
             os.environ.pop("FLS_TOKEN", None)
@@ -96,7 +106,12 @@ def read_json(path):
 
 
 def login_client(client, token="unit-token"):
-    response = client.get(f"/tasks?token={token}")
+    login_page = client.get("/login")
+    csrf_token = csrf_token_from_html(login_page.get_data(as_text=True))
+    response = client.post(
+        "/login",
+        data={"token": token, "csrf_token": csrf_token},
+    )
     if response.status_code == 302:
         client.get(response.headers["Location"])
 
@@ -143,19 +158,137 @@ class AuthFlowTests(unittest.TestCase):
     def test_api_rejects_wrong_query_token(self):
         with isolated_fls_env(token="unit-token"):
             client = load_app().test_client()
-            response = client.get("/api/status?token=wrong")
+            with patch.dict(os.environ, {"FLS_ALLOW_QUERY_TOKEN": "1"}):
+                response = client.get("/api/status?token=wrong")
 
             self.assertEqual(response.status_code, 403)
             self.assertFalse(response.get_json()["ok"])
 
+    def test_api_query_token_is_disabled_by_default(self):
+        with isolated_fls_env(token="unit-token"):
+            response = load_app().test_client().get(
+                "/api/status?token=unit-token"
+            )
+
+            self.assertEqual(response.status_code, 403)
+            self.assertIn("X-Token", response.get_json()["msg"])
+
+    def test_api_query_token_opt_in_redirects_to_clean_url(self):
+        with isolated_fls_env(token="unit-token"):
+            client = load_app().test_client()
+            with patch.dict(os.environ, {"FLS_ALLOW_QUERY_TOKEN": "1"}):
+                response = client.get("/api/status?token=unit-token")
+
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.headers.get("Location"), "/api/status")
+            self.assertNotIn("unit-token", response.headers.get("Location", ""))
+            api_response = client.get(response.headers["Location"])
+            self.assertEqual(api_response.status_code, 200)
+            self.assertEqual(api_response.get_json(), [])
+
+    def test_query_token_is_disabled_by_default(self):
+        with isolated_fls_env(token="unit-token"):
+            client = load_app().test_client()
+            response = client.get("/tasks?token=unit-token")
+
+            self.assertEqual(response.status_code, 302)
+            location = response.headers.get("Location", "")
+            self.assertIn("/login", location)
+            self.assertNotIn("unit-token", location)
+
     def test_query_token_sets_session_and_redirects_to_clean_url(self):
         with isolated_fls_env(token="unit-token"):
             client = load_app().test_client()
-            response = client.get("/tasks?token=unit-token&q=abc")
+            with patch.dict(os.environ, {"FLS_ALLOW_QUERY_TOKEN": "1"}):
+                response = client.get("/tasks?token=unit-token&q=abc")
 
             self.assertEqual(response.status_code, 302)
             self.assertEqual(response.headers.get("Location"), "/tasks?q=abc")
             self.assertIn("session=", response.headers.get("Set-Cookie", ""))
+
+    def test_login_next_accepts_internal_path_and_rejects_external_targets(self):
+        with isolated_fls_env(token="unit-token"):
+            client = load_app().test_client()
+
+            for next_url, expected in (
+                ("/tasks?q=abc", "/tasks?q=abc"),
+                ("https://evil.example/", "/"),
+                ("//evil.example/", "/"),
+                ("/\\\\evil.example", "/"),
+                ("/%2f%2fevil.example", "/"),
+                ("/%252f%252fevil.example", "/"),
+                ("/tasks/../login", "/"),
+                ("/%252e%252e/login", "/"),
+            ):
+                with self.subTest(next_url=next_url):
+                    login_page = client.get("/login")
+                    csrf_token = csrf_token_from_html(
+                        login_page.get_data(as_text=True)
+                    )
+                    response = client.post(
+                        "/login?" + urlencode({"next": next_url}),
+                        data={
+                            "token": "unit-token",
+                            "csrf_token": csrf_token,
+                        },
+                    )
+                    self.assertEqual(response.status_code, 302)
+                    self.assertEqual(response.headers.get("Location"), expected)
+                    client.get("/logout")
+
+    def test_client_ip_ignores_forwarded_header_from_untrusted_peer(self):
+        with isolated_fls_env(token="unit-token"):
+            from fls_manager.routes import auth_routes
+
+            with patch.dict(os.environ, {"FLS_TRUSTED_PROXIES": ""}), \
+                    load_app().test_request_context(
+                "/login",
+                headers={"X-Forwarded-For": "198.51.100.10"},
+                environ_base={"REMOTE_ADDR": "127.0.0.1"},
+            ):
+                self.assertEqual(auth_routes.client_ip(), "127.0.0.1")
+
+    def test_client_ip_uses_forwarded_address_from_trusted_proxy(self):
+        with isolated_fls_env(token="unit-token"):
+            from fls_manager.routes import auth_routes
+
+            with patch.dict(os.environ, {"FLS_TRUSTED_PROXIES": "127.0.0.1/32"}), \
+                    load_app().test_request_context(
+                "/login",
+                headers={"X-Forwarded-For": "198.51.100.10, 127.0.0.1"},
+                environ_base={"REMOTE_ADDR": "127.0.0.1"},
+            ):
+                self.assertEqual(auth_routes.client_ip(), "198.51.100.10")
+
+    def test_client_ip_walks_trusted_ipv6_proxy_chain_from_right(self):
+        with isolated_fls_env(token="unit-token"):
+            from fls_manager.routes import auth_routes
+
+            with patch.dict(
+                os.environ,
+                {"FLS_TRUSTED_PROXIES": "2001:db8::/64"},
+            ), load_app().test_request_context(
+                "/login",
+                headers={
+                    "X-Forwarded-For": "2001:db8:1::7, 2001:db8::1, 2001:db8::2",
+                },
+                environ_base={"REMOTE_ADDR": "2001:db8::3"},
+            ):
+                self.assertEqual(auth_routes.client_ip(), "2001:db8:1::7")
+
+    def test_client_ip_ignores_malformed_forwarded_chain(self):
+        with isolated_fls_env(token="unit-token"):
+            from fls_manager.routes import auth_routes
+
+            with patch.dict(
+                os.environ,
+                {"FLS_TRUSTED_PROXIES": "127.0.0.1/32"},
+            ), load_app().test_request_context(
+                "/login",
+                headers={"X-Forwarded-For": "198.51.100.10, invalid"},
+                environ_base={"REMOTE_ADDR": "127.0.0.1"},
+            ):
+                self.assertEqual(auth_routes.client_ip(), "127.0.0.1")
 
 
 class CsrfSafetyTests(unittest.TestCase):
@@ -356,6 +489,109 @@ class BackupSafetyTests(unittest.TestCase):
                 missing.get_json(),
                 {"ok": False, "msg": "任务不存在"},
             )
+
+    def test_api_backup_job_recovers_persisted_running_as_unknown_after_restart(self):
+        with isolated_fls_env(token="unit-token"):
+            from fls_manager.routes.backup._common import (
+                BACKUP_JOBS,
+                BACKUP_JOBS_FILE,
+            )
+
+            snapshot = {
+                "id": "restart-job",
+                "items": ["data"],
+                "type_text": "仅配置",
+                "running": True,
+                "status": "正在压缩",
+                "filename": "",
+                "size": 0,
+                "size_text": "-",
+                "error": "",
+                "created_at": "2026-07-14 10:00:00",
+                "updated_at": "2026-07-14 10:01:00",
+            }
+            BACKUP_JOBS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            BACKUP_JOBS_FILE.write_text(
+                json.dumps({"restart-job": snapshot}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            BACKUP_JOBS.clear()
+
+            response = load_app().test_client().get(
+                "/api/backup/job/restart-job",
+                headers={"X-Token": "unit-token"},
+            )
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertTrue(payload["ok"])
+            self.assertFalse(payload["running"])
+            self.assertEqual(payload["status"], "结果未知")
+            self.assertIn("面板重启后无法确认", payload["error"])
+            persisted = read_json(BACKUP_JOBS_FILE)["restart-job"]
+            self.assertEqual(persisted["status"], "结果未知")
+            self.assertFalse(persisted["running"])
+
+    def test_api_backup_cancel_rejects_terminal_and_restart_unknown_jobs(self):
+        with isolated_fls_env(token="unit-token"):
+            from fls_manager.routes.backup._common import (
+                BACKUP_JOBS,
+                BACKUP_JOBS_FILE,
+            )
+            import threading
+
+            BACKUP_JOBS["finished-job"] = {
+                "id": "finished-job",
+                "running": False,
+                "status": "失败",
+            }
+            client = load_app().test_client()
+            response = client.post(
+                "/api/backup/cancel/finished-job",
+                headers={"X-Token": "unit-token"},
+            )
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(response.get_json()["msg"], "备份任务已结束")
+
+            # A stale cancellation handle must not make a terminal result cancellable.
+            BACKUP_JOBS["finished-with-handle"] = {
+                "id": "finished-with-handle",
+                "running": False,
+                "status": "已完成",
+            }
+            from fls_manager.routes.backup._common import BACKUP_CANCEL_EVENTS
+            BACKUP_CANCEL_EVENTS["finished-with-handle"] = threading.Event()
+            response = client.post(
+                "/api/backup/cancel/finished-with-handle",
+                headers={"X-Token": "unit-token"},
+            )
+            self.assertEqual(response.status_code, 409)
+            self.assertFalse(BACKUP_CANCEL_EVENTS["finished-with-handle"].is_set())
+
+            BACKUP_JOBS.clear()
+            BACKUP_JOBS_FILE.write_text(
+                json.dumps({"unknown-job": {"id": "unknown-job", "running": True}}),
+                encoding="utf-8",
+            )
+            response = client.post(
+                "/api/backup/cancel/unknown-job",
+                headers={"X-Token": "unit-token"},
+            )
+            self.assertEqual(response.status_code, 409)
+            self.assertIn("状态未知", response.get_json()["msg"])
+
+    def test_backup_page_exposes_cancel_action_and_unknown_result_copy(self):
+        with isolated_fls_env(token="unit-token"):
+            response = load_app().test_client().get(
+                "/backup",
+                headers={"X-Token": "unit-token"},
+            )
+
+            self.assertEqual(response.status_code, 200)
+            html = response.get_data(as_text=True)
+            self.assertIn("flsCancelBackup", html)
+            self.assertIn("/api/backup/cancel/", html)
+            self.assertIn("状态读取失败", html)
 
     def test_api_backup_list_returns_stable_file_fields_in_newest_order(self):
         with isolated_fls_env(token="unit-token"):

@@ -5,7 +5,7 @@ from . import bp
 from ...models import load_tasks, save_tasks
 from ...utils import h, now_str, get_back_url
 from ...scheduler import reload_scheduler
-from ...task_runner import run_task_now, stop_task_now
+from ...task_runner import run_task_now, stop_task_now, cancel_task_retry
 from ...ui.components import message_card
 from ...ui.layout import layout
 
@@ -57,6 +57,8 @@ def task_toggle(task_id):
         abort(404)
 
     save_tasks(tasks)
+    if not task["enabled"]:
+        cancel_task_retry(task_id, "任务已禁用")
     reload_scheduler()
 
     return redirect(get_back_url("/tasks"))
@@ -146,8 +148,9 @@ def stop_task_route(task_id):
     back_url = get_back_url("/tasks")
 
     if not ok and msg != "任务未运行":
+        title = "任务已结束" if msg.startswith("任务已结束") else "停止失败"
         body = f"""
-{message_card(msg, "error", strong=True, title="停止失败")}
+{message_card(msg, "error", strong=True, title=title)}
 <div class="card">
     <a class="btn btn-gray" href="{h(back_url)}">返回</a>
 </div>

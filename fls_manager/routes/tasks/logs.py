@@ -23,6 +23,7 @@ def history_status_badge(status):
         "starting": ("starting", "启动中"),
         "delaying": ("warning", "延迟中"),
         "start_failed": ("error", "启动失败"),
+        "unknown": ("error", "结果未知"),
     }
     tone, text = mapping.get(status, ("neutral", status or "-"))
     return status_badge(status, label=text, tone=tone)
@@ -210,7 +211,14 @@ def api_log(task_id):
     if not task:
         abort(404)
 
-    lines = int(request.args.get("lines", "800"))
+    try:
+        lines = int(request.args.get("lines", "800"))
+    except (TypeError, ValueError):
+        return Response(
+            "lines 必须为整数",
+            status=400,
+            content_type="text/plain; charset=utf-8",
+        )
 
     if is_running(task_id):
         log_file = RUNNING.get(task_id, {}).get("log_file", "")

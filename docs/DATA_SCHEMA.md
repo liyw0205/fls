@@ -12,6 +12,32 @@
 - 环境隔离测试必须在导入 `fls_manager.*` 前设置临时 `FLS_BASE_DIR`。
 - 当前读取时会规范化 `tasks.json`、`task_history.json`、`global_env.json`、`proxies.json`、`collections.json`；配置读取由 `normalize_config_data()` 规范化返回值。
 
+## data/backup_jobs.json
+
+类型：以作业 ID 为键的备份作业快照对象。
+
+- `id`、`items`、`type_text`：作业标识和备份范围。
+- `running`、`status`：当前状态；终态包括 `已完成`、`失败`、`超时`、`已取消`，面板重启后无法确认的运行中作业会归一为 `结果未知`。
+- `filename`、`size`、`size_text`：已完成归档信息；失败、超时和取消会清空这些字段。
+- `error`：失败、超时或结果未知时的原始诊断信息。
+- `created_at`、`updated_at`：作业时间戳。
+
+快照不包含线程、取消事件或进程句柄。最多保留最近 100 个作业；读取到 `running=true` 的旧快照时，
+系统会幂等改写为 `结果未知`，不会声称外部备份进程已经完成或退出。
+
+## data/online_install_jobs.json
+
+类型：以安装 ID 为键的在线脚本安装作业快照对象。
+
+- `id`、`script_id`、`script_name`：安装和脚本标识。
+- `log_file`：安装日志路径；日志文件本身仍按日志读取规则处理。
+- `running`、`status`：准备中、运行中、停止中、停止失败或超时（停止失败）时为活跃状态；终态为已完成、失败、启动失败、超时、已停止或结果未知。
+- `returncode`、`error`：真实进程退出码和原始诊断；无进程退出码时为 `null`。重启后失去进程句柄的作业归一为 `结果未知`，保留原诊断并追加重启说明。
+- `start_time`、`updated_at`：作业时间戳。
+
+快照不包含线程、停止集合或进程句柄，最多保留最近 100 个作业。安装日志 API 对真实不存在的 ID 返回
+`404`；已持久化但重启后无法确认的运行中作业返回 `200` 和明确的 `结果未知`。
+
 ## data/tasks.json
 
 类型：任务对象数组。
@@ -49,6 +75,7 @@
 - 旧字段 `retry_count` 会迁移为 `retry.attempts`，写回时移除旧字段；新任务默认 `retry.interval_seconds=60`。
 - `random_delay.seconds`、`retry.attempts`、`retry.interval_seconds`、`run_count` 会转整数并钳制到有效范围。
 - `enabled`、`pinned` 支持布尔、数字和常见字符串值。
+- 待执行的失败重试仅保存在运行时内存中；每个任务最多保留一个待重试计时器。手动或定时启动会使旧重试失效，停止、禁用或删除任务会取消待重试。
 
 ## data/task_history.json
 
@@ -60,7 +87,7 @@
 - `task_id`：字符串，任务 ID。
 - `task_name`：字符串，任务名快照。
 - `command`：字符串，任务命令快照。
-- `status`：字符串，常见值包括 `success`、`failed`、`timeout`、`stopped`、`running`、`starting`、`delaying`、`start_failed`。
+- `status`：字符串，常见值包括 `success`、`failed`、`timeout`、`stopped`、`unknown`、`running`、`starting`、`delaying`、`start_failed`。`running`、`starting` 和 `delaying` 只表示面板当前进程仍持有运行状态；面板启动时会把没有结束时间的这些旧记录改为 `unknown`，因为重启后不能据此确认外部进程仍存活。
 - `source`：字符串，运行来源，例如 `manual`、`cron`、`retry`。
 - `retry_attempt`：整数，当前重试次数。
 - `max_retries`：整数，最大重试次数。
@@ -77,6 +104,7 @@
 - `save_task_history()` 最多保留最近 `500` 条记录。
 - `add_task_history()` 会把新记录插入到数组开头并按上限裁剪。
 - `update_task_history()` 按 `id` 更新第一条匹配记录；找不到或传空 ID 时返回 `False`。
+- 面板启动时会幂等恢复未结束的 `running`、`starting`、`delaying` 记录为 `unknown`，写入结束时间并保留原说明、日志路径和退出码；这不表示外部进程已被终止。
 - `task_history_for_task(task_id, limit)` 按 `task_id` 过滤并按传入上限返回，最少返回上限为 `1`。
 
 ## data/config.json

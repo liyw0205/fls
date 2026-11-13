@@ -3,8 +3,10 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 
@@ -249,6 +251,194 @@ class SchemaMigrationTests(unittest.TestCase):
                 ["h0", "h1", "h2"],
             )
             self.assertNotIn("h3", [item["id"] for item in trimmed])
+
+    def test_task_history_restart_recovery_is_idempotent_and_preserves_terminal_rows(self):
+        with isolated_fls_modules():
+            from fls_manager import models, paths
+
+            write_json(
+                paths.TASK_HISTORY_FILE,
+                [
+                    {
+                        "id": "h-running",
+                        "status": "running",
+                        "start_at": "2026-11-14 09:00:00",
+                        "end_at": "",
+                        "return_code": None,
+                        "log_file": "/tmp/running.log",
+                        "message": "进程已启动",
+                    },
+                    {
+                        "id": "h-starting",
+                        "status": "starting",
+                        "end_at": "",
+                        "message": "已提交启动",
+                    },
+                    {
+                        "id": "h-delaying",
+                        "status": "delaying",
+                        "end_at": "",
+                    },
+                    {
+                        "id": "h-success",
+                        "status": "success",
+                        "end_at": "",
+                        "message": "运行成功",
+                    },
+                    {
+                        "id": "h-failed",
+                        "status": "failed",
+                        "end_at": "",
+                        "message": "退出码 7",
+                    },
+                    {
+                        "id": "h-timeout",
+                        "status": "timeout",
+                        "end_at": "",
+                        "message": "任务超时",
+                    },
+                    {
+                        "id": "h-stopped",
+                        "status": "stopped",
+                        "end_at": "",
+                        "message": "手动结束",
+                    },
+                    {
+                        "id": "h-ended",
+                        "status": "running",
+                        "end_at": "2026-11-14 09:00:05",
+                        "message": "已结束",
+                    },
+                    {
+                        "id": "h-unknown",
+                        "status": "unknown",
+                        "end_at": "2026-11-14 09:00:06",
+                        "message": "之前已恢复",
+                    },
+                ],
+            )
+
+            with patch.object(models, "now_str", return_value="2026-11-14 10:00:00"):
+                self.assertEqual(models.reconcile_task_history_after_restart(), 3)
+
+            recovered = {item["id"]: item for item in read_json(paths.TASK_HISTORY_FILE)}
+            self.assertEqual(recovered["h-running"]["status"], "unknown")
+            self.assertEqual(recovered["h-running"]["end_at"], "2026-11-14 10:00:00")
+            self.assertEqual(recovered["h-running"]["return_code"], None)
+            self.assertEqual(recovered["h-running"]["log_file"], "/tmp/running.log")
+            self.assertIn("重启前状态：运行中", recovered["h-running"]["message"])
+            self.assertIn("原说明：进程已启动", recovered["h-running"]["message"])
+            self.assertEqual(recovered["h-starting"]["status"], "unknown")
+            self.assertEqual(recovered["h-delaying"]["status"], "unknown")
+            self.assertEqual(recovered["h-success"]["status"], "success")
+            self.assertEqual(recovered["h-success"]["end_at"], "")
+            self.assertEqual(recovered["h-failed"]["status"], "failed")
+            self.assertEqual(recovered["h-timeout"]["status"], "timeout")
+            self.assertEqual(recovered["h-stopped"]["status"], "stopped")
+            self.assertEqual(recovered["h-ended"]["status"], "running")
+            self.assertEqual(recovered["h-unknown"]["message"], "之前已恢复")
+
+            first_write = read_json(paths.TASK_HISTORY_FILE)
+            with patch.object(models, "now_str", return_value="2026-11-14 11:00:00"):
+                self.assertEqual(models.reconcile_task_history_after_restart(), 0)
+            self.assertEqual(read_json(paths.TASK_HISTORY_FILE), first_write)
+
+            with patch.object(models, "now_str", return_value="2026-11-14 12:00:00"):
+                self.assertEqual(
+                    models.reconcile_task_history_after_restart({"h-running"}),
+                    0,
+                )
+            self.assertEqual(read_json(paths.TASK_HISTORY_FILE), first_write)
+
+    def test_create_app_reconciles_history_before_serving_requests(self):
+        with isolated_fls_modules():
+            from fls_manager import paths, models
+
+            write_json(
+                paths.TASK_HISTORY_FILE,
+                [
+                    {"id": "h1", "status": "running", "end_at": "", "message": "进行中"},
+                    {"id": "h-active", "status": "running", "end_at": "", "message": "仍受控"},
+                ],
+            )
+
+            from fls_manager import task_runner
+            from fls_manager.app import create_app
+
+            task_runner.RUNNING["active-task"] = {"history_id": "h-active"}
+            with patch.object(models, "now_str", return_value="2026-11-14 12:00:00"):
+                app = create_app()
+
+            response = app.test_client().get("/history")
+            self.assertEqual(response.status_code, 302)
+            self.assertIn("/setup", response.headers.get("Location", ""))
+            history = read_json(paths.TASK_HISTORY_FILE)
+            by_id = {item["id"]: item for item in history}
+            self.assertEqual(by_id["h1"]["status"], "unknown")
+            self.assertEqual(by_id["h1"]["end_at"], "2026-11-14 12:00:00")
+            self.assertEqual(by_id["h-active"]["status"], "running")
+            self.assertEqual(by_id["h-active"]["end_at"], "")
+
+    def test_task_history_concurrent_updates_keep_all_records(self):
+        with isolated_fls_modules():
+            from fls_manager import models, paths
+
+            write_json(paths.TASK_HISTORY_FILE, [])
+            barrier = threading.Barrier(8)
+            errors = []
+
+            def add_record(index):
+                try:
+                    barrier.wait(timeout=2)
+                    models.add_task_history({
+                        "id": f"concurrent-{index}",
+                        "task_id": f"task-{index}",
+                        "status": "starting",
+                    })
+                except BaseException as exc:
+                    errors.append(exc)
+
+            workers = [threading.Thread(target=add_record, args=(index,)) for index in range(8)]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(timeout=3)
+            self.assertTrue(all(not worker.is_alive() for worker in workers))
+            self.assertEqual(errors, [])
+
+            persisted = read_json(paths.TASK_HISTORY_FILE)
+            self.assertEqual(
+                {item["id"] for item in persisted},
+                {f"concurrent-{index}" for index in range(8)},
+            )
+
+            update_barrier = threading.Barrier(8)
+            errors = []
+
+            def update_record(index):
+                try:
+                    update_barrier.wait(timeout=2)
+                    if not models.update_task_history(
+                        f"concurrent-{index}",
+                        {"status": "success"},
+                    ):
+                        raise AssertionError(
+                            f"history record concurrent-{index} was not updated"
+                        )
+                except BaseException as exc:
+                    errors.append(exc)
+
+            workers = [threading.Thread(target=update_record, args=(index,)) for index in range(8)]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(timeout=3)
+            self.assertTrue(all(not worker.is_alive() for worker in workers))
+            self.assertEqual(errors, [])
+
+            persisted = read_json(paths.TASK_HISTORY_FILE)
+            self.assertEqual(len(persisted), 8)
+            self.assertTrue(all(item["status"] == "success" for item in persisted))
 
     def test_load_global_env_normalizes_keys_and_values(self):
         with isolated_fls_modules():

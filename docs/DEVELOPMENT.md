@@ -18,7 +18,9 @@ done
 
 ## 浏览器回归
 
-前端修改需要在当前 Termux 浏览器环境测试手机和桌面视口。至少覆盖：
+前端修改需要通过 Chromium 回归手机和桌面视口。可运行 `python3 tools/browser_regression.py`；
+Playwright Core 或 Chromium 不在默认路径时，使用 `FLS_PLAYWRIGHT_CORE` 和 `FLS_CHROMIUM` 指定。
+至少覆盖：
 
 - 登录、刷新、后台恢复和首次访问通知
 - 侧边栏切换、更新提示和更新日志浮窗
@@ -38,7 +40,7 @@ done
 FLS_BASE_DIR="$PWD/.test-fls" PYTHONPATH=. pytest -q
 ```
 
-真实 Termux、服务器、KernelSU/Magisk 数据不应进入测试提交。浏览器测试完成后检查：
+运行应用或浏览器回归时，将 `FLS_BASE_DIR` 指向隔离目录，避免测试读写真实实例的配置、日志和脚本。回归结束后检查工作区，只保留预期的源码或测试变更：
 
 ```bash
 git status --short

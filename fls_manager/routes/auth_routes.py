@@ -1,3 +1,5 @@
+import ipaddress
+import os
 import time
 
 from flask import Blueprint, request, redirect, url_for, current_app, session
@@ -5,7 +7,12 @@ from flask import Blueprint, request, redirect, url_for, current_app, session
 from ..ui.layout import layout
 from ..utils import h, now_str
 from ..config import fls_get_admin_token, save_config
-from ..auth import auth_set_session, auth_clear_session, auth_session_valid
+from ..auth import (
+    auth_set_session,
+    auth_clear_session,
+    auth_session_valid,
+    safe_local_next_url,
+)
 from ..notify import send_all_enabled
 from ..security import (
     security_enabled,
@@ -28,11 +35,41 @@ LOGIN_FAIL_MAX_RECORDS = 256
 
 
 def client_ip():
-    return (
-        request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-        or request.remote_addr
-        or "unknown"
-    )
+    remote_addr = request.remote_addr or "unknown"
+    configured = os.environ.get("FLS_TRUSTED_PROXIES", "")
+    configured = configured.replace(",", " ").split()
+
+    try:
+        remote_ip = ipaddress.ip_address(remote_addr)
+    except ValueError:
+        return remote_addr
+
+    trusted_networks = []
+    for value in configured:
+        try:
+            trusted_networks.append(ipaddress.ip_network(str(value), strict=False))
+        except ValueError:
+            continue
+
+    if not any(remote_ip in network for network in trusted_networks):
+        return remote_addr
+
+    forwarded = [
+        item.strip()
+        for item in request.headers.get("X-Forwarded-For", "").split(",")
+        if item.strip()
+    ]
+
+    try:
+        forwarded_ips = [ipaddress.ip_address(value) for value in forwarded]
+    except ValueError:
+        return remote_addr
+
+    for candidate in reversed(forwarded_ips):
+        if not any(candidate in network for network in trusted_networks):
+            return str(candidate)
+
+    return remote_addr
 
 
 def login_fail_info(ip):
@@ -176,7 +213,12 @@ def login():
                 security_verified=True,
             )
 
-            return redirect(request.args.get("next") or url_for("dashboard.dashboard"))
+            return redirect(
+                safe_local_next_url(
+                    request.args.get("next"),
+                    default=url_for("dashboard.dashboard"),
+                )
+            )
 
         info = record_login_fail(ip, ua=ua)
 

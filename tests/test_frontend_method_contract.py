@@ -163,6 +163,7 @@ class FrontendMethodContractTests(unittest.TestCase):
                         "name": "Fixture runtime",
                         "suffix": ".fixture",
                         "command": "fixture-runtime",
+                        "status": "missing",
                         "version": "",
                         "install_url": "/install/runtime/fixture",
                     }

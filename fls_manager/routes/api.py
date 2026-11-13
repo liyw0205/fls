@@ -4,7 +4,13 @@ import uuid
 from flask import Blueprint, jsonify, request
 
 from ..models import load_tasks, save_tasks
-from ..task_runner import run_task_now, stop_task_now, is_running, safe_process_name
+from ..task_runner import (
+    run_task_now,
+    stop_task_now,
+    is_running,
+    safe_process_name,
+    cancel_task_retry,
+)
 from ..scheduler import reload_scheduler, scheduler
 from ..state import RUNNING
 from ..utils import now_str
@@ -64,6 +70,12 @@ def _task_action_result(ok, msg):
 
     if not ok and msg == "任务不存在":
         return jsonify(payload), 404
+
+    if not ok and (
+        msg.startswith("停止失败")
+        or msg.startswith("任务已结束")
+    ):
+        return jsonify(payload), 409
 
     return jsonify(payload)
 
@@ -176,6 +188,8 @@ def api_task_action(action, task_id):
                 return jsonify({"ok": False, "msg": "任务不存在"}), 404
 
             save_tasks(tasks)
+            if not task["enabled"]:
+                cancel_task_retry(task_id, "任务已禁用")
             reload_scheduler()
 
             return jsonify({
@@ -317,6 +331,10 @@ def api_task_bulk_action():
 
             if changed_count:
                 save_tasks(tasks)
+            if not enabled:
+                for task_id in task_ids:
+                    cancel_task_retry(task_id, "任务已禁用")
+            if changed_count:
                 reload_scheduler()
 
             return jsonify(_bulk_payload(

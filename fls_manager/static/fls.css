@@ -1366,7 +1366,7 @@ body.fls-menu-open .fls-log-new-tip {
     }
 
     body.page-status .table-wrap #runtimeTable {
-        min-width:760px;
+        min-width:900px;
     }
 
     body.page-history .table-wrap th:first-child,
@@ -1420,6 +1420,11 @@ body.fls-menu-open .fls-log-new-tip {
     body.page-status .table-wrap #runtimeTable th:first-child,
     body.page-status .table-wrap #runtimeTable th:last-child {
         z-index:3;
+    }
+
+    body.page-status .table-wrap #runtimeTable th:first-child,
+    body.page-status .table-wrap #runtimeTable td:first-child {
+        white-space:nowrap;
     }
 
     /* 任务表在中宽屏优先保留身份、调度、状态和操作入口。 */

@@ -45,32 +45,64 @@ def is_deps_install_running(install_id):
 
     proc = info.get("process")
 
-    if not proc:
-        info["finished"] = True
-        info["process"] = None
-        info["log_fp"] = None
-        return False
-
-    if proc.poll() is None:
+    returncode = proc.poll() if proc is not None else None
+    if proc is not None and returncode is None:
         return True
 
     fp = info.get("log_fp")
 
     if fp:
         try:
-            fp.write(
-                f"\n===== 安装结束: {now_str()}，退出码: {proc.returncode} =====\n".encode("utf-8")
-            )
-            fp.close()
+            if returncode is not None:
+                fp.write(
+                    f"\n===== 安装结束: {now_str()}，退出码: {returncode} =====\n".encode("utf-8")
+                )
         except Exception:
             pass
+        finally:
+            try:
+                fp.close()
+            except Exception:
+                pass
 
     info["finished"] = True
     info["process"] = None
     info["log_fp"] = None
-    info["returncode"] = proc.returncode
+    info["returncode"] = returncode
 
     return False
+
+
+def deps_install_result(install_id):
+    running = is_deps_install_running(install_id)
+    info = DEPS_RUNNING.get(install_id)
+    returncode = info.get("returncode") if info else None
+    error = info.get("error", "") if info else ""
+
+    if not info:
+        status, label = "missing", "无法追踪"
+        error = "安装记录不存在或面板已重启，请到日志管理查看 deps-install-*.log / system-install-*.log。"
+    elif running:
+        status, label = "running", "安装中"
+    elif error:
+        status, label = "start_failed", "启动失败"
+    elif returncode == 0:
+        status, label = "succeeded", "安装成功"
+    elif returncode is not None:
+        status, label = "failed", "安装失败"
+        error = f"安装进程退出码为 {returncode}，请查看日志中的错误信息。"
+    else:
+        # Older records may have no exit code; completion alone does not prove success.
+        status, label = "unknown", "结果未知"
+        error = "无法取得安装进程的退出码，请查看安装日志并刷新依赖检测结果。"
+
+    return {
+        "running": running,
+        "status": status,
+        "status_label": label,
+        "returncode": returncode,
+        "error": error,
+    }
 
 
 def get_package_version(name):
@@ -214,8 +246,20 @@ def deps_install():
     )
     log_fp.write(header.encode("utf-8"))
 
+    prune_completed_records(DEPS_RUNNING, finished_key="finished")
+    info = {
+        "process": None,
+        "package": name,
+        "log_file": str(log_file),
+        "log_fp": log_fp,
+        "start_time": time.time(),
+        "finished": False,
+        "returncode": None,
+    }
+    DEPS_RUNNING[install_id] = info
+
     try:
-        proc = subprocess.Popen(
+        info["process"] = subprocess.Popen(
             [sys.executable, "-m", "pip", "install", name],
             stdout=log_fp,
             stderr=subprocess.STDOUT,
@@ -225,18 +269,11 @@ def deps_install():
     except Exception as e:
         log_fp.write(f"启动安装失败: {e}\n".encode("utf-8"))
         log_fp.close()
-        return f"启动安装失败：{h(e)}。下一步：检查 Python、pip 和日志目录权限后重试", 500
-
-    prune_completed_records(DEPS_RUNNING, finished_key="finished")
-    DEPS_RUNNING[install_id] = {
-        "process": proc,
-        "package": name,
-        "log_file": str(log_file),
-        "log_fp": log_fp,
-        "start_time": time.time(),
-        "finished": False,
-        "returncode": None,
-    }
+        info.update(
+            finished=True,
+            log_fp=None,
+            error=f"启动安装失败：{e}。请检查 Python、pip 和日志目录权限后重试。",
+        )
 
     return redirect(url_for("deps.deps_install_log", install_id=install_id, back="/deps"))
 
@@ -247,13 +284,15 @@ def deps_install_log(install_id):
     info = DEPS_RUNNING.get(install_id)
     package = info.get("package") if info else "未知"
     log_file = info.get("log_file") if info else ""
-    running = is_deps_install_running(install_id)
+    result = deps_install_result(install_id)
 
     header_card = page_header_card(
         f"安装日志：{package}",
         help_html=f"""
-        状态：<b id="installStatus">{"安装中" if running else "已结束"}</b><br>
-        日志文件：{h(log_file or "当前进程已结束，无法定位日志")}
+        状态：<b id="installStatus" role="status" aria-live="polite">{h(result["status_label"])}</b><br>
+        退出码：<span id="installReturncode">{h(result["returncode"] if result["returncode"] is not None else "-")}</span><br>
+        日志文件：{h(log_file or "无法定位日志")}
+        <div id="installError" role="status" aria-live="polite"{'' if result["error"] else ' hidden'}>{h(result["error"])}</div>
 """,
         actions_html=f"""
 <a class="btn btn-gray" href="{h(back_url)}">返回</a>
@@ -283,7 +322,11 @@ async function loadLog(){{
         }}else{{
             logEl.textContent = logText;
         }}
-        document.getElementById("installStatus").textContent = json.running ? "安装中" : "已结束";
+        document.getElementById("installStatus").textContent = json.status_label || (json.running ? "安装中" : "结果未知");
+        document.getElementById("installReturncode").textContent = json.returncode == null ? "-" : String(json.returncode);
+        const errorEl = document.getElementById("installError");
+        errorEl.textContent = json.error || "";
+        errorEl.hidden = !json.error;
 
         if(json.running){{
             window.scrollTo(0, document.documentElement.scrollHeight);
@@ -311,7 +354,7 @@ def api_deps_install_log(install_id):
 
     if not info:
         return jsonify({
-            "running": False,
+            **deps_install_result(install_id),
             "log": "安装进程已结束或面板已重启，无法通过该 ID 继续追踪。请到日志管理查看 deps-install-*.log / system-install-*.log。",
         })
 
@@ -325,11 +368,11 @@ def api_deps_install_log(install_id):
             "log": "",
         }), 400
 
-    running = is_deps_install_running(install_id)
+    result = deps_install_result(install_id)
     log_file = info.get("log_file", "")
 
     return jsonify({
-        "running": running,
+        **result,
         "log": tail_file(log_file, lines),
     })
 

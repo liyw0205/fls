@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Run the real Chromium responsive regression matrix.
 
-The repository intentionally has no npm dependency.  On the development
-machine this script uses the Playwright Core installation provided by the
-Codex/Termux environment; ``FLS_PLAYWRIGHT_CORE`` and ``FLS_CHROMIUM`` can be
-used to point at equivalent local installations.
+The repository intentionally has no npm dependency. The script uses a local
+Playwright Core installation and Chromium executable; ``FLS_PLAYWRIGHT_CORE``
+and ``FLS_CHROMIUM`` can point to their locations.
 """
 
 import argparse

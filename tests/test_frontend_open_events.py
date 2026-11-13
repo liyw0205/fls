@@ -55,7 +55,15 @@ def isolated_app():
 
 class FrontendOpenEventTests(unittest.TestCase):
     def _set_session(self, client):
-        response = client.get(f"/?token={TOKEN}")
+        login_page = client.get("/login")
+        csrf_token = re.search(
+            r'name="csrf_token" value="([^"]+)"',
+            login_page.get_data(as_text=True),
+        ).group(1)
+        response = client.post(
+            "/login",
+            data={"token": TOKEN, "csrf_token": csrf_token},
+        )
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response.headers.get("Location"), "/")
 

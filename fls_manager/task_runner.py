@@ -25,6 +25,62 @@ from .notify import task_notify_ids, extract_user_log_content, send_by_ids
 
 
 STOPPED_MANUALLY = set()
+PENDING_RETRIES = {}
+_RUNNING_LOCK = threading.RLock()
+
+
+def running_history_ids():
+    with _RUNNING_LOCK:
+        return {
+            str(info.get("history_id"))
+            for info in RUNNING.values()
+            if info.get("history_id")
+        }
+
+
+def _pop_running(task_id, history_id=None):
+    with _RUNNING_LOCK:
+        info = RUNNING.get(task_id)
+        if not info:
+            return False
+        if history_id and info.get("history_id") != history_id:
+            return False
+        RUNNING.pop(task_id, None)
+        return True
+
+
+def _has_running_attempt(task_id, history_id):
+    with _RUNNING_LOCK:
+        info = RUNNING.get(task_id)
+        return bool(info and info.get("history_id") == history_id)
+
+
+def _update_running_attempt(task_id, history_id, updates):
+    with _RUNNING_LOCK:
+        info = RUNNING.get(task_id)
+        if not info or info.get("history_id") != history_id:
+            return False
+        info.update(updates)
+        return True
+
+
+def _cancel_task_retry_entry(pending, reason):
+    if not pending:
+        return False
+
+    pending["timer"].cancel()
+    append_task_log(
+        pending["log_file"],
+        f"\n===== 已取消计划重试：{reason} =====\n",
+    )
+    return True
+
+
+def cancel_task_retry(task_id, reason="收到新的任务操作"):
+    with _RUNNING_LOCK:
+        pending = PENDING_RETRIES.pop(task_id, None)
+
+    return _cancel_task_retry_entry(pending, reason)
 
 
 def safe_process_name(name):
@@ -33,25 +89,26 @@ def safe_process_name(name):
 
 
 def is_running(task_id):
-    info = RUNNING.get(task_id)
+    with _RUNNING_LOCK:
+        info = RUNNING.get(task_id)
 
-    if not info:
+        if not info:
+            return False
+
+        status = info.get("status")
+        if status in ("starting", "delaying"):
+            return True
+
+        proc = info.get("process")
+
+        if not proc:
+            RUNNING.pop(task_id, None)
+            return False
+
+        if proc.poll() is None:
+            return True
+
         return False
-
-    status = info.get("status")
-    if status in ("starting", "delaying"):
-        return True
-
-    proc = info.get("process")
-
-    if not proc:
-        RUNNING.pop(task_id, None)
-        return False
-
-    if proc.poll() is None:
-        return True
-
-    return False
 
 
 def increase_run_count(task_id):
@@ -124,7 +181,7 @@ def task_retry_config(task):
     }
 
 
-def schedule_task_retry(task_id, task_snapshot, retry_attempt, reason, log_file):
+def schedule_task_retry(task_id, task_snapshot, retry_attempt, reason, log_file, history_id=None):
     cfg = task_retry_config(task_snapshot)
     max_retries = int(cfg.get("attempts", 0) or 0)
 
@@ -134,18 +191,14 @@ def schedule_task_retry(task_id, task_snapshot, retry_attempt, reason, log_file)
     next_attempt = retry_attempt + 1
     interval_seconds = int(cfg.get("interval_seconds", 60) or 60)
 
-    append_task_log(
-        log_file,
-        (
-            f"\n===== 任务失败，计划第 {next_attempt}/{max_retries} 次重试 =====\n"
-            f"原因: {reason}\n"
-            f"间隔: {interval_seconds} 秒\n"
-            f"时间: {now_str()}\n"
-        ),
-    )
+    pending = {"timer": None, "log_file": str(log_file)}
 
     def retry_worker():
         try:
+            with _RUNNING_LOCK:
+                if PENDING_RETRIES.get(task_id) is not pending:
+                    return
+
             latest_task = get_task(task_id)
 
             if not latest_task:
@@ -156,9 +209,14 @@ def schedule_task_retry(task_id, task_snapshot, retry_attempt, reason, log_file)
                 append_task_log(log_file, "\n===== 重试取消：任务已禁用 =====\n")
                 return
 
-            ok, msg = run_task_now(task_id, source="retry", retry_attempt=next_attempt)
+            ok, msg = run_task_now(
+                task_id,
+                source="retry",
+                retry_attempt=next_attempt,
+                retry_token=pending,
+            )
 
-            if not ok:
+            if not ok and msg != "重试已取消":
                 append_task_log(
                     log_file,
                     f"\n===== 重试启动失败: {now_str()}，{msg} =====\n",
@@ -166,58 +224,121 @@ def schedule_task_retry(task_id, task_snapshot, retry_attempt, reason, log_file)
 
         except Exception as e:
             append_task_log(log_file, f"\n===== 重试调度失败: {e} =====\n")
+        finally:
+            with _RUNNING_LOCK:
+                if PENDING_RETRIES.get(task_id) is pending:
+                    PENDING_RETRIES.pop(task_id, None)
 
     timer = threading.Timer(interval_seconds, retry_worker)
     timer.daemon = True
-    timer.start()
+    pending["timer"] = timer
+    with _RUNNING_LOCK:
+        if history_id:
+            current = RUNNING.get(task_id)
+            if (
+                not current
+                or current.get("history_id") != history_id
+                or (task_id, history_id) in STOPPED_MANUALLY
+            ):
+                return False, "任务已停止，取消重试"
+
+            latest_task = get_task(task_id)
+            if not latest_task or not latest_task.get("enabled", True):
+                return False, "任务已删除或禁用，取消重试"
+
+        previous = PENDING_RETRIES.get(task_id)
+        if previous:
+            previous["timer"].cancel()
+        PENDING_RETRIES[task_id] = pending
+        append_task_log(
+            log_file,
+            (
+                f"\n===== 任务失败，计划第 {next_attempt}/{max_retries} 次重试 =====\n"
+                f"原因: {reason}\n"
+                f"间隔: {interval_seconds} 秒\n"
+                f"时间: {now_str()}\n"
+            ),
+        )
+        timer.start()
 
     return True, f"{reason}，已计划第 {next_attempt}/{max_retries} 次重试"
 
 
-def force_kill_process(proc):
-    if not proc:
-        return
+def terminate_task_process(proc):
+    """Request termination and return a verified result with the real error."""
+    if proc is None:
+        return False, "任务进程不存在"
 
     try:
         if proc.poll() is not None:
-            return
+            return False, f"任务已结束，退出码 {proc.poll()}"
+    except Exception as e:
+        return False, f"读取任务进程状态失败：{e}"
 
-        if os.name == "nt":
+    errors = []
+
+    if os.name == "nt":
+        try:
+            proc.terminate()
+        except Exception as e:
+            errors.append(f"请求正常终止失败：{e}")
+    else:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except Exception as e:
+            errors.append(f"发送进程组终止信号失败：{e}")
             try:
                 proc.terminate()
-            except Exception:
-                pass
+            except Exception as fallback_error:
+                errors.append(f"请求进程终止失败：{fallback_error}")
 
-            time.sleep(1)
-
-            if proc.poll() is None:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-
-        else:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            except Exception:
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
-
-            time.sleep(1)
-
-            if proc.poll() is None:
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                except Exception:
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
-
-    except Exception:
+    try:
+        proc.wait(timeout=1)
+        if proc.poll() is not None:
+            return True, ""
+    except subprocess.TimeoutExpired:
         pass
+    except Exception as e:
+        errors.append(f"等待正常终止失败：{e}")
+
+    if os.name == "nt":
+        try:
+            proc.kill()
+        except Exception as e:
+            errors.append(f"强制终止失败：{e}")
+    else:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except Exception as e:
+            errors.append(f"发送进程组强制终止信号失败：{e}")
+            try:
+                proc.kill()
+            except Exception as fallback_error:
+                errors.append(f"强制终止进程失败：{fallback_error}")
+
+    try:
+        proc.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        pass
+    except Exception as e:
+        errors.append(f"等待强制终止失败：{e}")
+
+    try:
+        if proc.poll() is not None:
+            return True, ""
+    except Exception as e:
+        errors.append(f"确认任务进程状态失败：{e}")
+
+    detail = "；".join(errors)
+    if detail:
+        detail += "；无法确认任务进程已退出"
+    return False, detail or "无法确认任务进程已退出"
+
+
+def force_kill_process(proc):
+    """Compatibility wrapper for timeout and stale-worker cleanup paths."""
+    ok, detail = terminate_task_process(proc)
+    return ok or detail.startswith("任务已结束")
 
 
 def task_random_delay_seconds(task):
@@ -278,10 +399,42 @@ def task_finish_watcher(task_id, task_snapshot, proc, log_file, log_fp, history_
                 f"\n===== 任务超时: {now_str()}，超过 {timeout_seconds} 秒，开始强制结束 =====\n"
             )
 
-            force_kill_process(proc)
-            return_code = proc.wait()
+            terminated = force_kill_process(proc)
+            try:
+                return_code = proc.poll()
+            except Exception:
+                return_code = None
 
-        manual_stopped = task_id in STOPPED_MANUALLY
+            if return_code is None and terminated:
+                try:
+                    return_code = proc.wait(timeout=1)
+                except Exception:
+                    return_code = None
+
+            if return_code is None:
+                append_task_log(
+                    log_file,
+                    "===== 超时后停止失败：无法确认任务进程已退出 =====\n",
+                )
+                _update_running_attempt(
+                    task_id,
+                    history_id,
+                    {
+                        "status": "running",
+                        "stop_error": "超时后停止失败：无法确认任务进程已退出",
+                    },
+                )
+                update_task_history(
+                    history_id,
+                    {
+                        "status": "running",
+                        "message": "超时后停止失败：无法确认任务进程已退出",
+                    },
+                )
+                return
+
+        stopped_key = (task_id, history_id)
+        manual_stopped = stopped_key in STOPPED_MANUALLY
 
         if timed_out:
             history_status = "timeout"
@@ -305,6 +458,7 @@ def task_finish_watcher(task_id, task_snapshot, proc, log_file, log_fp, history_
                 retry_attempt,
                 history_msg,
                 log_file,
+                history_id=history_id,
             )
 
             if retry_scheduled:
@@ -339,13 +493,13 @@ def task_finish_watcher(task_id, task_snapshot, proc, log_file, log_fp, history_
         except Exception:
             pass
 
-        try:
-            RUNNING.pop(task_id, None)
-        except Exception:
-            pass
+        _pop_running(task_id, history_id=history_id)
+
+        with _RUNNING_LOCK:
+            manual_stopped = manual_stopped or stopped_key in STOPPED_MANUALLY
+            STOPPED_MANUALLY.discard(stopped_key)
 
         if manual_stopped:
-            STOPPED_MANUALLY.discard(task_id)
             append_task_log(log_file, "\n===== 手动结束任务，不发送任务完成通知 =====\n")
             return
 
@@ -394,6 +548,20 @@ def task_finish_watcher(task_id, task_snapshot, proc, log_file, log_fp, history_
 
 def _start_task_worker(task_id, task_snapshot, cmd_info, process_name, log_file, log_fp, source, history_id, history_start_ts, retry_attempt):
     try:
+        if not _has_running_attempt(task_id, history_id):
+            try:
+                log_fp.close()
+            except Exception:
+                pass
+            finish_task_history(
+                history_id,
+                history_start_ts,
+                "stopped",
+                log_file=log_file,
+                message="启动前已取消",
+            )
+            return
+
         env = os.environ.copy()
         env.update(load_global_env())
         env.update(task_snapshot.get("env", {}) or {})
@@ -424,13 +592,16 @@ def _start_task_worker(task_id, task_snapshot, cmd_info, process_name, log_file,
         delay_seconds = task_random_delay_seconds(task_snapshot)
 
         if delay_seconds > 0:
-            if task_id not in RUNNING:
+            if not _update_running_attempt(
+                task_id,
+                history_id,
+                {"status": "delaying"},
+            ):
                 log_fp.write("===== 任务在随机延迟前被取消 =====\n".encode("utf-8"))
                 log_fp.close()
                 finish_task_history(history_id, history_start_ts, "stopped", log_file=log_file, message="随机延迟前被取消")
                 return
 
-            RUNNING[task_id]["status"] = "delaying"
             update_task_history(history_id, {"status": "delaying"})
 
             log_fp.write(
@@ -439,7 +610,7 @@ def _start_task_worker(task_id, task_snapshot, cmd_info, process_name, log_file,
 
             time.sleep(delay_seconds)
 
-            if task_id not in RUNNING:
+            if not _has_running_attempt(task_id, history_id):
                 try:
                     log_fp.write("===== 任务在随机延迟期间被取消 =====\n".encode("utf-8"))
                     log_fp.close()
@@ -452,7 +623,11 @@ def _start_task_worker(task_id, task_snapshot, cmd_info, process_name, log_file,
                 f"===== 随机延迟结束: {now_str()}，开始启动任务 =====\n".encode("utf-8")
             )
 
-        if task_id not in RUNNING:
+        if not _update_running_attempt(
+            task_id,
+            history_id,
+            {"status": "starting"},
+        ):
             try:
                 log_fp.write("===== 任务在启动前被取消 =====\n".encode("utf-8"))
                 log_fp.close()
@@ -461,7 +636,6 @@ def _start_task_worker(task_id, task_snapshot, cmd_info, process_name, log_file,
             finish_task_history(history_id, history_start_ts, "stopped", log_file=log_file, message="启动前被取消")
             return
 
-        RUNNING[task_id]["status"] = "starting"
         update_task_history(history_id, {"status": "starting"})
 
         popen_kwargs = {
@@ -480,7 +654,19 @@ def _start_task_worker(task_id, task_snapshot, cmd_info, process_name, log_file,
             **popen_kwargs
         )
 
-        if task_id not in RUNNING:
+        if not _update_running_attempt(
+            task_id,
+            history_id,
+            {
+                "process": proc,
+                "pid": proc.pid,
+                "process_name": process_name,
+                "log_file": str(log_file),
+                "log_fp": log_fp,
+                "start_time": time.time(),
+                "status": "running",
+            },
+        ):
             force_kill_process(proc)
             try:
                 log_fp.write("===== 任务启动后立即被取消 =====\n".encode("utf-8"))
@@ -490,15 +676,6 @@ def _start_task_worker(task_id, task_snapshot, cmd_info, process_name, log_file,
             finish_task_history(history_id, history_start_ts, "stopped", return_code=proc.poll(), log_file=log_file, message="启动后立即被取消")
             return
 
-        RUNNING[task_id].update({
-            "process": proc,
-            "pid": proc.pid,
-            "process_name": process_name,
-            "log_file": str(log_file),
-            "log_fp": log_fp,
-            "start_time": time.time(),
-            "status": "running",
-        })
         update_task_history(history_id, {
             "status": "running",
             "pid": proc.pid,
@@ -521,12 +698,23 @@ def _start_task_worker(task_id, task_snapshot, cmd_info, process_name, log_file,
         except Exception:
             pass
 
+        if not _has_running_attempt(task_id, history_id):
+            finish_task_history(
+                history_id,
+                history_start_ts,
+                "stopped",
+                log_file=log_file,
+                message="启动期间已取消",
+            )
+            return
+
         retry_scheduled, retry_msg = schedule_task_retry(
             task_id,
             task_snapshot,
             retry_attempt,
             f"启动失败：{e}",
             log_file,
+            history_id=history_id,
         )
 
         finish_task_history(
@@ -537,94 +725,134 @@ def _start_task_worker(task_id, task_snapshot, cmd_info, process_name, log_file,
             message=retry_msg if retry_scheduled else f"启动失败：{e}",
         )
 
-        try:
-            RUNNING.pop(task_id, None)
-        except Exception:
-            pass
+        _pop_running(task_id, history_id=history_id)
 
 
-def run_task_now(task_id, source="manual", retry_attempt=0):
+def run_task_now(task_id, source="manual", retry_attempt=0, retry_token=None):
     task = get_task(task_id)
 
     if not task:
         return False, "任务不存在"
 
-    if is_running(task_id):
-        return False, "任务已在运行中"
+    if source != "retry":
+        source_label = {"manual": "手动运行", "cron": "定时运行"}.get(source, "新运行请求")
+        cancel_task_retry(task_id, source_label)
+
+    with _RUNNING_LOCK:
+        if is_running(task_id):
+            return False, "任务已在运行中"
+
+        if source == "retry":
+            if retry_token is None or PENDING_RETRIES.get(task_id) is not retry_token:
+                return False, "重试已取消"
 
     try:
         cmd_info = build_command(task)
     except Exception as e:
         return False, f"命令解析失败：{e}"
 
-    STOPPED_MANUALLY.discard(task_id)
     retry_attempt = max(0, int(retry_attempt or 0))
 
     task_display_name = task.get("name") or task.get("command") or task_id
     process_name = safe_process_name(task_display_name)
     retry_cfg = task_retry_config(task)
 
-    log_file = log_file_for_task(task)
-    log_fp = open(log_file, "ab", buffering=0)
-    history_id = uuid.uuid4().hex
-    history_start_ts = time.time()
+    with _RUNNING_LOCK:
+        if is_running(task_id):
+            return False, "任务已在运行中"
 
-    add_task_history({
-        "id": history_id,
-        "task_id": task_id,
-        "task_name": task_display_name,
-        "command": task.get("command", ""),
-        "source": source,
-        "status": "starting",
-        "retry_attempt": retry_attempt,
-        "max_retries": int(retry_cfg.get("attempts", 0) or 0),
-        "start_at": now_str(),
-        "end_at": "",
-        "duration_seconds": 0,
-        "return_code": None,
-        "pid": "-",
-        "log_file": str(log_file),
-        "message": "已提交启动",
-    })
+        if source == "retry":
+            if retry_token is None or PENDING_RETRIES.get(task_id) is not retry_token:
+                return False, "重试已取消"
+            PENDING_RETRIES.pop(task_id, None)
+        else:
+            cancel_task_retry(task_id, source_label)
 
-    RUNNING[task_id] = {
-        "process": None,
-        "pid": "-",
-        "process_name": process_name,
-        "log_file": str(log_file),
-        "log_fp": log_fp,
-        "start_time": time.time(),
-        "status": "starting",
-        "history_id": history_id,
-        "history_start_ts": history_start_ts,
-    }
+        log_file = log_file_for_task(task)
+        log_fp = open(log_file, "ab", buffering=0)
+        history_id = uuid.uuid4().hex
+        history_start_ts = time.time()
 
-    th = threading.Thread(
-        target=_start_task_worker,
-        args=(task_id, dict(task), cmd_info, process_name, str(log_file), log_fp, source, history_id, history_start_ts, retry_attempt),
-        daemon=True,
-        name=f"fls-task-start-{task_id[:8]}",
-    )
-    th.start()
+        add_task_history({
+            "id": history_id,
+            "task_id": task_id,
+            "task_name": task_display_name,
+            "command": task.get("command", ""),
+            "source": source,
+            "status": "starting",
+            "retry_attempt": retry_attempt,
+            "max_retries": int(retry_cfg.get("attempts", 0) or 0),
+            "start_at": now_str(),
+            "end_at": "",
+            "duration_seconds": 0,
+            "return_code": None,
+            "pid": "-",
+            "log_file": str(log_file),
+            "message": "已提交启动",
+        })
+
+        RUNNING[task_id] = {
+            "process": None,
+            "pid": "-",
+            "process_name": process_name,
+            "log_file": str(log_file),
+            "log_fp": log_fp,
+            "start_time": time.time(),
+            "status": "starting",
+            "history_id": history_id,
+            "history_start_ts": history_start_ts,
+        }
+        STOPPED_MANUALLY.discard((task_id, history_id))
+
+        th = threading.Thread(
+            target=_start_task_worker,
+            args=(task_id, dict(task), cmd_info, process_name, str(log_file), log_fp, source, history_id, history_start_ts, retry_attempt),
+            daemon=True,
+            name=f"fls-task-start-{task_id[:8]}",
+        )
+        th.start()
 
     return True, "已提交启动"
 
 
 def stop_task_now(task_id):
-    info = RUNNING.get(task_id)
+    with _RUNNING_LOCK:
+        pending_retry = PENDING_RETRIES.pop(task_id, None)
+        info = RUNNING.get(task_id)
+        if info:
+            STOPPED_MANUALLY.add((task_id, info.get("history_id")))
+            proc = info.get("process")
+            if not proc and RUNNING.get(task_id) is info:
+                RUNNING.pop(task_id, None)
+
+    _cancel_task_retry_entry(pending_retry, "任务已停止或删除")
 
     if not info:
+        if pending_retry:
+            return True, "已取消计划重试"
         return False, "任务未运行"
-
-    STOPPED_MANUALLY.add(task_id)
-
-    proc = info.get("process")
 
     if proc:
         try:
-            force_kill_process(proc)
+            return_code = proc.poll()
         except Exception as e:
-            return False, f"结束失败：{e}"
+            return False, f"停止失败：读取任务进程状态失败：{e}"
+
+        if return_code is not None:
+            _pop_running(task_id, history_id=info.get("history_id"))
+            STOPPED_MANUALLY.discard((task_id, info.get("history_id")))
+            return False, f"任务已结束，退出码 {return_code}"
+
+        terminated, detail = terminate_task_process(proc)
+
+        if not terminated:
+            log_file = info.get("log_file")
+            if log_file:
+                append_task_log(
+                    log_file,
+                    f"\n===== 停止任务失败: {now_str()}，{detail} =====\n",
+                )
+            return False, f"停止失败：{detail}"
 
     try:
         log_file = info.get("log_file")
@@ -634,7 +862,7 @@ def stop_task_now(task_id):
         pass
 
     if not proc:
-        STOPPED_MANUALLY.discard(task_id)
+        STOPPED_MANUALLY.discard((task_id, info.get("history_id")))
 
         try:
             log_fp = info.get("log_fp")
@@ -651,9 +879,6 @@ def stop_task_now(task_id):
             message="手动结束",
         )
 
-    try:
-        RUNNING.pop(task_id, None)
-    except Exception:
-        pass
+    _pop_running(task_id, history_id=info.get("history_id"))
 
     return True, "已结束"
