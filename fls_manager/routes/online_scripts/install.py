@@ -1,4 +1,12 @@
 from ._common import *
+from ...utils import now_str
+from ...online_scripts.constants import (
+    ONLINE_INSTALL_LOCK,
+    ONLINE_INSTALL_RUNNING,
+    active_online_install_for_script,
+    get_online_install_job,
+    persist_online_install,
+)
 
 
 @bp.route("/online-scripts/install/<script_id>", methods=["POST"])
@@ -8,8 +16,9 @@ def online_scripts_install(script_id):
     if not item:
         abort(404)
 
-    for install_id, info in ONLINE_INSTALL_RUNNING.items():
-        if info.get("script_id") == script_id and info.get("running"):
+    with ONLINE_INSTALL_LOCK:
+        active_id, _ = active_online_install_for_script(script_id)
+        if active_id:
             return redirect(
                 url_for(
                     "online_scripts.online_scripts_page",
@@ -136,29 +145,56 @@ def online_scripts_install(script_id):
         item.get("name") or item.get("id"),
     )
 
-    prune_completed_records(ONLINE_INSTALL_RUNNING)
-    ONLINE_INSTALL_RUNNING[install_id] = {
-        "id": install_id,
-        "script_id": script_id,
-        "script_name": item.get("name"),
-        "log_file": str(log_file),
-        "running": True,
-        "status": "准备中",
-        "start_time": time.time(),
-        "returncode": None,
-        "error": "",
-        "process": None,
-    }
+    with ONLINE_INSTALL_LOCK:
+        active_id, _ = active_online_install_for_script(script_id)
+        if active_id:
+            return redirect(
+                url_for(
+                    "online_scripts.online_scripts_page",
+                    msg="该脚本正在安装中",
+                )
+            )
+        prune_completed_records(ONLINE_INSTALL_RUNNING)
+        ONLINE_INSTALL_RUNNING[install_id] = {
+            "id": install_id,
+            "script_id": script_id,
+            "script_name": item.get("name"),
+            "log_file": str(log_file),
+            "running": True,
+            "status": "准备中",
+            "start_time": time.time(),
+            "returncode": None,
+            "error": "",
+            "process": None,
+            "updated_at": now_str(),
+        }
+        try:
+            persist_online_install(ONLINE_INSTALL_RUNNING[install_id])
+        except Exception as e:
+            ONLINE_INSTALL_RUNNING[install_id].update(
+                running=False, status="启动失败", error=f"保存安装状态失败：{e}", updated_at=now_str(),
+            )
+            return _install_start_error(install_id, ONLINE_INSTALL_RUNNING[install_id]["error"])
 
-    start_install_thread(
-        install_id=install_id,
-        item=item,
-        proxy_id=proxy_id,
-        import_task=import_task,
-        force=force,
-        enable_task=enable_task,
-        selected_task_indexes=selected_task_indexes,
-    )
+    try:
+        start_install_thread(
+            install_id=install_id,
+            item=item,
+            proxy_id=proxy_id,
+            import_task=import_task,
+            force=force,
+            enable_task=enable_task,
+            selected_task_indexes=selected_task_indexes,
+        )
+    except Exception as e:
+        with ONLINE_INSTALL_LOCK:
+            info = ONLINE_INSTALL_RUNNING[install_id]
+            info.update(running=False, status="启动失败", error=f"启动安装线程失败：{e}", updated_at=now_str())
+            try:
+                persist_online_install(info)
+            except Exception as storage_error:
+                info["error"] += f"；保存安装状态失败：{storage_error}"
+        return _install_start_error(install_id, info["error"])
 
     return redirect(
         url_for(
@@ -169,9 +205,34 @@ def online_scripts_install(script_id):
     )
 
 
+def _install_start_error(install_id, error):
+    body = page_header_card(
+        "在线脚本安装启动失败",
+        help_html=h(error),
+        actions_html=f'<a class="btn btn-gray" href="/online-scripts/log/{h(install_id)}">查看安装记录</a>',
+    )
+    return layout("在线脚本安装失败", "online_scripts", body), 500
+
+
+def _stop_install_result(install_id):
+    try:
+        ok, msg = request_stop_online_install(install_id)
+        code = 200 if ok else (404 if get_online_install_job(install_id) is None else 409)
+        return ok, msg, code
+    except Exception as e:
+        return False, f"停止请求失败：{e}", 500
+
+
 @bp.route("/online-scripts/install-stop/<install_id>", methods=["POST"])
 def online_scripts_install_stop(install_id):
-    ok, msg = request_stop_online_install(install_id)
+    ok, msg, code = _stop_install_result(install_id)
+    if not ok:
+        body = page_header_card(
+            "无法停止在线安装",
+            help_html=h(msg),
+            actions_html=f'<a class="btn btn-gray" href="/online-scripts/log/{h(install_id)}">查看安装记录</a>',
+        )
+        return layout("无法停止在线安装", "online_scripts", body), code
 
     return redirect(
         url_for(
@@ -180,3 +241,9 @@ def online_scripts_install_stop(install_id):
             err="" if ok else msg,
         )
     )
+
+
+@bp.route("/api/online-scripts/install-stop/<install_id>", methods=["POST"])
+def api_online_scripts_install_stop(install_id):
+    ok, msg, code = _stop_install_result(install_id)
+    return jsonify({"ok": ok, "msg": msg}), code

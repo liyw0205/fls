@@ -13,92 +13,152 @@ from ..proxy import (
     github_proxy_url,
     build_git_command_with_github_proxy,
 )
-from .constants import ONLINE_INSTALL_RUNNING, ONLINE_INSTALL_STOPPING
+from .constants import (
+    ONLINE_INSTALL_RUNNING,
+    ONLINE_INSTALL_STOPPING,
+    ONLINE_INSTALL_LOCK,
+    ONLINE_INSTALL_TIMEOUT_SECONDS,
+    active_online_install_for_script,
+    get_online_install_job,
+    persist_online_install,
+)
 from .logs import append_log
 from .tasks import import_task_if_needed
 
 requests = LazyModule("requests")
 
 
+class InstallCommandError(RuntimeError):
+    def __init__(self, message, returncode=None):
+        super().__init__(message)
+        self.returncode = returncode
+
+
+class InstallTimeout(InstallCommandError):
+    pass
+
+
+class InstallStopped(InstallCommandError):
+    pass
+
+
+def _persist_install_state(info):
+    try:
+        persist_online_install(info)
+    except Exception as e:
+        detail = f"保存安装状态失败：{e}"
+        info["persistence_error"] = detail
+        info["error"] = "；".join(filter(None, (info.get("error"), detail)))
+        print(detail, flush=True)
+
+
 def get_running_install_by_script_id(script_id):
-    script_id = str(script_id or "")
-
-    for install_id, info in ONLINE_INSTALL_RUNNING.items():
-        if info.get("script_id") == script_id and info.get("running"):
-            return install_id, info
-
-    return "", None
+    return active_online_install_for_script(script_id)
 
 
 def online_install_should_stop(install_id):
-    return install_id in ONLINE_INSTALL_STOPPING
+    with ONLINE_INSTALL_LOCK:
+        return install_id in ONLINE_INSTALL_STOPPING
 
 
 def terminate_install_process(proc):
     if not proc:
-        return
+        return True, ""
 
-    try:
+    errors = []
+    for sig, method in ((signal.SIGTERM, "terminate"), (getattr(signal, "SIGKILL", signal.SIGTERM), "kill")):
         if proc.poll() is not None:
-            return
-
+            return True, ""
         if os.name == "nt":
             try:
-                proc.terminate()
-            except Exception:
-                pass
-
-            time.sleep(1)
-
-            if proc.poll() is None:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
+                getattr(proc, method)()
+            except Exception as e:
+                errors.append(f"{method}: {e}")
         else:
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            except Exception:
+                os.killpg(os.getpgid(proc.pid), sig)
+            except Exception as e:
+                errors.append(f"killpg({sig}): {e}")
                 try:
-                    proc.terminate()
-                except Exception:
-                    pass
+                    getattr(proc, method)()
+                except Exception as fallback_error:
+                    errors.append(f"{method}: {fallback_error}")
+        try:
+            proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+        except Exception as e:
+            errors.append(f"wait: {e}")
 
-            time.sleep(1)
+    if proc.poll() is not None:
+        return True, ""
+    return False, "；".join(errors + ["无法确认安装进程已退出"])
 
-            if proc.poll() is None:
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                except Exception:
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
-    except Exception:
-        pass
+
+def _interrupt_install_command(install_id, proc, reason, retry=False):
+    with ONLINE_INSTALL_LOCK:
+        info = ONLINE_INSTALL_RUNNING.get(install_id)
+        if not info or info.get("process") is not proc or not info.get("running"):
+            return True, ""
+        stop_lock = info.setdefault("stop_lock", threading.Lock())
+
+    # Serialize signals per job, never blocking the worker's state lock while waiting.
+    with stop_lock:
+        with ONLINE_INSTALL_LOCK:
+            if not info.get("running") or info.get("process") is not proc or proc.poll() is not None:
+                return True, ""
+            if info.get("command_interruption") and not retry:
+                return False, info.get("error", "")
+            info.setdefault("command_interruption", reason)
+            reason = info["command_interruption"]
+        ok, detail = terminate_install_process(proc)
+        with ONLINE_INSTALL_LOCK:
+            if info.get("running") and info.get("process") is proc and proc.poll() is None:
+                info["status"] = "超时（停止失败）" if reason == "timeout" else "停止失败"
+                info["error"] = (
+                    f"安装命令超时，超过 {ONLINE_INSTALL_TIMEOUT_SECONDS} 秒；{detail}"
+                    if reason == "timeout" else detail
+                )
+                info["updated_at"] = now_str()
+                _persist_install_state(info)
+        return ok, detail
 
 
 def request_stop_online_install(install_id):
-    info = ONLINE_INSTALL_RUNNING.get(install_id)
+    with ONLINE_INSTALL_LOCK:
+        snapshot = get_online_install_job(install_id)
+        if not snapshot:
+            return False, "安装记录不存在"
+        if snapshot.get("status") == "结果未知":
+            return False, "安装任务结果未知，面板重启后无法停止，请检查日志和脚本目录"
+        info = ONLINE_INSTALL_RUNNING.get(install_id)
 
-    if not info:
-        return False, "安装记录不存在或面板已重启"
+        if not info or not info.get("running"):
+            return False, "安装任务已结束"
 
-    if not info.get("running"):
-        return False, "安装任务已结束"
+        if install_id in ONLINE_INSTALL_STOPPING and info.get("status") == "停止中":
+            return True, "已请求停止安装"
 
-    ONLINE_INSTALL_STOPPING.add(install_id)
-    info["status"] = "停止中"
-    info["error"] = "用户请求停止安装"
+        previous_status = info.get("status")
+        info["status"] = "停止中"
+        info["updated_at"] = now_str()
+        try:
+            persist_online_install(info)
+        except Exception:
+            info["status"] = previous_status
+            raise
+        ONLINE_INSTALL_STOPPING.add(install_id)
+        proc = info.get("process")
+        log_file = info.get("log_file")
 
-    proc = info.get("process")
-    if proc:
-        terminate_install_process(proc)
-
-    log_file = info.get("log_file")
     if log_file:
         append_log(log_file, "")
         append_log(log_file, f"===== 用户请求停止安装: {now_str()} =====")
+
+    if proc:
+        ok, detail = _interrupt_install_command(install_id, proc, "stop", retry=True)
+        if not ok and proc.poll() is None:
+            return False, f"停止失败：{detail}"
 
     return True, "已请求停止安装"
 
@@ -143,39 +203,48 @@ def run_logged_command(cmd, cwd, log_file, env=None, shell=False, install_id="")
         }
 
         if os.name != "nt":
-            popen_kwargs["preexec_fn"] = os.setsid
+            popen_kwargs["start_new_session"] = True
 
-        proc = subprocess.Popen(
-            cmd,
-            **popen_kwargs,
-        )
-
-        if install_id and install_id in ONLINE_INSTALL_RUNNING:
-            ONLINE_INSTALL_RUNNING[install_id]["process"] = proc
-
-        while proc.poll() is None:
+        with ONLINE_INSTALL_LOCK:
             if install_id and online_install_should_stop(install_id):
-                append_log(log_file, "")
-                append_log(log_file, "===== 检测到停止请求，正在结束当前安装命令 =====")
-                terminate_install_process(proc)
+                raise InstallStopped("安装已停止")
+            proc = subprocess.Popen(cmd, **popen_kwargs)
+            info = ONLINE_INSTALL_RUNNING.get(install_id)
+            if info is not None:
+                info["process"] = proc
+                info.pop("command_interruption", None)
 
-                if install_id in ONLINE_INSTALL_RUNNING:
-                    ONLINE_INSTALL_RUNNING[install_id]["process"] = None
-
-                raise RuntimeError("安装已停止")
-
-            time.sleep(0.5)
+        deadline = time.monotonic() + ONLINE_INSTALL_TIMEOUT_SECONDS
+        interruption_attempted = False
+        while proc.poll() is None:
+            stopping = install_id and online_install_should_stop(install_id)
+            if not interruption_attempted and (stopping or time.monotonic() >= deadline):
+                interruption_attempted = True
+                reason = "stop" if stopping else "timeout"
+                if info is not None:
+                    with ONLINE_INSTALL_LOCK:
+                        already_attempted = bool(info.get("command_interruption"))
+                    if not already_attempted:
+                        _interrupt_install_command(install_id, proc, reason)
+                else:
+                    terminate_install_process(proc)
+            time.sleep(0.1)
 
         return_code = proc.returncode
-
-        if install_id and install_id in ONLINE_INSTALL_RUNNING:
-            ONLINE_INSTALL_RUNNING[install_id]["process"] = None
+        with ONLINE_INSTALL_LOCK:
+            interruption = info.pop("command_interruption", "") if info is not None else ""
+            if info is not None:
+                info["process"] = None
 
     append_log(log_file, "------------------------------------------------------------")
     append_log(log_file, f"命令结束，退出码：{return_code}")
 
+    if interruption == "timeout" or (info is None and interruption_attempted):
+        raise InstallTimeout(f"安装命令超时，超过 {ONLINE_INSTALL_TIMEOUT_SECONDS} 秒", return_code)
+    if interruption == "stop":
+        raise InstallStopped("安装已停止", return_code)
     if return_code != 0:
-        raise RuntimeError(f"命令执行失败，退出码：{return_code}")
+        raise InstallCommandError(f"命令执行失败，退出码：{return_code}", return_code)
 
 
 def download_online_script_logged(item, proxy_id, log_file, force=False, install_id=""):
@@ -195,7 +264,7 @@ def download_online_script_logged(item, proxy_id, log_file, force=False, install
     append_log(log_file, "============================================================")
 
     if install_id and online_install_should_stop(install_id):
-        raise RuntimeError("安装已停止")
+        raise InstallStopped("安装已停止")
 
     if target.exists() and not force:
         raise FileExistsError(f"目标已存在，为避免意外覆盖已停止：{target}")
@@ -229,7 +298,7 @@ def download_online_script_logged(item, proxy_id, log_file, force=False, install
                 if install_id and online_install_should_stop(install_id):
                     append_log(log_file, "")
                     append_log(log_file, "===== 检测到停止请求，已中断文件下载 =====")
-                    raise RuntimeError("安装已停止")
+                    raise InstallStopped("安装已停止")
 
                 if chunk:
                     f.write(chunk)
@@ -318,27 +387,34 @@ def install_worker(
     enable_task=False,
     selected_task_indexes=None,
 ):
-    log_file = ONLINE_INSTALL_RUNNING[install_id]["log_file"]
-
-    ONLINE_INSTALL_RUNNING[install_id]["running"] = True
-    ONLINE_INSTALL_RUNNING[install_id]["status"] = "运行中"
-
-    append_log(log_file, "===== 在线脚本下载安装 =====")
-    append_log(log_file, f"时间: {now_str()}")
-    append_log(log_file, f"安装ID: {install_id}")
-    append_log(log_file, f"脚本ID: {item.get('id')}")
-    append_log(log_file, f"脚本名称: {item.get('name')}")
-    append_log(log_file, f"类型: {item.get('type')}")
-    append_log(log_file, f"链接: {item.get('link')}")
-    append_log(log_file, f"保存名: {item.get('link_name')}")
-    append_log(log_file, f"脚本目录: {SCRIPT_DIR}")
-    append_log(log_file, f"代理ID: {proxy_id or '不使用代理'}")
-    append_log(log_file, f"导入任务: {'是' if import_task else '否'}")
-    append_log(log_file, f"导入后启用任务: {'是' if enable_task else '否'}")
-    append_log(log_file, f"允许覆盖/更新: {'是' if force else '否'}")
-    append_log(log_file, "============================================================")
+    with ONLINE_INSTALL_LOCK:
+        info = ONLINE_INSTALL_RUNNING.get(install_id)
+        if not isinstance(info, dict):
+            return
+        log_file = info["log_file"]
 
     try:
+        with ONLINE_INSTALL_LOCK:
+            if online_install_should_stop(install_id):
+                raise InstallStopped("安装已停止")
+            info.update(running=True, status="运行中", error="", updated_at=now_str())
+            persist_online_install(info)
+
+        append_log(log_file, "===== 在线脚本下载安装 =====")
+        append_log(log_file, f"时间: {now_str()}")
+        append_log(log_file, f"安装ID: {install_id}")
+        append_log(log_file, f"脚本ID: {item.get('id')}")
+        append_log(log_file, f"脚本名称: {item.get('name')}")
+        append_log(log_file, f"类型: {item.get('type')}")
+        append_log(log_file, f"链接: {item.get('link')}")
+        append_log(log_file, f"保存名: {item.get('link_name')}")
+        append_log(log_file, f"脚本目录: {SCRIPT_DIR}")
+        append_log(log_file, f"代理ID: {proxy_id or '不使用代理'}")
+        append_log(log_file, f"导入任务: {'是' if import_task else '否'}")
+        append_log(log_file, f"导入后启用任务: {'是' if enable_task else '否'}")
+        append_log(log_file, f"允许覆盖/更新: {'是' if force else '否'}")
+        append_log(log_file, "============================================================")
+
         download_online_script_logged(
             item=item,
             proxy_id=proxy_id,
@@ -348,7 +424,7 @@ def install_worker(
         )
 
         if online_install_should_stop(install_id):
-            raise RuntimeError("安装已停止")
+            raise InstallStopped("安装已停止")
 
         if import_task:
             append_log(log_file, "")
@@ -361,7 +437,7 @@ def install_worker(
             )
 
         if online_install_should_stop(install_id):
-            raise RuntimeError("安装已停止")
+            raise InstallStopped("安装已停止")
 
         install_cmd = str(item.get("install") or "").strip()
 
@@ -386,36 +462,56 @@ def install_worker(
             append_log(log_file, "")
             append_log(log_file, "该脚本未提供 install 命令，跳过安装步骤")
 
-        ONLINE_INSTALL_RUNNING[install_id]["running"] = False
-        ONLINE_INSTALL_RUNNING[install_id]["status"] = "已完成"
-        ONLINE_INSTALL_RUNNING[install_id]["returncode"] = 0
-        ONLINE_INSTALL_RUNNING[install_id]["process"] = None
+        with ONLINE_INSTALL_LOCK:
+            if online_install_should_stop(install_id):
+                raise InstallStopped("安装已停止")
+            info = ONLINE_INSTALL_RUNNING.get(install_id)
+            if not isinstance(info, dict):
+                return
+            info.update({
+                "running": False,
+                "status": "已完成",
+                "returncode": 0,
+                "error": info.get("persistence_error", ""),
+                "process": None,
+                "updated_at": now_str(),
+            })
+            _persist_install_state(info)
 
         append_log(log_file, "")
         append_log(log_file, f"===== 全部完成: {now_str()} =====")
 
     except Exception as e:
-        stopped = online_install_should_stop(install_id) or str(e) == "安装已停止"
+        stopped = isinstance(e, InstallStopped)
 
-        ONLINE_INSTALL_RUNNING[install_id]["running"] = False
-        ONLINE_INSTALL_RUNNING[install_id]["status"] = "已停止" if stopped else "失败"
-        ONLINE_INSTALL_RUNNING[install_id]["returncode"] = -1 if stopped else 1
-        ONLINE_INSTALL_RUNNING[install_id]["error"] = str(e)
-        ONLINE_INSTALL_RUNNING[install_id]["process"] = None
+        with ONLINE_INSTALL_LOCK:
+            info = ONLINE_INSTALL_RUNNING.get(install_id)
+            if not isinstance(info, dict):
+                return
+            # Logging after a committed terminal result must not overwrite that result.
+            if not info.get("running"):
+                return
+            info.update({
+                "running": False,
+                "status": "已停止" if stopped else ("超时" if isinstance(e, InstallTimeout) else "失败"),
+                "returncode": getattr(e, "returncode", None),
+                "error": "；".join(dict.fromkeys(filter(None, (
+                    str(e), info.get("error"), info.get("persistence_error"),
+                )))),
+                "process": None,
+                "updated_at": now_str(),
+            })
+            _persist_install_state(info)
 
-        append_log(log_file, "")
-
-        if stopped:
-            append_log(log_file, f"===== 已停止: {now_str()} =====")
-        else:
-            append_log(log_file, f"===== 失败: {now_str()} =====")
+        try:
+            append_log(log_file, f"===== {info['status']}: {now_str()} =====")
             append_log(log_file, f"错误: {e}")
+        except Exception as log_error:
+            print(f"写入安装日志失败：{log_error}；原错误：{e}", flush=True)
 
     finally:
-        ONLINE_INSTALL_STOPPING.discard(install_id)
-
-        if install_id in ONLINE_INSTALL_RUNNING:
-            ONLINE_INSTALL_RUNNING[install_id]["process"] = None
+        with ONLINE_INSTALL_LOCK:
+            ONLINE_INSTALL_STOPPING.discard(install_id)
 
 
 def script_has_install(item):

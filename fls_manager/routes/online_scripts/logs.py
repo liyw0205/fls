@@ -1,22 +1,9 @@
 from ._common import *
+from ...online_scripts.constants import get_online_install_job
 
 
 @bp.route("/api/online-scripts/log/<install_id>")
 def api_online_install_log(install_id):
-    info = ONLINE_INSTALL_RUNNING.get(install_id)
-
-    if not info:
-        return jsonify({
-            "running": False,
-            "status": "记录不存在或面板已重启",
-            "returncode": None,
-            "error": "",
-            "log_file": "",
-            "log": "安装记录不存在或面板已重启。请到日志管理中查找 online-script-install-*.log。",
-        })
-
-    log_file = info.get("log_file", "")
-
     try:
         lines = int(request.args.get("lines", "1200"))
     except (TypeError, ValueError):
@@ -31,6 +18,20 @@ def api_online_install_log(install_id):
             "log": "",
         }), 400
 
+    info = get_online_install_job(install_id)
+
+    if not info:
+        return jsonify({
+            "running": False,
+            "status": "记录不存在",
+            "returncode": None,
+            "error": "安装记录不存在。请确认安装 ID 后重试。",
+            "log_file": "",
+            "log": "安装记录不存在。请到日志管理中查找 online-script-install-*.log。",
+        }), 404
+
+    log_file = info.get("log_file", "")
+
     return jsonify({
         "running": bool(info.get("running")),
         "status": info.get("status") or "-",
@@ -44,13 +45,13 @@ def api_online_install_log(install_id):
 @bp.route("/online-scripts/log/<install_id>")
 def online_install_log(install_id):
     back_url = get_back_url("/online-scripts")
-    info = ONLINE_INSTALL_RUNNING.get(install_id)
+    info = get_online_install_job(install_id)
 
     if not info:
         body = page_header_card(
             "在线脚本日志",
             help_html="""
-        安装记录不存在或面板已重启。<br>
+        安装记录不存在。<br>
         可以到日志管理中查找 online-script-install-*.log。
 """,
             actions_html=f"""
@@ -58,13 +59,13 @@ def online_install_log(install_id):
 <a class="btn btn-blue" href="/logs?back={h(back_url)}">查看日志管理</a>
 """,
         )
-        return layout("在线脚本日志", "online_scripts", body)
+        return layout("在线脚本日志", "online_scripts", body), 404
 
     stop_install_button = ""
 
     if info.get("running"):
         stop_install_button = f"""
-<div class="row-actions-danger">
+<div class="row-actions-danger" id="installStopAction">
     <form method="post" action="/online-scripts/install-stop/{h(install_id)}" style="display:inline;">
         <button class="btn btn-red" type="submit" onclick="return confirm('确定停止该安装任务吗？')">停止安装任务</button>
     </form>
@@ -75,6 +76,8 @@ def online_install_log(install_id):
         f'在线脚本下载安装日志：{info.get("script_name") or install_id}',
         help_html=f"""
         状态：<b id="installStatus">{h(info.get("status") or "-")}</b><br>
+        退出码：<span id="installReturncode">{h(info.get("returncode") if info.get("returncode") is not None else "-")}</span><br>
+        <span id="installError">{"错误：" + h(info.get("error")) if info.get("error") else ""}</span><br>
         日志文件：{h(info.get("log_file") or "-")}
 """,
         actions_html=f"""
@@ -112,6 +115,9 @@ async function loadLog(){{
         const json = await res.json();
 
         document.getElementById("installStatus").textContent = json.status || "-";
+        const errorEl = document.getElementById("installError");
+        if(errorEl) errorEl.textContent = json.error ? "错误：" + json.error : "";
+        document.getElementById("installReturncode").textContent = json.returncode == null ? "-" : String(json.returncode);
 
         const text = json.log || "暂无日志";
         const old = window.__FLS_LOG_LAST_TEXT__ || "";
@@ -141,6 +147,8 @@ async function loadLog(){{
         }}
 
         if(!json.running){{
+            const stopAction = document.getElementById("installStopAction");
+            if(stopAction) stopAction.hidden = true;
             clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
             window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
         }}

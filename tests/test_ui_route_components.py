@@ -2296,24 +2296,30 @@ class UiRouteComponentTests(unittest.TestCase):
                     headers={"X-Token": TOKEN},
                 )
 
-            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.status_code, 400)
             self.assertEqual(response.content_type, "application/json")
             self.assertEqual(
                 response.get_json(),
                 {
+                    "ok": False,
+                    "msg": "lines 必须为整数",
                     "running": False,
-                    "status": "记录不存在或面板已重启",
+                    "status": "参数错误",
                     "returncode": None,
                     "error": "",
                     "log_file": "",
-                    "log": (
-                        "安装记录不存在或面板已重启。"
-                        "请到日志管理中查找 online-script-install-*.log。"
-                    ),
+                    "log": "",
                 },
             )
             tail_file.assert_not_called()
             self.assertNotIn("missing-install", ONLINE_INSTALL_RUNNING)
+
+            response = app.test_client().get(
+                "/api/online-scripts/log/missing-install",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(response.status_code, 404)
+            self.assertEqual(response.get_json()["status"], "记录不存在")
 
     def test_online_install_log_api_invalid_lines_returns_json_error(self):
         with isolated_app() as (app, _base_dir):
@@ -2516,7 +2522,7 @@ class UiRouteComponentTests(unittest.TestCase):
             info = ONLINE_INSTALL_RUNNING[install_id]
             self.assertFalse(info["running"])
             self.assertEqual(info["status"], "失败")
-            self.assertEqual(info["returncode"], 1)
+            self.assertIsNone(info["returncode"])
             self.assertEqual(info["error"], "mock download failure")
             self.assertIsNone(info["process"])
             download.assert_called_once()
@@ -2565,12 +2571,171 @@ class UiRouteComponentTests(unittest.TestCase):
             info = ONLINE_INSTALL_RUNNING[install_id]
             self.assertFalse(info["running"])
             self.assertEqual(info["status"], "已停止")
-            self.assertEqual(info["returncode"], -1)
+            self.assertIsNone(info["returncode"])
             self.assertEqual(info["error"], "安装已停止")
             self.assertIsNone(info["process"])
             self.assertNotIn(install_id, ONLINE_INSTALL_STOPPING)
-            download.assert_called_once()
+            download.assert_not_called()
             run_command.assert_not_called()
+
+    def test_online_install_worker_timeout_is_terminal_and_persisted(self):
+        with isolated_app() as (_app, base_dir):
+            from fls_manager.online_scripts.constants import (
+                ONLINE_INSTALL_JOBS_FILE,
+                ONLINE_INSTALL_RUNNING,
+            )
+            from fls_manager.online_scripts.install import install_worker, InstallTimeout
+
+            install_id = "install-timeout"
+            ONLINE_INSTALL_RUNNING[install_id] = {
+                "id": install_id,
+                "script_id": "demo",
+                "script_name": "Demo script",
+                "log_file": str(base_dir / "install.log"),
+                "running": True,
+                "status": "准备中",
+                "returncode": None,
+                "error": "",
+                "process": None,
+            }
+            item = {
+                "id": "demo",
+                "name": "Demo script",
+                "type": "raw",
+                "link": "https://example.invalid/demo.sh",
+                "link_name": "demo.sh",
+                "install": "echo should-not-run",
+            }
+
+            with patch("fls_manager.online_scripts.install.append_log"):
+                with patch(
+                    "fls_manager.online_scripts.install.download_online_script_logged",
+                    side_effect=InstallTimeout("安装命令超时，超过 1 秒"),
+                ):
+                    install_worker(install_id, item)
+
+            info = ONLINE_INSTALL_RUNNING[install_id]
+            self.assertFalse(info["running"])
+            self.assertEqual(info["status"], "超时")
+            self.assertIsNone(info["returncode"])
+            self.assertIn("超过 1 秒", info["error"])
+            persisted = json.loads(ONLINE_INSTALL_JOBS_FILE.read_text(encoding="utf-8"))
+            self.assertEqual(persisted[install_id]["status"], "超时")
+
+    def test_online_install_restart_unknown_and_stop_api_have_distinct_results(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import (
+                ONLINE_INSTALL_JOBS_FILE,
+                ONLINE_INSTALL_RUNNING,
+            )
+
+            snapshot = {
+                "id": "restart-install",
+                "script_id": "demo",
+                "script_name": "Demo",
+                "log_file": str(base_dir / "restart.log"),
+                "running": True,
+                "status": "运行中",
+                "start_time": 1,
+                "returncode": None,
+                "error": "",
+                "updated_at": "2026-11-14 04:00:00",
+            }
+            ONLINE_INSTALL_JOBS_FILE.write_text(
+                json.dumps({"restart-install": snapshot}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            ONLINE_INSTALL_RUNNING.clear()
+            client = app.test_client()
+
+            response = client.get(
+                "/api/online-scripts/log/restart-install?lines=20",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertFalse(payload["running"])
+            self.assertEqual(payload["status"], "结果未知")
+            self.assertIn("面板重启后无法确认", payload["error"])
+
+            response = client.post(
+                "/api/online-scripts/install-stop/restart-install",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(response.status_code, 409)
+            self.assertIn("结果未知", response.get_json()["msg"])
+
+            response = client.get(
+                "/api/online-scripts/log/does-not-exist",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(response.status_code, 404)
+            self.assertEqual(response.get_json()["status"], "记录不存在")
+
+    def test_online_install_duplicate_start_is_rejected_while_active(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING
+
+            ONLINE_INSTALL_RUNNING["active-install"] = {
+                "id": "active-install",
+                "script_id": "demo",
+                "running": True,
+            }
+            item = {
+                "id": "demo",
+                "name": "Demo script",
+                "type": "raw",
+                "link": "https://example.invalid/demo.sh",
+                "link_name": "demo.sh",
+            }
+            with patch(
+                "fls_manager.routes.online_scripts.install.get_online_script",
+                return_value=item,
+            ), patch(
+                "fls_manager.routes.online_scripts.install.start_install_thread"
+            ) as start_install_thread:
+                response = app.test_client().post(
+                    "/online-scripts/install/demo",
+                    data={"force": "1"},
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(
+                parse_qs(urlsplit(response.headers["Location"]).query),
+                {"msg": ["该脚本正在安装中"]},
+            )
+            start_install_thread.assert_not_called()
+
+    def test_online_install_stop_api_returns_success_for_active_job(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING
+
+            ONLINE_INSTALL_RUNNING["stop-api-install"] = {
+                "id": "stop-api-install",
+                "script_id": "demo",
+                "script_name": "Demo",
+                "log_file": str(base_dir / "install.log"),
+                "running": True,
+                "status": "运行中",
+                "returncode": None,
+                "error": "",
+                "process": None,
+            }
+            with patch("fls_manager.online_scripts.install.append_log"):
+                with patch(
+                    "fls_manager.online_scripts.install.terminate_install_process"
+                ):
+                    response = app.test_client().post(
+                        "/api/online-scripts/install-stop/stop-api-install",
+                        headers={"X-Token": TOKEN},
+                    )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.get_json()["ok"])
+            self.assertEqual(
+                ONLINE_INSTALL_RUNNING["stop-api-install"]["status"], "停止中"
+            )
 
     def test_about_job_log_invalid_lines_returns_json_error(self):
         with isolated_app() as (app, _base_dir):
