@@ -1895,6 +1895,51 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertNotIn("Batch failed", csv_text)
             self.assertNotIn("Other task", csv_text)
 
+    def test_history_and_task_log_render_unknown_restart_result(self):
+        with isolated_app() as (app, base_dir):
+            data_dir = base_dir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            (data_dir / "tasks.json").write_text(
+                json.dumps([{
+                    "id": "restart-task",
+                    "name": "Restart task",
+                    "command": "echo restart",
+                    "enabled": True,
+                }]),
+                encoding="utf-8",
+            )
+            (data_dir / "task_history.json").write_text(
+                json.dumps([{
+                    "id": "restart-history",
+                    "task_id": "restart-task",
+                    "task_name": "Restart task",
+                    "command": "echo restart",
+                    "status": "unknown",
+                    "start_at": "2026-11-14 09:00:00",
+                    "end_at": "2026-11-14 09:01:00",
+                    "message": "面板重启后无法确认任务进程是否仍存活",
+                }], ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            client = app.test_client()
+            history_response = client.get(
+                "/history?status=unknown",
+                headers={"X-Token": TOKEN},
+            )
+            log_response = client.get(
+                "/log/restart-task",
+                headers={"X-Token": TOKEN},
+            )
+
+            self.assertEqual(history_response.status_code, 200)
+            history_html = history_response.get_data(as_text=True)
+            self.assertIn('<option value="unknown" selected>结果未知</option>', history_html)
+            self.assertIn('<span class="status-badge status-error" role="status">结果未知</span>', history_html)
+            self.assertIn("面板重启后无法确认任务进程是否仍存活", history_html)
+            self.assertEqual(log_response.status_code, 200)
+            self.assertIn("结果未知", log_response.get_data(as_text=True))
+
     def test_dashboard_keeps_abnormal_history_summary_without_recent_runs(self):
         with isolated_app() as (app, base_dir):
             data_dir = base_dir / "data"

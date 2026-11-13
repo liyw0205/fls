@@ -2,6 +2,7 @@ import uuid
 
 from .paths import TASK_FILE, TASK_HISTORY_FILE, GLOBAL_ENV_FILE, PROXY_FILE, COLLECTION_FILE
 from .storage import read_json, write_json, mutate_json
+from .utils import now_str
 
 MAX_TASK_RETRY_ATTEMPTS = 5
 MIN_TASK_RETRY_INTERVAL_SECONDS = 5
@@ -10,6 +11,7 @@ DEFAULT_TASK_RETRY_INTERVAL_SECONDS = 60
 TASK_NOTIFY_MODES = ("none", "default", "custom")
 TASK_RANDOM_DELAY_MODES = ("none", "default", "custom")
 PROXY_TYPES = ("http", "https", "socks4", "socks5", "socks5h", "github")
+TASK_HISTORY_IN_FLIGHT_STATUSES = frozenset(("starting", "delaying", "running"))
 
 
 def _as_text(value, default=""):
@@ -327,6 +329,59 @@ def load_task_history():
 
 def save_task_history(items):
     write_json(TASK_HISTORY_FILE, list(items or [])[:TASK_HISTORY_LIMIT])
+
+
+def reconcile_task_history_after_restart(active_history_ids=None):
+    """Mark unfinished attempts as unknown without touching currently held handles."""
+    active_history_ids = {
+        str(history_id)
+        for history_id in (active_history_ids or ())
+        if str(history_id or "").strip()
+    }
+    recovered_at = now_str()
+    status_labels = {
+        "starting": "启动中",
+        "delaying": "延迟中",
+        "running": "运行中",
+    }
+    recovered_count = 0
+
+    def reconcile(data):
+        nonlocal recovered_count
+        history = data if isinstance(data, list) else []
+        history = [item for item in history if isinstance(item, dict)]
+        changed = False
+
+        for item in history:
+            status = str(item.get("status") or "")
+            if status not in TASK_HISTORY_IN_FLIGHT_STATUSES:
+                continue
+            if str(item.get("id") or "") in active_history_ids:
+                continue
+            if str(item.get("end_at") or "").strip():
+                continue
+
+            original_message = str(item.get("message") or "").strip()
+            message = (
+                "面板重启后无法确认任务进程是否仍存活；"
+                f"重启前状态：{status_labels.get(status, status)}"
+            )
+            if original_message:
+                message += f"；原说明：{original_message}"
+
+            item.update({
+                "status": "unknown",
+                "end_at": recovered_at,
+                "message": message,
+            })
+            changed = True
+            recovered_count += 1
+
+        return history[:TASK_HISTORY_LIMIT] if changed else None
+
+    mutate_json(TASK_HISTORY_FILE, [], reconcile)
+
+    return recovered_count
 
 
 def add_task_history(record):

@@ -96,6 +96,7 @@ def dashboard_history_badge(status):
         "starting": ("starting", "启动中"),
         "delaying": ("warning", "延迟中"),
         "start_failed": ("error", "启动失败"),
+        "unknown": ("error", "结果未知"),
     }
     tone, text = mapping.get(status, ("neutral", status or "-"))
     return status_badge(status, label=text, tone=tone)
@@ -139,6 +140,7 @@ HISTORY_STATUS_OPTIONS = [
     ("running", "运行中"),
     ("starting", "启动中"),
     ("delaying", "延迟中"),
+    ("unknown", "结果未知"),
 ]
 
 
@@ -711,7 +713,7 @@ def dashboard():
     history = load_task_history()
     abnormal_history = [
         item for item in history
-        if str(item.get("status") or "") in ("failed", "timeout", "start_failed")
+        if str(item.get("status") or "") in ("failed", "timeout", "start_failed", "unknown")
     ][:8]
 
     try:

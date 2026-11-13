@@ -61,7 +61,7 @@
 - `task_id`：字符串，任务 ID。
 - `task_name`：字符串，任务名快照。
 - `command`：字符串，任务命令快照。
-- `status`：字符串，常见值包括 `success`、`failed`、`timeout`、`stopped`、`running`、`starting`、`delaying`、`start_failed`。`running`、`starting` 和 `delaying` 只表示面板当前进程仍持有运行状态；面板重启后不能据此确认外部进程仍存活。
+- `status`：字符串，常见值包括 `success`、`failed`、`timeout`、`stopped`、`unknown`、`running`、`starting`、`delaying`、`start_failed`。`running`、`starting` 和 `delaying` 只表示面板当前进程仍持有运行状态；面板启动时会把没有结束时间的这些旧记录改为 `unknown`，因为重启后不能据此确认外部进程仍存活。
 - `source`：字符串，运行来源，例如 `manual`、`cron`、`retry`。
 - `retry_attempt`：整数，当前重试次数。
 - `max_retries`：整数，最大重试次数。
@@ -78,6 +78,7 @@
 - `save_task_history()` 最多保留最近 `500` 条记录。
 - `add_task_history()` 会把新记录插入到数组开头并按上限裁剪。
 - `update_task_history()` 按 `id` 更新第一条匹配记录；找不到或传空 ID 时返回 `False`。
+- 面板启动时会幂等恢复未结束的 `running`、`starting`、`delaying` 记录为 `unknown`，写入结束时间并保留原说明、日志路径和退出码；这不表示外部进程已被终止。
 - `task_history_for_task(task_id, limit)` 按 `task_id` 过滤并按传入上限返回，最少返回上限为 `1`。
 
 ## data/config.json

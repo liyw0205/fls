@@ -29,6 +29,15 @@ PENDING_RETRIES = {}
 _RUNNING_LOCK = threading.RLock()
 
 
+def running_history_ids():
+    with _RUNNING_LOCK:
+        return {
+            str(info.get("history_id"))
+            for info in RUNNING.values()
+            if info.get("history_id")
+        }
+
+
 def _pop_running(task_id, history_id=None):
     with _RUNNING_LOCK:
         info = RUNNING.get(task_id)
