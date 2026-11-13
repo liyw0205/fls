@@ -228,6 +228,13 @@ def history_table_rows(items):
     return rows
 
 
+def parse_history_page(value):
+    try:
+        return max(1, int(value or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
 def filter_history_items(q="", status=""):
     q = str(q or "").strip()
     status = str(status or "").strip()
@@ -583,7 +590,7 @@ def api_dashboard_runtime():
 def history_page():
     q = request.args.get("q", "").strip()
     status = request.args.get("status", "").strip()
-    page = max(1, int(request.args.get("page", "1") or 1))
+    page = parse_history_page(request.args.get("page", "1"))
     per_page = 30
     items, q, status = filter_history_items(q, status)
 

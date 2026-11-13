@@ -1828,6 +1828,55 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertNotIn("Beta", html)
             self.assertNotIn("hidden", html)
 
+    def test_history_pagination_normalizes_page_and_preserves_filters(self):
+        with isolated_app() as (app, base_dir):
+            data_dir = base_dir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            records = [
+                {
+                    "id": f"history-{index}",
+                    "task_id": "batch",
+                    "task_name": f"Batch {index:02d}",
+                    "command": "echo batch",
+                    "status": "success",
+                    "message": "done",
+                }
+                for index in range(31)
+            ]
+            (data_dir / "task_history.json").write_text(
+                json.dumps(records, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            client = app.test_client()
+            invalid = client.get(
+                "/history?page=invalid&q=Batch&status=success",
+                headers={"X-Token": TOKEN},
+            )
+            negative = client.get(
+                "/history?page=-4&q=Batch&status=success",
+                headers={"X-Token": TOKEN},
+            )
+            oversized = client.get(
+                "/history?page=999&q=Batch&status=success",
+                headers={"X-Token": TOKEN},
+            )
+
+            self.assertEqual(invalid.status_code, 200)
+            invalid_html = invalid.get_data(as_text=True)
+            self.assertIn("第 <b>1</b> / <b>2</b> 页", invalid_html)
+            self.assertIn(
+                'href="/history?page=2&amp;q=Batch&amp;status=success"',
+                invalid_html,
+            )
+            self.assertEqual(negative.status_code, 200)
+            self.assertIn("第 <b>1</b> / <b>2</b> 页", negative.get_data(as_text=True))
+            self.assertEqual(oversized.status_code, 200)
+            oversized_html = oversized.get_data(as_text=True)
+            self.assertIn("第 <b>2</b> / <b>2</b> 页", oversized_html)
+            self.assertIn("Batch 00", invalid_html)
+            self.assertIn("Batch 30", oversized_html)
+
     def test_history_export_uses_filters_exports_all_matches_and_neutralizes_formulas(self):
         with isolated_app() as (app, base_dir):
             data_dir = base_dir / "data"
@@ -1872,7 +1921,7 @@ class UiRouteComponentTests(unittest.TestCase):
                 headers={"X-Token": TOKEN},
             )
             response = client.get(
-                "/history/export?q=Batch&status=success",
+                "/history/export?q=Batch&status=success&page=999",
                 headers={"X-Token": TOKEN},
             )
 
