@@ -88,7 +88,7 @@ if __name__ == "__main__":
     print(f"访问地址: http://{host}:{port}")
 
     if token:
-        print(f"Token访问: http://服务器IP:{port}/?token={token}")
+        print("Token 已配置，请使用 /login 或 API 的 X-Token 请求头访问")
     else:
         print("警告: 当前未设置登录 Token，首次访问将进入 /setup 引导设置")
 

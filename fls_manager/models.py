@@ -1,7 +1,7 @@
 import uuid
 
 from .paths import TASK_FILE, TASK_HISTORY_FILE, GLOBAL_ENV_FILE, PROXY_FILE, COLLECTION_FILE
-from .storage import read_json, write_json
+from .storage import read_json, write_json, mutate_json
 
 MAX_TASK_RETRY_ATTEMPTS = 5
 MIN_TASK_RETRY_INTERVAL_SECONDS = 5
@@ -330,26 +330,35 @@ def save_task_history(items):
 
 
 def add_task_history(record):
-    history = load_task_history()
-    history.insert(0, dict(record or {}))
-    save_task_history(history)
+    def add_record(data):
+        history = data if isinstance(data, list) else []
+        history = [item for item in history if isinstance(item, dict)]
+        history.insert(0, dict(record or {}))
+        return history[:TASK_HISTORY_LIMIT]
+
+    mutate_json(TASK_HISTORY_FILE, [], add_record)
 
 
 def update_task_history(record_id, updates):
     if not record_id:
         return False
 
-    history = load_task_history()
     changed = False
 
-    for item in history:
-        if item.get("id") == record_id:
-            item.update(updates or {})
-            changed = True
-            break
+    def update_record(data):
+        nonlocal changed
+        history = data if isinstance(data, list) else []
+        history = [item for item in history if isinstance(item, dict)]
 
-    if changed:
-        save_task_history(history)
+        for item in history:
+            if item.get("id") == record_id:
+                item.update(updates or {})
+                changed = True
+                break
+
+        return history[:TASK_HISTORY_LIMIT] if changed else None
+
+    mutate_json(TASK_HISTORY_FILE, [], update_record)
 
     return changed
 

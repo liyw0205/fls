@@ -48,6 +48,8 @@ FLS_PORT=5701 FLS_TOKEN=123456 sh fls.sh restart
 | `FLS_REPO_BRANCH` | 覆盖仓库分支 |
 | `FLS_PORT` | 面板端口 |
 | `FLS_TOKEN` | 临时管理 Token |
+| `FLS_TRUSTED_PROXIES` | 可提供 `X-Forwarded-For` 的代理 IP/CIDR，逗号分隔；默认不信任任何代理 |
+| `FLS_ALLOW_QUERY_TOKEN` | 设为 `1` 临时启用 URL 查询 Token 兼容；默认禁用，优先使用登录页或 `X-Token` |
 
 Termux 专用变量见 [TERMUX.md](TERMUX.md)，KernelSU/Magisk 容器变量见
 [ANDROID_MODULE.md](ANDROID_MODULE.md)。

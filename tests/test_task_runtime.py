@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -295,6 +296,51 @@ class TaskRuntimeTests(unittest.TestCase):
             self.assertFalse(ok)
             self.assertEqual(msg, "命令解析失败：bad")
 
+    def test_run_task_now_reserves_same_task_once_under_concurrency(self):
+        with isolated_fls_modules():
+            from fls_manager import task_runner
+
+            task = {
+                "id": "t1",
+                "name": "Concurrent Task",
+                "command": "echo ok",
+            }
+            log_file = Path(os.environ["FLS_BASE_DIR"]) / "log" / "concurrent.log"
+            cmd_info = {
+                "cmd": "echo ok",
+                "shell": True,
+                "cwd": str(Path(os.environ["FLS_BASE_DIR"])),
+                "display_cmd": "echo ok",
+            }
+            barrier = threading.Barrier(2)
+            results = []
+
+            def get_task(_task_id):
+                barrier.wait(timeout=2)
+                return task
+
+            def call_run():
+                results.append(task_runner.run_task_now("t1"))
+
+            try:
+                with mock.patch.object(task_runner, "get_task", side_effect=get_task), \
+                        mock.patch.object(task_runner, "build_command", return_value=cmd_info), \
+                        mock.patch.object(task_runner, "log_file_for_task", return_value=log_file), \
+                        mock.patch.object(task_runner, "_start_task_worker"):
+                    callers = [threading.Thread(target=call_run) for _ in range(2)]
+                    for caller in callers:
+                        caller.start()
+                    for caller in callers:
+                        caller.join(timeout=3)
+
+                self.assertEqual(sorted(results, key=lambda item: item[0]), [
+                    (False, "任务已在运行中"),
+                    (True, "已提交启动"),
+                ])
+                self.assertEqual(len(task_runner.RUNNING), 1)
+            finally:
+                cleanup_runtime_state()
+
     def test_stop_task_now_removes_running_state_and_logs(self):
         with isolated_fls_modules():
             from fls_manager import task_runner
@@ -313,7 +359,7 @@ class TaskRuntimeTests(unittest.TestCase):
             self.assertTrue(ok)
             self.assertEqual(msg, "已结束")
             self.assertNotIn("t1", task_runner.RUNNING)
-            self.assertIn("t1", task_runner.STOPPED_MANUALLY)
+            self.assertIn(("t1", None), task_runner.STOPPED_MANUALLY)
             self.assertIn("手动结束任务", log_file.read_text(encoding="utf-8"))
 
             self.assertEqual(
@@ -321,11 +367,67 @@ class TaskRuntimeTests(unittest.TestCase):
                 (False, "任务未运行"),
             )
 
+    def test_stop_starting_task_releases_reservation_before_closing_log(self):
+        with isolated_fls_modules():
+            from fls_manager import task_runner
+
+            log_file = Path(os.environ["FLS_BASE_DIR"]) / "log" / "stop-starting.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_fp = open(log_file, "ab", buffering=0)
+            task_runner.RUNNING["t1"] = {
+                "status": "starting",
+                "process": None,
+                "history_id": "history-1",
+                "history_start_ts": 100.0,
+                "log_file": str(log_file),
+                "log_fp": log_fp,
+            }
+            append_entered = threading.Event()
+            release_append = threading.Event()
+            result = []
+
+            def pause_append(*_args):
+                append_entered.set()
+                release_append.wait(timeout=2)
+
+            try:
+                with mock.patch.object(
+                    task_runner,
+                    "append_task_log",
+                    side_effect=pause_append,
+                ):
+                    stopper = threading.Thread(
+                        target=lambda: result.append(
+                            task_runner.stop_task_now("t1")
+                        )
+                    )
+                    stopper.start()
+                    self.assertTrue(append_entered.wait(timeout=2))
+                    attached = task_runner._update_running_attempt(
+                        "t1",
+                        "history-1",
+                        {"process": FakeProc(return_code=None)},
+                    )
+                    self.assertFalse(attached)
+                    release_append.set()
+                    stopper.join(timeout=3)
+
+                self.assertFalse(stopper.is_alive())
+                self.assertEqual(result, [(True, "已结束")])
+                self.assertNotIn("t1", task_runner.RUNNING)
+            finally:
+                release_append.set()
+                with contextlib.suppress(Exception):
+                    log_fp.close()
+
     def test_start_task_worker_builds_environment_starts_popen_and_watcher(self):
         with isolated_fls_modules():
             from fls_manager import task_runner
 
-            task_runner.RUNNING["t1"] = {"status": "starting"}
+            task_runner.RUNNING["t1"] = {
+                "status": "starting",
+                "history_id": "history-1",
+            }
             log_file = Path(os.environ["FLS_BASE_DIR"]) / "log" / "worker.log"
             log_file.parent.mkdir(parents=True, exist_ok=True)
             log_fp = open(log_file, "ab", buffering=0)
@@ -429,11 +531,54 @@ class TaskRuntimeTests(unittest.TestCase):
             self.assertEqual(watcher.args[-3:], ("history-1", 100.0, 0))
             self.assertTrue(watcher.started)
 
+    def test_stale_start_worker_cannot_claim_a_new_reservation(self):
+        with isolated_fls_modules():
+            from fls_manager import task_runner
+
+            log_file = Path(os.environ["FLS_BASE_DIR"]) / "log" / "stale-worker.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_fp = open(log_file, "ab", buffering=0)
+            task_runner.RUNNING["t1"] = {
+                "status": "starting",
+                "history_id": "new-history",
+            }
+
+            try:
+                with mock.patch.object(task_runner.subprocess, "Popen") as popen:
+                    task_runner._start_task_worker(
+                        "t1",
+                        {"id": "t1", "name": "Demo", "command": "echo stale"},
+                        {
+                            "cmd": "echo stale",
+                            "shell": True,
+                            "cwd": str(Path(os.environ["FLS_BASE_DIR"])),
+                        },
+                        "FLS-Demo",
+                        str(log_file),
+                        log_fp,
+                        "manual",
+                        "old-history",
+                        100.0,
+                        0,
+                    )
+
+                popen.assert_not_called()
+                self.assertEqual(
+                    task_runner.RUNNING["t1"]["history_id"],
+                    "new-history",
+                )
+            finally:
+                with contextlib.suppress(Exception):
+                    log_fp.close()
+
     def test_start_task_worker_records_start_failed_history_and_clears_running(self):
         with isolated_fls_modules():
             from fls_manager import paths, task_runner
 
-            task_runner.RUNNING["t1"] = {"status": "starting"}
+            task_runner.RUNNING["t1"] = {
+                "status": "starting",
+                "history_id": "history-1",
+            }
             log_file = Path(os.environ["FLS_BASE_DIR"]) / "log" / "start-failed.log"
             log_file.parent.mkdir(parents=True, exist_ok=True)
             log_fp = open(log_file, "ab", buffering=0)
@@ -611,6 +756,7 @@ class TaskRuntimeTests(unittest.TestCase):
                 "process": FakeProc(7),
                 "log_file": str(log_file),
                 "log_fp": log_fp,
+                "history_id": "history-1",
             }
             write_json(
                 paths.TASK_HISTORY_FILE,
@@ -695,6 +841,7 @@ class TaskRuntimeTests(unittest.TestCase):
                 "process": FakeProc(2),
                 "log_file": str(log_file),
                 "log_fp": log_fp,
+                "history_id": "history-1",
             }
 
             try:

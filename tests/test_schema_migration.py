@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -249,6 +250,67 @@ class SchemaMigrationTests(unittest.TestCase):
                 ["h0", "h1", "h2"],
             )
             self.assertNotIn("h3", [item["id"] for item in trimmed])
+
+    def test_task_history_concurrent_updates_keep_all_records(self):
+        with isolated_fls_modules():
+            from fls_manager import models, paths
+
+            write_json(paths.TASK_HISTORY_FILE, [])
+            barrier = threading.Barrier(8)
+            errors = []
+
+            def add_record(index):
+                try:
+                    barrier.wait(timeout=2)
+                    models.add_task_history({
+                        "id": f"concurrent-{index}",
+                        "task_id": f"task-{index}",
+                        "status": "starting",
+                    })
+                except BaseException as exc:
+                    errors.append(exc)
+
+            workers = [threading.Thread(target=add_record, args=(index,)) for index in range(8)]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(timeout=3)
+            self.assertTrue(all(not worker.is_alive() for worker in workers))
+            self.assertEqual(errors, [])
+
+            persisted = read_json(paths.TASK_HISTORY_FILE)
+            self.assertEqual(
+                {item["id"] for item in persisted},
+                {f"concurrent-{index}" for index in range(8)},
+            )
+
+            update_barrier = threading.Barrier(8)
+            errors = []
+
+            def update_record(index):
+                try:
+                    update_barrier.wait(timeout=2)
+                    if not models.update_task_history(
+                        f"concurrent-{index}",
+                        {"status": "success"},
+                    ):
+                        raise AssertionError(
+                            f"history record concurrent-{index} was not updated"
+                        )
+                except BaseException as exc:
+                    errors.append(exc)
+
+            workers = [threading.Thread(target=update_record, args=(index,)) for index in range(8)]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(timeout=3)
+            self.assertTrue(all(not worker.is_alive() for worker in workers))
+            self.assertEqual(errors, [])
+
+            persisted = read_json(paths.TASK_HISTORY_FILE)
+            self.assertEqual(len(persisted), 8)
+            self.assertTrue(all(item["status"] == "success" for item in persisted))
 
     def test_load_global_env_normalizes_keys_and_values(self):
         with isolated_fls_modules():
