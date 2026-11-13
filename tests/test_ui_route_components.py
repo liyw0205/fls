@@ -3,13 +3,18 @@ import csv
 import io
 import json
 import os
+import signal
+import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
+from html import escape
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import parse_qs, urlsplit
-from unittest.mock import patch
+from urllib.parse import parse_qs, quote, urlsplit
+from unittest.mock import Mock, patch
 
 sys.dont_write_bytecode = True
 
@@ -63,7 +68,401 @@ def shutdown_scheduler():
             scheduler.shutdown(wait=False)
 
 
+@contextlib.contextmanager
+def ready_debug_process(ignore_sigterm=False):
+    with tempfile.TemporaryDirectory(prefix="fls-debug-process-") as temp_dir:
+        ready = Path(temp_dir) / "ready"
+        handler = "SIG_IGN" if ignore_sigterm else "SIG_DFL"
+        code = (
+            "import pathlib, signal, sys, time\n"
+            f"signal.signal(signal.SIGTERM, signal.{handler})\n"
+            "pathlib.Path(sys.argv[1]).touch()\n"
+            "time.sleep(30)\n"
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", code, str(ready)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=os.name != "nt",
+        )
+        try:
+            deadline = time.monotonic() + 3
+            while not ready.exists():
+                if proc.poll() is not None or time.monotonic() >= deadline:
+                    raise AssertionError("Debug child did not become ready within 3 seconds")
+                time.sleep(0.01)
+            if proc.poll() is not None:
+                raise AssertionError("Debug child exited before the stop request")
+            yield proc
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=3)
+
+
 class UiRouteComponentTests(unittest.TestCase):
+    def test_debug_stop_failure_keeps_process_and_returns_409(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.routes.scripts.debug import SCRIPT_DEBUG_RUNNING
+
+            for running in (True, False):
+                with self.subTest(running=running):
+                    proc = SimpleNamespace(pid=4321, poll=Mock(return_value=None))
+                    SCRIPT_DEBUG_RUNNING["d1"] = {
+                        "running": running, "process": proc, "returncode": None, "error": "",
+                    }
+                    with patch("fls_manager.routes.scripts.debug.terminate_debug_process", return_value=False):
+                        response = app.test_client().post("/scripts/debug-stop/d1", headers={"X-Token": TOKEN})
+
+                    self.assertEqual(response.status_code, 409)
+                    self.assertNotIn("Location", response.headers)
+                    self.assertTrue(SCRIPT_DEBUG_RUNNING["d1"]["running"])
+                    self.assertIs(SCRIPT_DEBUG_RUNNING["d1"]["process"], proc)
+                    self.assertIsNone(SCRIPT_DEBUG_RUNNING["d1"]["returncode"])
+                    self.assertIn("停止失败", response.get_data(as_text=True))
+
+    def test_debug_stop_success_preserves_redirect_and_clears_process(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.routes.scripts.debug import SCRIPT_DEBUG_RUNNING
+
+            proc = SimpleNamespace(pid=4321, poll=Mock(side_effect=[None, -15]))
+            log_file = base_dir / "log" / "script-debug-d1.log"
+            SCRIPT_DEBUG_RUNNING["d1"] = {
+                "running": True, "process": proc, "returncode": None, "error": "",
+                "log_file": str(log_file),
+            }
+            with patch("fls_manager.routes.scripts.debug.terminate_debug_process", return_value=True):
+                response = app.test_client().post("/scripts/debug-stop/d1?back=/pull", headers={"X-Token": TOKEN})
+
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.headers["Location"], "/pull")
+            self.assertFalse(SCRIPT_DEBUG_RUNNING["d1"]["running"])
+            self.assertIsNone(SCRIPT_DEBUG_RUNNING["d1"]["process"])
+            self.assertEqual(SCRIPT_DEBUG_RUNNING["d1"]["returncode"], -15)
+            self.assertEqual(SCRIPT_DEBUG_RUNNING["d1"]["error"], "用户手动停止")
+            self.assertEqual(log_file.read_text(encoding="utf-8").count("用户手动停止调试"), 1)
+
+            repeated = app.test_client().post("/scripts/debug-stop/d1", headers={"X-Token": TOKEN})
+            self.assertEqual(repeated.status_code, 302)
+            self.assertEqual(log_file.read_text(encoding="utf-8").count("用户手动停止调试"), 1)
+
+    def test_debug_stop_missing_record_returns_404_without_stopping(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.routes.scripts.debug import SCRIPT_DEBUG_RUNNING
+
+            with patch("fls_manager.routes.scripts.debug.terminate_debug_process") as terminate:
+                client = app.test_client()
+                response = client.post("/scripts/debug-stop/missing", headers={"X-Token": TOKEN})
+
+            self.assertEqual(response.status_code, 404)
+            self.assertIn("调试记录不存在", response.get_data(as_text=True))
+            self.assertNotIn("Location", response.headers)
+            self.assertEqual(SCRIPT_DEBUG_RUNNING, {})
+            terminate.assert_not_called()
+            self.assertEqual(client.get("/logs?back=%2Fpull", headers={"X-Token": TOKEN}).status_code, 200)
+
+    def test_debug_stop_completed_record_preserves_result_and_log(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.routes.scripts.debug import SCRIPT_DEBUG_RUNNING
+
+            log_file = base_dir / "log" / "script-debug-d1.log"
+            log_file.write_text("original result\n", encoding="utf-8")
+            for return_code, error in ((0, ""), (7, "original error")):
+                with self.subTest(returncode=return_code):
+                    info = {
+                        "running": False, "process": None, "returncode": return_code,
+                        "error": error, "log_file": str(log_file),
+                    }
+                    SCRIPT_DEBUG_RUNNING["d1"] = info.copy()
+                    with patch("fls_manager.routes.scripts.debug.terminate_debug_process") as terminate:
+                        response = app.test_client().post("/scripts/debug-stop/d1?back=/pull?p=nested", headers={"X-Token": TOKEN})
+
+                    self.assertEqual(response.status_code, 302)
+                    self.assertEqual(response.headers["Location"], "/pull?p=nested")
+                    self.assertEqual(SCRIPT_DEBUG_RUNNING["d1"], info)
+                    self.assertEqual(log_file.read_text(encoding="utf-8"), "original result\n")
+                    terminate.assert_not_called()
+
+    def test_debug_stop_exited_process_updates_stale_record_without_manual_stop(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.routes.scripts.debug import SCRIPT_DEBUG_RUNNING
+
+            for running in (True, False):
+                with self.subTest(running=running):
+                    proc = SimpleNamespace(poll=Mock(return_value=7))
+                    SCRIPT_DEBUG_RUNNING["d1"] = {
+                        "running": running, "process": proc, "returncode": None, "error": "original error",
+                    }
+                    with patch("fls_manager.routes.scripts.debug.terminate_debug_process") as terminate:
+                        response = app.test_client().post("/scripts/debug-stop/d1", headers={"X-Token": TOKEN})
+
+                    self.assertEqual(response.status_code, 302)
+                    self.assertFalse(SCRIPT_DEBUG_RUNNING["d1"]["running"])
+                    self.assertIsNone(SCRIPT_DEBUG_RUNNING["d1"]["process"])
+                    self.assertEqual(SCRIPT_DEBUG_RUNNING["d1"]["returncode"], 7)
+                    self.assertEqual(SCRIPT_DEBUG_RUNNING["d1"]["error"], "original error")
+                    terminate.assert_not_called()
+
+    def test_debug_stop_missing_process_cannot_confirm_exit(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.routes.scripts.debug import SCRIPT_DEBUG_RUNNING
+
+            SCRIPT_DEBUG_RUNNING["d1"] = {"running": True, "process": None, "returncode": None}
+            with patch("fls_manager.routes.scripts.debug.terminate_debug_process") as terminate:
+                response = app.test_client().post("/scripts/debug-stop/d1", headers={"X-Token": TOKEN})
+
+            self.assertEqual(response.status_code, 409)
+            self.assertTrue(SCRIPT_DEBUG_RUNNING["d1"]["running"])
+            self.assertIsNone(SCRIPT_DEBUG_RUNNING["d1"]["returncode"])
+            terminate.assert_not_called()
+
+    def test_debug_stop_poll_error_keeps_process_and_returns_409(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.routes.scripts.debug import SCRIPT_DEBUG_RUNNING
+
+            proc = SimpleNamespace(poll=Mock(side_effect=OSError("poll failed")))
+            SCRIPT_DEBUG_RUNNING["d1"] = {"running": True, "process": proc, "returncode": None}
+            response = app.test_client().post("/scripts/debug-stop/d1", headers={"X-Token": TOKEN})
+
+            self.assertEqual(response.status_code, 409)
+            self.assertTrue(SCRIPT_DEBUG_RUNNING["d1"]["running"])
+            self.assertIs(SCRIPT_DEBUG_RUNNING["d1"]["process"], proc)
+
+    def test_debug_stop_rechecks_exit_after_termination(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.routes.scripts.debug import SCRIPT_DEBUG_RUNNING
+
+            for confirmed, final_code, expected_http in ((True, None, 409), (False, 7, 302)):
+                with self.subTest(confirmed=confirmed):
+                    proc = SimpleNamespace(poll=Mock(side_effect=[None, final_code]))
+                    SCRIPT_DEBUG_RUNNING["d1"] = {
+                        "running": True, "process": proc, "returncode": None, "error": "",
+                    }
+                    with patch("fls_manager.routes.scripts.debug.terminate_debug_process", return_value=confirmed):
+                        response = app.test_client().post("/scripts/debug-stop/d1", headers={"X-Token": TOKEN})
+
+                    self.assertEqual(response.status_code, expected_http)
+                    self.assertEqual(SCRIPT_DEBUG_RUNNING["d1"]["running"], final_code is None)
+                    self.assertEqual(SCRIPT_DEBUG_RUNNING["d1"]["returncode"], final_code)
+                    self.assertNotEqual(SCRIPT_DEBUG_RUNNING["d1"]["error"], "用户手动停止")
+
+    def test_debug_stop_failure_page_encodes_link_and_preserves_back_url(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.routes.scripts.debug import SCRIPT_DEBUG_RUNNING
+
+            debug_id = 'd<bad & "x">'
+            encoded_id = quote(debug_id, safe="")
+            back_url = '/pull?p=nested&name=<bad & "x">'
+            log_url = f"/scripts/debug-log/{encoded_id}?back={quote(back_url, safe='')}"
+            SCRIPT_DEBUG_RUNNING[debug_id] = {
+                "running": True, "process": SimpleNamespace(poll=Mock(return_value=None)),
+                "returncode": None, "error": "",
+            }
+            client = app.test_client()
+            with patch("fls_manager.routes.scripts.debug.terminate_debug_process", return_value=False):
+                response = client.post(f"/scripts/debug-stop/{encoded_id}?back={quote(back_url, safe='')}", headers={"X-Token": TOKEN})
+
+            html = response.get_data(as_text=True)
+            self.assertEqual(response.status_code, 409)
+            self.assertIn('<h1 class="page-title">停止失败</h1>', html)
+            self.assertIn("无法确认调试进程已退出", html)
+            self.assertIn(f'href="{escape(log_url, quote=True)}"', html)
+            self.assertNotIn(debug_id, html)
+            self.assertNotIn(back_url, html)
+            self.assertIn('name="viewport"', html)
+            self.assertIn('id="main-content"', html)
+            for css in ("fls.css", "fls_responsive.css", "fls_theme.css", "fls_density.css"):
+                self.assertEqual(client.get(f"/static/{css}", headers={"X-Token": TOKEN}).status_code, 200)
+
+            log_response = client.get(log_url, headers={"X-Token": TOKEN})
+            self.assertEqual(log_response.status_code, 200)
+            self.assertIn("停止调试运行", log_response.get_data(as_text=True))
+            self.assertIn(f'href="{escape(back_url, quote=True)}"', log_response.get_data(as_text=True))
+
+    def test_debug_stop_live_process_and_watcher_exit_without_fixed_delay(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.routes.scripts import debug
+
+            log_file = base_dir / "log" / "script-debug-live.log"
+            watcher = None
+            with open(log_file, "ab", buffering=0) as log_fp:
+                try:
+                    with ready_debug_process() as proc:
+                        debug.SCRIPT_DEBUG_RUNNING["live"] = {
+                            "running": True, "process": proc, "returncode": None,
+                            "error": "", "log_file": str(log_file),
+                        }
+                        watcher = threading.Thread(target=debug.script_debug_watch, args=("live", proc, log_fp), daemon=True)
+                        watcher.start()
+                        client = app.test_client()
+                        started = time.monotonic()
+                        response = client.post("/scripts/debug-stop/live", headers={"X-Token": TOKEN})
+                        elapsed = time.monotonic() - started
+
+                        self.assertEqual(response.status_code, 302)
+                        self.assertLess(elapsed, 0.9, f"Stop took {elapsed:.3f}s")
+                        self.assertIsNotNone(proc.poll())
+                        result = client.get("/api/scripts/debug-log/live", headers={"X-Token": TOKEN}).get_json()
+                        self.assertFalse(result["running"])
+                        self.assertEqual(result["returncode"], proc.returncode)
+                        self.assertEqual(result["error"], "用户手动停止")
+                        self.assertIsNone(debug.SCRIPT_DEBUG_RUNNING["live"]["process"])
+                finally:
+                    if watcher is not None:
+                        watcher.join(timeout=3)
+                        self.assertFalse(watcher.is_alive())
+            log_text = log_file.read_text(encoding="utf-8")
+            self.assertIn("调试运行结束", log_text)
+            self.assertEqual(log_text.count("用户手动停止调试"), 1)
+
+    @unittest.skipIf(os.name == "nt", "SIGTERM-ignore escalation requires POSIX")
+    def test_debug_stop_live_sigterm_ignoring_process_escalates_with_bounded_delay(self):
+        with isolated_app() as (app, _base_dir), ready_debug_process(ignore_sigterm=True) as proc:
+            from fls_manager.routes.scripts import debug
+
+            debug.SCRIPT_DEBUG_RUNNING["live"] = {"running": True, "process": proc, "returncode": None, "error": ""}
+            started = time.monotonic()
+            response = app.test_client().post("/scripts/debug-stop/live", headers={"X-Token": TOKEN})
+            elapsed = time.monotonic() - started
+
+            self.assertEqual(response.status_code, 302)
+            self.assertGreaterEqual(elapsed, 0.9)
+            self.assertLess(elapsed, 2.5, f"Stop took {elapsed:.3f}s")
+            self.assertEqual(proc.poll(), -signal.SIGKILL)
+            self.assertEqual(debug.SCRIPT_DEBUG_RUNNING["live"]["returncode"], -signal.SIGKILL)
+            self.assertFalse(debug.SCRIPT_DEBUG_RUNNING["live"]["running"])
+            self.assertIsNone(debug.SCRIPT_DEBUG_RUNNING["live"]["process"])
+
+    @unittest.skipIf(os.name == "nt", "Process-group permission failure requires POSIX")
+    def test_debug_stop_live_process_failure_is_retryable_and_stays_running(self):
+        with isolated_app() as (app, base_dir), ready_debug_process() as proc:
+            from fls_manager.routes.scripts import debug
+
+            log_file = base_dir / "log" / "script-debug-live.log"
+            log_file.write_text("running\n", encoding="utf-8")
+            debug.SCRIPT_DEBUG_RUNNING["live"] = {
+                "running": True, "process": proc, "returncode": None,
+                "error": "", "log_file": str(log_file),
+            }
+            client = app.test_client()
+            started = time.monotonic()
+            with patch.object(debug.os, "killpg", side_effect=PermissionError("denied")), \
+                    patch.object(proc, "terminate", side_effect=PermissionError("denied")), \
+                    patch.object(proc, "kill", side_effect=PermissionError("denied")):
+                response = client.post("/scripts/debug-stop/live", headers={"X-Token": TOKEN})
+            elapsed = time.monotonic() - started
+
+            self.assertEqual(response.status_code, 409)
+            self.assertLess(elapsed, 2.5, f"Failed stop took {elapsed:.3f}s")
+            self.assertIsNone(proc.poll())
+            self.assertIs(debug.SCRIPT_DEBUG_RUNNING["live"]["process"], proc)
+            result = client.get("/api/scripts/debug-log/live", headers={"X-Token": TOKEN}).get_json()
+            self.assertTrue(result["running"])
+            self.assertIsNone(result["returncode"])
+            self.assertIn("停止失败", result["error"])
+            self.assertEqual(log_file.read_text(encoding="utf-8"), "running\n")
+            log_response = client.get("/scripts/debug-log/live", headers={"X-Token": TOKEN})
+            self.assertEqual(log_response.status_code, 200)
+            self.assertIn("停止调试运行", log_response.get_data(as_text=True))
+
+            retried = client.post("/scripts/debug-stop/live", headers={"X-Token": TOKEN})
+            self.assertEqual(retried.status_code, 302)
+            self.assertIsNotNone(proc.poll())
+            self.assertFalse(debug.SCRIPT_DEBUG_RUNNING["live"]["running"])
+            self.assertEqual(debug.SCRIPT_DEBUG_RUNNING["live"]["returncode"], proc.returncode)
+            self.assertEqual(debug.SCRIPT_DEBUG_RUNNING["live"]["error"], "用户手动停止")
+            self.assertEqual(log_file.read_text(encoding="utf-8").count("用户手动停止调试"), 1)
+
+    def test_debug_termination_missing_or_completed_process(self):
+        with isolated_app():
+            from fls_manager.routes.scripts import debug
+
+            self.assertFalse(debug.terminate_debug_process(None))
+            proc = SimpleNamespace(poll=Mock(return_value=7), wait=Mock(), terminate=Mock(), kill=Mock())
+            self.assertTrue(debug.terminate_debug_process(proc))
+            proc.wait.assert_not_called()
+            proc.terminate.assert_not_called()
+            proc.kill.assert_not_called()
+
+    def test_debug_termination_waits_without_sleep_for_graceful_exit(self):
+        with isolated_app():
+            from fls_manager.routes.scripts import debug
+
+            proc = SimpleNamespace(
+                pid=4321, poll=Mock(side_effect=[None, 0]), wait=Mock(return_value=0),
+                terminate=Mock(), kill=Mock(),
+            )
+            with patch.object(debug, "os", SimpleNamespace(name="nt")), \
+                    patch.object(debug.time, "sleep") as sleep:
+                self.assertTrue(debug.terminate_debug_process(proc))
+
+            proc.terminate.assert_called_once_with()
+            proc.wait.assert_called_once_with(timeout=1)
+            proc.kill.assert_not_called()
+            sleep.assert_not_called()
+
+    def test_debug_termination_escalates_and_waits_for_posix_group_exit(self):
+        with isolated_app():
+            from fls_manager.routes.scripts import debug
+
+            proc = SimpleNamespace(
+                pid=4321, poll=Mock(side_effect=[None, -9]),
+                wait=Mock(side_effect=[debug.subprocess.TimeoutExpired("debug", 1), -9]),
+            )
+            fake_os = SimpleNamespace(name="posix", getpgid=Mock(return_value=4321), killpg=Mock())
+            with patch.object(debug, "os", fake_os):
+                self.assertTrue(debug.terminate_debug_process(proc))
+
+            self.assertEqual(fake_os.killpg.call_args_list, [
+                unittest.mock.call(4321, debug.signal.SIGTERM),
+                unittest.mock.call(4321, debug.signal.SIGKILL),
+            ])
+            self.assertEqual(proc.wait.call_count, 2)
+
+    def test_debug_termination_returns_false_when_process_survives(self):
+        with isolated_app():
+            from fls_manager.routes.scripts import debug
+
+            proc = SimpleNamespace(
+                pid=4321, poll=Mock(return_value=None),
+                wait=Mock(side_effect=debug.subprocess.TimeoutExpired("debug", 1)),
+                terminate=Mock(side_effect=PermissionError("denied")),
+                kill=Mock(side_effect=PermissionError("denied")),
+            )
+            with patch.object(debug, "os", SimpleNamespace(name="nt")):
+                self.assertFalse(debug.terminate_debug_process(proc))
+
+            proc.terminate.assert_called_once_with()
+            proc.kill.assert_called_once_with()
+            self.assertEqual(proc.wait.call_count, 2)
+
+    def test_debug_termination_falls_back_when_posix_group_signal_fails(self):
+        with isolated_app():
+            from fls_manager.routes.scripts import debug
+
+            proc = SimpleNamespace(
+                pid=4321, poll=Mock(side_effect=[None, 0]), wait=Mock(return_value=0),
+                terminate=Mock(), kill=Mock(),
+            )
+            fake_os = SimpleNamespace(name="posix", getpgid=Mock(side_effect=OSError("no group")))
+            with patch.object(debug, "os", fake_os):
+                self.assertTrue(debug.terminate_debug_process(proc))
+
+            proc.terminate.assert_called_once_with()
+            proc.wait.assert_called_once_with(timeout=1)
+            proc.kill.assert_not_called()
+
+    def test_debug_termination_wait_error_does_not_claim_success(self):
+        with isolated_app():
+            from fls_manager.routes.scripts import debug
+
+            proc = SimpleNamespace(
+                poll=Mock(return_value=None), wait=Mock(side_effect=OSError("wait failed")),
+                terminate=Mock(), kill=Mock(),
+            )
+            with patch.object(debug, "os", SimpleNamespace(name="nt")):
+                self.assertFalse(debug.terminate_debug_process(proc))
+
     def test_static_js_formats_structured_bulk_action_messages(self):
         js = (ROOT / "fls_manager" / "static" / "fls.js").read_text(
             encoding="utf-8"

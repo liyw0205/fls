@@ -34,26 +34,18 @@ def script_debug_log_file(debug_id, script_name):
 
 
 def terminate_debug_process(proc):
-    if not proc:
-        return
+    if proc is None:
+        return False
 
     try:
         if proc.poll() is not None:
-            return
+            return True
 
         if os.name == "nt":
             try:
                 proc.terminate()
             except Exception:
                 pass
-
-            time.sleep(1)
-
-            if proc.poll() is None:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
         else:
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
@@ -63,18 +55,33 @@ def terminate_debug_process(proc):
                 except Exception:
                     pass
 
-            time.sleep(1)
+        try:
+            proc.wait(timeout=1)
+            return proc.poll() is not None
+        except subprocess.TimeoutExpired:
+            pass
 
-            if proc.poll() is None:
+        if os.name == "nt":
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        else:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
                 try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    proc.kill()
                 except Exception:
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
+                    pass
+
+        try:
+            proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+        return proc.poll() is not None
     except Exception:
-        pass
+        return False
 
 
 def script_debug_watch(debug_id, proc, log_fp):
@@ -221,20 +228,52 @@ def scripts_debug_run(rel_path):
 
 @bp.route("/scripts/debug-stop/<debug_id>", methods=["POST"])
 def scripts_debug_stop(debug_id):
+    back_url = get_back_url("/pull")
     info = SCRIPT_DEBUG_RUNNING.get(debug_id)
 
-    if info and info.get("running"):
-        proc = info.get("process")
+    if not info:
+        body = page_header_card(
+            "调试记录不存在",
+            help_html="调试记录不存在或面板已重启，无法停止此调试运行。",
+            actions_html=f"""
+<a class="btn btn-gray" href="{h(back_url)}">返回</a>
+<a class="btn btn-blue" href="/logs?back={h(quote(back_url, safe=''))}">日志管理</a>
+""",
+        )
+        return layout("停止调试", "pull", body), 404
 
-        if proc:
-            terminate_debug_process(proc)
+    proc = info.get("process")
+    if proc is None and not info.get("running"):
+        return redirect(back_url)
 
-        info["running"] = False
-        info["process"] = None
+    return_code = None
+    stopped = False
+    try:
+        if proc is not None:
+            # The watcher may lag behind; use the actual process exit code.
+            return_code = proc.poll()
+            if return_code is None:
+                stopped = terminate_debug_process(proc)
+                return_code = proc.poll()
+    except Exception:
+        pass
+
+    if return_code is None:
+        info["running"] = True
+        info["error"] = "停止失败：无法确认调试进程已退出"
+        body = page_header_card(
+            "停止失败",
+            help_html=h(info["error"]),
+            actions_html=f'<a class="btn btn-gray" href="/scripts/debug-log/{h(quote(debug_id, safe=""))}?back={h(quote(back_url, safe=""))}">返回调试日志</a>',
+        )
+        return layout("停止调试", "pull", body), 409
+
+    info["running"] = False
+    info["returncode"] = return_code
+    info["process"] = None
+    if stopped:
         info["error"] = "用户手动停止"
-
         log_file = info.get("log_file")
-
         if log_file:
             try:
                 with open(log_file, "ab") as f:
@@ -244,7 +283,7 @@ def scripts_debug_stop(debug_id):
             except Exception:
                 pass
 
-    return redirect(get_back_url("/pull"))
+    return redirect(back_url)
 
 
 @bp.route("/scripts/debug-log/<debug_id>")
