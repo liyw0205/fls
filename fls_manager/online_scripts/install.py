@@ -2,8 +2,11 @@ import os
 import time
 import signal
 import shutil
+import stat
 import threading
 import subprocess
+import uuid
+from contextlib import closing
 
 from ..paths import SCRIPT_DIR
 from ..utils import now_str, LazyModule, prune_completed_records
@@ -284,34 +287,48 @@ def download_online_script_logged(item, proxy_id, log_file, force=False, install
 
         append_log(log_file, f"开始下载文件：{real_url}")
 
-        r = requests.get(
-            real_url,
-            timeout=60,
-            stream=True,
-            headers={"User-Agent": "Mozilla/5.0 FLS-Manager"},
-            proxies=requests_proxy_dict(proxy_id),
-        )
-        r.raise_for_status()
+        temp_file = target.with_name(f".fls-download-{uuid.uuid4().hex}.part")
+        temp_created = False
+        try:
+            with closing(requests.get(
+                real_url,
+                timeout=60,
+                stream=True,
+                headers={"User-Agent": "Mozilla/5.0 FLS-Manager"},
+                proxies=requests_proxy_dict(proxy_id),
+            )) as r:
+                r.raise_for_status()
+                with temp_file.open("xb") as f:
+                    temp_created = True
+                    for chunk in r.iter_content(chunk_size=1024 * 128):
+                        if install_id and online_install_should_stop(install_id):
+                            raise InstallStopped("安装已停止")
+                        if chunk:
+                            f.write(chunk)
+                    f.flush()
+                    os.fsync(f.fileno())
 
-        with open(target, "wb") as f:
-            for chunk in r.iter_content(chunk_size=1024 * 128):
+            if target.exists():
+                temp_file.chmod(stat.S_IMODE(target.stat().st_mode))
+            if target.suffix.lower() in (".sh", ".bash"):
+                temp_file.chmod(temp_file.stat().st_mode | 0o755)
+
+            # Stop and publication have one ordering; link provides atomic no-overwrite.
+            with ONLINE_INSTALL_LOCK:
                 if install_id and online_install_should_stop(install_id):
-                    append_log(log_file, "")
-                    append_log(log_file, "===== 检测到停止请求，已中断文件下载 =====")
                     raise InstallStopped("安装已停止")
-
-                if chunk:
-                    f.write(chunk)
+                if force:
+                    os.replace(temp_file, target)
+                else:
+                    os.link(temp_file, target)
+        finally:
+            if temp_created:
+                try:
+                    temp_file.unlink(missing_ok=True)
+                except OSError as e:
+                    append_log(log_file, f"清理临时下载文件失败：{temp_file}：{e}")
 
         append_log(log_file, f"文件下载完成：{target}")
-
-        try:
-            if target.suffix.lower() in (".sh", ".bash"):
-                target.chmod(target.stat().st_mode | 0o755)
-                append_log(log_file, "已添加可执行权限")
-        except Exception as e:
-            append_log(log_file, f"添加可执行权限失败：{e}")
-
         return target
 
     if script_type == "repo":
