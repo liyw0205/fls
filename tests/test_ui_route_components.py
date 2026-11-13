@@ -1,4 +1,5 @@
 import contextlib
+import csv
 import io
 import json
 import os
@@ -1299,6 +1300,73 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertNotIn("done <ok>", html)
             self.assertNotIn("Beta", html)
             self.assertNotIn("hidden", html)
+
+    def test_history_export_uses_filters_exports_all_matches_and_neutralizes_formulas(self):
+        with isolated_app() as (app, base_dir):
+            data_dir = base_dir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            records = [
+                {
+                    "task_name": "Batch task {:02d}".format(index),
+                    "task_id": "task-{}".format(index),
+                    "command": "task batch.py",
+                    "status": "success",
+                    "start_at": "2026-07-04 02:00:00",
+                    "end_at": "2026-07-04 02:00:03",
+                    "duration_seconds": 3,
+                    "return_code": 1 if index == 0 else 0,
+                    "source": "manual",
+                    "retry_attempt": 0,
+                    "max_retries": 0,
+                    "message": "=HYPERLINK(\"https://invalid\")" if index == 34 else "done",
+                }
+                for index in range(35)
+            ]
+            records.append({
+                "task_name": "Batch failed",
+                "command": "task batch-failed.py",
+                "status": "failed",
+                "message": "excluded by status",
+            })
+            records.append({
+                "task_name": "Other task",
+                "command": "task other.py",
+                "status": "failed",
+                "message": "not part of the search",
+            })
+            (data_dir / "task_history.json").write_text(
+                json.dumps(records, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            client = app.test_client()
+            page = client.get(
+                "/history?q=Batch&status=success",
+                headers={"X-Token": TOKEN},
+            )
+            response = client.get(
+                "/history/export?q=Batch&status=success",
+                headers={"X-Token": TOKEN},
+            )
+
+            self.assertEqual(page.status_code, 200)
+            self.assertIn('formaction="/history/export"', page.get_data(as_text=True))
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.headers["Content-Type"].startswith("text/csv"))
+            self.assertIn(
+                'attachment; filename="fls-history-',
+                response.headers["Content-Disposition"],
+            )
+
+            csv_text = response.get_data(as_text=True).lstrip("\ufeff")
+            rows = list(csv.reader(io.StringIO(csv_text)))
+            self.assertEqual(len(rows), 36)
+            self.assertEqual(rows[0][0], "任务名")
+            self.assertEqual(rows[1][0], "Batch task 00")
+            self.assertEqual(rows[-1][0], "Batch task 34")
+            self.assertEqual(rows[-1][-1], "'=HYPERLINK(\"https://invalid\")")
+            self.assertNotIn("Batch failed", csv_text)
+            self.assertNotIn("Other task", csv_text)
 
     def test_dashboard_keeps_abnormal_history_summary_without_recent_runs(self):
         with isolated_app() as (app, base_dir):

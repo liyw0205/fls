@@ -1,3 +1,5 @@
+import csv
+import io
 import os
 import sys
 import time
@@ -7,7 +9,7 @@ from datetime import datetime
 from math import ceil
 from urllib.parse import quote
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, Response, jsonify, request
 
 from ..models import load_tasks, load_task_history
 from ..task_runner import is_running
@@ -222,6 +224,41 @@ def history_table_rows(items):
         rows = empty_table_row(10, "暂无匹配历史", '<a class="btn btn-gray" href="/history">查看运行历史</a>')
 
     return rows
+
+
+def filter_history_items(q="", status=""):
+    q = str(q or "").strip()
+    status = str(status or "").strip()
+    allowed_statuses = {item[0] for item in HISTORY_STATUS_OPTIONS}
+    if status not in allowed_statuses:
+        status = ""
+
+    items = load_task_history()
+    if q:
+        q_lower = q.lower()
+        items = [
+            item for item in items
+            if q_lower in str(item.get("task_name") or "").lower()
+            or q_lower in str(item.get("command") or "").lower()
+            or q_lower in str(item.get("message") or "").lower()
+            or q_lower in str(item.get("source") or "").lower()
+        ]
+
+    if status:
+        items = [
+            item for item in items
+            if str(item.get("status") or "") == status
+        ]
+
+    return items, q, status
+
+
+def history_csv_cell(value):
+    text = str(value if value is not None else "")
+    if text.lstrip().startswith(("=", "+", "-", "@", "\t", "\r")):
+        return "'" + text
+    return text
+
 
 def panel_cpu_peak_slot():
     """
@@ -546,28 +583,7 @@ def history_page():
     status = request.args.get("status", "").strip()
     page = max(1, int(request.args.get("page", "1") or 1))
     per_page = 30
-
-    allowed_statuses = {item[0] for item in HISTORY_STATUS_OPTIONS}
-    if status not in allowed_statuses:
-        status = ""
-
-    items = load_task_history()
-
-    if q:
-        q_lower = q.lower()
-        items = [
-            item for item in items
-            if q_lower in str(item.get("task_name") or "").lower()
-            or q_lower in str(item.get("command") or "").lower()
-            or q_lower in str(item.get("message") or "").lower()
-            or q_lower in str(item.get("source") or "").lower()
-        ]
-
-    if status:
-        items = [
-            item for item in items
-            if str(item.get("status") or "") == status
-        ]
+    items, q, status = filter_history_items(q, status)
 
     total = len(items)
     pages = max(1, ceil(total / per_page))
@@ -598,6 +614,7 @@ def history_page():
         </div>
         <div class="action-row">
             <button class="btn btn-primary" type="submit">筛选运行历史</button>
+            <button class="btn btn-blue" type="submit" formaction="/history/export" formmethod="get">导出匹配记录 CSV</button>
             <a class="btn btn-gray" href="/history">重置筛选</a>
         </div>
         """,
@@ -622,6 +639,53 @@ def history_page():
 {history_page_links(q, status, page, pages)}
 """
     return layout("运行历史", "history", body)
+
+
+@bp.route("/history/export")
+def history_export():
+    items, _, _ = filter_history_items(
+        request.args.get("q", ""),
+        request.args.get("status", ""),
+    )
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow([
+        "任务名",
+        "任务 ID",
+        "命令",
+        "状态",
+        "开始时间",
+        "结束时间",
+        "耗时（秒）",
+        "退出码",
+        "来源",
+        "重试次数",
+        "最大重试次数",
+        "说明",
+    ])
+    fields = (
+        "task_name",
+        "task_id",
+        "command",
+        "status",
+        "start_at",
+        "end_at",
+        "duration_seconds",
+        "return_code",
+        "source",
+        "retry_attempt",
+        "max_retries",
+        "message",
+    )
+    for item in items:
+        writer.writerow([history_csv_cell(item.get(field, "")) for field in fields])
+
+    filename = datetime.now().strftime("fls-history-%Y%m%d-%H%M%S.csv")
+    return Response(
+        "\ufeff" + output.getvalue(),
+        mimetype="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @bp.route("/")
