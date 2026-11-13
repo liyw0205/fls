@@ -25,6 +25,7 @@ from .notify import task_notify_ids, extract_user_log_content, send_by_ids
 
 
 STOPPED_MANUALLY = set()
+PENDING_RETRIES = {}
 _RUNNING_LOCK = threading.RLock()
 
 
@@ -52,6 +53,25 @@ def _update_running_attempt(task_id, history_id, updates):
             return False
         info.update(updates)
         return True
+
+
+def _cancel_task_retry_entry(pending, reason):
+    if not pending:
+        return False
+
+    pending["timer"].cancel()
+    append_task_log(
+        pending["log_file"],
+        f"\n===== 已取消计划重试：{reason} =====\n",
+    )
+    return True
+
+
+def cancel_task_retry(task_id, reason="收到新的任务操作"):
+    with _RUNNING_LOCK:
+        pending = PENDING_RETRIES.pop(task_id, None)
+
+    return _cancel_task_retry_entry(pending, reason)
 
 
 def safe_process_name(name):
@@ -152,7 +172,7 @@ def task_retry_config(task):
     }
 
 
-def schedule_task_retry(task_id, task_snapshot, retry_attempt, reason, log_file):
+def schedule_task_retry(task_id, task_snapshot, retry_attempt, reason, log_file, history_id=None):
     cfg = task_retry_config(task_snapshot)
     max_retries = int(cfg.get("attempts", 0) or 0)
 
@@ -162,18 +182,14 @@ def schedule_task_retry(task_id, task_snapshot, retry_attempt, reason, log_file)
     next_attempt = retry_attempt + 1
     interval_seconds = int(cfg.get("interval_seconds", 60) or 60)
 
-    append_task_log(
-        log_file,
-        (
-            f"\n===== 任务失败，计划第 {next_attempt}/{max_retries} 次重试 =====\n"
-            f"原因: {reason}\n"
-            f"间隔: {interval_seconds} 秒\n"
-            f"时间: {now_str()}\n"
-        ),
-    )
+    pending = {"timer": None, "log_file": str(log_file)}
 
     def retry_worker():
         try:
+            with _RUNNING_LOCK:
+                if PENDING_RETRIES.get(task_id) is not pending:
+                    return
+
             latest_task = get_task(task_id)
 
             if not latest_task:
@@ -184,9 +200,14 @@ def schedule_task_retry(task_id, task_snapshot, retry_attempt, reason, log_file)
                 append_task_log(log_file, "\n===== 重试取消：任务已禁用 =====\n")
                 return
 
-            ok, msg = run_task_now(task_id, source="retry", retry_attempt=next_attempt)
+            ok, msg = run_task_now(
+                task_id,
+                source="retry",
+                retry_attempt=next_attempt,
+                retry_token=pending,
+            )
 
-            if not ok:
+            if not ok and msg != "重试已取消":
                 append_task_log(
                     log_file,
                     f"\n===== 重试启动失败: {now_str()}，{msg} =====\n",
@@ -194,10 +215,42 @@ def schedule_task_retry(task_id, task_snapshot, retry_attempt, reason, log_file)
 
         except Exception as e:
             append_task_log(log_file, f"\n===== 重试调度失败: {e} =====\n")
+        finally:
+            with _RUNNING_LOCK:
+                if PENDING_RETRIES.get(task_id) is pending:
+                    PENDING_RETRIES.pop(task_id, None)
 
     timer = threading.Timer(interval_seconds, retry_worker)
     timer.daemon = True
-    timer.start()
+    pending["timer"] = timer
+    with _RUNNING_LOCK:
+        if history_id:
+            current = RUNNING.get(task_id)
+            if (
+                not current
+                or current.get("history_id") != history_id
+                or (task_id, history_id) in STOPPED_MANUALLY
+            ):
+                return False, "任务已停止，取消重试"
+
+            latest_task = get_task(task_id)
+            if not latest_task or not latest_task.get("enabled", True):
+                return False, "任务已删除或禁用，取消重试"
+
+        previous = PENDING_RETRIES.get(task_id)
+        if previous:
+            previous["timer"].cancel()
+        PENDING_RETRIES[task_id] = pending
+        append_task_log(
+            log_file,
+            (
+                f"\n===== 任务失败，计划第 {next_attempt}/{max_retries} 次重试 =====\n"
+                f"原因: {reason}\n"
+                f"间隔: {interval_seconds} 秒\n"
+                f"时间: {now_str()}\n"
+            ),
+        )
+        timer.start()
 
     return True, f"{reason}，已计划第 {next_attempt}/{max_retries} 次重试"
 
@@ -334,6 +387,7 @@ def task_finish_watcher(task_id, task_snapshot, proc, log_file, log_fp, history_
                 retry_attempt,
                 history_msg,
                 log_file,
+                history_id=history_id,
             )
 
             if retry_scheduled:
@@ -370,8 +424,11 @@ def task_finish_watcher(task_id, task_snapshot, proc, log_file, log_fp, history_
 
         _pop_running(task_id, history_id=history_id)
 
-        if manual_stopped:
+        with _RUNNING_LOCK:
+            manual_stopped = manual_stopped or stopped_key in STOPPED_MANUALLY
             STOPPED_MANUALLY.discard(stopped_key)
+
+        if manual_stopped:
             append_task_log(log_file, "\n===== 手动结束任务，不发送任务完成通知 =====\n")
             return
 
@@ -586,6 +643,7 @@ def _start_task_worker(task_id, task_snapshot, cmd_info, process_name, log_file,
             retry_attempt,
             f"启动失败：{e}",
             log_file,
+            history_id=history_id,
         )
 
         finish_task_history(
@@ -599,15 +657,23 @@ def _start_task_worker(task_id, task_snapshot, cmd_info, process_name, log_file,
         _pop_running(task_id, history_id=history_id)
 
 
-def run_task_now(task_id, source="manual", retry_attempt=0):
+def run_task_now(task_id, source="manual", retry_attempt=0, retry_token=None):
     task = get_task(task_id)
 
     if not task:
         return False, "任务不存在"
 
+    if source != "retry":
+        source_label = {"manual": "手动运行", "cron": "定时运行"}.get(source, "新运行请求")
+        cancel_task_retry(task_id, source_label)
+
     with _RUNNING_LOCK:
         if is_running(task_id):
             return False, "任务已在运行中"
+
+        if source == "retry":
+            if retry_token is None or PENDING_RETRIES.get(task_id) is not retry_token:
+                return False, "重试已取消"
 
     try:
         cmd_info = build_command(task)
@@ -623,6 +689,13 @@ def run_task_now(task_id, source="manual", retry_attempt=0):
     with _RUNNING_LOCK:
         if is_running(task_id):
             return False, "任务已在运行中"
+
+        if source == "retry":
+            if retry_token is None or PENDING_RETRIES.get(task_id) is not retry_token:
+                return False, "重试已取消"
+            PENDING_RETRIES.pop(task_id, None)
+        else:
+            cancel_task_retry(task_id, source_label)
 
         log_file = log_file_for_task(task)
         log_fp = open(log_file, "ab", buffering=0)
@@ -673,6 +746,7 @@ def run_task_now(task_id, source="manual", retry_attempt=0):
 
 def stop_task_now(task_id):
     with _RUNNING_LOCK:
+        pending_retry = PENDING_RETRIES.pop(task_id, None)
         info = RUNNING.get(task_id)
         if info:
             STOPPED_MANUALLY.add((task_id, info.get("history_id")))
@@ -680,7 +754,11 @@ def stop_task_now(task_id):
             if not proc and RUNNING.get(task_id) is info:
                 RUNNING.pop(task_id, None)
 
+    _cancel_task_retry_entry(pending_retry, "任务已停止或删除")
+
     if not info:
+        if pending_retry:
+            return True, "已取消计划重试"
         return False, "任务未运行"
 
     if proc:

@@ -5,7 +5,7 @@ from . import bp
 from ...models import load_tasks, save_tasks
 from ...utils import h, now_str, get_back_url
 from ...scheduler import reload_scheduler
-from ...task_runner import run_task_now, stop_task_now
+from ...task_runner import run_task_now, stop_task_now, cancel_task_retry
 from ...ui.components import message_card
 from ...ui.layout import layout
 
@@ -57,6 +57,8 @@ def task_toggle(task_id):
         abort(404)
 
     save_tasks(tasks)
+    if not task["enabled"]:
+        cancel_task_retry(task_id, "任务已禁用")
     reload_scheduler()
 
     return redirect(get_back_url("/tasks"))

@@ -50,6 +50,12 @@ def cleanup_runtime_state():
     task_runner = sys.modules.get("fls_manager.task_runner")
 
     if task_runner is not None:
+        for pending in list(task_runner.PENDING_RETRIES.values()):
+            timer = pending.get("timer") if isinstance(pending, dict) else None
+            if timer is not None:
+                with contextlib.suppress(Exception):
+                    timer.cancel()
+
         for info in list(task_runner.RUNNING.values()):
             log_fp = info.get("log_fp") if isinstance(info, dict) else None
             if log_fp is not None:
@@ -57,6 +63,7 @@ def cleanup_runtime_state():
                     log_fp.close()
 
         task_runner.RUNNING.clear()
+        task_runner.PENDING_RETRIES.clear()
         task_runner.STOPPED_MANUALLY.clear()
 
     state = sys.modules.get("fls_manager.state")
@@ -90,6 +97,27 @@ class ImmediateThread:
 
     def start(self):
         self.started = True
+
+
+class RecordingTimer:
+    created = []
+
+    def __init__(self, interval, function):
+        self.interval = interval
+        self.function = function
+        self.daemon = False
+        self.started = False
+        self.cancelled = False
+        RecordingTimer.created.append(self)
+
+    def start(self):
+        self.started = True
+
+    def cancel(self):
+        self.cancelled = True
+
+    def fire(self):
+        self.function()
 
 
 class FakeProc:
@@ -295,6 +323,249 @@ class TaskRuntimeTests(unittest.TestCase):
 
             self.assertFalse(ok)
             self.assertEqual(msg, "命令解析失败：bad")
+
+    def test_manual_run_cancels_pending_retry_before_reserving_attempt(self):
+        with isolated_fls_modules():
+            from fls_manager import task_runner
+
+            task = {"id": "t1", "name": "Demo", "command": "echo ok"}
+            cmd_info = {
+                "cmd": "echo ok",
+                "shell": True,
+                "cwd": str(Path(os.environ["FLS_BASE_DIR"])),
+                "display_cmd": "echo ok",
+            }
+            log_file = Path(os.environ["FLS_BASE_DIR"]) / "log" / "retry-manual.log"
+            RecordingTimer.created = []
+
+            with mock.patch.object(
+                task_runner,
+                "task_retry_config",
+                return_value={"attempts": 2, "interval_seconds": 5},
+            ), mock.patch.object(task_runner.threading, "Timer", RecordingTimer):
+                task_runner.schedule_task_retry("t1", task, 0, "exit 1", log_file)
+
+            timer = RecordingTimer.created[0]
+            ImmediateThread.created = []
+            with mock.patch.object(task_runner, "get_task", return_value=task), \
+                    mock.patch.object(task_runner, "build_command", return_value=cmd_info), \
+                    mock.patch.object(task_runner, "log_file_for_task", return_value=log_file), \
+                    mock.patch.object(task_runner.threading, "Thread", ImmediateThread):
+                ok, msg = task_runner.run_task_now("t1", source="manual")
+
+            self.assertTrue(ok)
+            self.assertEqual(msg, "已提交启动")
+            self.assertTrue(timer.cancelled)
+            self.assertNotIn("t1", task_runner.PENDING_RETRIES)
+            history_id = task_runner.RUNNING["t1"]["history_id"]
+            task_runner.RUNNING["t1"]["log_fp"].close()
+            task_runner._pop_running("t1", history_id=history_id)
+            timer.fire()
+            self.assertNotIn("t1", task_runner.RUNNING)
+            self.assertEqual(len(ImmediateThread.created), 1)
+
+    def test_cron_run_cancels_pending_retry_before_reserving_attempt(self):
+        with isolated_fls_modules():
+            from fls_manager import task_runner
+
+            task = {"id": "t1", "name": "Demo", "command": "echo ok"}
+            cmd_info = {
+                "cmd": "echo ok",
+                "shell": True,
+                "cwd": str(Path(os.environ["FLS_BASE_DIR"])),
+                "display_cmd": "echo ok",
+            }
+            log_file = Path(os.environ["FLS_BASE_DIR"]) / "log" / "retry-cron.log"
+            RecordingTimer.created = []
+
+            with mock.patch.object(
+                task_runner,
+                "task_retry_config",
+                return_value={"attempts": 2, "interval_seconds": 5},
+            ), mock.patch.object(task_runner.threading, "Timer", RecordingTimer):
+                task_runner.schedule_task_retry("t1", task, 0, "exit 1", log_file)
+
+            timer = RecordingTimer.created[0]
+            ImmediateThread.created = []
+            with mock.patch.object(task_runner, "get_task", return_value=task), \
+                    mock.patch.object(task_runner, "build_command", return_value=cmd_info), \
+                    mock.patch.object(task_runner, "log_file_for_task", return_value=log_file), \
+                    mock.patch.object(task_runner.threading, "Thread", ImmediateThread):
+                ok, msg = task_runner.run_task_now("t1", source="cron")
+
+            self.assertTrue(ok)
+            self.assertEqual(msg, "已提交启动")
+            self.assertTrue(timer.cancelled)
+            self.assertNotIn("t1", task_runner.PENDING_RETRIES)
+
+    def test_stale_retry_callback_cannot_start_after_cancellation(self):
+        with isolated_fls_modules():
+            from fls_manager import task_runner
+
+            task = {"id": "t1", "name": "Demo", "command": "echo ok"}
+            log_file = Path(os.environ["FLS_BASE_DIR"]) / "log" / "retry-stale.log"
+            RecordingTimer.created = []
+
+            with mock.patch.object(
+                task_runner,
+                "task_retry_config",
+                return_value={"attempts": 2, "interval_seconds": 5},
+            ), mock.patch.object(task_runner.threading, "Timer", RecordingTimer):
+                task_runner.schedule_task_retry("t1", task, 0, "exit 1", log_file)
+
+            timer = RecordingTimer.created[0]
+            self.assertTrue(task_runner.cancel_task_retry("t1", "测试取消"))
+
+            with mock.patch.object(task_runner, "get_task") as get_task, \
+                    mock.patch.object(task_runner, "run_task_now") as run_task_now:
+                timer.fire()
+
+            get_task.assert_not_called()
+            run_task_now.assert_not_called()
+            self.assertNotIn("t1", task_runner.PENDING_RETRIES)
+
+    def test_retry_cancelled_while_building_command_cannot_reserve_task(self):
+        with isolated_fls_modules():
+            from fls_manager import task_runner
+
+            task = {"id": "t1", "name": "Demo", "command": "echo ok"}
+            cmd_info = {
+                "cmd": "echo ok",
+                "shell": True,
+                "cwd": str(Path(os.environ["FLS_BASE_DIR"])),
+                "display_cmd": "echo ok",
+            }
+            log_file = Path(os.environ["FLS_BASE_DIR"]) / "log" / "retry-race.log"
+            RecordingTimer.created = []
+
+            with mock.patch.object(
+                task_runner,
+                "task_retry_config",
+                return_value={"attempts": 2, "interval_seconds": 5},
+            ), mock.patch.object(task_runner.threading, "Timer", RecordingTimer):
+                task_runner.schedule_task_retry("t1", task, 0, "exit 1", log_file)
+
+            def cancel_during_build(_task):
+                self.assertTrue(task_runner.cancel_task_retry("t1", "并发取消"))
+                return cmd_info
+
+            with mock.patch.object(task_runner, "get_task", return_value=task), \
+                    mock.patch.object(task_runner, "build_command", side_effect=cancel_during_build), \
+                    mock.patch.object(task_runner, "add_task_history") as add_history, \
+                    mock.patch.object(task_runner.threading, "Thread", ImmediateThread):
+                RecordingTimer.created[0].fire()
+
+            self.assertNotIn("t1", task_runner.RUNNING)
+            self.assertNotIn("t1", task_runner.PENDING_RETRIES)
+            add_history.assert_not_called()
+
+    def test_stop_task_now_cancels_pending_retry_without_running_process(self):
+        with isolated_fls_modules():
+            from fls_manager import task_runner
+
+            task = {"id": "t1", "name": "Demo", "command": "echo ok"}
+            log_file = Path(os.environ["FLS_BASE_DIR"]) / "log" / "retry-stop.log"
+            RecordingTimer.created = []
+
+            with mock.patch.object(
+                task_runner,
+                "task_retry_config",
+                return_value={"attempts": 2, "interval_seconds": 5},
+            ), mock.patch.object(task_runner.threading, "Timer", RecordingTimer):
+                task_runner.schedule_task_retry("t1", task, 0, "exit 1", log_file)
+
+            timer = RecordingTimer.created[0]
+            self.assertEqual(task_runner.stop_task_now("t1"), (True, "已取消计划重试"))
+            self.assertTrue(timer.cancelled)
+            self.assertNotIn("t1", task_runner.PENDING_RETRIES)
+
+    def test_valid_retry_reserves_once_and_records_retry_source(self):
+        with isolated_fls_modules():
+            from fls_manager import paths, task_runner
+
+            task = {
+                "id": "t1", "name": "Demo", "command": "echo ok",
+                "retry": {"attempts": 2, "interval_seconds": 5},
+            }
+            write_json(paths.TASK_FILE, [task])
+            log_file = paths.LOG_DIR / "retry-valid.log"
+            RecordingTimer.created = []
+            ImmediateThread.created = []
+
+            with mock.patch.object(task_runner.threading, "Timer", RecordingTimer):
+                ok, _ = task_runner.schedule_task_retry("t1", task, 0, "exit 1", log_file)
+            self.assertTrue(ok)
+            timer = RecordingTimer.created[0]
+            self.assertTrue(timer.started)
+            self.assertEqual(timer.interval, 5)
+
+            with mock.patch.object(task_runner.threading, "Thread", ImmediateThread):
+                timer.fire()
+                timer.fire()
+
+            self.assertNotIn("t1", task_runner.PENDING_RETRIES)
+            self.assertEqual(len(ImmediateThread.created), 1)
+            history = read_json(paths.TASK_HISTORY_FILE)
+            self.assertEqual(len(history), 1)
+            self.assertEqual(history[0]["source"], "retry")
+            self.assertEqual(history[0]["retry_attempt"], 1)
+            self.assertEqual(history[0]["max_retries"], 2)
+
+    def test_replaced_retry_callback_preserves_new_timer(self):
+        with isolated_fls_modules():
+            from fls_manager import paths, task_runner
+
+            task = {
+                "id": "t1", "command": "echo ok",
+                "retry": {"attempts": 2, "interval_seconds": 5},
+            }
+            RecordingTimer.created = []
+            with mock.patch.object(task_runner.threading, "Timer", RecordingTimer):
+                task_runner.schedule_task_retry("t1", task, 0, "first", paths.LOG_DIR / "first.log")
+                task_runner.schedule_task_retry("t1", task, 1, "second", paths.LOG_DIR / "second.log")
+
+            first, second = RecordingTimer.created
+            self.assertTrue(first.cancelled)
+            first.fire()
+            self.assertIs(task_runner.PENDING_RETRIES["t1"]["timer"], second)
+            self.assertFalse(second.cancelled)
+
+    def test_stopped_stale_or_disabled_attempt_cannot_schedule_retry(self):
+        for state in ("stopped", "stale", "disabled", "deleted"):
+            with self.subTest(state=state), isolated_fls_modules():
+                from fls_manager import paths, task_runner
+
+                task = {
+                    "id": "t1", "command": "echo ok", "enabled": state != "disabled",
+                    "retry": {"attempts": 2, "interval_seconds": 5},
+                }
+                write_json(paths.TASK_FILE, [] if state == "deleted" else [task])
+                task_runner.RUNNING["t1"] = {
+                    "history_id": "new-history" if state == "stale" else "history-1",
+                    "status": "starting",
+                }
+                if state == "stopped":
+                    task_runner.STOPPED_MANUALLY.add(("t1", "history-1"))
+
+                RecordingTimer.created = []
+                with mock.patch.object(task_runner.threading, "Timer", RecordingTimer):
+                    ok, _ = task_runner.schedule_task_retry(
+                        "t1", task, 0, "exit 1", paths.LOG_DIR / "cancel.log",
+                        history_id="history-1",
+                    )
+
+                self.assertFalse(ok)
+                self.assertNotIn("t1", task_runner.PENDING_RETRIES)
+                self.assertFalse(any(timer.started for timer in RecordingTimer.created))
+
+    def test_retry_without_registered_token_is_rejected(self):
+        with isolated_fls_modules():
+            from fls_manager import task_runner
+
+            with mock.patch.object(task_runner, "get_task", return_value={"id": "t1"}), \
+                    mock.patch.object(task_runner, "build_command") as build_command:
+                self.assertEqual(task_runner.run_task_now("t1", source="retry"), (False, "重试已取消"))
+            build_command.assert_not_called()
 
     def test_run_task_now_reserves_same_task_once_under_concurrency(self):
         with isolated_fls_modules():

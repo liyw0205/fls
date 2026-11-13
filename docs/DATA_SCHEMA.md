@@ -49,6 +49,7 @@
 - 旧字段 `retry_count` 会迁移为 `retry.attempts`，写回时移除旧字段；新任务默认 `retry.interval_seconds=60`。
 - `random_delay.seconds`、`retry.attempts`、`retry.interval_seconds`、`run_count` 会转整数并钳制到有效范围。
 - `enabled`、`pinned` 支持布尔、数字和常见字符串值。
+- 待执行的失败重试仅保存在运行时内存中；每个任务最多保留一个待重试计时器。手动或定时启动会使旧重试失效，停止、禁用或删除任务会取消待重试。
 
 ## data/task_history.json
 
