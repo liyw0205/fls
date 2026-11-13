@@ -1,6 +1,8 @@
 import json
+import os
 import threading
 import uuid
+from contextlib import closing
 from pathlib import Path
 
 from ..config import load_config
@@ -9,7 +11,7 @@ from ..proxy import requests_proxy_dict, github_proxy_url
 from .constants import (
     DEFAULT_ONLINE_SCRIPT_SOURCE,
     ONLINE_SCRIPT_CACHE_FILE,
-    ONLINE_REFRESH_STATE,
+    update_online_refresh_state,
 )
 from .logs import append_log, online_refresh_log_file
 from .tasks import normalize_online_task_crons
@@ -84,11 +86,17 @@ def load_online_script_cache():
 
 def save_online_script_cache(items):
     ONLINE_SCRIPT_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-
-    ONLINE_SCRIPT_CACHE_FILE.write_text(
-        json.dumps(items, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    temp_file = ONLINE_SCRIPT_CACHE_FILE.with_name(
+        f".{ONLINE_SCRIPT_CACHE_FILE.name}.{uuid.uuid4().hex}.tmp"
     )
+    try:
+        temp_file.write_text(
+            json.dumps(items, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(temp_file, ONLINE_SCRIPT_CACHE_FILE)
+    finally:
+        temp_file.unlink(missing_ok=True)
 
 
 def read_cache_text():
@@ -118,15 +126,15 @@ def fetch_task_link_tasks(item, proxy_id="", timeout=12):
 
     real_url = github_proxy_url(task_link, proxy_id)
 
-    r = requests.get(
+    with closing(requests.get(
         real_url,
         timeout=timeout,
         headers={"User-Agent": "Mozilla/5.0 FLS-Manager"},
         proxies=requests_proxy_dict(proxy_id),
-    )
-
-    status_code = getattr(r, "status_code", 0)
-    text = r.text or ""
+    )) as r:
+        status_code = getattr(r, "status_code", 0)
+        text = r.text or ""
+        headers = getattr(r, "headers", {})
 
     if status_code < 200 or status_code >= 300:
         preview = text[:500].replace("\n", "\\n")
@@ -143,7 +151,7 @@ def fetch_task_link_tasks(item, proxy_id="", timeout=12):
         data = json.loads(text)
     except Exception as e:
         preview = text[:800].replace("\n", "\\n")
-        ctype = r.headers.get("Content-Type", "")
+        ctype = headers.get("Content-Type", "")
         raise RuntimeError(
             f"任务源不是合法 JSON：{e}。下一步：检查任务源格式并确认返回 JSON 后重试。"
             f"请求地址：{real_url}。"
@@ -158,15 +166,15 @@ def fetch_online_scripts(proxy_id="", timeout=12):
     url = get_online_script_source()
     real_url = github_proxy_url(url, proxy_id)
 
-    r = requests.get(
+    with closing(requests.get(
         real_url,
         timeout=timeout,
         headers={"User-Agent": "Mozilla/5.0 FLS-Manager"},
         proxies=requests_proxy_dict(proxy_id),
-    )
-
-    status_code = getattr(r, "status_code", 0)
-    text = r.text or ""
+    )) as r:
+        status_code = getattr(r, "status_code", 0)
+        text = r.text or ""
+        headers = getattr(r, "headers", {})
 
     if status_code < 200 or status_code >= 300:
         preview = text[:500].replace("\n", "\\n")
@@ -183,7 +191,7 @@ def fetch_online_scripts(proxy_id="", timeout=12):
         data = json.loads(text)
     except Exception as e:
         preview = text[:800].replace("\n", "\\n")
-        ctype = r.headers.get("Content-Type", "")
+        ctype = headers.get("Content-Type", "")
         raise RuntimeError(
             f"脚本源不是合法 JSON：{e}。下一步：检查在线脚本源格式并确认返回 JSON 后重试。"
             f"请求地址：{real_url}。"
@@ -232,55 +240,69 @@ def fetch_online_scripts(proxy_id="", timeout=12):
     return items
 
 
-def refresh_worker(proxy_id=""):
-    refresh_id = uuid.uuid4().hex
-    log_file = online_refresh_log_file(refresh_id)
-
-    ONLINE_REFRESH_STATE.update({
-        "running": True,
-        "message": "正在后台同步在线脚本源，请稍候...",
-        "error": "",
-        "updated_at": now_str(),
-        "log_file": str(log_file),
-    })
-
-    append_log(log_file, "===== 在线脚本源刷新 =====")
-    append_log(log_file, f"时间: {now_str()}")
-    append_log(log_file, f"脚本源: {get_online_script_source()}")
-    append_log(log_file, f"代理ID: {proxy_id or '不使用代理'}")
-    append_log(log_file, "============================================================")
-
+def refresh_worker(refresh_id, proxy_id="", log_file=""):
+    log_file = log_file or str(online_refresh_log_file(refresh_id))
     try:
+        update_online_refresh_state(
+            id=refresh_id,
+            running=True,
+            status="运行中",
+            message="正在后台同步在线脚本源，请稍候...",
+            error="",
+            updated_at=now_str(),
+            log_file=str(log_file),
+        )
+        append_log(log_file, "===== 在线脚本源刷新 =====")
+        append_log(log_file, f"时间: {now_str()}")
+        append_log(log_file, f"脚本源: {get_online_script_source()}")
+        append_log(log_file, f"代理ID: {proxy_id or '不使用代理'}")
+        append_log(log_file, "============================================================")
+
         items = fetch_online_scripts(proxy_id=proxy_id, timeout=20)
+        # fetch_online_scripts keeps its direct-call cache behavior; publish here too
+        # so a mocked or alternate fetcher cannot report success without a cache.
+        if load_online_script_cache() != items:
+            save_online_script_cache(items)
         msg = f"同步在线脚本源成功，共 {len(items)} 条"
         append_log(log_file, msg)
 
-        ONLINE_REFRESH_STATE.update({
-            "running": False,
-            "message": msg,
-            "error": "",
-            "updated_at": now_str(),
-            "log_file": str(log_file),
-        })
+        update_online_refresh_state(
+            id=refresh_id,
+            running=False,
+            status="已完成",
+            message=msg,
+            error="",
+            updated_at=now_str(),
+            log_file=str(log_file),
+        )
 
     except Exception as e:
         err = f"远程脚本源刷新失败：{e}。下一步：检查脚本源地址、代理和网络后重试"
-        append_log(log_file, err)
+        try:
+            append_log(log_file, err)
+        except Exception:
+            pass
+        try:
+            update_online_refresh_state(
+                id=refresh_id,
+                running=False,
+                status="失败",
+                message="",
+                error=err,
+                updated_at=now_str(),
+                log_file=str(log_file),
+            )
+        except Exception:
+            # A state-file failure must not leave an uncaught worker exception.
+            pass
 
-        ONLINE_REFRESH_STATE.update({
-            "running": False,
-            "message": "",
-            "error": err,
-            "updated_at": now_str(),
-            "log_file": str(log_file),
-        })
 
-
-def start_refresh_thread(proxy_id=""):
+def start_refresh_thread(refresh_id, proxy_id="", log_file=""):
     th = threading.Thread(
         target=refresh_worker,
-        args=(proxy_id,),
+        args=(refresh_id, proxy_id, log_file),
         daemon=True,
         name="fls-online-scripts-refresh",
     )
     th.start()
+    return th

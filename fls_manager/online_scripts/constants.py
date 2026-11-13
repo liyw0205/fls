@@ -1,4 +1,6 @@
+import json
 import threading
+import os
 
 from ..paths import DATA_DIR
 from ..storage import read_json, mutate_json
@@ -13,14 +15,90 @@ ONLINE_INSTALL_JOBS_FILE = DATA_DIR / "online_install_jobs.json"
 ONLINE_INSTALL_LOCK = threading.RLock()
 ONLINE_INSTALL_LIMIT = 100
 ONLINE_INSTALL_TIMEOUT_SECONDS = 1800
+ONLINE_REFRESH_STATE_FILE = DATA_DIR / "online_script_refresh.json"
+ONLINE_REFRESH_LOCK = threading.RLock()
 
 ONLINE_REFRESH_STATE = {
+    "id": "",
     "running": False,
+    "status": "",
     "message": "",
     "error": "",
     "updated_at": "",
     "log_file": "",
 }
+
+
+def _refresh_snapshot(info):
+    fields = ("id", "running", "status", "message", "error", "updated_at", "log_file")
+    return {field: info.get(field, "") for field in fields}
+
+
+def persist_online_refresh(info):
+    snapshot = _refresh_snapshot(info)
+    ONLINE_REFRESH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temp = ONLINE_REFRESH_STATE_FILE.with_name(
+        f".{ONLINE_REFRESH_STATE_FILE.name}.{threading.get_ident()}.tmp"
+    )
+    try:
+        temp.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temp, ONLINE_REFRESH_STATE_FILE)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def update_online_refresh_state(**updates):
+    with ONLINE_REFRESH_LOCK:
+        ONLINE_REFRESH_STATE.update(updates)
+        persist_online_refresh(ONLINE_REFRESH_STATE)
+        return dict(ONLINE_REFRESH_STATE)
+
+
+def get_online_refresh_state():
+    with ONLINE_REFRESH_LOCK:
+        current = dict(ONLINE_REFRESH_STATE)
+        loaded_from_file = False
+        if not current.get("id"):
+            data = read_json(ONLINE_REFRESH_STATE_FILE, {})
+            if isinstance(data, dict):
+                current.update(_refresh_snapshot(data))
+                loaded_from_file = bool(data)
+        if loaded_from_file and current.get("running"):
+            current["running"] = False
+            current["status"] = "结果未知"
+            current["error"] = "面板重启后无法确认在线脚本源同步是否完成；保留旧缓存，请查看刷新日志后重试。"
+            current["message"] = ""
+            current["updated_at"] = now_str()
+            ONLINE_REFRESH_STATE.update(current)
+            persist_online_refresh(current)
+        return current
+
+
+def reserve_online_refresh(proxy_id=""):
+    with ONLINE_REFRESH_LOCK:
+        current = get_online_refresh_state()
+        if current.get("running"):
+            return None
+        import uuid
+        previous = dict(ONLINE_REFRESH_STATE)
+        info = {
+            "id": uuid.uuid4().hex,
+            "running": True,
+            "status": "运行中",
+            "message": "正在后台同步在线脚本源，请稍候...",
+            "error": "",
+            "updated_at": now_str(),
+            "log_file": "",
+            "proxy_id": proxy_id,
+        }
+        ONLINE_REFRESH_STATE.update(info)
+        try:
+            persist_online_refresh(info)
+        except Exception:
+            ONLINE_REFRESH_STATE.clear()
+            ONLINE_REFRESH_STATE.update(previous)
+            raise
+        return dict(info)
 
 
 def _install_snapshot(info):
