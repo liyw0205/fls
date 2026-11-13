@@ -95,7 +95,6 @@ cd fls
 | [命令与配置](docs/COMMANDS.md) | 启停命令、端口、Token、环境变量和维护 |
 | [Actions 与发布](docs/ACTIONS.md) | 模块 ZIP、固定 proot 运行时和版本发布 |
 | [数据结构](docs/DATA_SCHEMA.md) | `data/*.json` 字段和读取迁移规则 |
-| [面板参考](docs/PANEL_REFERENCE.md) | 同类面板的信息架构参考 |
 
 ## 项目结构
 

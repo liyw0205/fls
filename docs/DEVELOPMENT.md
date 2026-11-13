@@ -18,7 +18,9 @@ done
 
 ## 浏览器回归
 
-前端修改需要在当前 Termux 浏览器环境测试手机和桌面视口。至少覆盖：
+前端修改需要通过 Chromium 回归手机和桌面视口。可运行 `python3 tools/browser_regression.py`；
+Playwright Core 或 Chromium 不在默认路径时，使用 `FLS_PLAYWRIGHT_CORE` 和 `FLS_CHROMIUM` 指定。
+至少覆盖：
 
 - 登录、刷新、后台恢复和首次访问通知
 - 侧边栏切换、更新提示和更新日志浮窗
