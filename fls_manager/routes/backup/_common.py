@@ -23,9 +23,27 @@ from ...scheduler import reload_scheduler
 BACKUP_DIR = DATA_DIR / "backups"
 BACKUP_JOBS = {}
 BACKUP_CANCEL_EVENTS = {}
+MIB = 1024 * 1024
+
+
+def _positive_env_limit(name, default):
+    try:
+        value = int(os.environ.get(name, ""))
+        return value if value > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+MAX_BACKUP_UPLOAD_BYTES = _positive_env_limit("FLS_BACKUP_MAX_UPLOAD_MB", 512) * MIB
+MAX_BACKUP_EXTRACTED_BYTES = _positive_env_limit("FLS_BACKUP_MAX_EXTRACTED_MB", 2048) * MIB
+MAX_BACKUP_ARCHIVE_ENTRIES = _positive_env_limit("FLS_BACKUP_MAX_ARCHIVE_ENTRIES", 10000)
 
 
 class BackupCancelled(Exception):
+    pass
+
+
+class BackupLimitExceeded(ValueError):
     pass
 
 
@@ -51,6 +69,30 @@ def backup_safe_file(filename):
         raise ValueError("备份文件路径非法")
 
     return target
+
+
+def save_backup_upload(file_storage, target):
+    target = Path(target)
+    total = 0
+    try:
+        with target.open("wb") as output:
+            while True:
+                chunk = file_storage.stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_BACKUP_UPLOAD_BYTES:
+                    raise BackupLimitExceeded(
+                        "备份文件超过上传上限（{} MiB）".format(
+                            MAX_BACKUP_UPLOAD_BYTES // MIB
+                        )
+                    )
+                output.write(chunk)
+    except Exception:
+        target.unlink(missing_ok=True)
+        raise
+
+    return total
 
 
 def fmt_size(n):
@@ -360,9 +402,26 @@ def _archive_member_target(base, name):
 
 def safe_extract_tar(tar, path):
     base = Path(path).resolve()
+    members = tar.getmembers()
+    if len(members) > MAX_BACKUP_ARCHIVE_ENTRIES:
+        raise BackupLimitExceeded(
+            "备份文件条目过多（最多 {} 个）".format(MAX_BACKUP_ARCHIVE_ENTRIES)
+        )
 
-    for member in tar.getmembers():
+    total_size = 0
+
+    for member in members:
         _archive_member_target(base, member.name)
+
+        if member.size < 0:
+            raise RuntimeError("备份文件包含非法大小")
+        total_size += member.size
+        if total_size > MAX_BACKUP_EXTRACTED_BYTES:
+            raise BackupLimitExceeded(
+                "备份文件解压后超过允许大小（{} MiB）".format(
+                    MAX_BACKUP_EXTRACTED_BYTES // MIB
+                )
+            )
 
         if member.issym() or member.islnk():
             raise RuntimeError("备份文件包含不安全链接")
@@ -380,15 +439,33 @@ def safe_extract_tar(tar, path):
 
 def safe_extract_zip(zip_obj, path):
     base = Path(path).resolve()
+    members = zip_obj.infolist()
+    if len(members) > MAX_BACKUP_ARCHIVE_ENTRIES:
+        raise BackupLimitExceeded(
+            "备份文件条目过多（最多 {} 个）".format(MAX_BACKUP_ARCHIVE_ENTRIES)
+        )
 
-    for member in zip_obj.infolist():
+    total_size = 0
+
+    for member in members:
         _archive_member_target(base, member.filename)
+        total_size += member.file_size
+        if total_size > MAX_BACKUP_EXTRACTED_BYTES:
+            raise BackupLimitExceeded(
+                "备份文件解压后超过允许大小（{} MiB）".format(
+                    MAX_BACKUP_EXTRACTED_BYTES // MIB
+                )
+            )
 
     zip_obj.extractall(path)
 
 
 def extract_archive(file_path, dest_dir):
     file_path = Path(file_path)
+    if file_path.stat().st_size > MAX_BACKUP_UPLOAD_BYTES:
+        raise BackupLimitExceeded(
+            "备份文件超过上传上限（{} MiB）".format(MAX_BACKUP_UPLOAD_BYTES // MIB)
+        )
     name = file_path.name.lower()
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)

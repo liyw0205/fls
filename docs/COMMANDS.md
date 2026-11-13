@@ -54,6 +54,16 @@ FLS_PORT=5701 FLS_TOKEN=123456 sh fls.sh restart
 Termux 专用变量见 [TERMUX.md](TERMUX.md)，KernelSU/Magisk 容器变量见
 [ANDROID_MODULE.md](ANDROID_MODULE.md)。
 
+## 备份恢复限制
+
+以下面板环境变量在启动时读取，设置后需重启 FLS：
+
+| 变量 | 作用 | 默认值 |
+| --- | --- | --- |
+| `FLS_BACKUP_MAX_UPLOAD_MB` | 备份上传大小上限，正整数 MiB | `512` |
+| `FLS_BACKUP_MAX_EXTRACTED_MB` | 归档解压后总大小上限，正整数 MiB | `2048` |
+| `FLS_BACKUP_MAX_ARCHIVE_ENTRIES` | 归档成员数上限，正整数 | `10000` |
+
 ## `ensure-repo` 和 `clone`
 
 - `ensure-repo`：检查 `fls-manager.py`、`fls_manager/` 和 `fls.sh`，缺失时才拉取。
