@@ -22,6 +22,12 @@ sh fls.sh start
 
 发布包安装（推荐）：
 
+从 [GitHub Releases](https://github.com/liyw0205/fls/releases/latest) 下载
+`fls-manager-desktop-windows-x64.zip` 或 `FLS-Manager-Setup-Windows-x64.exe`，
+并使用同一 Release 中的 `SHA256SUMS-windows-desktop` 或
+`SHA256SUMS-windows-installer` 校验下载文件。校验通过后，ZIP 在根目录运行
+`install.ps1`，EXE 直接按安装向导操作。
+
 ```powershell
 .\install.ps1
 ```

@@ -63,7 +63,9 @@ su -c 'sh /data/adb/fls-a.sh start'
 
 ### Windows
 
-下载 Windows Release 后，在压缩包根目录执行一次安装脚本：
+从 [GitHub Releases](https://github.com/liyw0205/fls/releases/latest) 下载 Windows 桌面 ZIP 或 EXE 安装器；
+同时下载对应的 `SHA256SUMS-windows-desktop` 或 `SHA256SUMS-windows-installer` 校验文件后再安装。
+桌面 ZIP 根目录执行一次安装脚本：
 
 ```powershell
 .\install.ps1
