@@ -1138,6 +1138,134 @@ class UiRouteComponentTests(unittest.TestCase):
             tail_file.assert_not_called()
             self.assertEqual(log_file.read_text(encoding="utf-8"), "log-content\n")
 
+    def test_task_log_invalid_lines_returns_400_without_reading(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import models
+
+            models.save_tasks([{"id": "t1", "name": "Demo", "command": "echo ok"}])
+            with patch("fls_manager.routes.tasks.logs.tail_file") as tail_file:
+                response = app.test_client().get("/api/log/t1?lines=invalid", headers={"X-Token": TOKEN})
+
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.content_type, "text/plain; charset=utf-8")
+            self.assertEqual(response.get_data(as_text=True), "lines 必须为整数")
+            tail_file.assert_not_called()
+
+    def test_debug_log_invalid_lines_returns_400_without_mutating_record(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.routes.scripts.debug import SCRIPT_DEBUG_RUNNING
+
+            info = {"running": True, "returncode": None, "log_file": "unused.log"}
+            SCRIPT_DEBUG_RUNNING["d1"] = info.copy()
+            with patch("fls_manager.routes.scripts.debug.tail_file") as tail_file:
+                response = app.test_client().get("/api/scripts/debug-log/d1?lines=invalid", headers={"X-Token": TOKEN})
+
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.get_json(), {
+                "ok": False, "msg": "lines 必须为整数", "running": False, "log": "",
+            })
+            tail_file.assert_not_called()
+            self.assertEqual(SCRIPT_DEBUG_RUNNING["d1"], info)
+
+    def test_task_debug_and_file_log_apis_return_bounded_masked_tail(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import logs, models, sensitive
+            from fls_manager.state import DEPS_RUNNING
+            from fls_manager.routes.scripts.debug import SCRIPT_DEBUG_RUNNING
+            from fls_manager.routes.about.state import ABOUT_JOBS
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING
+
+            models.save_tasks([{"id": "t1", "name": "Demo", "command": "echo ok"}])
+            log_file = base_dir / "log" / "Demo-fixture.log"
+            log_file.write_bytes(b"password=" + b"s" * (2 * logs.MAX_TAIL_BYTES) + b"\nready\npassword=complete-secret\n")
+            info = {"running": False, "returncode": 0, "log_file": str(log_file), "finished": True}
+            SCRIPT_DEBUG_RUNNING["d1"] = info.copy()
+            DEPS_RUNNING["i1"] = info.copy()
+            ABOUT_JOBS["j1"] = info.copy()
+            ONLINE_INSTALL_RUNNING["o1"] = info.copy()
+            expected = "\n".join([
+                logs.TAIL_TRUNCATION_NOTICE,
+                "ready",
+                "password=" + sensitive.mask_secret_value("complete-secret"),
+            ])
+            client = app.test_client()
+
+            for url in (
+                "/api/log/t1", "/api/logfile/Demo-fixture.log", "/api/scripts/debug-log/d1",
+                "/api/deps/install-log/i1", "/api/about/job-log/j1", "/api/online-scripts/log/o1",
+            ):
+                with self.subTest(url=url):
+                    response = client.get(url + "?lines=10", headers={"X-Token": TOKEN})
+                    self.assertEqual(response.status_code, 200)
+                    actual = response.get_json()["log"] if response.is_json else response.get_data(as_text=True)
+                    self.assertEqual(actual, expected)
+
+    def test_all_log_apis_reject_invalid_lines_before_reading(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import models
+            from fls_manager.state import DEPS_RUNNING
+            from fls_manager.routes.scripts.debug import SCRIPT_DEBUG_RUNNING
+            from fls_manager.routes.about.state import ABOUT_JOBS
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING
+
+            models.save_tasks([{"id": "t1", "name": "Demo", "command": "echo ok"}])
+            log_file = base_dir / "log" / "Demo-fixture.log"
+            log_file.write_text("original\n", encoding="utf-8")
+            info = {"running": True, "returncode": None, "log_file": str(log_file)}
+            records = [SCRIPT_DEBUG_RUNNING, DEPS_RUNNING, ABOUT_JOBS, ONLINE_INSTALL_RUNNING]
+            for records_by_id in records:
+                records_by_id["r1"] = info.copy()
+
+            cases = (
+                ("/api/log/t1", "fls_manager.routes.tasks.logs"),
+                ("/api/logfile/Demo-fixture.log", "fls_manager.routes.logs.files"),
+                ("/api/scripts/debug-log/r1", "fls_manager.routes.scripts.debug"),
+                ("/api/deps/install-log/r1", "fls_manager.routes.deps"),
+                ("/api/about/job-log/r1", "fls_manager.routes.about.jobs"),
+                ("/api/online-scripts/log/r1", "fls_manager.routes.online_scripts.logs"),
+            )
+            client = app.test_client()
+            for url, module in cases:
+                for value in ("invalid", "", "1.5"):
+                    with self.subTest(url=url, value=value), patch(module + ".tail_file") as tail:
+                        response = client.get(url, query_string={"lines": value}, headers={"X-Token": TOKEN})
+                        self.assertEqual(response.status_code, 400)
+                        error = response.get_json()["msg"] if response.is_json else response.get_data(as_text=True)
+                        self.assertEqual(error, "lines 必须为整数")
+                        tail.assert_not_called()
+
+            for records_by_id in records:
+                self.assertEqual(records_by_id["r1"], info)
+            self.assertEqual(log_file.read_text(encoding="utf-8"), "original\n")
+
+    def test_all_log_apis_keep_defaults_and_clamp_valid_line_counts(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import models
+            from fls_manager.state import DEPS_RUNNING
+            from fls_manager.routes.scripts.debug import SCRIPT_DEBUG_RUNNING
+            from fls_manager.routes.about.state import ABOUT_JOBS
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING
+
+            models.save_tasks([{"id": "t1", "name": "Demo", "command": "echo ok"}])
+            log_file = base_dir / "log" / "Demo-fixture.log"
+            log_file.write_text("one\ntwo\nthree\n", encoding="utf-8")
+            info = {"running": False, "returncode": 0, "log_file": str(log_file), "finished": True}
+            for records in (SCRIPT_DEBUG_RUNNING, DEPS_RUNNING, ABOUT_JOBS, ONLINE_INSTALL_RUNNING):
+                records["r1"] = info.copy()
+
+            client = app.test_client()
+            for url in (
+                "/api/log/t1", "/api/logfile/Demo-fixture.log", "/api/scripts/debug-log/r1",
+                "/api/deps/install-log/r1", "/api/about/job-log/r1", "/api/online-scripts/log/r1",
+            ):
+                for value, expected in ((None, "one\ntwo\nthree"), ("0", "three"), ("-5", "three"), ("999999", "one\ntwo\nthree")):
+                    with self.subTest(url=url, value=value):
+                        query = {} if value is None else {"lines": value}
+                        response = client.get(url, query_string=query, headers={"X-Token": TOKEN})
+                        self.assertEqual(response.status_code, 200)
+                        actual = response.get_json()["log"] if response.is_json else response.get_data(as_text=True)
+                        self.assertEqual(actual, expected)
+
     def test_task_log_page_keeps_history_table_actions_and_safe_back(self):
         with isolated_app() as (app, base_dir):
             data_dir = base_dir / "data"

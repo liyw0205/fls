@@ -18,7 +18,7 @@ def api_online_install_log(install_id):
     log_file = info.get("log_file", "")
 
     try:
-        lines = int(request.args.get("lines", "1200") or 1200)
+        lines = int(request.args.get("lines", "1200"))
     except (TypeError, ValueError):
         return jsonify({
             "ok": False,

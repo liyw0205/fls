@@ -210,7 +210,14 @@ def api_log(task_id):
     if not task:
         abort(404)
 
-    lines = int(request.args.get("lines", "800"))
+    try:
+        lines = int(request.args.get("lines", "800"))
+    except (TypeError, ValueError):
+        return Response(
+            "lines 必须为整数",
+            status=400,
+            content_type="text/plain; charset=utf-8",
+        )
 
     if is_running(task_id):
         log_file = RUNNING.get(task_id, {}).get("log_file", "")

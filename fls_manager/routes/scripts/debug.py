@@ -378,7 +378,15 @@ def api_scripts_debug_log(debug_id):
             "log": "调试记录不存在或面板已重启。请到日志管理中查找 script-debug-*.log。",
         })
 
-    lines = int(request.args.get("lines", "1200") or 1200)
+    try:
+        lines = int(request.args.get("lines", "1200"))
+    except (TypeError, ValueError):
+        return jsonify({
+            "ok": False,
+            "msg": "lines 必须为整数",
+            "running": False,
+            "log": "",
+        }), 400
 
     return jsonify({
         "running": bool(info.get("running")),

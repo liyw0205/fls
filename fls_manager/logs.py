@@ -8,6 +8,8 @@ from .config import load_config
 from .sensitive import mask_sensitive_text
 
 MAX_TAIL_LINES = 5000
+MAX_TAIL_BYTES = 1024 * 1024
+TAIL_TRUNCATION_NOTICE = "===== 日志过长，已省略超出读取范围的内容 ====="
 
 def log_file_for_task(task):
     display_name = task.get("name") or Path(task.get("command", "task")).stem or "未命名任务"
@@ -42,14 +44,26 @@ def tail_file(file_path, lines=800):
             f.seek(0, os.SEEK_END)
             size = f.tell()
             block = 4096
-            data = b""
-            while size > 0 and data.count(b"\n") <= lines:
-                step = min(block, size)
+            chunks = []
+            read_bytes = 0
+            newline_count = 0
+            while size > 0 and newline_count <= lines and read_bytes < MAX_TAIL_BYTES:
+                step = min(block, size, MAX_TAIL_BYTES - read_bytes)
                 size -= step
                 f.seek(size)
-                data = f.read(step) + data
-            text = data.decode("utf-8", errors="replace")
-            return mask_sensitive_text("\n".join(text.splitlines()[-lines:]))
+                chunk = f.read(step)
+                chunks.append(chunk)
+                read_bytes += step
+                newline_count += chunk.count(b"\n")
+            truncated = size > 0 and newline_count <= lines
+            text_lines = b"".join(reversed(chunks)).decode("utf-8", errors="replace").splitlines()
+            if truncated:
+                # Without the line prefix, a sensitive value cannot be reliably masked.
+                text_lines = text_lines[1:]
+            text = mask_sensitive_text("\n".join(text_lines[-lines:]))
+            if truncated:
+                return TAIL_TRUNCATION_NOTICE + ("\n" + text if text else "")
+            return text
     except Exception as e:
         return f"读取日志失败: {e}"
 
