@@ -1462,6 +1462,7 @@ class UiRouteComponentTests(unittest.TestCase):
                     "name": "<Python>",
                     "suffix": ".py <x>",
                     "command": "python",
+                    "status": "available",
                     "version": "3.13",
                     "install_url": "/install/runtime/python",
                 }

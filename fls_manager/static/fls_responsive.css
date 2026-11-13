@@ -553,7 +553,7 @@
 
     .page-status #runtimeTable {
         display:table!important;
-        min-width:760px!important;
+        min-width:900px!important;
         width:100%!important;
         border-collapse:collapse!important;
     }
@@ -585,6 +585,32 @@
         padding:10px 8px!important;
         font-size:13px!important;
         vertical-align:middle!important;
+    }
+
+    .page-status #runtimeTable th:first-child,
+    .page-status #runtimeTable td:first-child {
+        min-width:110px!important;
+        white-space:nowrap!important;
+    }
+
+    .page-status #runtimeTable th:nth-child(2),
+    .page-status #runtimeTable td:nth-child(2) {
+        min-width:130px!important;
+    }
+
+    .page-status #runtimeTable th:nth-child(3),
+    .page-status #runtimeTable td:nth-child(3) {
+        min-width:150px!important;
+    }
+
+    .page-status #runtimeTable th:nth-child(4),
+    .page-status #runtimeTable td:nth-child(4) {
+        min-width:280px!important;
+    }
+
+    .page-status #runtimeTable th:nth-child(5),
+    .page-status #runtimeTable td:nth-child(5) {
+        min-width:160px!important;
     }
 
     .page-status #runtimeTable td::before {
