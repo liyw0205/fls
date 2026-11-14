@@ -1649,6 +1649,40 @@ class BackupIsolationTests(unittest.TestCase):
             self.assertFalse(worker.is_alive(), "restore worker did not finish")
             self.assertEqual(result["response"].status_code, 200)
 
+    def test_backup_data_restore_reloads_task_collection_membership_from_disk(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager import models
+
+            task = {
+                "id": "restored-task",
+                "name": "Restored",
+                "command": "task restored.py",
+                "collection_id": "restored-collection",
+            }
+            collection = {
+                "id": "restored-collection",
+                "name": "Restored collection",
+                "remark": "",
+                "created_at": "",
+                "updated_at": "",
+            }
+            archive = restore_test_archive({
+                "tasks.json": json.dumps([task]).encode(),
+                "collections.json": json.dumps([collection]).encode(),
+            })
+
+            with patch("fls_manager.routes.backup.restore.reload_scheduler"):
+                response = post_restore(app, archive)
+
+            self.assertEqual(response.status_code, 200)
+            restored_tasks = models.load_tasks()
+            restored_collections = models.load_collections()
+            collection_ids = {item["id"] for item in restored_collections}
+
+            self.assertEqual([item["id"] for item in restored_tasks], ["restored-task"])
+            self.assertEqual(restored_tasks[0]["collection_id"], "restored-collection")
+            self.assertIn(restored_tasks[0]["collection_id"], collection_ids)
+
     def test_backup_import_reports_scheduler_reload_failure_after_persisting(self):
         with isolated_app() as (app, _base_dir):
             from fls_manager import paths
