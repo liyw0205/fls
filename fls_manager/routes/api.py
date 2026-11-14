@@ -471,7 +471,15 @@ def api_task_bulk_action():
                         result["changed_count"] += 1
                 return result["changed_count"] > 0
 
-            mutate_tasks(clear_collection)
+            try:
+                mutate_tasks(clear_collection)
+            except Exception as e:
+                return jsonify({
+                    "ok": False,
+                    "msg": f"任务合集归属未更改，保存失败：{e}",
+                    "action": action,
+                    "count": len(task_ids),
+                }), 500
             changed_count = result["changed_count"]
 
             return jsonify(_bulk_payload(

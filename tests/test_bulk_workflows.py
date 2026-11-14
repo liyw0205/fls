@@ -2,6 +2,7 @@ import contextlib
 import json
 import os
 import sys
+import threading
 import tempfile
 import unittest
 from pathlib import Path
@@ -2186,6 +2187,336 @@ class BulkWorkflowTests(unittest.TestCase):
             tasks = {task["id"]: task for task in read_json(base_dir / "data" / "tasks.json")}
             self.assertEqual(tasks["t1"]["collection_id"], "")
             self.assertEqual(tasks["t2"]["collection_id"], "")
+
+    def test_collection_delete_task_write_failure_keeps_collection_and_membership(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            collection = {
+                "id": "c1",
+                "name": "合集一",
+                "remark": "",
+                "created_at": "2026-07-04 00:00:00",
+                "updated_at": "2026-07-04 00:00:00",
+            }
+            write_json(paths.COLLECTION_FILE, [collection])
+            write_json(paths.TASK_FILE, [sample_task("t1", collection_id="c1")])
+
+            with patch(
+                "fls_manager.routes.tasks.collections.mutate_tasks",
+                side_effect=OSError("task storage unavailable"),
+            ):
+                response = app.test_client().post(
+                    "/collection/delete/c1",
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 500)
+            self.assertIn("task storage unavailable", response.get_data(as_text=True))
+            self.assertEqual(read_json(base_dir / "data" / "collections.json"), [collection])
+            task = read_json(base_dir / "data" / "tasks.json")[0]
+            self.assertEqual(task["collection_id"], "c1")
+
+    def test_collection_delete_collection_write_failure_reports_cleared_members(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import models, paths
+            from fls_manager.routes.tasks import collections as collection_routes
+
+            collection = {
+                "id": "c1",
+                "name": "合集一",
+                "remark": "",
+                "created_at": "2026-07-04 00:00:00",
+                "updated_at": "2026-07-04 00:00:00",
+            }
+            write_json(paths.COLLECTION_FILE, [collection])
+            write_json(paths.TASK_FILE, [sample_task("t1", collection_id="c1")])
+
+            with patch.object(
+                collection_routes,
+                "save_collections",
+                side_effect=OSError("collection storage unavailable"),
+            ):
+                response = app.test_client().post(
+                    "/collection/delete/c1",
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 500)
+            body = response.get_data(as_text=True)
+            self.assertIn("任务已移出该合集", body)
+            self.assertIn("collection storage unavailable", body)
+            self.assertEqual(read_json(base_dir / "data" / "collections.json"), [collection])
+            task = read_json(base_dir / "data" / "tasks.json")[0]
+            self.assertEqual(task["collection_id"], "")
+            self.assertEqual(models.load_collections(), [collection])
+            self.assertEqual(models.load_tasks()[0]["collection_id"], "")
+
+    def test_collection_create_and_rename_write_failures_keep_persisted_state(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+            from fls_manager.routes.tasks import collections as collection_routes
+
+            collection = {
+                "id": "c1",
+                "name": "原名称",
+                "remark": "原备注",
+                "created_at": "2026-07-04 00:00:00",
+                "updated_at": "2026-07-04 00:00:00",
+            }
+            write_json(paths.COLLECTION_FILE, [collection])
+
+            with patch.object(
+                collection_routes,
+                "save_collections",
+                side_effect=OSError("collection disk full"),
+            ):
+                create = app.test_client().post(
+                    "/collection/new",
+                    data={"name": "新合集", "remark": ""},
+                    headers={"X-Token": TOKEN},
+                )
+                rename = app.test_client().post(
+                    "/collection/edit/c1",
+                    data={"name": "新名称", "remark": "新备注"},
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(create.status_code, 500)
+            self.assertIn("合集创建失败，未保存", create.get_data(as_text=True))
+            self.assertIn("collection disk full", create.get_data(as_text=True))
+            self.assertEqual(rename.status_code, 500)
+            self.assertIn("原有内容未更改", rename.get_data(as_text=True))
+            self.assertIn("collection disk full", rename.get_data(as_text=True))
+            self.assertEqual(read_json(base_dir / "data" / "collections.json"), [collection])
+
+    def test_collection_add_write_failure_keeps_task_unassigned(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+            from fls_manager.routes.tasks import collections as collection_routes
+
+            collection = {
+                "id": "c1",
+                "name": "合集一",
+                "remark": "",
+                "created_at": "2026-07-04 00:00:00",
+                "updated_at": "2026-07-04 00:00:00",
+            }
+            write_json(paths.COLLECTION_FILE, [collection])
+            write_json(paths.TASK_FILE, [sample_task("t1")])
+
+            with patch.object(
+                collection_routes,
+                "mutate_tasks",
+                side_effect=OSError("task file is read-only"),
+            ):
+                response = app.test_client().post(
+                    "/collection/add-task/c1",
+                    data={"task_ids": ["t1"]},
+                    headers={"X-Token": TOKEN},
+                )
+
+            body = response.get_data(as_text=True)
+            self.assertEqual(response.status_code, 500)
+            self.assertIn("任务未更改", body)
+            self.assertIn("task file is read-only", body)
+            self.assertEqual(read_json(base_dir / "data" / "collections.json"), [collection])
+            self.assertEqual(
+                read_json(base_dir / "data" / "tasks.json")[0]["collection_id"],
+                "",
+            )
+
+    def test_single_and_bulk_collection_removal_report_write_failure(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+            from fls_manager.routes.tasks import actions
+
+            write_json(paths.TASK_FILE, [sample_task("t1", collection_id="c1")])
+
+            with patch.object(
+                actions,
+                "mutate_tasks",
+                side_effect=OSError("task file is read-only"),
+            ):
+                page = app.test_client().post(
+                    "/task/collection/clear/t1",
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(page.status_code, 500)
+            page_body = page.get_data(as_text=True)
+            self.assertIn("任务归属未更改", page_body)
+            self.assertIn("task file is read-only", page_body)
+            self.assertIn("刷新后重试", page_body)
+
+            with patch(
+                "fls_manager.routes.api.mutate_tasks",
+                side_effect=OSError("task file is read-only"),
+            ):
+                api = app.test_client().post(
+                    "/api/task/bulk-action",
+                    json={"action": "clear_collection", "task_ids": ["t1"]},
+                    headers={"X-Token": TOKEN},
+                )
+
+            payload = api.get_json()
+            self.assertEqual(api.status_code, 500)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["action"], "clear_collection")
+            self.assertIn("归属未更改", payload["msg"])
+            self.assertIn("task file is read-only", payload["msg"])
+            self.assertEqual(
+                read_json(base_dir / "data" / "tasks.json")[0]["collection_id"],
+                "c1",
+            )
+
+    def test_collection_add_and_delete_serialize_membership_changes(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+            from fls_manager.routes.tasks import collections as collection_routes
+
+            collection = {
+                "id": "c1",
+                "name": "合集一",
+                "remark": "",
+                "created_at": "2026-07-04 00:00:00",
+                "updated_at": "2026-07-04 00:00:00",
+            }
+            write_json(paths.COLLECTION_FILE, [collection])
+            write_json(paths.TASK_FILE, [sample_task("t1")])
+
+            add_checked_collection = threading.Event()
+            allow_add = threading.Event()
+            delete_saved = threading.Event()
+            delete_started = threading.Event()
+            results = {}
+
+            real_get_collection = collection_routes.get_collection
+            real_save_collections = collection_routes.save_collections
+
+            def delayed_get_collection(collection_id):
+                result = real_get_collection(collection_id)
+                if threading.current_thread().name == "collection-add":
+                    add_checked_collection.set()
+                    if not allow_add.wait(2):
+                        raise TimeoutError("collection add was not released")
+                return result
+
+            def track_delete_save(collections):
+                if not any(item.get("id") == "c1" for item in collections):
+                    delete_saved.set()
+                return real_save_collections(collections)
+
+            def post(name, url, data=None):
+                response = app.test_client().post(
+                    url,
+                    data=data,
+                    headers={"X-Token": TOKEN},
+                )
+                results[name] = response.status_code
+
+            add_thread = threading.Thread(
+                name="collection-add",
+                target=post,
+                args=("add", "/collection/add-task/c1", {"task_ids": ["t1"]}),
+            )
+            delete_thread = threading.Thread(
+                name="collection-delete",
+                target=lambda: (delete_started.set(), post("delete", "/collection/delete/c1")),
+            )
+
+            with patch.object(
+                collection_routes,
+                "get_collection",
+                side_effect=delayed_get_collection,
+            ), patch.object(
+                collection_routes,
+                "save_collections",
+                side_effect=track_delete_save,
+            ):
+                add_thread.start()
+                try:
+                    self.assertTrue(add_checked_collection.wait(2))
+                    delete_thread.start()
+                    self.assertTrue(delete_started.wait(2))
+                    self.assertFalse(delete_saved.wait(0.05))
+                finally:
+                    allow_add.set()
+
+                add_thread.join(timeout=2)
+                delete_thread.join(timeout=2)
+
+            self.assertFalse(add_thread.is_alive(), "collection add did not finish")
+            self.assertFalse(delete_thread.is_alive(), "collection delete did not finish")
+            self.assertEqual(results, {"add": 302, "delete": 302})
+            self.assertEqual(read_json(base_dir / "data" / "collections.json"), [])
+            task = read_json(base_dir / "data" / "tasks.json")[0]
+            self.assertEqual(task["collection_id"], "")
+
+    def test_concurrent_collection_create_preserves_both_records(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+            from fls_manager.routes.tasks import collections as collection_routes
+
+            write_json(paths.COLLECTION_FILE, [])
+            first_save_entered = threading.Event()
+            allow_first_save = threading.Event()
+            second_save_entered = threading.Event()
+            results = {}
+            real_save_collections = collection_routes.save_collections
+
+            def controlled_save(collections):
+                thread_name = threading.current_thread().name
+                if thread_name == "collection-create-a":
+                    first_save_entered.set()
+                    if not allow_first_save.wait(2):
+                        raise TimeoutError("first collection save was not released")
+                elif thread_name == "collection-create-b":
+                    second_save_entered.set()
+                return real_save_collections(collections)
+
+            def create(name, thread_name):
+                response = app.test_client().post(
+                    "/collection/new",
+                    data={"name": name, "remark": ""},
+                    headers={"X-Token": TOKEN},
+                )
+                results[thread_name] = response.status_code
+
+            first = threading.Thread(
+                name="collection-create-a",
+                target=create,
+                args=("A", "a"),
+            )
+            second = threading.Thread(
+                name="collection-create-b",
+                target=create,
+                args=("B", "b"),
+            )
+
+            with patch.object(
+                collection_routes,
+                "save_collections",
+                side_effect=controlled_save,
+            ):
+                first.start()
+                try:
+                    self.assertTrue(first_save_entered.wait(2))
+                    second.start()
+                    self.assertFalse(second_save_entered.wait(0.05))
+                finally:
+                    allow_first_save.set()
+
+                first.join(timeout=2)
+                second.join(timeout=2)
+
+            self.assertFalse(first.is_alive(), "first collection create did not finish")
+            self.assertFalse(second.is_alive(), "second collection create did not finish")
+            self.assertEqual(results, {"a": 302, "b": 302})
+            self.assertEqual(
+                {item["name"] for item in read_json(base_dir / "data" / "collections.json")},
+                {"A", "B"},
+            )
 
     def test_collection_delete_missing_collection_aborts_without_writes(self):
         with isolated_app() as (app, base_dir):

@@ -121,7 +121,17 @@ def task_collection_clear(task_id):
         task["updated_at"] = now_str()
         return True
 
-    mutate_tasks(clear_collection)
+    try:
+        mutate_tasks(clear_collection)
+    except Exception as e:
+        back_url = get_back_url("/collections")
+        body = f"""
+{message_card(f"移出合集失败，任务归属未更改：{h(e)}", "error", strong=True, title="移出失败")}
+<div class="card">
+    <a class="btn btn-gray" href="{h(back_url)}">返回并刷新后重试</a>
+</div>
+"""
+        return layout("移出任务", "collections", body), 500
 
     if not result.get("found"):
         abort(404)

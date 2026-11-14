@@ -298,6 +298,7 @@ def _normalize_list(data, normalizer):
 
 TASK_HISTORY_LIMIT = 500
 TASKS_MUTATION_LOCK = threading.RLock()
+COLLECTION_MUTATION_LOCK = threading.RLock()
 
 
 class TaskSchedulerReloadError(RuntimeError):
@@ -505,18 +506,20 @@ def get_proxy(proxy_id):
 
 
 def load_collections():
-    data = read_json(COLLECTION_FILE, [])
-    collections, changed = _normalize_list(data, normalize_collection)
+    with COLLECTION_MUTATION_LOCK:
+        data = read_json(COLLECTION_FILE, [])
+        collections, changed = _normalize_list(data, normalize_collection)
 
-    if changed:
-        save_collections(collections)
+        if changed:
+            save_collections(collections)
 
-    return collections
+        return collections
 
 
 def save_collections(collections):
-    normalized, _ = _normalize_list(collections or [], normalize_collection)
-    write_json(COLLECTION_FILE, normalized)
+    with COLLECTION_MUTATION_LOCK:
+        normalized, _ = _normalize_list(collections or [], normalize_collection)
+        write_json(COLLECTION_FILE, normalized)
 
 
 def get_collection(collection_id):

@@ -154,6 +154,173 @@ class TaskMutationConcurrencyTests(unittest.TestCase):
             persisted = (base_dir / "data" / "tasks.json").read_text(encoding="utf-8")
             self.assertIn('"enabled": false', persisted)
 
+    def test_task_create_and_edit_report_scheduler_reload_failure_after_persisting(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager import models
+            from fls_manager.routes.tasks import pages
+
+            models.save_collections([{
+                "id": "c1",
+                "name": "合集一",
+                "remark": "",
+                "created_at": "2026-07-04 00:00:00",
+                "updated_at": "2026-07-04 00:00:00",
+            }])
+            client = app.test_client()
+
+            with patch.object(
+                pages,
+                "reload_scheduler",
+                side_effect=RuntimeError("scheduler unavailable"),
+            ):
+                created = client.post(
+                    "/task/new",
+                    data={
+                        "name": "新任务",
+                        "command": "task new.py",
+                        "collection_id": "c1",
+                        "enabled": "1",
+                    },
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(created.status_code, 500)
+            self.assertIn("任务已保存", created.get_data(as_text=True))
+            self.assertIn("scheduler unavailable", created.get_data(as_text=True))
+            task = models.load_tasks()[0]
+            self.assertEqual(task["collection_id"], "c1")
+            task_id = task["id"]
+
+            with patch.object(
+                pages,
+                "reload_scheduler",
+                side_effect=RuntimeError("scheduler unavailable"),
+            ):
+                edited = client.post(
+                    f"/task/edit/{task_id}",
+                    data={
+                        "name": "编辑后",
+                        "command": "task edited.py",
+                        "collection_id": "c1",
+                        "enabled": "1",
+                    },
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(edited.status_code, 500)
+            self.assertIn("任务已保存", edited.get_data(as_text=True))
+            self.assertIn("scheduler unavailable", edited.get_data(as_text=True))
+            persisted = models.load_tasks()[0]
+            self.assertEqual(persisted["name"], "编辑后")
+            self.assertEqual(persisted["command"], "task edited.py")
+            self.assertEqual(persisted["collection_id"], "c1")
+
+            rejected_create = client.post(
+                "/task/new",
+                data={
+                    "name": "无效归属",
+                    "command": "task invalid.py",
+                    "collection_id": "missing",
+                    "enabled": "1",
+                },
+                headers={"X-Token": TOKEN},
+            )
+            rejected_edit = client.post(
+                f"/task/edit/{task_id}",
+                data={
+                    "name": "不应保存",
+                    "command": "task invalid.py",
+                    "collection_id": "missing",
+                    "enabled": "1",
+                },
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(rejected_create.status_code, 400)
+            self.assertEqual(rejected_edit.status_code, 400)
+            persisted = models.load_tasks()[0]
+            self.assertEqual(persisted["name"], "编辑后")
+            self.assertEqual(persisted["collection_id"], "c1")
+
+    def test_task_create_and_collection_delete_serialize_membership_validation(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager import models
+            from fls_manager.routes.tasks import collections as collection_routes
+            from fls_manager.routes.tasks import pages
+
+            collection = {
+                "id": "c1",
+                "name": "合集一",
+                "remark": "",
+                "created_at": "2026-07-04 00:00:00",
+                "updated_at": "2026-07-04 00:00:00",
+            }
+            models.save_collections([collection])
+            checked = threading.Event()
+            release_create = threading.Event()
+            delete_saved = threading.Event()
+            results = {}
+            real_get_collection = pages.get_collection
+            real_save_collections = collection_routes.save_collections
+
+            def delayed_get_collection(collection_id):
+                result = real_get_collection(collection_id)
+                if threading.current_thread().name == "task-create":
+                    checked.set()
+                    if not release_create.wait(2):
+                        raise TimeoutError("task create was not released")
+                return result
+
+            def track_collection_save(collections):
+                if not any(item.get("id") == "c1" for item in collections):
+                    delete_saved.set()
+                return real_save_collections(collections)
+
+            def create_task():
+                response = app.test_client().post(
+                    "/task/new",
+                    data={
+                        "name": "并发任务",
+                        "command": "task concurrent.py",
+                        "collection_id": "c1",
+                        "enabled": "1",
+                    },
+                    headers={"X-Token": TOKEN},
+                )
+                results["create"] = response.status_code
+
+            def delete_collection():
+                response = app.test_client().post(
+                    "/collection/delete/c1",
+                    headers={"X-Token": TOKEN},
+                )
+                results["delete"] = response.status_code
+
+            create_thread = threading.Thread(name="task-create", target=create_task)
+            delete_thread = threading.Thread(name="collection-delete", target=delete_collection)
+            with patch.object(pages, "get_collection", side_effect=delayed_get_collection), \
+                    patch.object(
+                        collection_routes,
+                        "save_collections",
+                        side_effect=track_collection_save,
+                    ), patch.object(pages, "reload_scheduler"):
+                create_thread.start()
+                try:
+                    self.assertTrue(checked.wait(2))
+                    delete_thread.start()
+                    self.assertFalse(delete_saved.wait(0.05))
+                finally:
+                    release_create.set()
+
+                create_thread.join(timeout=2)
+                delete_thread.join(timeout=2)
+
+            self.assertFalse(create_thread.is_alive(), "task create did not finish")
+            self.assertFalse(delete_thread.is_alive(), "collection delete did not finish")
+            self.assertEqual(results, {"create": 302, "delete": 302})
+            self.assertEqual(models.load_collections(), [])
+            persisted = models.load_tasks()[0]
+            self.assertEqual(persisted["collection_id"], "")
+
 
 if __name__ == "__main__":
     unittest.main()

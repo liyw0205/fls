@@ -196,24 +196,31 @@ def backup_import():
             raise BackupRestoreWriteError(str(e)) from e
 
         scheduler_error = ""
-        restore_lock = (
+        restore_changes_data = "data" in restore_items
+        collection_lock = (
+            models.COLLECTION_MUTATION_LOCK
+            if restore_changes_data
+            else nullcontext()
+        )
+        task_lock = (
             models.TASKS_MUTATION_LOCK
-            if "data" in restore_items
+            if restore_changes_data
             else nullcontext()
         )
         storage_guard = (
             storage_transaction()
-            if "data" in restore_items
+            if restore_changes_data
             else nullcontext()
         )
         try:
-            with restore_lock:
-                with storage_guard:
-                    _commit_restore_directories(staged)
-                    try:
-                        reload_scheduler()
-                    except Exception as e:
-                        scheduler_error = str(e)
+            with collection_lock:
+                with task_lock:
+                    with storage_guard:
+                        _commit_restore_directories(staged)
+                        try:
+                            reload_scheduler()
+                        except Exception as e:
+                            scheduler_error = str(e)
         finally:
             for entry in staged:
                 if not entry["preserve_workspace"]:

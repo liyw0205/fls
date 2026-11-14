@@ -1118,6 +1118,59 @@ class BackupIsolationTests(unittest.TestCase):
                 {"restored-task", "concurrent-task"},
             )
 
+    def test_backup_data_restore_waits_for_collection_mutation_lock(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager import models
+            from fls_manager.routes.backup import restore
+
+            real_lock = models.COLLECTION_MUTATION_LOCK
+            lock_attempted = threading.Event()
+            commit_entered = threading.Event()
+            finished = threading.Event()
+            result = {}
+
+            class ObservedRLock:
+                def __enter__(self):
+                    lock_attempted.set()
+                    real_lock.acquire()
+                    return self
+
+                def __exit__(self, _exc_type, _exc_value, _traceback):
+                    real_lock.release()
+
+            real_commit = restore._commit_restore_directories
+
+            def track_commit(entries):
+                commit_entered.set()
+                return real_commit(entries)
+
+            def run_restore():
+                try:
+                    with patch.object(
+                        restore,
+                        "_commit_restore_directories",
+                        side_effect=track_commit,
+                    ):
+                        result["response"] = post_restore(app, restore_test_archive())
+                finally:
+                    finished.set()
+
+            real_lock.acquire()
+            models.COLLECTION_MUTATION_LOCK = ObservedRLock()
+            worker = threading.Thread(target=run_restore)
+            try:
+                worker.start()
+                self.assertTrue(lock_attempted.wait(2), "restore did not request collection lock")
+                self.assertFalse(commit_entered.wait(0.05), "restore committed before collection lock")
+            finally:
+                real_lock.release()
+                worker.join(timeout=3)
+                models.COLLECTION_MUTATION_LOCK = real_lock
+
+            self.assertTrue(finished.is_set(), "restore did not finish after lock release")
+            self.assertFalse(worker.is_alive(), "restore worker did not finish")
+            self.assertEqual(result["response"].status_code, 200)
+
     def test_backup_import_reports_scheduler_reload_failure_after_persisting(self):
         with isolated_app() as (app, _base_dir):
             from fls_manager import paths

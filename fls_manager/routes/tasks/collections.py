@@ -10,6 +10,7 @@ from ...models import (
     load_tasks,
     save_tasks,
     mutate_tasks,
+    COLLECTION_MUTATION_LOCK,
     load_collections,
     save_collections,
     get_collection,
@@ -830,18 +831,22 @@ def collection_new():
         name = request.form.get("name", "").strip()
         remark = request.form.get("remark", "").strip()
 
-        collections = load_collections()
+        with COLLECTION_MUTATION_LOCK:
+            collections = load_collections()
 
-        item = {
-            "id": uuid.uuid4().hex,
-            "name": unique_collection_name(name),
-            "remark": remark,
-            "created_at": now_str(),
-            "updated_at": now_str(),
-        }
+            item = {
+                "id": uuid.uuid4().hex,
+                "name": unique_collection_name(name),
+                "remark": remark,
+                "created_at": now_str(),
+                "updated_at": now_str(),
+            }
 
-        collections.append(item)
-        save_collections(collections)
+            collections.append(item)
+            try:
+                save_collections(collections)
+            except Exception as e:
+                return f"合集创建失败，未保存：{h(e)}", 500
 
         return redirect(url_for("tasks.collections_page"))
 
@@ -865,11 +870,20 @@ def collection_edit(collection_id):
         name = request.form.get("name", "").strip()
         remark = request.form.get("remark", "").strip()
 
-        item["name"] = unique_collection_name(name, exclude_id=collection_id)
-        item["remark"] = remark
-        item["updated_at"] = now_str()
+        with COLLECTION_MUTATION_LOCK:
+            collections = load_collections()
+            item = next((c for c in collections if c.get("id") == collection_id), None)
+            if not item:
+                abort(404)
 
-        save_collections(collections)
+            item["name"] = unique_collection_name(name, exclude_id=collection_id)
+            item["remark"] = remark
+            item["updated_at"] = now_str()
+
+            try:
+                save_collections(collections)
+            except Exception as e:
+                return f"合集更新失败，原有内容未更改：{h(e)}", 500
 
         return redirect(url_for("tasks.collections_page"))
 
@@ -878,64 +892,78 @@ def collection_edit(collection_id):
 
 @bp.route("/collection/delete/<collection_id>", methods=["POST"])
 def collection_delete(collection_id):
-    collections = load_collections()
-    exists = any(c.get("id") == collection_id for c in collections)
+    with COLLECTION_MUTATION_LOCK:
+        collections = load_collections()
+        exists = any(c.get("id") == collection_id for c in collections)
 
-    if not exists:
-        abort(404)
+        if not exists:
+            abort(404)
 
-    collections = [c for c in collections if c.get("id") != collection_id]
+        remaining_collections = [
+            c for c in collections if c.get("id") != collection_id
+        ]
 
-    save_collections(collections)
+        def clear_deleted_collection(tasks):
+            changed = False
+            for task in tasks:
+                if str(task.get("collection_id") or "") == collection_id:
+                    task["collection_id"] = ""
+                    task["updated_at"] = now_str()
+                    changed = True
+            return changed
 
-    def clear_deleted_collection(tasks):
-        changed = False
-        for task in tasks:
-            if str(task.get("collection_id") or "") == collection_id:
-                task["collection_id"] = ""
-                task["updated_at"] = now_str()
-                changed = True
-        return changed
+        try:
+            _tasks, tasks_changed = mutate_tasks(clear_deleted_collection)
+        except Exception as e:
+            return f"合集未删除，任务成员关系未更改：{h(e)}", 500
 
-    mutate_tasks(clear_deleted_collection)
+        try:
+            save_collections(remaining_collections)
+        except Exception as e:
+            state = "任务已移出该合集" if tasks_changed else "任务成员关系未更改"
+            return f"合集删除未完成，{state}；合集记录仍保留：{h(e)}", 500
 
     return redirect(get_back_url("/collections"))
 
 
 @bp.route("/collection/add-task/<collection_id>", methods=["POST"])
 def collection_add_task(collection_id):
-    collection = get_collection(collection_id)
+    with COLLECTION_MUTATION_LOCK:
+        collection = get_collection(collection_id)
 
-    if not collection:
-        abort(404)
+        if not collection:
+            abort(404)
 
-    task_ids = _collection_task_ids_from_form()
-    if not task_ids:
-        return redirect(get_back_url("/collections"))
+        task_ids = _collection_task_ids_from_form()
+        if not task_ids:
+            return redirect(get_back_url("/collections"))
 
-    selected = set(task_ids)
-    result = {"missing": False}
+        selected = set(task_ids)
+        result = {"missing": False}
 
-    def add_to_collection(tasks):
-        existing = {
-            str(task.get("id") or "")
-            for task in tasks
-            if str(task.get("id") or "") in selected
-        }
-        if existing != selected:
-            result["missing"] = True
-            return False
+        def add_to_collection(tasks):
+            existing = {
+                str(task.get("id") or "")
+                for task in tasks
+                if str(task.get("id") or "") in selected
+            }
+            if existing != selected:
+                result["missing"] = True
+                return False
 
-        for task in tasks:
-            if task.get("id") in selected:
-                task["collection_id"] = collection_id
-                task["updated_at"] = now_str()
-                task["pinned"] = False
-        return bool(selected)
+            for task in tasks:
+                if task.get("id") in selected:
+                    task["collection_id"] = collection_id
+                    task["updated_at"] = now_str()
+                    task["pinned"] = False
+            return bool(selected)
 
-    mutate_tasks(add_to_collection)
+        try:
+            mutate_tasks(add_to_collection)
+        except Exception as e:
+            return f"合集成员更新失败，任务未更改：{h(e)}", 500
 
-    if result["missing"]:
-        abort(404)
+        if result["missing"]:
+            abort(404)
 
     return redirect(get_back_url("/collections"))
