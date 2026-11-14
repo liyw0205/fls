@@ -1,9 +1,14 @@
+import threading
 import uuid
 
-from ..models import load_tasks, save_tasks
+from ..models import normalize_task
+from ..paths import TASK_FILE
 from ..scheduler import reload_scheduler, cron_to_trigger
+from ..storage import mutate_json
 from ..utils import now_str
 from .logs import append_log
+
+ONLINE_TASK_IMPORT_LOCK = threading.RLock()
 
 
 def normalize_online_task_crons(data):
@@ -168,124 +173,118 @@ def import_task_if_needed(item, log_file=None, enable_task=False, selected_task_
             except Exception:
                 pass
 
-    tasks = load_tasks()
     online_id = item.get("id")
-
     imported = 0
     skipped = 0
     unselected = 0
     messages = []
 
-    for idx, task_cron in enumerate(task_crons, 1):
-        if selected_set and idx not in selected_set:
-            unselected += 1
-            continue
+    def add_selected_tasks(data):
+        nonlocal imported, skipped, unselected
+        tasks = []
+        if isinstance(data, list):
+            tasks = [
+                normalized
+                for raw in data
+                if (normalized := normalize_task(raw)) is not None
+            ]
 
-        name = str(task_cron.get("name") or item.get("name") or "").strip()
-        cron_expr = str(task_cron.get("cron") or "").strip()
-        command = str(task_cron.get("command") or "").strip() or guess_task_command(item)
-        task_env = online_task_cron_vars(task_cron)
-
-        config_path = str(task_cron.get("config_path") or "").strip().strip("/")
-
-        remark = str(
-            task_cron.get("remark")
-            or f"从在线脚本导入：{item.get('name')}"
-        ).strip()
-
-        if not name:
-            msg = f"第 {idx} 个任务 task_cron.name 为空，跳过"
-            skipped += 1
-            messages.append(msg)
-            if log_file:
-                append_log(log_file, msg)
-            continue
-
-        if not command:
-            msg = f"第 {idx} 个任务无法推导任务命令，请在 task_cron.command 中显式指定"
-            skipped += 1
-            messages.append(msg)
-            if log_file:
-                append_log(log_file, msg)
-            continue
-
-        if cron_expr:
-            try:
-                cron_to_trigger(cron_expr)
-            except Exception as e:
-                msg = f"第 {idx} 个任务 Cron 不合法：{e}"
-                skipped += 1
-                messages.append(msg)
-                if log_file:
-                    append_log(log_file, msg)
+        for idx, task_cron in enumerate(task_crons, 1):
+            if selected_set and idx not in selected_set:
+                unselected += 1
                 continue
 
-        online_task_key = f"{online_id}:{idx}:{name}"
+            name = str(task_cron.get("name") or item.get("name") or "").strip()
+            cron_expr = str(task_cron.get("cron") or "").strip()
+            command = str(task_cron.get("command") or "").strip() or guess_task_command(item)
+            task_env = online_task_cron_vars(task_cron)
+            config_path = str(task_cron.get("config_path") or "").strip().strip("/")
+            remark = str(
+                task_cron.get("remark")
+                or f"从在线脚本导入：{item.get('name')}"
+            ).strip()
 
-        exists = False
+            if not name:
+                msg = f"第 {idx} 个任务 task_cron.name 为空，跳过"
+                skipped += 1
+                messages.append(msg)
+                continue
 
-        for task in tasks:
-            if task.get("online_script_task_key") == online_task_key:
-                exists = True
-                break
+            if not command:
+                msg = f"第 {idx} 个任务无法推导任务命令，请在 task_cron.command 中显式指定"
+                skipped += 1
+                messages.append(msg)
+                continue
 
-            if len(task_crons) == 1 and task.get("online_script_id") == online_id:
-                exists = True
-                break
+            if cron_expr:
+                try:
+                    cron_to_trigger(cron_expr)
+                except Exception as e:
+                    msg = f"第 {idx} 个任务 Cron 不合法：{e}"
+                    skipped += 1
+                    messages.append(msg)
+                    continue
 
-        if exists:
-            msg = f"任务已导入过，跳过：{name}"
-            skipped += 1
-            messages.append(msg)
-            if log_file:
-                append_log(log_file, msg)
-            continue
+            online_task_key = f"{online_id}:{idx}:{name}"
+            exists = any(
+                task.get("online_script_task_key") == online_task_key
+                or (len(task_crons) == 1 and task.get("online_script_id") == online_id)
+                for task in tasks
+            )
+            if exists:
+                msg = f"任务已导入过，跳过：{name}"
+                skipped += 1
+                messages.append(msg)
+                continue
 
-        task = {
-            "id": uuid.uuid4().hex,
-            "name": name,
-            "remark": remark,
-            "command": command,
-            "cron": cron_expr,
-            "enabled": bool(enable_task),
-            "env": task_env,
-            "proxy_id": "",
-            "notify": {"mode": "default", "ids": []},
-            "random_delay": {"mode": "none", "seconds": 0},
-            "run_count": 0,
-            "online_script_id": online_id,
-            "online_script_task_key": online_task_key,
-            "created_at": now_str(),
-            "updated_at": now_str(),
-        }
+            task = {
+                "id": uuid.uuid4().hex,
+                "name": name,
+                "remark": remark,
+                "command": command,
+                "cron": cron_expr,
+                "enabled": bool(enable_task),
+                "env": task_env,
+                "proxy_id": "",
+                "notify": {"mode": "default", "ids": []},
+                "random_delay": {"mode": "none", "seconds": 0},
+                "run_count": 0,
+                "online_script_id": online_id,
+                "online_script_task_key": online_task_key,
+                "created_at": now_str(),
+                "updated_at": now_str(),
+            }
 
-        if config_path:
-            task["config_path"] = config_path
+            if config_path:
+                task["config_path"] = config_path
 
-        tasks.append(task)
-        imported += 1
+            tasks.append(task)
+            imported += 1
+            env_msg = f" / 变量 {len(task_env)} 个" if task_env else ""
+            config_msg = f" / 配置 {config_path}" if config_path else ""
+            status_msg = "启用" if enable_task else "禁用"
+            messages.append(
+                f"任务已导入：{name} / {cron_expr or '手动'} / {command} / {status_msg}"
+                f"{env_msg}{config_msg}"
+            )
 
-        env_msg = f" / 变量 {len(task_env)} 个" if task_env else ""
-        config_msg = f" / 配置 {config_path}" if config_path else ""
-        status_msg = "启用" if enable_task else "禁用"
+        return tasks if imported else None
 
-        msg = (
-            f"任务已导入：{name} / "
-            f"{cron_expr or '手动'} / "
-            f"{command} / "
-            f"{status_msg}"
-            f"{env_msg}"
-            f"{config_msg}"
-        )
+    with ONLINE_TASK_IMPORT_LOCK:
+        mutate_json(TASK_FILE, [], add_selected_tasks)
 
-        messages.append(msg)
+        if imported > 0:
+            try:
+                reload_scheduler()
+            except Exception as e:
+                summary = f"任务已持久化，但调度器重载失败：{e}"
+                if log_file:
+                    append_log(log_file, summary)
+                return True, summary
 
-        if log_file:
+    if log_file:
+        for msg in messages:
             append_log(log_file, msg)
-
-    if imported > 0:
-        save_tasks(tasks)
-        reload_scheduler()
 
     summary = f"任务导入完成：新增 {imported} 个，跳过 {skipped} 个，未选择 {unselected} 个"
 
