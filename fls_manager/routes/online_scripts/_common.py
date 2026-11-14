@@ -22,6 +22,7 @@ from ...online_scripts.constants import (
     ONLINE_SCRIPT_CACHE_FILE,
     ONLINE_INSTALL_RUNNING,
     ONLINE_REFRESH_STATE,
+    get_online_refresh_state,
 )
 
 from ...online_scripts.logs import online_install_log_file

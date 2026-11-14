@@ -25,11 +25,12 @@ def online_scripts_page():
     msg = request.args.get("msg", "").strip()
     err = request.args.get("err", "").strip()
 
-    refresh_running = ONLINE_REFRESH_STATE.get("running")
-    refresh_message = ONLINE_REFRESH_STATE.get("message", "")
-    refresh_error = ONLINE_REFRESH_STATE.get("error", "")
-    refresh_updated_at = ONLINE_REFRESH_STATE.get("updated_at", "")
-    refresh_log = ONLINE_REFRESH_STATE.get("log_file", "")
+    refresh_state = get_online_refresh_state()
+    refresh_running = refresh_state.get("running")
+    refresh_message = refresh_state.get("message", "")
+    refresh_error = refresh_state.get("error", "")
+    refresh_updated_at = refresh_state.get("updated_at", "")
+    refresh_log = refresh_state.get("log_file", "")
 
     proxy_options = proxy_select_options("")
 
@@ -45,7 +46,11 @@ def online_scripts_page():
     refresh_status_text = (
         "正在后台同步在线脚本源，请稍候..."
         if refresh_running
-        else h(refresh_message or refresh_error or "")
+        else (
+            f"{h(refresh_state.get('status'))}：{h(refresh_message or refresh_error)}"
+            if refresh_state.get("status") and (refresh_message or refresh_error)
+            else h(refresh_state.get("status") or refresh_message or refresh_error or "")
+        )
     )
     header = page_header_card(
         "在线脚本",
@@ -164,7 +169,9 @@ async function updateOnlineRefreshStatus(){{
             card.style.display = "block";
 
             let color = json.error ? "#dc2626" : "#18a058";
-            let first = json.running ? "正在后台同步在线脚本源，请稍候..." : (json.message || json.error || "");
+            let detail = json.message || json.error || "";
+            let first = json.running ? "正在后台同步在线脚本源，请稍候..." :
+                ((json.status ? json.status + "：" : "") + detail);
 
             text.innerHTML =
                 "<span style='color:" + color + ";font-weight:900;'>" + escapeHtml(first) + "</span><br>" +
