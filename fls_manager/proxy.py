@@ -2,8 +2,12 @@ import time
 import re
 import shutil
 import subprocess
+import threading
+import uuid
 from .models import load_proxies
-from .utils import h, LazyModule
+from .paths import PROXY_DIAGNOSTICS_FILE
+from .storage import read_json, write_json
+from .utils import h, LazyModule, now_str
 
 requests = LazyModule("requests")
 
@@ -13,6 +17,268 @@ GITHUB_QUALITY_REPO_URL = "https://github.com/liyw0205/fls-scripts.git"
 
 _GITHUB_PROXY_HEALTH_CACHE = {}
 _GITHUB_PROXY_HEALTH_TTL = 60
+
+PROXY_DIAGNOSTIC_LIMIT = 200
+PROXY_DIAGNOSTIC_CONTENT_LIMIT = 12000
+PROXY_DIAGNOSTIC_URL_LIMIT = 500
+PROXY_DIAGNOSTIC_ITEM_LIMIT = 2000
+PROXY_DIAGNOSTIC_STATUSES = ("running", "succeeded", "failed", "unknown")
+PROXY_DIAGNOSTIC_KINDS = ("test", "quality")
+PROXY_DIAGNOSTICS_LOCK = threading.RLock()
+PROXY_ACTIVE_DIAGNOSTICS = set()
+
+
+def _diagnostic_text(value, default=""):
+    if value is None:
+        return default
+    return str(value)
+
+
+def _restart_recovery_message(previous):
+    recovery = "面板重启后无法确认代理检测结果，请检查代理并重新检测"
+    suffix = f"；{recovery}"
+    previous = _diagnostic_text(previous).strip()
+    if not previous:
+        return recovery
+    return previous[:max(0, PROXY_DIAGNOSTIC_CONTENT_LIMIT - len(suffix))] + suffix
+
+
+def _diagnostic_items(raw):
+    if not isinstance(raw, list):
+        return [], True
+
+    items = []
+    changed = False
+    for item in raw[:20]:
+        if not isinstance(item, dict):
+            changed = True
+            continue
+        normalized = dict(item)
+        for key, limit in (
+            ("url", PROXY_DIAGNOSTIC_URL_LIMIT),
+            ("status_code", 100),
+            ("elapsed", PROXY_DIAGNOSTIC_ITEM_LIMIT),
+        ):
+            value = normalized.get(key)
+            if isinstance(value, str) and len(value) > limit:
+                normalized[key] = value[:limit]
+                changed = True
+        if normalized != item:
+            changed = True
+        items.append(normalized)
+    if len(raw) > 20:
+        changed = True
+    return items, changed
+
+
+def _diagnostic_rows(raw):
+    rows = raw if isinstance(raw, list) else []
+    normalized = []
+    changed = not isinstance(raw, list)
+
+    for row in rows:
+        if not isinstance(row, dict):
+            changed = True
+            continue
+
+        diagnostic_id = _diagnostic_text(row.get("id")).strip()
+        if not diagnostic_id:
+            changed = True
+            continue
+
+        status = _diagnostic_text(row.get("status"), "unknown").strip()
+        if status not in PROXY_DIAGNOSTIC_STATUSES:
+            status = "unknown"
+            changed = True
+
+        if status == "running" and diagnostic_id not in PROXY_ACTIVE_DIAGNOSTICS:
+            status = "unknown"
+            previous = _diagnostic_text(row.get("error") or row.get("message")).strip()
+            row = dict(row)
+            row["error"] = _restart_recovery_message(previous)
+            changed = True
+
+        kind = _diagnostic_text(row.get("kind"), "quality").strip()
+        if kind not in PROXY_DIAGNOSTIC_KINDS:
+            kind = "quality"
+            changed = True
+
+        urls = row.get("urls")
+        if not isinstance(urls, list):
+            urls = []
+            changed = True
+        urls = [_diagnostic_text(url)[:PROXY_DIAGNOSTIC_URL_LIMIT] for url in urls[:20]]
+
+        items, items_changed = _diagnostic_items(row.get("items"))
+        changed = changed or items_changed
+
+        try:
+            attempt = max(1, int(row.get("attempt", 1) or 1))
+        except Exception:
+            attempt = 1
+            changed = True
+
+        error = _diagnostic_text(row.get("error"))[:PROXY_DIAGNOSTIC_CONTENT_LIMIT]
+        message = _diagnostic_text(row.get("message"))[:PROXY_DIAGNOSTIC_CONTENT_LIMIT]
+        normalized_row = {
+            "id": diagnostic_id,
+            "proxy_id": _diagnostic_text(row.get("proxy_id")).strip(),
+            "proxy_name": _diagnostic_text(row.get("proxy_name")).strip(),
+            "proxy_type": _diagnostic_text(row.get("proxy_type")).strip(),
+            "kind": kind,
+            "urls": urls,
+            "items": items,
+            "status": status,
+            "attempt": attempt,
+            "error": error,
+            "message": message,
+            "created_at": _diagnostic_text(row.get("created_at")),
+            "updated_at": _diagnostic_text(row.get("updated_at")),
+            "retry_of": _diagnostic_text(row.get("retry_of")),
+        }
+        if normalized_row != row:
+            changed = True
+        normalized.append(normalized_row)
+
+    limited = normalized[:PROXY_DIAGNOSTIC_LIMIT]
+    if limited != normalized:
+        changed = True
+    return limited, changed
+
+
+def load_proxy_diagnostics(limit=None, status="", proxy_id=""):
+    with PROXY_DIAGNOSTICS_LOCK:
+        raw = read_json(PROXY_DIAGNOSTICS_FILE, [])
+        rows, changed = _diagnostic_rows(raw)
+        if changed:
+            write_json(PROXY_DIAGNOSTICS_FILE, rows)
+
+        status = _diagnostic_text(status).strip()
+        proxy_id = _diagnostic_text(proxy_id).strip()
+        if status in PROXY_DIAGNOSTIC_STATUSES:
+            rows = [row for row in rows if row.get("status") == status]
+        if proxy_id:
+            rows = [row for row in rows if row.get("proxy_id") == proxy_id]
+
+        if limit is None:
+            return rows
+        try:
+            limit = int(limit)
+        except Exception:
+            limit = 50
+        return rows[:max(1, min(100, limit))]
+
+
+def get_proxy_diagnostic(diagnostic_id):
+    diagnostic_id = _diagnostic_text(diagnostic_id).strip()
+    if not diagnostic_id:
+        return None
+    for row in load_proxy_diagnostics():
+        if row.get("id") == diagnostic_id:
+            return row
+    return None
+
+
+def create_proxy_diagnostic(proxy, kind, urls=None, retry_of=""):
+    proxy = proxy if isinstance(proxy, dict) else {}
+    kind = kind if kind in PROXY_DIAGNOSTIC_KINDS else "quality"
+    urls = [_diagnostic_text(url)[:PROXY_DIAGNOSTIC_URL_LIMIT] for url in (urls or [])[:20]]
+    now = now_str()
+    row = {
+        "id": uuid.uuid4().hex,
+        "proxy_id": _diagnostic_text(proxy.get("id")).strip(),
+        "proxy_name": _diagnostic_text(proxy.get("name"), "未命名代理").strip() or "未命名代理",
+        "proxy_type": _diagnostic_text(proxy.get("type")).strip(),
+        "kind": kind,
+        "urls": urls,
+        "items": [],
+        "status": "running",
+        "attempt": 1,
+        "error": "",
+        "message": "检测中",
+        "created_at": now,
+        "updated_at": now,
+        "retry_of": _diagnostic_text(retry_of).strip(),
+    }
+    with PROXY_DIAGNOSTICS_LOCK:
+        rows, _changed = _diagnostic_rows(read_json(PROXY_DIAGNOSTICS_FILE, []))
+        rows.insert(0, row)
+        write_json(PROXY_DIAGNOSTICS_FILE, rows[:PROXY_DIAGNOSTIC_LIMIT])
+        PROXY_ACTIVE_DIAGNOSTICS.add(row["id"])
+    return row["id"]
+
+
+def finish_proxy_diagnostic(diagnostic_id, status, items=None, error="", message=""):
+    diagnostic_id = _diagnostic_text(diagnostic_id).strip()
+    status = status if status in PROXY_DIAGNOSTIC_STATUSES else "failed"
+    items, _items_changed = _diagnostic_items(items)
+    with PROXY_DIAGNOSTICS_LOCK:
+        rows, _changed = _diagnostic_rows(read_json(PROXY_DIAGNOSTICS_FILE, []))
+        target = next((row for row in rows if row.get("id") == diagnostic_id), None)
+        if target is None:
+            PROXY_ACTIVE_DIAGNOSTICS.discard(diagnostic_id)
+            return False
+        target["status"] = status
+        target["items"] = items
+        target["error"] = _diagnostic_text(error)[:PROXY_DIAGNOSTIC_CONTENT_LIMIT]
+        target["message"] = _diagnostic_text(message)[:PROXY_DIAGNOSTIC_CONTENT_LIMIT]
+        target["updated_at"] = now_str()
+        try:
+            write_json(PROXY_DIAGNOSTICS_FILE, rows[:PROXY_DIAGNOSTIC_LIMIT])
+        finally:
+            PROXY_ACTIVE_DIAGNOSTICS.discard(diagnostic_id)
+    return True
+
+
+def _claim_proxy_diagnostic(diagnostic_id):
+    diagnostic_id = _diagnostic_text(diagnostic_id).strip()
+    with PROXY_DIAGNOSTICS_LOCK:
+        rows, _changed = _diagnostic_rows(read_json(PROXY_DIAGNOSTICS_FILE, []))
+        target = next((row for row in rows if row.get("id") == diagnostic_id), None)
+        if target is None:
+            return None, "代理诊断不存在"
+        if target.get("status") == "running":
+            return None, "代理诊断正在检测"
+        if target.get("status") == "succeeded":
+            return None, "代理诊断已成功，无需重试"
+        target["status"] = "running"
+        target["message"] = "重新检测中"
+        target["error"] = ""
+        target["attempt"] = max(1, int(target.get("attempt", 1) or 1)) + 1
+        target["updated_at"] = now_str()
+        write_json(PROXY_DIAGNOSTICS_FILE, rows[:PROXY_DIAGNOSTIC_LIMIT])
+        PROXY_ACTIVE_DIAGNOSTICS.add(diagnostic_id)
+        return dict(target), ""
+
+
+def retry_proxy_diagnostic(diagnostic_id):
+    row, error = _claim_proxy_diagnostic(diagnostic_id)
+    if row is None:
+        return False, error, None
+    proxy = get_proxy_for_test(row.get("proxy_id"))
+    if proxy is None:
+        message = "代理不存在或已删除"
+        finish_proxy_diagnostic(row["id"], "failed", row.get("items"), message, message)
+        return False, message, get_proxy_diagnostic(row["id"])
+    if not proxy.get("enabled", True):
+        message = "代理已停用"
+        finish_proxy_diagnostic(row["id"], "failed", row.get("items"), message, message)
+        return False, message, get_proxy_diagnostic(row["id"])
+    try:
+        if row.get("kind") == "test":
+            result = test_proxy_object(proxy, (row.get("urls") or ["https://www.baidu.com"])[0])
+            items = [{"url": (row.get("urls") or ["https://www.baidu.com"])[0], "ok": True, "status_code": result.get("status_code", "-"), "elapsed": f"{result.get('elapsed_ms', '-')} ms"}]
+        else:
+            items = quality_proxy_object(proxy, row.get("urls"))
+        ok = bool(items) and all(bool(item.get("ok")) for item in items)
+        status = "succeeded" if ok else "failed"
+        message = "检测完成" if ok else "部分检测失败"
+        finish_proxy_diagnostic(row["id"], status, items, "" if ok else message, message)
+    except Exception as exc:
+        message = str(exc)
+        finish_proxy_diagnostic(row["id"], "failed", [], message, message)
+        return False, message, get_proxy_diagnostic(row["id"])
+    return status == "succeeded", message, get_proxy_diagnostic(row["id"])
 
 
 def get_proxy(proxy_id):

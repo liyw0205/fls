@@ -2,6 +2,114 @@ from ._common import *
 from ...ui.components import empty_state, empty_table_row, page_header_card, table_card
 
 
+def _diagnostic_status_badge(status):
+    labels = {
+        "running": ("检测中", "blue"),
+        "succeeded": ("成功", "green"),
+        "failed": ("失败", "red"),
+        "unknown": ("结果未知", "orange"),
+    }
+    label, color = labels.get(status, ("结果未知", "orange"))
+    return f'<span class="badge {color} status-badge status-{h(status)}" role="status">{label}</span>'
+
+
+def _diagnostic_items_text(items):
+    parts = []
+    for item in items if isinstance(items, list) else []:
+        result = "成功" if item.get("ok") else "失败"
+        parts.append(f'{item.get("url", "-")}：{result}，{item.get("elapsed", "-")}')
+    return "；".join(parts) or "-"
+
+
+def proxy_diagnostics_page(notice="", error=False):
+    status = request.args.get("status", "").strip()
+    if status not in PROXY_DIAGNOSTIC_STATUSES:
+        status = ""
+    proxy_id = request.args.get("proxy_id", "").strip()
+    try:
+        limit = max(1, min(100, int(request.args.get("limit", "50"))))
+    except (TypeError, ValueError):
+        limit = 50
+
+    records = load_proxy_diagnostics(limit=limit, status=status, proxy_id=proxy_id)
+    rows = ""
+    for record in records:
+        retry = ""
+        if record.get("status") in ("failed", "unknown"):
+            retry = f'''<form class="inline-form" method="post" action="/proxy/diagnostics/retry/{h(record.get("id"))}">
+                <button class="btn btn-orange" type="submit">重新检测</button>
+            </form>'''
+        else:
+            retry = '<span class="muted">-</span>'
+        kind = "连接测试" if record.get("kind") == "test" else "质量检测"
+        message = record.get("error") or record.get("message") or "-"
+        rows += f"""
+<tr>
+    <td>{h(record.get("updated_at") or record.get("created_at") or "-")}</td>
+    <td>{h(record.get("proxy_name") or record.get("proxy_id") or "-")}</td>
+    <td>{kind}</td>
+    <td>{_diagnostic_status_badge(record.get("status"))}</td>
+    <td>{h(record.get("attempt", 1))}</td>
+    <td>{h(_diagnostic_items_text(record.get("items")))}</td>
+    <td>{h(message)}</td>
+    <td>{retry}</td>
+</tr>
+"""
+    if not rows:
+        rows = empty_table_row(8, "暂无代理诊断记录", '<a class="btn btn-gray" href="/proxy">返回代理管理</a>')
+
+    options = "".join(
+        f'<option value="{h(item.get("id"))}" {"selected" if item.get("id") == proxy_id else ""}>{h(item.get("name") or item.get("id"))}</option>'
+        for item in load_proxies()
+    )
+    status_options = "".join(
+        f'<option value="{h(value)}" {"selected" if value == status else ""}>{h(label)}</option>'
+        for value, label in (("", "全部状态"), ("succeeded", "成功"), ("failed", "失败"), ("unknown", "结果未知"), ("running", "检测中"))
+    )
+    notice_html = f'<div class="notice {"red" if error else "green"}" role="status">{h(notice)}</div>' if notice else ""
+    header = page_header_card(
+        "代理诊断记录",
+        "查看保存代理的连接测试和质量检测结果；失败或结果未知的记录可以重新检测。",
+        '<a class="btn btn-gray" href="/proxy">返回代理管理</a>',
+    )
+    filters = f"""
+<form method="get" class="section fls-form-section">
+    <div class="form-grid">
+        <div class="form-item"><label>代理</label><select name="proxy_id"><option value="">全部代理</option>{options}</select></div>
+        <div class="form-item"><label>状态</label><select name="status">{status_options}</select></div>
+        <div class="form-item"><label>显示条数</label><input name="limit" type="number" min="1" max="100" value="{limit}"></div>
+    </div>
+    <br><button class="btn btn-blue" type="submit">筛选记录</button>
+</form>
+"""
+    table = table_card(
+        "最近诊断",
+        ("时间", "代理", "类型", "状态", "尝试", "分项结果", "说明", "操作"),
+        rows,
+    )
+    return layout("代理诊断记录", "proxy", f"{header}{notice_html}{filters}{table}")
+
+
+@bp.route("/proxy/diagnostics")
+def proxy_diagnostics():
+    return proxy_diagnostics_page()
+
+
+@bp.route("/proxy/diagnostics/retry/<diagnostic_id>", methods=["POST"])
+def proxy_diagnostics_retry(diagnostic_id):
+    try:
+        ok, message, _row = retry_proxy_diagnostic(diagnostic_id)
+    except Exception as exc:
+        return proxy_diagnostics_page(f"重新检测失败：{exc}", True), 500
+    if ok:
+        return proxy_diagnostics_page(f"重新检测成功：{message}")
+    if message == "代理诊断不存在":
+        return proxy_diagnostics_page(message, True), 404
+    if message in ("代理诊断正在检测", "代理诊断已成功，无需重试"):
+        return proxy_diagnostics_page(message, True), 409
+    return proxy_diagnostics_page(f"重新检测失败：{message}", True), 500
+
+
 @bp.route("/proxy")
 def proxy_page():
     proxies = load_proxies()
@@ -114,7 +222,7 @@ def proxy_page():
                 代理可用于任务运行、脚本导入和 GitHub 加速。<br>
                 禁用代理后，任务编辑页不再显示，已选择该代理的任务运行时会自动跳过。
             """,
-        '<a class="btn btn-primary" href="/proxy/new">新增代理</a>',
+        '<a class="btn btn-primary" href="/proxy/new">新增代理</a><a class="btn btn-gray" href="/proxy/diagnostics">诊断记录</a>',
     )
 
     table = table_card(

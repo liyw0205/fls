@@ -12,6 +12,11 @@ from ...proxy import (
     quality_proxy_object,
     parse_quality_urls,
     get_proxy_for_test,
+    PROXY_DIAGNOSTIC_STATUSES,
+    load_proxy_diagnostics,
+    create_proxy_diagnostic,
+    finish_proxy_diagnostic,
+    retry_proxy_diagnostic,
 )
 
 def proxy_form(proxy=None, mode="new"):

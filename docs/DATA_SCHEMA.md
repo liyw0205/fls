@@ -182,6 +182,18 @@
 
 投递记录通过存储锁原子追加和更新；重试先在锁内认领记录，已发送中的同一记录不会被第二个请求重复认领。重试使用当前通知配置，通知被删除或禁用时保留失败原因。缺失、损坏或旧版本历史文件按空数组读取，不影响配置和任务启动。
 
+## data/proxy_diagnostics.json
+
+类型：按最新在前排列的代理诊断记录数组，最多保留最近 `200` 条。
+
+- `id`、`proxy_id`、`proxy_name`、`proxy_type`：诊断和代理快照标识；代理删除后仍保留历史记录。
+- `kind`：`test` 或 `quality`；`urls`：本次检测使用的有界地址列表。
+- `items`：每个地址的 `ok`、`status_code` 和 `elapsed` 结果，最多保留 20 项。
+- `status`：`running`、`succeeded`、`failed` 或 `unknown`。面板重启后无法确认的 `running` 会幂等归一为 `unknown`。
+- `attempt`、`error`、`message`、`created_at`、`updated_at`、`retry_of`：尝试次数、原始错误、状态说明和时间信息。
+
+保存代理的连接/质量检测先在存储锁内写入 `running`，检测结束后原子写入终态；重试先认领记录，避免同一进程内并发重复检测。重试读取当前代理配置，代理删除或停用时保留失败原因。缺失或损坏文件按空历史处理，不影响代理和任务加载。
+
 ## data/global_env.json
 
 类型：对象，键值均为字符串。

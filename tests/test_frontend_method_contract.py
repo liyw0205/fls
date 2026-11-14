@@ -80,6 +80,7 @@ class FrontendMethodContractTests(unittest.TestCase):
         "/history",
         "/env",
         "/proxy",
+        "/proxy/diagnostics",
         "/pull",
         "/online-scripts",
         "/backup",

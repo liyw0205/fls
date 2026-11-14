@@ -208,6 +208,7 @@ const pages = [
   ["/env/edit/BROWSER_FIXTURE", "page-env"],
   ["/env/import", "page-env"],
   ["/proxy", "page-proxy"],
+  ["/proxy/diagnostics", "page-proxy"],
   ["/proxy/new", "page-proxy"],
   ["/proxy/edit/browser-proxy", "page-proxy"],
   ["/pull", "page-pull"],
