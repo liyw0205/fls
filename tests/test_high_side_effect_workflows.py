@@ -694,6 +694,484 @@ class BackupIsolationTests(unittest.TestCase):
             self.assertEqual(BACKUP_JOBS["cancel-fixture"]["status"], "正在取消")
             self.assertTrue(cancel_event.is_set())
 
+    def test_backup_create_persistence_failure_does_not_leave_phantom_running_job(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.routes.backup import _common as backup_common
+
+            with patch.object(
+                backup_common,
+                "persist_backup_job",
+                side_effect=OSError("backup state disk full"),
+            ):
+                response = app.test_client().post(
+                    "/api/backup/create",
+                    data={"items": ["data"]},
+                    headers={"X-Token": TOKEN},
+                )
+
+            payload = response.get_json()
+            self.assertEqual(response.status_code, 500)
+            self.assertFalse(payload["ok"])
+            self.assertIn("backup state disk full", payload["msg"])
+            self.assertEqual(backup_common.BACKUP_JOBS, {})
+            self.assertEqual(backup_common.BACKUP_CANCEL_EVENTS, {})
+
+    def test_backup_thread_start_failure_is_persisted_as_terminal_result(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.routes.backup import _common as backup_common
+
+            with patch.object(
+                backup_common.threading.Thread,
+                "start",
+                side_effect=OSError("worker limit reached"),
+            ):
+                response = app.test_client().post(
+                    "/api/backup/create",
+                    data={"items": ["data"]},
+                    headers={"X-Token": TOKEN},
+                )
+
+            payload = response.get_json()
+            self.assertEqual(response.status_code, 500)
+            self.assertFalse(payload["ok"])
+            self.assertIn("worker limit reached", payload["msg"])
+            self.assertIn("job_id", payload)
+            info = backup_common.BACKUP_JOBS[payload["job_id"]]
+            self.assertFalse(info["running"])
+            self.assertEqual(info["status"], "启动失败")
+            self.assertIn("worker limit reached", info["error"])
+            persisted = read_json(base_dir / "data" / "backup_jobs.json")[payload["job_id"]]
+            self.assertEqual(persisted["status"], "启动失败")
+            self.assertFalse(persisted["running"])
+            self.assertNotIn(payload["job_id"], backup_common.BACKUP_CANCEL_EVENTS)
+
+    def test_backup_cancel_persistence_failure_does_not_signal_worker(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.routes.backup import _common as backup_common
+            from fls_manager.routes.backup import api as backup_api
+
+            job_id = "cancel-persist-failure"
+            info = {
+                "id": job_id,
+                "items": ["data"],
+                "type_text": "仅配置",
+                "running": True,
+                "status": "正在压缩",
+                "filename": "",
+                "size": 0,
+                "size_text": "-",
+                "error": "",
+                "created_at": "2026-11-14 10:00:00",
+                "updated_at": "2026-11-14 10:00:00",
+            }
+            cancel_event = threading.Event()
+            backup_common.BACKUP_JOBS[job_id] = info
+            backup_common.BACKUP_CANCEL_EVENTS[job_id] = cancel_event
+            backup_common.persist_backup_job(info)
+
+            with patch.object(
+                backup_api,
+                "persist_backup_job",
+                side_effect=OSError("backup state disk full"),
+            ):
+                response = app.test_client().post(
+                    f"/api/backup/cancel/{job_id}",
+                    headers={"X-Token": TOKEN},
+                )
+
+            payload = response.get_json()
+            self.assertEqual(response.status_code, 500)
+            self.assertFalse(payload["ok"])
+            self.assertIn("backup state disk full", payload["msg"])
+            self.assertFalse(cancel_event.is_set())
+            self.assertEqual(backup_common.BACKUP_JOBS[job_id]["status"], "正在压缩")
+            self.assertEqual(
+                read_json(base_dir / "data" / "backup_jobs.json")[job_id]["status"],
+                "正在压缩",
+            )
+
+    def test_backup_job_api_distinguishes_restart_unknown_from_missing(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.routes.backup import _common as backup_common
+
+            job_id = "persisted-running-job"
+            backup_common.persist_backup_job({
+                "id": job_id,
+                "items": ["data"],
+                "type_text": "仅配置",
+                "running": True,
+                "status": "正在压缩",
+                "filename": "",
+                "size": 0,
+                "size_text": "-",
+                "error": "",
+                "created_at": "2026-11-14 10:00:00",
+                "updated_at": "2026-11-14 10:00:00",
+            })
+            backup_common.BACKUP_JOBS.clear()
+            backup_common.BACKUP_CANCEL_EVENTS.clear()
+            client = app.test_client()
+
+            recovered = client.get(
+                f"/api/backup/job/{job_id}",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(recovered.status_code, 200)
+            self.assertEqual(recovered.get_json()["status"], "结果未知")
+            self.assertFalse(recovered.get_json()["running"])
+
+            cancel = client.post(
+                f"/api/backup/cancel/{job_id}",
+                headers={"X-Token": TOKEN},
+            )
+            missing = client.get(
+                "/api/backup/job/missing-job",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(cancel.status_code, 409)
+            self.assertIn("状态未知", cancel.get_json()["msg"])
+            self.assertEqual(missing.status_code, 404)
+
+    def test_backup_unknown_state_is_returned_when_recovery_snapshot_write_fails(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.routes.backup import _common as backup_common
+
+            job_id = "unknown-snapshot-failure"
+            real_persist = backup_common.persist_backup_job
+            real_persist({
+                "id": job_id,
+                "items": ["data"],
+                "type_text": "仅配置",
+                "running": True,
+                "status": "正在压缩",
+                "filename": "",
+                "size": 0,
+                "size_text": "-",
+                "error": "",
+                "created_at": "2026-11-14 10:00:00",
+                "updated_at": "2026-11-14 10:00:00",
+            })
+            backup_common.BACKUP_JOBS.clear()
+
+            with patch.object(
+                backup_common,
+                "persist_backup_job",
+                side_effect=OSError("unknown snapshot disk full"),
+            ):
+                response = app.test_client().get(
+                    f"/api/backup/job/{job_id}",
+                    headers={"X-Token": TOKEN},
+                )
+
+            payload = response.get_json()
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(payload["status"], "结果未知")
+            self.assertFalse(payload["running"])
+            self.assertIn("unknown snapshot disk full", payload["error"])
+
+    def test_backup_page_polls_start_failure_job_when_api_returns_id(self):
+        with isolated_app() as (app, _base_dir):
+            response = app.test_client().get("/backup", headers={"X-Token": TOKEN})
+            body = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("if(json.job_id){", body)
+            self.assertIn("await flsPollBackupJob(json.job_id, source);", body)
+
+    def test_backup_worker_initial_persist_failure_finishes_with_diagnostic(self):
+        with isolated_app() as (_app, base_dir):
+            from fls_manager.routes.backup import _common as backup_common
+
+            job_id = "worker-persist-failure"
+            cancel_event = threading.Event()
+            backup_common.BACKUP_JOBS[job_id] = {
+                "id": job_id,
+                "items": ["data"],
+                "type_text": "仅配置",
+                "running": True,
+                "status": "准备中",
+                "filename": "",
+                "size": 0,
+                "size_text": "-",
+                "error": "",
+                "created_at": "2026-11-14 10:00:00",
+                "updated_at": "2026-11-14 10:00:00",
+            }
+            backup_common.BACKUP_CANCEL_EVENTS[job_id] = cancel_event
+            real_persist = backup_common.persist_backup_job
+
+            def fail_running_snapshot(info):
+                if info.get("status") == "正在压缩":
+                    raise OSError("transient snapshot failure")
+                return real_persist(info)
+
+            with patch.object(
+                backup_common,
+                "persist_backup_job",
+                side_effect=fail_running_snapshot,
+            ):
+                backup_common.create_backup_worker(job_id, ["data"], cancel_event)
+
+            info = backup_common.BACKUP_JOBS[job_id]
+            self.assertFalse(info["running"])
+            self.assertEqual(info["status"], "失败")
+            self.assertIn("transient snapshot failure", info["error"])
+            self.assertNotIn(job_id, backup_common.BACKUP_CANCEL_EVENTS)
+            persisted = read_json(base_dir / "data" / "backup_jobs.json")[job_id]
+            self.assertEqual(persisted["status"], "失败")
+
+    def test_backup_worker_keeps_both_errors_when_terminal_snapshot_cannot_persist(self):
+        with isolated_app() as (_app, base_dir):
+            from fls_manager.routes.backup import _common as backup_common
+
+            job_id = "terminal-snapshot-failure"
+            cancel_event = threading.Event()
+            info = {
+                "id": job_id,
+                "items": ["data"],
+                "type_text": "仅配置",
+                "running": True,
+                "status": "准备中",
+                "filename": "",
+                "size": 0,
+                "size_text": "-",
+                "error": "",
+                "created_at": "2026-11-14 10:00:00",
+                "updated_at": "2026-11-14 10:00:00",
+            }
+            backup_common.BACKUP_JOBS[job_id] = info
+            backup_common.BACKUP_CANCEL_EVENTS[job_id] = cancel_event
+            real_persist = backup_common.persist_backup_job
+            real_persist(info)
+
+            def fail_terminal_snapshot(snapshot):
+                if snapshot.get("status") == "失败":
+                    raise OSError("terminal state disk full")
+                return real_persist(snapshot)
+
+            with patch.object(
+                backup_common,
+                "persist_backup_job",
+                side_effect=fail_terminal_snapshot,
+            ), patch.object(
+                backup_common,
+                "write_dependencies_file",
+                side_effect=RuntimeError("dependency scan failed"),
+            ):
+                backup_common.create_backup_worker(job_id, ["data"], cancel_event)
+
+            result = backup_common.BACKUP_JOBS[job_id]
+            self.assertFalse(result["running"])
+            self.assertEqual(result["status"], "失败")
+            self.assertIn("dependency scan failed", result["error"])
+            self.assertIn("terminal state disk full", result["error"])
+            self.assertNotIn(job_id, backup_common.BACKUP_CANCEL_EVENTS)
+            persisted = read_json(base_dir / "data" / "backup_jobs.json")[job_id]
+            self.assertEqual(persisted["status"], "正在压缩")
+
+    def test_backup_success_snapshot_failure_removes_archive_and_records_failure(self):
+        with isolated_app() as (_app, base_dir):
+            from fls_manager.routes.backup import _common as backup_common
+
+            job_id = "success-snapshot-failure"
+            cancel_event = threading.Event()
+            info = {
+                "id": job_id,
+                "items": ["data"],
+                "type_text": "仅配置",
+                "running": True,
+                "status": "准备中",
+                "filename": "",
+                "size": 0,
+                "size_text": "-",
+                "error": "",
+                "created_at": "2026-11-14 10:00:00",
+                "updated_at": "2026-11-14 10:00:00",
+            }
+            backup_common.BACKUP_JOBS[job_id] = info
+            backup_common.BACKUP_CANCEL_EVENTS[job_id] = cancel_event
+            real_persist = backup_common.persist_backup_job
+            real_persist(info)
+
+            def fail_success_snapshot(snapshot):
+                if snapshot.get("status") == "已完成":
+                    raise OSError("success snapshot disk full")
+                return real_persist(snapshot)
+
+            def write_dependencies(path, _event):
+                Path(path).write_text("fixture==1\n", encoding="utf-8")
+
+            with patch.object(
+                backup_common,
+                "persist_backup_job",
+                side_effect=fail_success_snapshot,
+            ), patch.object(
+                backup_common,
+                "write_dependencies_file",
+                side_effect=write_dependencies,
+            ):
+                backup_common.create_backup_worker(job_id, ["data"], cancel_event)
+
+            result = backup_common.BACKUP_JOBS[job_id]
+            self.assertFalse(result["running"])
+            self.assertEqual(result["status"], "失败")
+            self.assertIn("success snapshot disk full", result["error"])
+            self.assertFalse(list((base_dir / "data" / "backups").glob("*.tar.gz")))
+            self.assertEqual(
+                read_json(base_dir / "data" / "backup_jobs.json")[job_id]["status"],
+                "失败",
+            )
+
+    def test_backup_worker_reports_partial_archive_cleanup_failure(self):
+        with isolated_app() as (_app, base_dir):
+            from fls_manager.routes.backup import _common as backup_common
+
+            job_id = "partial-cleanup-failure"
+            target = base_dir / "data" / "backups" / "partial.tar.gz"
+            cancel_event = threading.Event()
+            backup_common.BACKUP_JOBS[job_id] = {
+                "id": job_id,
+                "items": ["data"],
+                "type_text": "仅配置",
+                "running": True,
+                "status": "准备中",
+                "filename": "",
+                "size": 0,
+                "size_text": "-",
+                "error": "",
+                "created_at": "2026-11-14 10:00:00",
+                "updated_at": "2026-11-14 10:00:00",
+            }
+            backup_common.BACKUP_CANCEL_EVENTS[job_id] = cancel_event
+
+            class PartialArchive:
+                def __enter__(self):
+                    target.write_bytes(b"partial archive")
+                    return self
+
+                def __exit__(self, _exc_type, _exc_value, _traceback):
+                    return False
+
+                def add(self, *_args, **_kwargs):
+                    raise OSError("archive write failed")
+
+            def write_dependencies(path, _event):
+                Path(path).write_text("fixture==1\n", encoding="utf-8")
+
+            real_unlink = Path.unlink
+
+            def fail_archive_unlink(path, *args, **kwargs):
+                if path == target:
+                    raise OSError("cleanup denied")
+                return real_unlink(path, *args, **kwargs)
+
+            with patch.object(
+                backup_common,
+                "backup_safe_file",
+                return_value=target,
+            ), patch.object(
+                backup_common.tarfile,
+                "open",
+                return_value=PartialArchive(),
+            ), patch.object(
+                backup_common,
+                "write_dependencies_file",
+                side_effect=write_dependencies,
+            ), patch.object(
+                Path,
+                "unlink",
+                autospec=True,
+                side_effect=fail_archive_unlink,
+            ):
+                backup_common.create_backup_worker(job_id, ["data"], cancel_event)
+
+            result = backup_common.BACKUP_JOBS[job_id]
+            self.assertFalse(result["running"])
+            self.assertEqual(result["status"], "失败")
+            self.assertIn("archive write failed", result["error"])
+            self.assertIn("cleanup denied", result["error"])
+            self.assertTrue(target.is_file())
+
+    def test_backup_cancel_racing_with_success_cannot_replace_terminal_state(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.routes.backup import _common as backup_common
+
+            job_id = "cancel-success-race"
+            cancel_event = threading.Event()
+            backup_common.BACKUP_JOBS[job_id] = {
+                "id": job_id,
+                "items": ["data"],
+                "type_text": "仅配置",
+                "running": True,
+                "status": "准备中",
+                "filename": "",
+                "size": 0,
+                "size_text": "-",
+                "error": "",
+                "created_at": "2026-11-14 10:00:00",
+                "updated_at": "2026-11-14 10:00:00",
+            }
+            backup_common.BACKUP_CANCEL_EVENTS[job_id] = cancel_event
+            final_persist_entered = threading.Event()
+            release_final_persist = threading.Event()
+            cancel_started = threading.Event()
+            cancel_finished = threading.Event()
+            cancel_response = {}
+            real_persist = backup_common.persist_backup_job
+
+            def hold_success_persist(info):
+                if info.get("status") == "已完成":
+                    final_persist_entered.set()
+                    if not release_final_persist.wait(2):
+                        raise TimeoutError("success persistence was not released")
+                return real_persist(info)
+
+            def write_dependencies(path, _event):
+                Path(path).write_text("fixture==1\n", encoding="utf-8")
+
+            def cancel_job():
+                cancel_started.set()
+                try:
+                    cancel_response["response"] = app.test_client().post(
+                        f"/api/backup/cancel/{job_id}",
+                        headers={"X-Token": TOKEN},
+                    )
+                finally:
+                    cancel_finished.set()
+
+            worker = threading.Thread(
+                target=backup_common.create_backup_worker,
+                args=(job_id, ["data"], cancel_event),
+            )
+            canceller = threading.Thread(target=cancel_job)
+            with patch.object(
+                backup_common,
+                "persist_backup_job",
+                side_effect=hold_success_persist,
+            ), patch.object(
+                backup_common,
+                "write_dependencies_file",
+                side_effect=write_dependencies,
+            ):
+                worker.start()
+                try:
+                    self.assertTrue(final_persist_entered.wait(2))
+                    canceller.start()
+                    self.assertTrue(cancel_started.wait(2))
+                    self.assertFalse(cancel_finished.wait(0.05))
+                finally:
+                    release_final_persist.set()
+                worker.join(timeout=2)
+                canceller.join(timeout=2)
+
+            self.assertFalse(worker.is_alive(), "backup worker did not finish")
+            self.assertFalse(canceller.is_alive(), "cancel request did not finish")
+            self.assertEqual(cancel_response["response"].status_code, 409)
+            self.assertEqual(backup_common.BACKUP_JOBS[job_id]["status"], "已完成")
+            self.assertFalse(backup_common.BACKUP_JOBS[job_id]["running"])
+            self.assertFalse(cancel_event.is_set())
+            self.assertTrue(list((base_dir / "data" / "backups").glob("*.tar.gz")))
+
     def test_backup_filter_rejects_links(self):
         with isolated_app():
             from fls_manager.routes.backup._common import _backup_tar_filter

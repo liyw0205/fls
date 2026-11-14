@@ -168,6 +168,10 @@ async function flsCreateBackup(source){{
         const json = await res.json();
 
         if(!json.ok){{
+            if(json.job_id){{
+                await flsPollBackupJob(json.job_id, source);
+                return;
+            }}
             flsShowBackupJob("<span style='color:#dc2626;font-weight:800;'>" + flsEscapeHtml(flsActionFailure("创建失败：" + (json.msg || "未知错误"), "检查备份内容后重试")) + "</span>");
             flsRestoreButton(source);
             return;

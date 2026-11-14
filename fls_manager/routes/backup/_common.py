@@ -55,6 +55,12 @@ class BackupTimeout(Exception):
     pass
 
 
+class BackupJobStartError(RuntimeError):
+    def __init__(self, message, job_id=""):
+        super().__init__(message)
+        self.job_id = job_id
+
+
 class BackupLimitExceeded(ValueError):
     pass
 
@@ -167,7 +173,11 @@ def get_backup_job(job_id):
                 "如未生成可用归档，请重新创建备份。"
             )
             info["updated_at"] = now_str()
-            persist_backup_job(info)
+            try:
+                persist_backup_job(info)
+            except Exception as e:
+                info["error"] += f"；未知状态未能持久化：{e}"
+            BACKUP_JOBS[job_id] = info
 
         return info
 
@@ -384,13 +394,35 @@ def _update_backup_job(job_id, **updates):
         return info
 
 
+def _finish_backup_job(job_id, status, error="", **updates):
+    updates.update({
+        "running": False,
+        "status": status,
+        "error": error,
+        "updated_at": now_str(),
+    })
+    try:
+        return _update_backup_job(job_id, **updates)
+    except Exception as persist_error:
+        with BACKUP_JOB_LOCK:
+            info = BACKUP_JOBS.get(job_id)
+            if not isinstance(info, dict):
+                return None
+            detail = f"备份结果持久化失败：{persist_error}"
+            info["error"] = "；".join(
+                value for value in (str(info.get("error") or ""), detail) if value
+            )
+            return info
+
+
 def _remove_backup_target(target):
     if target is None:
-        return
+        return ""
     try:
         Path(target).unlink(missing_ok=True)
-    except Exception:
-        pass
+        return ""
+    except Exception as e:
+        return f"未能清理备份文件 {Path(target).name}：{e}"
 
 
 def _create_backup_worker(job_id, items, cancel_event):
@@ -402,16 +434,15 @@ def _create_backup_worker(job_id, items, cancel_event):
 
     items = list(items or [])
 
-    _update_backup_job(
-        job_id,
-        running=True,
-        status="正在压缩",
-        error="",
-        updated_at=now_str(),
-    )
-
     target = None
     try:
+        _update_backup_job(
+            job_id,
+            running=True,
+            status="正在压缩",
+            error="",
+            updated_at=now_str(),
+        )
         _check_backup_cancelled(cancel_event)
         if not items:
             raise RuntimeError("未选择备份内容")
@@ -483,40 +514,40 @@ def _create_backup_worker(job_id, items, cancel_event):
             raise BackupCancelled("备份任务已取消")
 
     except BackupCancelled:
-        _remove_backup_target(target)
-        _update_backup_job(
+        cleanup_error = _remove_backup_target(target)
+        _finish_backup_job(
             job_id,
-            running=False,
-            status="已取消",
-            error="",
+            "已取消",
+            error=cleanup_error,
             filename="",
             size=0,
             size_text="-",
-            updated_at=now_str(),
         )
     except BackupTimeout as e:
-        _remove_backup_target(target)
-        _update_backup_job(
+        cleanup_error = _remove_backup_target(target)
+        error = str(e)
+        if cleanup_error:
+            error += "；" + cleanup_error
+        _finish_backup_job(
             job_id,
-            running=False,
-            status="超时",
-            error=str(e),
+            "超时",
+            error=error,
             filename="",
             size=0,
             size_text="-",
-            updated_at=now_str(),
         )
     except Exception as e:
-        _remove_backup_target(target)
-        _update_backup_job(
+        cleanup_error = _remove_backup_target(target)
+        error = str(e)
+        if cleanup_error:
+            error += "；" + cleanup_error
+        _finish_backup_job(
             job_id,
-            running=False,
-            status="失败",
-            error=str(e),
+            "失败",
+            error=error,
             filename="",
             size=0,
             size_text="-",
-            updated_at=now_str(),
         )
     finally:
         with BACKUP_JOB_LOCK:
@@ -555,15 +586,40 @@ def start_backup_job(items):
             "updated_at": now,
         }
         BACKUP_CANCEL_EVENTS[job_id] = cancel_event
-        persist_backup_job(BACKUP_JOBS[job_id])
+        try:
+            persist_backup_job(BACKUP_JOBS[job_id])
+        except Exception as e:
+            BACKUP_JOBS.pop(job_id, None)
+            BACKUP_CANCEL_EVENTS.pop(job_id, None)
+            raise BackupJobStartError(
+                f"备份状态保存失败，任务未启动：{e}"
+            ) from e
 
-        th = threading.Thread(
-            target=create_backup_worker,
-            args=(job_id, items, cancel_event),
-            daemon=True,
-            name=f"fls-backup-{job_id[:8]}",
-        )
-        th.start()
+        try:
+            th = threading.Thread(
+                target=create_backup_worker,
+                args=(job_id, items, cancel_event),
+                daemon=True,
+                name=f"fls-backup-{job_id[:8]}",
+            )
+            th.start()
+        except Exception as e:
+            info = BACKUP_JOBS[job_id]
+            info.update({
+                "running": False,
+                "status": "启动失败",
+                "error": str(e),
+                "updated_at": now_str(),
+            })
+            BACKUP_CANCEL_EVENTS.pop(job_id, None)
+            try:
+                persist_backup_job(info)
+            except Exception as persist_error:
+                info["error"] += f"；启动失败状态保存失败：{persist_error}"
+            raise BackupJobStartError(
+                f"备份任务启动失败：{info['error']}",
+                job_id=job_id,
+            ) from e
 
     return job_id
 
