@@ -93,6 +93,20 @@
 - `enabled`、`pinned` 支持布尔、数字和常见字符串值。
 - 待执行的失败重试仅保存在运行时内存中；每个任务最多保留一个待重试计时器。手动或定时启动会使旧重试失效，停止、禁用或删除任务会取消待重试。
 
+## data/scheduler_state.json
+
+类型：调度器重载诊断对象，不是任务配置。
+
+- `status`：`running`、`succeeded`、`failed` 或 `unknown`；`status_label` 为页面显示文本。
+- `task_count`、`scheduled_count`：本次重载看到的任务总数和成功加载的定时任务数。
+- `failed_tasks`：最多保留 20 个任务/清理作业的 `task_id`、`task_name` 和原始 `error`。
+- `error`、`recovery`：失败诊断和下一步恢复建议；成功时 `error` 为空。
+- `updated_at`：最后一次状态更新时间。
+
+重载先完整校验计划，再替换 APScheduler 作业；应用失败会恢复上一组作业。面板重启后读取到
+`status=running` 会转换为 `unknown`，不会声称重载已完成。该文件只用于反馈，损坏或缺失时
+按未知状态处理，不会覆盖 `tasks.json` 或 `collections.json`。
+
 ## data/task_history.json
 
 类型：任务运行历史对象数组。

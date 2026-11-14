@@ -11,7 +11,7 @@ from ..task_runner import (
     safe_process_name,
     cancel_task_retry,
 )
-from ..scheduler import reload_scheduler, scheduler
+from ..scheduler import get_scheduler_state, reload_scheduler, scheduler
 from ..state import RUNNING
 from ..utils import now_str
 
@@ -157,6 +157,42 @@ def api_scheduler_jobs():
         "ok": True,
         "jobs": result,
     })
+
+
+@bp.route("/api/scheduler/status")
+def api_scheduler_status():
+    try:
+        return jsonify({"ok": True, **get_scheduler_state()})
+    except Exception as exc:
+        return jsonify({"ok": False, "status": "unknown", "error": str(exc)}), 500
+
+
+@bp.route("/api/scheduler/reload", methods=["POST"])
+def api_scheduler_reload():
+    try:
+        state = reload_scheduler()
+    except Exception as exc:
+        try:
+            state = get_scheduler_state()
+        except Exception:
+            state = {
+                "status": "failed",
+                "status_label": "失败",
+                "task_count": 0,
+                "scheduled_count": 0,
+                "failed_tasks": [],
+                "error": str(exc),
+                "recovery": "检查调度器状态文件后重新加载。",
+                "updated_at": "",
+            }
+        return jsonify({
+            "ok": False,
+            "status": state.get("status", "failed"),
+            "msg": str(exc),
+            "state": state,
+        }), 500
+
+    return jsonify({"ok": True, "status": "succeeded", "state": state})
 
 
 @bp.route("/api/task/action/<action>/<task_id>", methods=["POST"])

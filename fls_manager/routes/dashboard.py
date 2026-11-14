@@ -9,7 +9,7 @@ from datetime import datetime
 from math import ceil
 from urllib.parse import quote
 
-from flask import Blueprint, Response, jsonify, request
+from flask import Blueprint, Response, jsonify, redirect, request
 
 from ..models import load_tasks, load_task_history
 from ..task_runner import is_running
@@ -20,6 +20,7 @@ from ..paths import BASE_DIR, DATA_DIR, LOG_DIR, SCRIPT_DIR
 from ..config import get_host, get_port, fls_get_admin_token, panel_now, get_panel_timezone_text
 from ..state import PANEL_START_TIME, PANEL_START_STR
 from ..constants import MAIN_PROCESS_NAME, TASK_PROCESS_PREFIX
+from ..scheduler import get_scheduler_state, reload_scheduler
 
 bp = Blueprint("dashboard", __name__)
 
@@ -586,6 +587,15 @@ def api_dashboard_runtime():
     })
 
 
+@bp.route("/scheduler/reload", methods=["POST"])
+def scheduler_reload_page():
+    try:
+        reload_scheduler()
+    except Exception as exc:
+        return redirect("/?err=" + quote(f"调度器重载失败：{exc}"))
+    return redirect("/?msg=调度器已重新加载")
+
+
 @bp.route("/history")
 def history_page():
     q = request.args.get("q", "").strip()
@@ -717,6 +727,7 @@ def dashboard():
     panel_cpu_current, panel_cpu_peak = get_panel_cpu_status()
     panel_cpu_peak_period = panel_cpu_peak_slot_text()
     panel_uptime = fmt_duration(time.time() - PANEL_START_TIME)
+    scheduler_state = get_scheduler_state()
     history = load_task_history()
     abnormal_history = [
         item for item in history
@@ -832,9 +843,33 @@ def dashboard():
 """,
         section_id="dashboard-panel-control",
     )
+    scheduler_status = scheduler_state.get("status", "unknown")
+    scheduler_status_text = scheduler_state.get("status_label", "结果未知")
+    scheduler_tone = {
+        "succeeded": "success",
+        "failed": "error",
+        "running": "warning",
+        "unknown": "warning",
+    }.get(scheduler_status, "warning")
+    scheduler_error = scheduler_state.get("error") or scheduler_state.get("recovery") or "暂无重载记录"
+    scheduler_section = section(
+        "调度器状态",
+        f'''
+<div class="help">最近结果：<span class="status-badge status-{h(scheduler_tone)}" role="status">{h(scheduler_status_text)}</span><br>
+更新时间：{h(scheduler_state.get("updated_at") or "-")}<br>
+任务总数：{h(scheduler_state.get("task_count", 0))}；已加载定时任务：{h(scheduler_state.get("scheduled_count", 0))}<br>
+{h(scheduler_error)}</div>
+<div class="row-actions" style="margin-top:12px;">
+    <div class="row-actions-primary"><form method="post" action="/scheduler/reload" class="inline-form"><button class="btn btn-blue" type="submit">重新加载调度器</button></form></div>
+    <div class="row-actions-secondary"><a class="btn btn-gray" href="/api/scheduler/status">查看调度状态 API</a></div>
+</div>
+''',
+        section_id="dashboard-scheduler",
+    )
     body = f"""
 {header}
 {panel_control_section}
+{scheduler_section}
 <section class="section" id="dashboard-summary">
 <div class="grid">
     <div class="stat">
