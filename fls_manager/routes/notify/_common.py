@@ -20,7 +20,31 @@ from ...notify import (
     normalize_notify_log_mode,
     notify_log_mode_name,
     send_one,
+    create_notify_delivery,
+    finish_notify_delivery,
+    load_notify_history,
+    retry_notify_delivery,
+    NOTIFY_HISTORY_STATUSES,
 )
+
+
+def send_notify_with_history(item, title, content, source="manual", sender=None):
+    try:
+        delivery_id = create_notify_delivery(item, title, content, source=source)
+    except Exception as exc:
+        return False, f"投递记录保存失败：{exc}", None
+
+    try:
+        ok, msg = (sender or send_one)(item, title, content)
+    except Exception as exc:
+        ok, msg = False, str(exc)
+
+    try:
+        finish_notify_delivery(delivery_id, ok, msg)
+    except Exception as exc:
+        msg = f"{msg}；投递结果保存失败：{exc}"
+
+    return ok, msg, delivery_id
 
 def notify_item_from_form(old=None):
     old = old or {}

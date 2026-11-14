@@ -41,6 +41,7 @@ GLOBAL_ENV_FILE = DATA_DIR / "global_env.json"
 PROXY_FILE = DATA_DIR / "proxies.json"
 COLLECTION_FILE = DATA_DIR / "collections.json"
 SCHEDULER_STATE_FILE = DATA_DIR / "scheduler_state.json"
+NOTIFY_HISTORY_FILE = DATA_DIR / "notify_history.json"
 PID_FILE = DATA_DIR / "fls-manager.pid"
 
 for d in (BASE_DIR, DATA_DIR, LOG_DIR, SCRIPT_DIR):

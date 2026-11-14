@@ -8,12 +8,15 @@ import base64
 import hmac
 import hashlib
 import smtplib
+import threading
 import urllib.parse
 from email.mime.text import MIMEText
 from email.header import Header
 from email.utils import formataddr
 
 from .config import load_config, save_config
+from .paths import NOTIFY_HISTORY_FILE
+from .storage import read_json, write_json
 from .utils import now_str, LazyModule
 
 requests = LazyModule("requests")
@@ -23,6 +26,242 @@ NOTIFY_LOG_MODES = {
     "full": "完整日志",
     "trimmed": "裁剪日志",
 }
+
+NOTIFY_HISTORY_LIMIT = 300
+NOTIFY_CONTENT_LIMIT = 12000
+NOTIFY_HISTORY_STATUSES = (
+    "running",
+    "succeeded",
+    "failed",
+    "unknown",
+)
+NOTIFY_HISTORY_LOCK = threading.RLock()
+NOTIFY_ACTIVE_DELIVERIES = set()
+
+
+def _notify_text(value, default=""):
+    if value is None:
+        return default
+    return str(value)
+
+
+def _notify_history_rows(raw):
+    """Normalize persisted delivery rows and recover in-flight rows after restart."""
+    rows = raw if isinstance(raw, list) else []
+    normalized = []
+    changed = not isinstance(raw, list)
+
+    for row in rows:
+        if not isinstance(row, dict):
+            changed = True
+            continue
+
+        item = dict(row)
+        delivery_id = _notify_text(item.get("id")).strip()
+        if not delivery_id:
+            changed = True
+            continue
+
+        status = _notify_text(item.get("status"), "unknown").strip()
+        if status not in NOTIFY_HISTORY_STATUSES:
+            status = "unknown"
+            changed = True
+
+        if status == "running" and delivery_id not in NOTIFY_ACTIVE_DELIVERIES:
+            status = "unknown"
+            previous = _notify_text(item.get("message")).strip()
+            recovery = "面板重启后无法确认发送结果，请检查渠道并重试"
+            item["message"] = f"{previous}；{recovery}" if previous else recovery
+            changed = True
+
+        try:
+            attempt = max(1, int(item.get("attempt", 1) or 1))
+        except Exception:
+            attempt = 1
+            changed = True
+
+        content = _notify_text(item.get("content"))
+        if len(content) > NOTIFY_CONTENT_LIMIT:
+            content = content[:NOTIFY_CONTENT_LIMIT]
+            item["content_truncated"] = True
+            changed = True
+
+        normalized_row = {
+            "id": delivery_id,
+            "item_id": _notify_text(item.get("item_id")).strip(),
+            "item_name": _notify_text(item.get("item_name")).strip(),
+            "channel": _notify_text(item.get("channel")).strip(),
+            "title": _notify_text(item.get("title")),
+            "content": content,
+            "content_truncated": bool(item.get("content_truncated", False)),
+            "source": _notify_text(item.get("source"), "manual").strip() or "manual",
+            "status": status,
+            "attempt": attempt,
+            "message": _notify_text(item.get("message")),
+            "created_at": _notify_text(item.get("created_at")),
+            "updated_at": _notify_text(item.get("updated_at")),
+            "retry_of": _notify_text(item.get("retry_of")),
+        }
+
+        if normalized_row != row:
+            changed = True
+        normalized.append(normalized_row)
+
+    limited = normalized[:NOTIFY_HISTORY_LIMIT]
+    if limited != normalized:
+        changed = True
+
+    return limited, changed
+
+
+def load_notify_history(limit=None, status=""):
+    """Return newest delivery rows and persist restart recovery when needed."""
+    with NOTIFY_HISTORY_LOCK:
+        raw = read_json(NOTIFY_HISTORY_FILE, [])
+        rows, changed = _notify_history_rows(raw)
+        if changed:
+            write_json(NOTIFY_HISTORY_FILE, rows)
+
+        status = _notify_text(status).strip()
+        if status in NOTIFY_HISTORY_STATUSES:
+            rows = [row for row in rows if row.get("status") == status]
+
+        if limit is None:
+            return rows
+
+        try:
+            limit = int(limit)
+        except Exception:
+            limit = 50
+
+        return rows[:max(1, min(100, limit))]
+
+
+def get_notify_delivery(delivery_id):
+    delivery_id = _notify_text(delivery_id).strip()
+    if not delivery_id:
+        return None
+
+    for row in load_notify_history():
+        if row.get("id") == delivery_id:
+            return row
+    return None
+
+
+def create_notify_delivery(item, title, content, source="manual", retry_of=""):
+    """Persist a running delivery before contacting the external channel."""
+    item = item if isinstance(item, dict) else {}
+    raw_content = _notify_text(content)
+    stored_content = raw_content[:NOTIFY_CONTENT_LIMIT]
+    now = now_str()
+    row = {
+        "id": uuid.uuid4().hex,
+        "item_id": _notify_text(item.get("id")).strip(),
+        "item_name": _notify_text(item.get("name"), "未命名通知").strip() or "未命名通知",
+        "channel": _notify_text(item.get("channel")).strip(),
+        "title": _notify_text(title),
+        "content": stored_content,
+        "content_truncated": len(stored_content) < len(raw_content),
+        "source": _notify_text(source, "manual").strip() or "manual",
+        "status": "running",
+        "attempt": 1,
+        "message": "发送中",
+        "created_at": now,
+        "updated_at": now,
+        "retry_of": _notify_text(retry_of).strip(),
+    }
+
+    with NOTIFY_HISTORY_LOCK:
+        raw = read_json(NOTIFY_HISTORY_FILE, [])
+        rows, _changed = _notify_history_rows(raw)
+        rows.insert(0, row)
+        write_json(NOTIFY_HISTORY_FILE, rows[:NOTIFY_HISTORY_LIMIT])
+        NOTIFY_ACTIVE_DELIVERIES.add(row["id"])
+
+    return row["id"]
+
+
+def finish_notify_delivery(delivery_id, ok, message):
+    status = "succeeded" if ok else "failed"
+    delivery_id = _notify_text(delivery_id).strip()
+
+    with NOTIFY_HISTORY_LOCK:
+        raw = read_json(NOTIFY_HISTORY_FILE, [])
+        rows, _changed = _notify_history_rows(raw)
+        found = False
+        for row in rows:
+            if row.get("id") == delivery_id:
+                row["status"] = status
+                row["message"] = _notify_text(message)
+                row["updated_at"] = now_str()
+                found = True
+                break
+
+        if not found:
+            NOTIFY_ACTIVE_DELIVERIES.discard(delivery_id)
+            return False
+
+        try:
+            write_json(NOTIFY_HISTORY_FILE, rows[:NOTIFY_HISTORY_LIMIT])
+        except Exception:
+            # Let the next read expose the row as unknown so it can be retried.
+            NOTIFY_ACTIVE_DELIVERIES.discard(delivery_id)
+            raise
+
+        NOTIFY_ACTIVE_DELIVERIES.discard(delivery_id)
+        return True
+
+
+def _claim_notify_delivery(delivery_id):
+    delivery_id = _notify_text(delivery_id).strip()
+    with NOTIFY_HISTORY_LOCK:
+        raw = read_json(NOTIFY_HISTORY_FILE, [])
+        rows, _changed = _notify_history_rows(raw)
+        target = None
+        for row in rows:
+            if row.get("id") == delivery_id:
+                target = row
+                break
+
+        if target is None:
+            return None, "通知投递不存在"
+
+        status = target.get("status")
+        if status == "running":
+            return None, "通知投递正在发送"
+        if status == "succeeded":
+            return None, "通知投递已成功，无需重试"
+
+        try:
+            target["attempt"] = max(1, int(target.get("attempt", 1) or 1)) + 1
+        except Exception:
+            target["attempt"] = 2
+        target["status"] = "running"
+        target["message"] = "重试发送中"
+        target["updated_at"] = now_str()
+        write_json(NOTIFY_HISTORY_FILE, rows[:NOTIFY_HISTORY_LIMIT])
+        NOTIFY_ACTIVE_DELIVERIES.add(target["id"])
+        return dict(target), ""
+
+
+def retry_notify_delivery(delivery_id):
+    """Claim and synchronously retry one failed or unknown delivery."""
+    row, error = _claim_notify_delivery(delivery_id)
+    if row is None:
+        return False, error, None
+
+    item = get_notify_item(row.get("item_id"))
+    if item is None:
+        message = "通知渠道已删除"
+        finish_notify_delivery(row.get("id"), False, message)
+        return False, message, get_notify_delivery(row.get("id"))
+
+    try:
+        ok, message = send_one(item, row.get("title", ""), row.get("content", ""))
+    except Exception as exc:
+        ok, message = False, str(exc)
+    finish_notify_delivery(row.get("id"), ok, message)
+    return ok, message, get_notify_delivery(row.get("id"))
 
 
 def normalize_notify_log_mode(value):
@@ -711,7 +950,7 @@ def send_one(item, title, content):
         return False, str(e)
 
 
-def send_by_ids(title, content, ids=None):
+def send_by_ids(title, content, ids=None, source="task"):
     if isinstance(ids, str):
         ids = [ids]
 
@@ -764,7 +1003,32 @@ def send_by_ids(title, content, ids=None):
             else:
                 part_title = title
 
-            ok, msg = send_one(item, part_title, chunks[part_index])
+            try:
+                delivery_id = create_notify_delivery(
+                    item,
+                    part_title,
+                    chunks[part_index],
+                    source=source,
+                )
+            except Exception as exc:
+                results.append({
+                    "id": item_id,
+                    "name": item.get("name", item_id),
+                    "ok": False,
+                    "msg": f"投递记录保存失败：{exc}",
+                })
+                continue
+
+            try:
+                ok, msg = send_one(item, part_title, chunks[part_index])
+            except Exception as exc:
+                ok, msg = False, str(exc)
+
+            try:
+                finish_notify_delivery(delivery_id, ok, msg)
+            except Exception as exc:
+                msg = f"{msg}；投递结果保存失败：{exc}"
+
             results.append({
                 "id": item_id,
                 "name": item.get("name", item_id),
@@ -855,9 +1119,9 @@ def notify_select_options(selected=None):
 # ============================================================
 # 正式辅助函数：发送给所有已启用通知 / 系统失败通知
 # ============================================================
-def send_all_enabled(title, content):
+def send_all_enabled(title, content, source="system"):
     ids = [x.get("id") for x in enabled_notify_items() if x.get("id")]
-    return send_by_ids(title, content, ids)
+    return send_by_ids(title, content, ids, source=source)
 
 
 def send_system_failure(action, message, extra=""):
@@ -875,7 +1139,8 @@ def send_system_failure(action, message, extra=""):
 
         return send_all_enabled(
             f"FLS 系统功能失败：{action}",
-            "\n".join(lines)
+            "\n".join(lines),
+            source="system",
         )
     except Exception as e:
         print(f"[Notify] 系统失败通知发送失败: {e}")

@@ -170,6 +170,18 @@
 - `task_types` 只保留当前支持的类型键，值归一为布尔。
 - 未知顶层字段暂时保留，避免破坏后续扩展或用户自定义字段。
 
+## data/notify_history.json
+
+类型：按最新在前排列的通知投递记录数组，最多保留最近 `300` 条。
+
+- `id`、`item_id`、`item_name`、`channel`：投递和通知渠道快照标识。
+- `title`、`content`、`content_truncated`：发送标题和用于人工重试的有界正文副本；正文超过 `12000` 字符时只保留前缀。
+- `source`：`task`、`test`、`system` 或 `manual` 等发送来源。
+- `status`：`running`、`succeeded`、`failed` 或 `unknown`。面板重启后无法确认的 `running` 会幂等归一为 `unknown`，不会声称外部渠道已收到。
+- `attempt`、`message`、`created_at`、`updated_at`、`retry_of`：尝试次数、原始返回/错误和时间信息。
+
+投递记录通过存储锁原子追加和更新；重试先在锁内认领记录，已发送中的同一记录不会被第二个请求重复认领。重试使用当前通知配置，通知被删除或禁用时保留失败原因。缺失、损坏或旧版本历史文件按空数组读取，不影响配置和任务启动。
+
 ## data/global_env.json
 
 类型：对象，键值均为字符串。

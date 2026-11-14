@@ -14,8 +14,60 @@ from ..task_runner import (
 from ..scheduler import get_scheduler_state, reload_scheduler, scheduler
 from ..state import RUNNING
 from ..utils import now_str
+from ..notify import (
+    NOTIFY_HISTORY_STATUSES,
+    load_notify_history,
+    retry_notify_delivery,
+)
 
 bp = Blueprint("api", __name__)
+
+
+def _notify_history_limit(value):
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return None
+    return max(1, min(100, value))
+
+
+@bp.route("/api/notify/history")
+def api_notify_history():
+    raw_limit = request.args.get("limit", "50")
+    limit = _notify_history_limit(raw_limit)
+    if limit is None:
+        return jsonify({"ok": False, "msg": "limit 必须是整数", "items": []}), 400
+
+    status = str(request.args.get("status") or "").strip()
+    if status and status not in NOTIFY_HISTORY_STATUSES:
+        return jsonify({"ok": False, "msg": "未知通知状态", "items": []}), 400
+
+    return jsonify({
+        "ok": True,
+        "items": load_notify_history(limit=limit, status=status),
+        "limit": limit,
+        "status": status,
+    })
+
+
+@bp.route("/api/notify/retry/<delivery_id>", methods=["POST"])
+def api_notify_retry(delivery_id):
+    try:
+        ok, msg, row = retry_notify_delivery(delivery_id)
+    except Exception as exc:
+        return jsonify({"ok": False, "msg": str(exc)}), 500
+
+    payload = {"ok": ok, "msg": msg}
+    if row is not None:
+        payload["delivery"] = row
+
+    if ok:
+        return jsonify(payload)
+    if msg == "通知投递不存在":
+        return jsonify(payload), 404
+    if msg in ("通知投递正在发送", "通知投递已成功，无需重试"):
+        return jsonify(payload), 409
+    return jsonify(payload), 500
 
 
 def _unique_task_ids(values):

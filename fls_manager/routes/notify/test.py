@@ -9,10 +9,12 @@ def notify_test(item_id):
     if not item:
         abort(404)
 
-    ok, msg = send_one(
+    ok, msg, _delivery_id = send_notify_with_history(
         item,
         "FLS 通知测试",
         f"这是一条测试通知。\n时间：{now_str()}",
+        source="test",
+        sender=send_one,
     )
 
     status_badge = (
