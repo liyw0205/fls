@@ -43,6 +43,7 @@ COLLECTION_FILE = DATA_DIR / "collections.json"
 SCHEDULER_STATE_FILE = DATA_DIR / "scheduler_state.json"
 NOTIFY_HISTORY_FILE = DATA_DIR / "notify_history.json"
 PROXY_DIAGNOSTICS_FILE = DATA_DIR / "proxy_diagnostics.json"
+SCRIPT_DEBUG_RUNS_FILE = DATA_DIR / "script_debug_runs.json"
 PID_FILE = DATA_DIR / "fls-manager.pid"
 
 for d in (BASE_DIR, DATA_DIR, LOG_DIR, SCRIPT_DIR):

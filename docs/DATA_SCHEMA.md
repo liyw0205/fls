@@ -259,6 +259,30 @@
 - 缺失 `id` 的合集会被丢弃，避免任务引用无法稳定匹配。
 - 文本字段统一转字符串并去除首尾空白。
 
+## data/script_debug_runs.json
+
+类型：脚本调试运行快照数组，按最新写入在前排列，最多保留 `200` 条。
+
+规范字段：
+
+- `id`、`script`、`rel`：调试运行 ID、绝对脚本路径和脚本相对路径。
+- `log_file`：调试日志路径；日志文件不由历史清理自动删除。
+- `pid`、`returncode`：进程号和实际退出码；无法启动或无法取得时分别为 `"-"`、`null`。
+- `status`：`starting`、`running`、`succeeded`、`failed`、`stopped` 或 `unknown`。
+- `running`：由 `status` 派生的兼容布尔字段；仅 `starting`/`running` 为 `true`。
+- `error`：失败、停止失败或重启恢复诊断，最多 `12000` 字符。
+- `created_at`、`updated_at`：快照创建和最后更新的面板时间；`start_time` 为进程启动时间戳。
+
+读取和恢复规则：
+
+- 缺失、损坏、非数组数据以及无 ID 的行会归一为空数组或被丢弃，并在读取时写回规范数组。
+- 旧的 `starting`/`running` 行在新面板进程首次读取时幂等归一为 `unknown`，保留日志、PID、
+  退出码和原始错误；这不证明外部进程已经退出，也不会序列化进程句柄或自动执行跨重启终止。
+- 页面和调试日志 API 共享同一记录读取路径；缺失 ID 返回 `404`，`lines` 参数仍按日志 API
+  的整数和 `1-5000` 上限合同处理。
+- 启动、watcher 和停止结果在同一存储锁内原子更新；停止无法确认退出时保留 `running` 和进程
+  句柄，允许再次停止，不会写入伪造终态。
+
 ## 测试入口
 
 当前 schema 迁移测试在 `tests/test_schema_migration.py`。

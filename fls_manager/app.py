@@ -87,6 +87,10 @@ def create_app():
     # Runtime process handles are in memory; close the false "running" state
     # left by a previous panel process before serving the first request.
     reconcile_task_history_after_restart(running_history_ids())
+    # Debug process handles are also in memory; reconcile durable snapshots
+    # before the first page/API request can report their restart state.
+    from .routes.scripts.debug import load_script_debug_runs
+    load_script_debug_runs()
 
     # Cookie 基础配置。
     # remember 登录时，auth.py 会设置 session.permanent；
