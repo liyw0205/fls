@@ -22,6 +22,7 @@ Windows 桌面包打包和 Windows EXE 安装包打包。
 - `workflow_dispatch`、主分支版本变更和推送 `v*` 标签时会打包并创建/更新对应 Release。
 - 产物为 `fls-manager-desktop-windows-x64.zip`，包含 `install.ps1`、`fls.ps1` 和
   `fls.bat`，不包含运行数据、日志、虚拟环境或 Git 元数据。
+- 同一 Release 同时发布 `SHA256SUMS-windows-desktop`；Windows 安装前应先核对 ZIP 的 SHA256。
 - `install.ps1` 默认安装到 `%LOCALAPPDATA%\FLS`，升级时保留 `data/`、`log/` 和
   `scripts/`。
 
@@ -34,6 +35,7 @@ Windows 桌面包打包和 Windows EXE 安装包打包。
 - `workflow_dispatch` 可以手动运行。
 - `workflow_dispatch`、主分支版本变更和推送 `v*` 标签时打包并创建/更新模块 Release。
 - 输出只有 `fls-manager-module.zip`，不会再套一层 ZIP 或 `payload/` 目录。
+- 模块包发布前会检查固定根目录结构、脚本语法、危险 ZIP 路径和嵌套归档。
 
 模块 ZIP 根目录包含：
 
