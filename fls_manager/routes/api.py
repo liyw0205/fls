@@ -3,7 +3,7 @@ import uuid
 
 from flask import Blueprint, jsonify, request
 
-from ..models import load_tasks, save_tasks
+from ..models import load_tasks, save_tasks, mutate_tasks
 from ..task_runner import (
     run_task_now,
     stop_task_now,
@@ -174,39 +174,42 @@ def api_task_action(action, task_id):
             return _task_action_result(ok, msg)
 
         if action == "toggle":
-            tasks = load_tasks()
-            found = False
+            result = {}
 
-            for task in tasks:
-                if task.get("id") == task_id:
-                    task["enabled"] = not task.get("enabled", True)
-                    task["updated_at"] = now_str()
-                    found = True
-                    break
+            def toggle(tasks):
+                task = next((item for item in tasks if item.get("id") == task_id), None)
+                if task is None:
+                    return False
+                task["enabled"] = not task.get("enabled", True)
+                task["updated_at"] = now_str()
+                result["enabled"] = task["enabled"]
+                return True
 
-            if not found:
+            def after_toggle():
+                if not result["enabled"]:
+                    cancel_task_retry(task_id, "任务已禁用")
+
+            _tasks, changed = mutate_tasks(toggle, reload_scheduler, after_toggle)
+            if not changed:
                 return jsonify({"ok": False, "msg": "任务不存在"}), 404
-
-            save_tasks(tasks)
-            if not task["enabled"]:
-                cancel_task_retry(task_id, "任务已禁用")
-            reload_scheduler()
 
             return jsonify({
                 "ok": True,
                 "msg": "已切换",
-                "enabled": bool(task.get("enabled")),
+                "enabled": bool(result["enabled"]),
             })
 
         if action == "copy":
-            tasks = load_tasks()
-            new_task = _copy_task(tasks, task_id)
+            result = {}
 
-            if not new_task:
+            def copy_task(tasks):
+                result["task"] = _copy_task(tasks, task_id)
+                return result["task"] is not None
+
+            _tasks, changed = mutate_tasks(copy_task, reload_scheduler)
+            new_task = result.get("task")
+            if not changed or not new_task:
                 return jsonify({"ok": False, "msg": "任务不存在"}), 404
-
-            save_tasks(tasks)
-            reload_scheduler()
 
             return jsonify({
                 "ok": True,
@@ -214,31 +217,35 @@ def api_task_action(action, task_id):
             })
 
         if action == "pin":
-            tasks = load_tasks()
-            target = None
+            result = {}
 
-            for task in tasks:
-                if task.get("id") == task_id:
-                    target = task
-                    break
+            def pin(tasks):
+                target = next((item for item in tasks if item.get("id") == task_id), None)
+                if target is None:
+                    return False
+                result["found"] = True
 
-            if not target:
+                pinned_count = sum(1 for item in tasks if item.get("pinned"))
+                if not target.get("pinned") and pinned_count >= 5:
+                    result["limit_exceeded"] = True
+                    return False
+
+                target["pinned"] = not target.get("pinned", False)
+                target["updated_at"] = now_str()
+                result["pinned"] = target["pinned"]
+                return True
+
+            _tasks, changed = mutate_tasks(pin)
+            if not result.get("found"):
                 return jsonify({"ok": False, "msg": "任务不存在"}), 404
 
-            pinned_count = sum(1 for task in tasks if task.get("pinned"))
-
-            if not target.get("pinned") and pinned_count >= 5:
+            if result.get("limit_exceeded"):
                 return jsonify({"ok": False, "msg": "最多只能置顶 5 个任务，请先取消一个置顶任务"}), 400
-
-            target["pinned"] = not target.get("pinned", False)
-            target["updated_at"] = now_str()
-
-            save_tasks(tasks)
 
             return jsonify({
                 "ok": True,
-                "msg": "已置顶" if target.get("pinned") else "已取消置顶",
-                "pinned": bool(target.get("pinned")),
+                "msg": "已置顶" if result["pinned"] else "已取消置顶",
+                "pinned": bool(result["pinned"]),
             })
 
         if action == "delete":
@@ -256,13 +263,16 @@ def api_task_action(action, task_id):
                     "msg": f"删除失败：{msg}",
                 }), 409
 
-            tasks = [
-                t for t in tasks
-                if t.get("id") != task_id
-            ]
+            def remove_task(current_tasks):
+                remaining = [task for task in current_tasks if task.get("id") != task_id]
+                if len(remaining) == len(current_tasks):
+                    return False
+                current_tasks[:] = remaining
+                return True
 
-            save_tasks(tasks)
-            reload_scheduler()
+            _tasks, changed = mutate_tasks(remove_task, reload_scheduler)
+            if not changed:
+                return jsonify({"ok": False, "msg": "任务不存在"}), 404
 
             return jsonify({"ok": True, "msg": "已删除"})
 
@@ -321,21 +331,23 @@ def api_task_bulk_action():
 
         if action in ("enable", "disable"):
             enabled = action == "enable"
-            changed_count = 0
+            result = {"changed_count": 0}
 
-            for task in tasks:
-                if task.get("id") in selected and bool(task.get("enabled", True)) != enabled:
-                    task["enabled"] = enabled
-                    task["updated_at"] = now_str()
-                    changed_count += 1
+            def set_enabled(current_tasks):
+                for task in current_tasks:
+                    if task.get("id") in selected and bool(task.get("enabled", True)) != enabled:
+                        task["enabled"] = enabled
+                        task["updated_at"] = now_str()
+                        result["changed_count"] += 1
+                return result["changed_count"] > 0
 
-            if changed_count:
-                save_tasks(tasks)
-            if not enabled:
-                for task_id in task_ids:
-                    cancel_task_retry(task_id, "任务已禁用")
-            if changed_count:
-                reload_scheduler()
+            def cancel_disabled_retries():
+                if not enabled:
+                    for task_id in task_ids:
+                        cancel_task_retry(task_id, "任务已禁用")
+
+            mutate_tasks(set_enabled, reload_scheduler, cancel_disabled_retries)
+            changed_count = result["changed_count"]
 
             return jsonify(_bulk_payload(
                 action,
@@ -424,13 +436,14 @@ def api_task_bulk_action():
             deleted = set(deleted_ids)
 
             if deleted:
-                tasks = [
-                    task for task in tasks
-                    if task.get("id") not in deleted
-                ]
+                def remove_deleted(current_tasks):
+                    remaining = [task for task in current_tasks if task.get("id") not in deleted]
+                    if len(remaining) == len(current_tasks):
+                        return False
+                    current_tasks[:] = remaining
+                    return True
 
-                save_tasks(tasks)
-                reload_scheduler()
+                mutate_tasks(remove_deleted, reload_scheduler)
 
             parts = [f"已删除 {len(deleted_ids)} 个任务"]
             if failed:
@@ -448,16 +461,18 @@ def api_task_bulk_action():
             ))
 
         if action == "clear_collection":
-            changed_count = 0
+            result = {"changed_count": 0}
 
-            for task in tasks:
-                if task.get("id") in selected and str(task.get("collection_id") or ""):
-                    task["collection_id"] = ""
-                    task["updated_at"] = now_str()
-                    changed_count += 1
+            def clear_collection(current_tasks):
+                for task in current_tasks:
+                    if task.get("id") in selected and str(task.get("collection_id") or ""):
+                        task["collection_id"] = ""
+                        task["updated_at"] = now_str()
+                        result["changed_count"] += 1
+                return result["changed_count"] > 0
 
-            if changed_count:
-                save_tasks(tasks)
+            mutate_tasks(clear_collection)
+            changed_count = result["changed_count"]
 
             return jsonify(_bulk_payload(
                 action,

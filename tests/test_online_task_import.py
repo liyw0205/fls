@@ -93,7 +93,7 @@ class OnlineTaskImportConcurrencyTests(unittest.TestCase):
             from fls_manager.online_scripts import tasks
 
             item = self.task_item("demo", "Daily")
-            with patch.object(tasks, "mutate_json", side_effect=OSError("task store is read-only")), patch.object(
+            with patch("fls_manager.models.mutate_json", side_effect=OSError("task store is read-only")), patch.object(
                 tasks, "reload_scheduler",
             ) as reload_scheduler:
                 with self.assertRaisesRegex(OSError, "task store is read-only"):
@@ -141,12 +141,10 @@ class OnlineTaskImportConcurrencyTests(unittest.TestCase):
 
     def test_import_route_keeps_storage_error_visible(self):
         with isolated_app() as (app, base_dir):
-            from fls_manager.online_scripts import tasks
-
             cache_file = base_dir / "data" / "online_scripts_cache.json"
             cache_file.parent.mkdir(parents=True, exist_ok=True)
             cache_file.write_text(json.dumps([self.task_item("demo", "Daily")]), encoding="utf-8")
-            with patch.object(tasks, "mutate_json", side_effect=OSError("task store is read-only")):
+            with patch("fls_manager.models.mutate_json", side_effect=OSError("task store is read-only")):
                 response = app.test_client().post(
                     "/online-scripts/import-tasks/demo",
                     data={"task_indexes": "1"},

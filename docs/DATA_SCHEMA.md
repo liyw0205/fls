@@ -86,7 +86,8 @@
   - 包含 `__default__` => `{"mode": "default", "ids": []}`
   - 其他 ID => `{"mode": "custom", "ids": [...]}`
 - 缺失 `notify` 且没有 `notify_ids` 时按旧运行时行为归一为 `none`，避免给旧任务意外开启通知。
-- 在线任务导入通过一次 `tasks.json` 原子读-改-写检查并追加任务；并发重复请求不会重复创建，同步导入的其他脚本不会被覆盖。
+- 在线任务导入、任务页面/API 操作、合集调整和运行次数更新都通过进程内串行化的 `tasks.json` 原子读-改-写；并发导入不会重复创建或覆盖其他入口刚写入的任务。
+- 会改变调度的任务写入与调度器重载在同一顺序锁内完成，避免并发更新后由较早请求留下过期调度状态。
 - 旧字段 `retry_count` 会迁移为 `retry.attempts`，写回时移除旧字段；新任务默认 `retry.interval_seconds=60`。
 - `random_delay.seconds`、`retry.attempts`、`retry.interval_seconds`、`run_count` 会转整数并钳制到有效范围。
 - `enabled`、`pinned` 支持布尔、数字和常见字符串值。

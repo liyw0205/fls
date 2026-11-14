@@ -1,15 +1,9 @@
-import threading
 import uuid
 
-from ..models import normalize_task
-from ..paths import TASK_FILE
+from ..models import mutate_tasks, TaskSchedulerReloadError
 from ..scheduler import reload_scheduler, cron_to_trigger
-from ..storage import mutate_json
 from ..utils import now_str
 from .logs import append_log
-
-ONLINE_TASK_IMPORT_LOCK = threading.RLock()
-
 
 def normalize_online_task_crons(data):
     """
@@ -179,15 +173,8 @@ def import_task_if_needed(item, log_file=None, enable_task=False, selected_task_
     unselected = 0
     messages = []
 
-    def add_selected_tasks(data):
+    def add_selected_tasks(tasks):
         nonlocal imported, skipped, unselected
-        tasks = []
-        if isinstance(data, list):
-            tasks = [
-                normalized
-                for raw in data
-                if (normalized := normalize_task(raw)) is not None
-            ]
 
         for idx, task_cron in enumerate(task_crons, 1):
             if selected_set and idx not in selected_set:
@@ -268,19 +255,15 @@ def import_task_if_needed(item, log_file=None, enable_task=False, selected_task_
                 f"{env_msg}{config_msg}"
             )
 
-        return tasks if imported else None
+        return imported > 0
 
-    with ONLINE_TASK_IMPORT_LOCK:
-        mutate_json(TASK_FILE, [], add_selected_tasks)
-
-        if imported > 0:
-            try:
-                reload_scheduler()
-            except Exception as e:
-                summary = f"任务已持久化，但调度器重载失败：{e}"
-                if log_file:
-                    append_log(log_file, summary)
-                return True, summary
+    try:
+        mutate_tasks(add_selected_tasks, reload_scheduler)
+    except TaskSchedulerReloadError as e:
+        summary = f"任务已持久化，但调度器重载失败：{e}"
+        if log_file:
+            append_log(log_file, summary)
+        return True, summary
 
     if log_file:
         for msg in messages:

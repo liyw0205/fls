@@ -9,8 +9,8 @@ import uuid
 from .state import RUNNING
 from .models import (
     get_task,
-    load_tasks,
-    save_tasks,
+    mutate_tasks,
+    TASKS_MUTATION_LOCK,
     load_global_env,
     add_task_history,
     update_task_history,
@@ -112,16 +112,16 @@ def is_running(task_id):
 
 
 def increase_run_count(task_id):
-    tasks = load_tasks()
+    def increment(tasks):
+        for item in tasks:
+            if item.get("id") == task_id:
+                item["run_count"] = int(item.get("run_count", 0)) + 1
+                item["last_run_at"] = now_str()
+                item["updated_at"] = now_str()
+                return True
+        return False
 
-    for item in tasks:
-        if item.get("id") == task_id:
-            item["run_count"] = int(item.get("run_count", 0)) + 1
-            item["last_run_at"] = now_str()
-            item["updated_at"] = now_str()
-            break
-
-    save_tasks(tasks)
+    mutate_tasks(increment)
 
 
 def append_task_log(log_file, text):
@@ -232,34 +232,37 @@ def schedule_task_retry(task_id, task_snapshot, retry_attempt, reason, log_file,
     timer = threading.Timer(interval_seconds, retry_worker)
     timer.daemon = True
     pending["timer"] = timer
-    with _RUNNING_LOCK:
+    # Task mutations cancel retries under this lock order: tasks before running state.
+    with TASKS_MUTATION_LOCK:
         if history_id:
-            current = RUNNING.get(task_id)
-            if (
-                not current
-                or current.get("history_id") != history_id
-                or (task_id, history_id) in STOPPED_MANUALLY
-            ):
-                return False, "任务已停止，取消重试"
-
             latest_task = get_task(task_id)
             if not latest_task or not latest_task.get("enabled", True):
                 return False, "任务已删除或禁用，取消重试"
 
-        previous = PENDING_RETRIES.get(task_id)
-        if previous:
-            previous["timer"].cancel()
-        PENDING_RETRIES[task_id] = pending
-        append_task_log(
-            log_file,
-            (
-                f"\n===== 任务失败，计划第 {next_attempt}/{max_retries} 次重试 =====\n"
-                f"原因: {reason}\n"
-                f"间隔: {interval_seconds} 秒\n"
-                f"时间: {now_str()}\n"
-            ),
-        )
-        timer.start()
+        with _RUNNING_LOCK:
+            if history_id:
+                current = RUNNING.get(task_id)
+                if (
+                    not current
+                    or current.get("history_id") != history_id
+                    or (task_id, history_id) in STOPPED_MANUALLY
+                ):
+                    return False, "任务已停止，取消重试"
+
+            previous = PENDING_RETRIES.get(task_id)
+            if previous:
+                previous["timer"].cancel()
+            PENDING_RETRIES[task_id] = pending
+            append_task_log(
+                log_file,
+                (
+                    f"\n===== 任务失败，计划第 {next_attempt}/{max_retries} 次重试 =====\n"
+                    f"原因: {reason}\n"
+                    f"间隔: {interval_seconds} 秒\n"
+                    f"时间: {now_str()}\n"
+                ),
+            )
+            timer.start()
 
     return True, f"{reason}，已计划第 {next_attempt}/{max_retries} 次重试"
 

@@ -9,6 +9,7 @@ from .helpers import sort_tasks_for_display, task_matches_query
 from ...models import (
     load_tasks,
     save_tasks,
+    mutate_tasks,
     load_collections,
     save_collections,
     get_collection,
@@ -885,19 +886,18 @@ def collection_delete(collection_id):
 
     collections = [c for c in collections if c.get("id") != collection_id]
 
-    tasks = load_tasks()
-    tasks_changed = False
-
-    for task in tasks:
-        if str(task.get("collection_id") or "") == collection_id:
-            task["collection_id"] = ""
-            task["updated_at"] = now_str()
-            tasks_changed = True
-
     save_collections(collections)
 
-    if tasks_changed:
-        save_tasks(tasks)
+    def clear_deleted_collection(tasks):
+        changed = False
+        for task in tasks:
+            if str(task.get("collection_id") or "") == collection_id:
+                task["collection_id"] = ""
+                task["updated_at"] = now_str()
+                changed = True
+        return changed
+
+    mutate_tasks(clear_deleted_collection)
 
     return redirect(get_back_url("/collections"))
 
@@ -913,23 +913,29 @@ def collection_add_task(collection_id):
     if not task_ids:
         return redirect(get_back_url("/collections"))
 
-    tasks = load_tasks()
     selected = set(task_ids)
-    existing = {
-        str(task.get("id") or "")
-        for task in tasks
-        if str(task.get("id") or "") in selected
-    }
+    result = {"missing": False}
 
-    if existing != selected:
+    def add_to_collection(tasks):
+        existing = {
+            str(task.get("id") or "")
+            for task in tasks
+            if str(task.get("id") or "") in selected
+        }
+        if existing != selected:
+            result["missing"] = True
+            return False
+
+        for task in tasks:
+            if task.get("id") in selected:
+                task["collection_id"] = collection_id
+                task["updated_at"] = now_str()
+                task["pinned"] = False
+        return bool(selected)
+
+    mutate_tasks(add_to_collection)
+
+    if result["missing"]:
         abort(404)
-
-    for task in tasks:
-        if task.get("id") in selected:
-            task["collection_id"] = collection_id
-            task["updated_at"] = now_str()
-            task["pinned"] = False
-
-    save_tasks(tasks)
 
     return redirect(get_back_url("/collections"))

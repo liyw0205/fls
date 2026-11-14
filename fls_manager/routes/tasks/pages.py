@@ -20,6 +20,7 @@ from .helpers import (
 from ...models import (
     load_tasks,
     save_tasks,
+    mutate_tasks,
     load_collections,
     get_collection,
 )
@@ -277,8 +278,6 @@ def task_new():
         if collection_id and not get_collection(collection_id):
             return _task_form_error("新建任务", back_url, "合集不存在", task)
 
-        tasks = load_tasks()
-
         task.update({
             "id": uuid.uuid4().hex,
             "run_count": 0,
@@ -287,9 +286,11 @@ def task_new():
             "updated_at": now_str(),
         })
 
-        tasks.append(task)
-        save_tasks(tasks)
-        reload_scheduler()
+        def add_task(tasks):
+            tasks.append(task)
+            return True
+
+        mutate_tasks(add_task, reload_scheduler)
 
         return redirect(back_url)
 
@@ -333,26 +334,33 @@ def task_edit(task_id):
         if collection_id and not get_collection(collection_id):
             return _task_form_error("编辑任务", back_url, "合集不存在", draft)
 
-        task.update({
-            "name": draft.get("name", ""),
-            "remark": draft.get("remark", ""),
-            "command": draft.get("command", ""),
-            "cron": draft.get("cron", ""),
-            "config_path": draft.get("config_path", ""),
-            "collection_id": draft.get("collection_id", ""),
-            "enabled": draft.get("enabled", True),
-            "env": draft.get("env", {}),
-            "proxy_id": draft.get("proxy_id", ""),
-            "notify": draft.get("notify"),
-            "random_delay": draft.get("random_delay"),
-            "retry": draft.get("retry"),
-        })
-        task["updated_at"] = now_str()
-        task.setdefault("run_count", 0)
-        task.setdefault("pinned", False)
+        def update_task(tasks):
+            target = next((item for item in tasks if item.get("id") == task_id), None)
+            if target is None:
+                return False
 
-        save_tasks(tasks)
-        reload_scheduler()
+            target.update({
+                "name": draft.get("name", ""),
+                "remark": draft.get("remark", ""),
+                "command": draft.get("command", ""),
+                "cron": draft.get("cron", ""),
+                "config_path": draft.get("config_path", ""),
+                "collection_id": draft.get("collection_id", ""),
+                "enabled": draft.get("enabled", True),
+                "env": draft.get("env", {}),
+                "proxy_id": draft.get("proxy_id", ""),
+                "notify": draft.get("notify"),
+                "random_delay": draft.get("random_delay"),
+                "retry": draft.get("retry"),
+            })
+            target["updated_at"] = now_str()
+            target.setdefault("run_count", 0)
+            target.setdefault("pinned", False)
+            return True
+
+        _tasks, changed = mutate_tasks(update_task, reload_scheduler)
+        if not changed:
+            abort(404)
 
         return redirect(back_url)
 

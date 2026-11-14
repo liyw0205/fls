@@ -551,7 +551,7 @@ class BulkWorkflowTests(unittest.TestCase):
             write_json(paths.TASK_FILE, [sample_task("t1", pinned=False)])
 
             with patch(
-                "fls_manager.routes.api.save_tasks",
+                "fls_manager.models.mutate_json",
                 side_effect=OSError("disk full"),
             ):
                 response = app.test_client().post(

@@ -2,7 +2,7 @@ from flask import redirect, url_for, abort
 
 from . import bp
 
-from ...models import load_tasks, save_tasks
+from ...models import load_tasks, save_tasks, mutate_tasks
 from ...utils import h, now_str, get_back_url
 from ...scheduler import reload_scheduler
 from ...task_runner import run_task_now, stop_task_now, cancel_task_retry
@@ -30,56 +30,70 @@ def task_delete(task_id):
 """
         return layout("删除任务", "tasks", body), 409
 
-    tasks = [
-        t for t in tasks
-        if t.get("id") != task_id
-    ]
+    def remove_task(current_tasks):
+        remaining = [task for task in current_tasks if task.get("id") != task_id]
+        if len(remaining) == len(current_tasks):
+            return False
+        current_tasks[:] = remaining
+        return True
 
-    save_tasks(tasks)
-    reload_scheduler()
+    _tasks, changed = mutate_tasks(remove_task, reload_scheduler)
+    if not changed:
+        abort(404)
 
     return redirect(get_back_url("/tasks"))
 
 
 @bp.route("/task/toggle/<task_id>", methods=["POST"])
 def task_toggle(task_id):
-    tasks = load_tasks()
-    found = False
+    result = {}
 
-    for task in tasks:
-        if task.get("id") == task_id:
-            task["enabled"] = not task.get("enabled", True)
-            task["updated_at"] = now_str()
-            found = True
-            break
+    def toggle(current_tasks):
+        task = next((item for item in current_tasks if item.get("id") == task_id), None)
+        if task is None:
+            return False
+        task["enabled"] = not task.get("enabled", True)
+        task["updated_at"] = now_str()
+        result["enabled"] = task["enabled"]
+        return True
 
-    if not found:
+    def after_toggle():
+        if not result["enabled"]:
+            cancel_task_retry(task_id, "任务已禁用")
+
+    _tasks, changed = mutate_tasks(toggle, reload_scheduler, after_toggle)
+    if not changed:
         abort(404)
-
-    save_tasks(tasks)
-    if not task["enabled"]:
-        cancel_task_retry(task_id, "任务已禁用")
-    reload_scheduler()
 
     return redirect(get_back_url("/tasks"))
 
 
 @bp.route("/task/pin/<task_id>", methods=["POST"])
 def task_pin(task_id):
-    tasks = load_tasks()
-    target = None
+    result = {}
 
-    for task in tasks:
-        if task.get("id") == task_id:
-            target = task
-            break
+    def pin(current_tasks):
+        target = next((item for item in current_tasks if item.get("id") == task_id), None)
+        if target is None:
+            return False
+        result["found"] = True
 
-    if not target:
+        pinned_count = sum(1 for task in current_tasks if task.get("pinned"))
+        if not target.get("pinned") and pinned_count >= 5:
+            result["limit_exceeded"] = True
+            return False
+
+        target["pinned"] = not target.get("pinned", False)
+        target["updated_at"] = now_str()
+        result["pinned"] = target["pinned"]
+        return True
+
+    mutate_tasks(pin)
+
+    if not result.get("found"):
         abort(404)
 
-    pinned_count = sum(1 for t in tasks if t.get("pinned"))
-
-    if not target.get("pinned") and pinned_count >= 5:
+    if result.get("limit_exceeded"):
         back_url = get_back_url("/tasks")
         body = f"""
 {message_card("最多只能置顶 5 个任务，请先取消一个置顶任务", "error", strong=True, title="置顶失败")}
@@ -89,34 +103,28 @@ def task_pin(task_id):
 """
         return layout("置顶任务", "tasks", body), 400
 
-    target["pinned"] = not target.get("pinned", False)
-    target["updated_at"] = now_str()
-
-    save_tasks(tasks)
-
     return redirect(get_back_url("/tasks"))
 
 
 @bp.route("/task/collection/clear/<task_id>", methods=["POST"])
 def task_collection_clear(task_id):
-    tasks = load_tasks()
-    found = False
-    changed = False
+    result = {}
 
-    for task in tasks:
-        if task.get("id") == task_id:
-            found = True
-            if str(task.get("collection_id") or ""):
-                task["collection_id"] = ""
-                task["updated_at"] = now_str()
-                changed = True
-            break
+    def clear_collection(current_tasks):
+        task = next((item for item in current_tasks if item.get("id") == task_id), None)
+        if task is None:
+            return False
+        result["found"] = True
+        if not str(task.get("collection_id") or ""):
+            return False
+        task["collection_id"] = ""
+        task["updated_at"] = now_str()
+        return True
 
-    if not found:
+    mutate_tasks(clear_collection)
+
+    if not result.get("found"):
         abort(404)
-
-    if changed:
-        save_tasks(tasks)
 
     return redirect(get_back_url("/collections"))
 

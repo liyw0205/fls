@@ -1,3 +1,4 @@
+import threading
 import uuid
 
 from .paths import TASK_FILE, TASK_HISTORY_FILE, GLOBAL_ENV_FILE, PROXY_FILE, COLLECTION_FILE
@@ -296,21 +297,57 @@ def _normalize_list(data, normalizer):
 
 
 TASK_HISTORY_LIMIT = 500
+TASKS_MUTATION_LOCK = threading.RLock()
+
+
+class TaskSchedulerReloadError(RuntimeError):
+    pass
 
 
 def load_tasks():
-    data = read_json(TASK_FILE, [])
-    tasks, changed = _normalize_list(data, normalize_task)
+    result = {}
 
-    if changed:
-        save_tasks(tasks)
+    def normalize(data):
+        tasks, changed = _normalize_list(data, normalize_task)
+        result["tasks"] = tasks
+        return tasks if changed else None
 
-    return tasks
+    with TASKS_MUTATION_LOCK:
+        mutate_json(TASK_FILE, [], normalize)
+
+    return result.get("tasks", [])
 
 
 def save_tasks(tasks):
-    normalized, _ = _normalize_list(tasks or [], normalize_task)
-    write_json(TASK_FILE, normalized)
+    with TASKS_MUTATION_LOCK:
+        normalized, _ = _normalize_list(tasks or [], normalize_task)
+        write_json(TASK_FILE, normalized)
+
+
+def mutate_tasks(update_fn, reload_scheduler_fn=None, after_write=None):
+    """Atomically update tasks and keep related scheduler changes in the same order."""
+    result = {}
+
+    with TASKS_MUTATION_LOCK:
+        def update(data):
+            tasks, normalized = _normalize_list(data, normalize_task)
+            changed = bool(update_fn(tasks))
+            result["tasks"] = tasks
+            result["changed"] = changed
+            return tasks if changed or normalized else None
+
+        mutate_json(TASK_FILE, [], update)
+
+        if result.get("changed") and after_write:
+            after_write()
+
+        if result.get("changed") and reload_scheduler_fn:
+            try:
+                reload_scheduler_fn()
+            except Exception as exc:
+                raise TaskSchedulerReloadError(str(exc)) from exc
+
+    return result.get("tasks", []), bool(result.get("changed"))
 
 
 def get_task(task_id):
