@@ -114,7 +114,9 @@ fls/
 └─ packaging/           # KernelSU/Magisk 和 proot 构建文件
 ```
 
-更新程序时保留 `data/`、`log/` 和 `scripts/`。默认面板地址为
+安装器升级会保留 `data/`、`log/` 和现有 `scripts/`。源码目录的 `update` 会同步仓库跟踪的程序文件，
+其中同路径的仓库脚本也可能更新；`clone` 会覆盖同路径的仓库文件。使用 `clone` 前请备份自定义脚本。
+默认面板地址为
 `http://设备IP:5700`；未配置 Token 时访问 `/setup` 完成初始化。
 
 ## License

@@ -1,7 +1,16 @@
 import json
 import threading
+from contextlib import contextmanager
 
 _STORAGE_LOCK = threading.RLock()
+
+
+@contextmanager
+def storage_transaction():
+    """Hold the JSON storage lock across a multi-file filesystem operation."""
+    with _STORAGE_LOCK:
+        yield
+
 
 def read_json(file_path, default):
     with _STORAGE_LOCK:

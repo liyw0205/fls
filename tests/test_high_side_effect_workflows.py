@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -97,6 +98,29 @@ def add_tar_file(tar, name, content):
     info = tarfile.TarInfo(name)
     info.size = len(content)
     tar.addfile(info, io.BytesIO(content))
+
+
+def restore_test_archive(data_files=None):
+    archive = io.BytesIO()
+    with tarfile.open(fileobj=archive, mode="w:gz") as tar:
+        add_tar_file(tar, "payload/data/config.json", b'{"restored": true}')
+        for name, content in (data_files or {}).items():
+            add_tar_file(tar, "payload/data/" + name, content)
+        add_tar_file(tar, "payload/scripts/demo.py", b"print('restored')\n")
+    archive.seek(0)
+    return archive
+
+
+def post_restore(app, archive):
+    return app.test_client().post(
+        "/backup/import",
+        data={
+            "file": (archive, "fixture.tar.gz"),
+            "restore_items": ["data", "scripts"],
+        },
+        headers={"X-Token": TOKEN},
+        content_type="multipart/form-data",
+    )
 
 
 class DependencyInstallIsolationTests(unittest.TestCase):
@@ -895,6 +919,224 @@ class BackupIsolationTests(unittest.TestCase):
             install_dependencies.assert_called_once()
             self.assertTrue(str(install_dependencies.call_args.args[0]).endswith("dependencies.txt"))
             reload_scheduler.assert_called_once_with()
+
+    def test_backup_import_copy_failure_preserves_live_directories(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager import paths
+
+            paths.DATA_DIR.mkdir(parents=True, exist_ok=True)
+            paths.SCRIPT_DIR.mkdir(parents=True, exist_ok=True)
+            (paths.DATA_DIR / "old.json").write_text("old-data", encoding="utf-8")
+            (paths.SCRIPT_DIR / "old.py").write_text("old-script", encoding="utf-8")
+
+            real_copytree = shutil.copytree
+
+            def fail_restored_data_copy(source, destination, *args, **kwargs):
+                if Path(source).name == "data":
+                    raise OSError("disk full")
+                return real_copytree(source, destination, *args, **kwargs)
+
+            with patch(
+                "fls_manager.routes.backup.restore.shutil.copytree",
+                side_effect=fail_restored_data_copy,
+            ):
+                response = post_restore(app, restore_test_archive())
+
+            self.assertEqual(response.status_code, 500)
+            self.assertIn("disk full", response.get_data(as_text=True))
+            self.assertEqual(
+                (paths.DATA_DIR / "old.json").read_text(encoding="utf-8"),
+                "old-data",
+            )
+            self.assertEqual(
+                (paths.SCRIPT_DIR / "old.py").read_text(encoding="utf-8"),
+                "old-script",
+            )
+
+    def test_backup_import_rejects_active_backup_and_new_workers_wait_for_restore(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.routes.backup._common import (
+                begin_backup_activity,
+                end_backup_activity,
+                end_restore_activity,
+                try_begin_restore_activity,
+            )
+            from fls_manager import paths
+
+            paths.DATA_DIR.mkdir(parents=True, exist_ok=True)
+            (paths.DATA_DIR / "old.json").write_text("old-data", encoding="utf-8")
+
+            begin_backup_activity()
+            try:
+                response = post_restore(app, restore_test_archive())
+            finally:
+                end_backup_activity()
+
+            self.assertEqual(response.status_code, 409)
+            self.assertIn("备份正在创建或恢复", response.get_data(as_text=True))
+            self.assertEqual(
+                (paths.DATA_DIR / "old.json").read_text(encoding="utf-8"),
+                "old-data",
+            )
+
+            self.assertTrue(try_begin_restore_activity())
+            worker_entered = threading.Event()
+            worker = threading.Thread(
+                target=lambda: (
+                    begin_backup_activity(),
+                    worker_entered.set(),
+                    end_backup_activity(),
+                )
+            )
+            worker.start()
+            try:
+                self.assertFalse(worker_entered.wait(0.05))
+            finally:
+                end_restore_activity()
+            self.assertTrue(worker_entered.wait(2))
+            worker.join(timeout=2)
+            self.assertFalse(worker.is_alive(), "backup worker did not leave activity guard")
+
+    def test_backup_import_rolls_back_data_if_scripts_commit_fails(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager import paths
+
+            paths.DATA_DIR.mkdir(parents=True, exist_ok=True)
+            paths.SCRIPT_DIR.mkdir(parents=True, exist_ok=True)
+            (paths.DATA_DIR / "old.json").write_text("old-data", encoding="utf-8")
+            (paths.SCRIPT_DIR / "old.py").write_text("old-script", encoding="utf-8")
+            real_replace = os.replace
+            failed = False
+
+            def fail_scripts_install(source, destination):
+                nonlocal failed
+                if Path(destination) == paths.SCRIPT_DIR and not failed:
+                    failed = True
+                    raise OSError("scripts directory is busy")
+                return real_replace(source, destination)
+
+            with patch(
+                "fls_manager.routes.backup.restore.os.replace",
+                side_effect=fail_scripts_install,
+            ):
+                response = post_restore(app, restore_test_archive())
+
+            self.assertEqual(response.status_code, 500)
+            self.assertIn("scripts directory is busy", response.get_data(as_text=True))
+            self.assertEqual(
+                (paths.DATA_DIR / "old.json").read_text(encoding="utf-8"),
+                "old-data",
+            )
+            self.assertEqual(
+                (paths.SCRIPT_DIR / "old.py").read_text(encoding="utf-8"),
+                "old-script",
+            )
+
+    def test_backup_import_preserves_old_directory_if_rollback_also_fails(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager import paths
+
+            paths.DATA_DIR.mkdir(parents=True, exist_ok=True)
+            paths.SCRIPT_DIR.mkdir(parents=True, exist_ok=True)
+            (paths.DATA_DIR / "old.json").write_text("old-data", encoding="utf-8")
+            (paths.SCRIPT_DIR / "old.py").write_text("old-script", encoding="utf-8")
+            real_replace = os.replace
+
+            def fail_scripts_target(_source, destination):
+                if Path(destination) == paths.SCRIPT_DIR:
+                    raise OSError("scripts directory is locked")
+                return real_replace(_source, destination)
+
+            with patch(
+                "fls_manager.routes.backup.restore.os.replace",
+                side_effect=fail_scripts_target,
+            ):
+                response = post_restore(app, restore_test_archive())
+
+            body = response.get_data(as_text=True)
+            self.assertEqual(response.status_code, 500)
+            self.assertIn("状态可能不完整", body)
+            self.assertIn("恢复副本保留在", body)
+            preserved = list(paths.SCRIPT_DIR.parent.glob(".scripts-restore-*/previous/old.py"))
+            self.assertEqual(len(preserved), 1)
+            self.assertEqual(preserved[0].read_text(encoding="utf-8"), "old-script")
+
+    def test_backup_data_commit_and_scheduler_reload_serialize_task_mutations(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager import models
+
+            errors = []
+            worker_done = threading.Event()
+            workers = []
+
+            def reload_with_concurrent_mutation():
+                self.assertEqual(models.load_tasks()[0]["id"], "restored-task")
+
+                def add_concurrent_task():
+                    def add(tasks):
+                        tasks.append({
+                            "id": "concurrent-task",
+                            "name": "Concurrent",
+                            "command": "task concurrent.py",
+                        })
+                        return True
+
+                    try:
+                        models.mutate_tasks(add)
+                    except Exception as e:
+                        errors.append(e)
+                    finally:
+                        worker_done.set()
+
+                worker = threading.Thread(target=add_concurrent_task)
+                workers.append(worker)
+                worker.start()
+                if worker_done.wait(0.05):
+                    raise AssertionError("task mutation ran before scheduler reload completed")
+
+            task = {
+                "id": "restored-task",
+                "name": "Restored",
+                "command": "task restored.py",
+            }
+            with patch(
+                "fls_manager.routes.backup.restore.reload_scheduler",
+                side_effect=reload_with_concurrent_mutation,
+            ):
+                response = post_restore(
+                    app,
+                    restore_test_archive({"tasks.json": json.dumps([task]).encode()}),
+                )
+
+            for worker in workers:
+                worker.join(timeout=2)
+                self.assertFalse(worker.is_alive(), "task mutation did not finish")
+            self.assertEqual(errors, [])
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(
+                {task["id"] for task in models.load_tasks()},
+                {"restored-task", "concurrent-task"},
+            )
+
+    def test_backup_import_reports_scheduler_reload_failure_after_persisting(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager import paths
+
+            paths.DATA_DIR.mkdir(parents=True, exist_ok=True)
+            (paths.DATA_DIR / "old.json").write_text("old-data", encoding="utf-8")
+
+            with patch(
+                "fls_manager.routes.backup.restore.reload_scheduler",
+                side_effect=RuntimeError("scheduler unavailable"),
+            ):
+                response = post_restore(app, restore_test_archive())
+
+            body = response.get_data(as_text=True)
+            self.assertEqual(response.status_code, 500)
+            self.assertIn("备份已恢复", body)
+            self.assertIn("scheduler unavailable", body)
+            self.assertTrue((paths.DATA_DIR / "config.json").is_file())
+            self.assertFalse((paths.DATA_DIR / "old.json").exists())
 
 
 class PanelControlIsolationTests(unittest.TestCase):

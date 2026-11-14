@@ -26,6 +26,9 @@ BACKUP_JOBS_FILE = DATA_DIR / "backup_jobs.json"
 BACKUP_JOBS = {}
 BACKUP_CANCEL_EVENTS = {}
 BACKUP_JOB_LOCK = threading.RLock()
+BACKUP_ACTIVITY_CONDITION = threading.Condition(threading.RLock())
+ACTIVE_BACKUP_WORKERS = 0
+RESTORE_ACTIVE = False
 BACKUP_JOB_LIMIT = 100
 BACKUP_DEPENDENCY_TIMEOUT_SECONDS = 120
 MIB = 1024 * 1024
@@ -54,6 +57,37 @@ class BackupTimeout(Exception):
 
 class BackupLimitExceeded(ValueError):
     pass
+
+
+def begin_backup_activity():
+    global ACTIVE_BACKUP_WORKERS
+    with BACKUP_ACTIVITY_CONDITION:
+        while RESTORE_ACTIVE:
+            BACKUP_ACTIVITY_CONDITION.wait()
+        ACTIVE_BACKUP_WORKERS += 1
+
+
+def end_backup_activity():
+    global ACTIVE_BACKUP_WORKERS
+    with BACKUP_ACTIVITY_CONDITION:
+        ACTIVE_BACKUP_WORKERS = max(0, ACTIVE_BACKUP_WORKERS - 1)
+        BACKUP_ACTIVITY_CONDITION.notify_all()
+
+
+def try_begin_restore_activity():
+    global RESTORE_ACTIVE
+    with BACKUP_ACTIVITY_CONDITION:
+        if RESTORE_ACTIVE or ACTIVE_BACKUP_WORKERS:
+            return False
+        RESTORE_ACTIVE = True
+        return True
+
+
+def end_restore_activity():
+    global RESTORE_ACTIVE
+    with BACKUP_ACTIVITY_CONDITION:
+        RESTORE_ACTIVE = False
+        BACKUP_ACTIVITY_CONDITION.notify_all()
 
 
 # ============================================================
@@ -359,7 +393,7 @@ def _remove_backup_target(target):
         pass
 
 
-def create_backup_worker(job_id, items, cancel_event):
+def _create_backup_worker(job_id, items, cancel_event):
     with BACKUP_JOB_LOCK:
         info = BACKUP_JOBS.get(job_id)
 
@@ -487,6 +521,14 @@ def create_backup_worker(job_id, items, cancel_event):
     finally:
         with BACKUP_JOB_LOCK:
             BACKUP_CANCEL_EVENTS.pop(job_id, None)
+
+
+def create_backup_worker(job_id, items, cancel_event):
+    begin_backup_activity()
+    try:
+        _create_backup_worker(job_id, items, cancel_event)
+    finally:
+        end_backup_activity()
 
 
 def start_backup_job(items):
