@@ -137,6 +137,19 @@
 - 面板启动时会幂等恢复未结束的 `running`、`starting`、`delaying` 记录为 `unknown`，写入结束时间并保留原说明、日志路径和退出码；这不表示外部进程已被终止。
 - `task_history_for_task(task_id, limit)` 按 `task_id` 过滤并按传入上限返回，最少返回上限为 `1`。
 
+### data/task_history_index.sqlite3（派生读取索引）
+
+这是由 `task_history.json` 派生的可删除 SQLite 文件，不是新的事实数据源。索引包含
+`history_rows(seq, id, task_id, status, search_text, row_json)`、`status/seq` 和
+`task_id/seq` 索引，以及记录 schema 版本和源文件 `mtime_ns:size` 签名的
+`history_meta`。`/history` 分页/状态筛选、任务详情历史和 CSV 导出优先使用它，仍按
+源数组顺序返回完整 JSON 行；关键词搜索保留原来的不区分大小写子串语义。
+
+索引缺失、签名过期、损坏、只读或 SQLite 不可用时，会在内存中回退到
+`task_history.json`，不阻止面板启动，也不改变任何页面/API 字段和状态码。索引重建使用
+临时文件原子替换；历史查询与 JSON 读改写共享 storage 锁，避免同一进程并发写入时读到
+半成品。删除该文件后下一次历史查询会自动重建。
+
 ## data/config.json
 
 类型：配置对象。

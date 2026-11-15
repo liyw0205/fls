@@ -186,6 +186,25 @@ raw 文件先流式下载到目标目录内唯一的 `.fls-download-*.part` 文�
 分页链接会保留当前 `q` 关键词和 `status` 状态筛选。未知状态值按“全部状态”处理，不会返回服务器错误。
 `/history/export` 使用同样的 `q` 和 `status` 筛选导出全部匹配记录，不受当前页面或 `page` 参数影响。
 
+## 有界性能基准
+
+`tools/benchmark_performance.py` 只创建约 **10,000 条**合成历史和最多 100 个合成任务，
+写入临时 `FLS_BASE_DIR` 后通过 Flask `test_client` 访问真实的列表、深分页、搜索、详情、
+`GET /api/status` 和 `POST /api/task/action/toggle/<task_id>` 入口。它报告每个场景的
+p50/p95/p99、吞吐、错误率、CPU、峰值 RSS、响应体大小和 SQLite `EXPLAIN QUERY PLAN`；
+`--playwright` 只做历史搜索和任务详情两个浏览器流程，缺少浏览器时记录 skip。
+
+重任务必须先取得全局验证锁，锁被占用时不会创建 fixture、启动服务或浏览器：
+
+```bash
+tools/run_performance_benchmark.sh --mode baseline --iterations 12
+tools/run_performance_benchmark.sh --mode optimized --iterations 12 --playwright
+```
+
+包装脚本等价于 `flock -w 600 /tmp/nonebot-project-validation.lock`。基准的临时目录在
+进程退出时自动删除；不会清理该目录之外的旧文件，也不会连接生产面板。`--rows` 固定为
+10,000，超过上限会直接失败。
+
 ## 停止脚本调试
 
 脚本调试日志页中的“停止调试运行”只在确认调试进程退出后才标记为已结束，

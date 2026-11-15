@@ -8,6 +8,14 @@ python3 -m compileall -q fls_manager
 git diff --check
 ```
 
+性能阶段的 API 和浏览器重测必须使用共享验证锁，避免与其他项目重任务并发：
+
+```bash
+tools/run_performance_benchmark.sh --mode optimized --iterations 12 --playwright
+```
+
+该命令固定约 10,000 条临时合成历史；锁无法取得时退出且不启动 benchmark。
+
 Shell 控制脚本修改后检查语法：
 
 ```bash

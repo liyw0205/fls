@@ -1,8 +1,19 @@
 import threading
 import uuid
+import json
+import os
+import sqlite3
+from pathlib import Path
 
-from .paths import TASK_FILE, TASK_HISTORY_FILE, GLOBAL_ENV_FILE, PROXY_FILE, COLLECTION_FILE
-from .storage import read_json, write_json, mutate_json
+from .paths import (
+    TASK_FILE,
+    TASK_HISTORY_FILE,
+    TASK_HISTORY_INDEX_FILE,
+    GLOBAL_ENV_FILE,
+    PROXY_FILE,
+    COLLECTION_FILE,
+)
+from .storage import read_json, write_json, mutate_json, storage_transaction
 from .utils import now_str
 
 MAX_TASK_RETRY_ATTEMPTS = 5
@@ -13,6 +24,13 @@ TASK_NOTIFY_MODES = ("none", "default", "custom")
 TASK_RANDOM_DELAY_MODES = ("none", "default", "custom")
 PROXY_TYPES = ("http", "https", "socks4", "socks5", "socks5h", "github")
 TASK_HISTORY_IN_FLIGHT_STATUSES = frozenset(("starting", "delaying", "running"))
+TASK_HISTORY_INDEX_LOCK = threading.RLock()
+TASK_HISTORY_INDEX_SCHEMA = 1
+
+
+def _history_index_disabled():
+    value = os.environ.get("FLS_DISABLE_HISTORY_INDEX", "").strip().lower()
+    return value in ("1", "true", "yes", "on")
 
 
 def _as_text(value, default=""):
@@ -358,11 +376,236 @@ def get_task(task_id):
     return None
 
 
+def _history_source_signature():
+    try:
+        stat = Path(TASK_HISTORY_FILE).stat()
+        return f"{stat.st_mtime_ns}:{stat.st_size}"
+    except OSError:
+        return "missing"
+
+
+def _history_search_text(item):
+    return "\n".join(
+        str(item.get(field) or "").lower()
+        for field in ("task_name", "command", "message", "source")
+    )
+
+
+def _history_like_pattern(query):
+    escaped = str(query or "").lower().replace("\\", "\\\\")
+    escaped = escaped.replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def _history_index_schema(conn):
+    conn.executescript(
+        """
+        CREATE TABLE history_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        CREATE TABLE history_rows (
+            seq INTEGER PRIMARY KEY,
+            id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            search_text TEXT NOT NULL,
+            row_json TEXT NOT NULL
+        );
+        CREATE INDEX history_rows_status_seq
+            ON history_rows(status, seq);
+        CREATE INDEX history_rows_task_seq
+            ON history_rows(task_id, seq);
+        """
+    )
+
+
+def _build_task_history_index(signature):
+    """Build a derived SQLite read index without changing the JSON source."""
+    data = read_json(TASK_HISTORY_FILE, [])
+    rows = [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
+    index_path = Path(TASK_HISTORY_INDEX_FILE)
+    temp_path = index_path.with_name(
+        f"{index_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+
+    try:
+        conn = sqlite3.connect(str(temp_path), timeout=30)
+        try:
+            _history_index_schema(conn)
+            conn.executemany(
+                "INSERT INTO history_rows(seq, id, task_id, status, search_text, row_json) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    (
+                        index,
+                        str(item.get("id") or ""),
+                        str(item.get("task_id") or ""),
+                        str(item.get("status") or ""),
+                        _history_search_text(item),
+                        json.dumps(item, ensure_ascii=False, separators=(",", ":")),
+                    )
+                    for index, item in enumerate(rows)
+                ),
+            )
+            conn.execute(
+                "INSERT INTO history_meta(key, value) VALUES('schema', ?)",
+                (str(TASK_HISTORY_INDEX_SCHEMA),),
+            )
+            conn.execute(
+                "INSERT INTO history_meta(key, value) VALUES('source_signature', ?)",
+                (signature,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path.replace(index_path)
+    except Exception:
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _open_current_task_history_index():
+    if _history_index_disabled():
+        return None
+
+    signature = _history_source_signature()
+    index_path = Path(TASK_HISTORY_INDEX_FILE)
+    with TASK_HISTORY_INDEX_LOCK:
+        current = False
+        if index_path.exists():
+            try:
+                with sqlite3.connect(str(index_path), timeout=30) as probe:
+                    meta = dict(probe.execute("SELECT key, value FROM history_meta").fetchall())
+                current = (
+                    meta.get("schema") == str(TASK_HISTORY_INDEX_SCHEMA)
+                    and meta.get("source_signature") == signature
+                )
+            except (OSError, sqlite3.Error):
+                current = False
+
+        if not current:
+            try:
+                _build_task_history_index(signature)
+            except (OSError, sqlite3.Error, TypeError, ValueError):
+                return None
+
+        try:
+            conn = sqlite3.connect(str(index_path), timeout=30)
+            conn.row_factory = sqlite3.Row
+            return conn
+        except (OSError, sqlite3.Error):
+            return None
+
+
 def load_task_history():
     data = read_json(TASK_HISTORY_FILE, [])
     if not isinstance(data, list):
         return []
     return [item for item in data if isinstance(item, dict)]
+
+
+def query_task_history(q="", status="", limit=30, offset=0, task_id="", statuses=None):
+    """Query the history read index while retaining the JSON fallback contract."""
+    q = str(q or "").strip()
+    status = str(status or "").strip()
+    task_id = str(task_id or "").strip()
+    status_values = [str(value or "").strip() for value in (statuses or []) if str(value or "").strip()]
+    try:
+        offset = max(0, int(offset or 0))
+    except (TypeError, ValueError):
+        offset = 0
+    if limit is not None:
+        try:
+            limit = max(1, min(5000, int(limit)))
+        except (TypeError, ValueError):
+            limit = 30
+
+    with storage_transaction():
+        conn = _open_current_task_history_index()
+        if conn is None:
+            items = load_task_history()
+            if task_id:
+                items = [item for item in items if str(item.get("task_id") or "") == task_id]
+            if status_values:
+                allowed = set(status_values)
+                items = [item for item in items if str(item.get("status") or "") in allowed]
+            elif status:
+                items = [item for item in items if str(item.get("status") or "") == status]
+            if q:
+                needle = q.lower()
+                items = [item for item in items if needle in _history_search_text(item)]
+            total = len(items)
+            if limit is None:
+                return items[offset:], total
+            return items[offset:offset + limit], total
+
+        try:
+            clauses = []
+            params = []
+            if task_id:
+                clauses.append("task_id = ?")
+                params.append(task_id)
+            if status_values:
+                placeholders = ", ".join("?" for _ in status_values)
+                clauses.append(f"status IN ({placeholders})")
+                params.extend(status_values)
+            elif status:
+                clauses.append("status = ?")
+                params.append(status)
+            if q:
+                clauses.append("search_text LIKE ? ESCAPE '\\'")
+                params.append(_history_like_pattern(q))
+            where = " WHERE " + " AND ".join(clauses) if clauses else ""
+            total = int(conn.execute(f"SELECT COUNT(*) FROM history_rows{where}", params).fetchone()[0])
+            query = f"SELECT row_json FROM history_rows{where} ORDER BY seq"
+            if limit is not None:
+                query += " LIMIT ? OFFSET ?"
+                params = [*params, limit, offset]
+            elif offset:
+                query += " LIMIT -1 OFFSET ?"
+                params = [*params, offset]
+            rows = []
+            for row in conn.execute(query, params):
+                try:
+                    rows.append(json.loads(row[0]))
+                except (TypeError, ValueError):
+                    continue
+            return rows, total
+        finally:
+            conn.close()
+
+
+def explain_task_history_query(q="", status="", task_id=""):
+    """Return SQLite query-plan details for the bounded performance benchmark."""
+    with storage_transaction():
+        conn = _open_current_task_history_index()
+        if conn is None:
+            return []
+        try:
+            clauses = []
+            params = []
+            if task_id:
+                clauses.append("task_id = ?")
+                params.append(str(task_id))
+            if status:
+                clauses.append("status = ?")
+                params.append(str(status))
+            if q:
+                clauses.append("search_text LIKE ? ESCAPE '\\'")
+                params.append(_history_like_pattern(q))
+            where = " WHERE " + " AND ".join(clauses) if clauses else ""
+            rows = conn.execute(
+                f"EXPLAIN QUERY PLAN SELECT row_json FROM history_rows{where} ORDER BY seq LIMIT 30",
+                params,
+            )
+            return [str(row[3]) for row in rows]
+        finally:
+            conn.close()
 
 
 def save_task_history(items):
@@ -457,12 +700,11 @@ def update_task_history(record_id, updates):
 
 
 def task_history_for_task(task_id, limit=20):
-    result = [
-        item for item in load_task_history()
-        if str(item.get("task_id") or "") == str(task_id or "")
-    ]
-
-    return result[:max(1, int(limit or 20))]
+    result, _total = query_task_history(
+        task_id=str(task_id or ""),
+        limit=max(1, int(limit or 20)),
+    )
+    return result
 
 
 def load_global_env():

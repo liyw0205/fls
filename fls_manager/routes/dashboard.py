@@ -11,7 +11,7 @@ from urllib.parse import quote
 
 from flask import Blueprint, Response, jsonify, redirect, request
 
-from ..models import load_tasks, load_task_history
+from ..models import load_tasks, load_task_history, query_task_history
 from ..task_runner import is_running
 from ..ui.layout import layout
 from ..ui.components import table_card, page_header, section, data_toolbar, empty_table_row, status_badge
@@ -602,12 +602,20 @@ def history_page():
     status = request.args.get("status", "").strip()
     page = parse_history_page(request.args.get("page", "1"))
     per_page = 30
-    items, q, status = filter_history_items(q, status)
-
-    total = len(items)
+    allowed_statuses = {item[0] for item in HISTORY_STATUS_OPTIONS}
+    if status not in allowed_statuses:
+        status = ""
+    offset = (page - 1) * per_page
+    show, total = query_task_history(q=q, status=status, limit=per_page, offset=offset)
     pages = max(1, ceil(total / per_page))
-    page = min(page, pages)
-    show = items[(page - 1) * per_page: page * per_page]
+    if page > pages:
+        page = pages
+        show, total = query_task_history(
+            q=q,
+            status=status,
+            limit=per_page,
+            offset=(page - 1) * per_page,
+        )
 
     status_options = ""
 
@@ -662,9 +670,10 @@ def history_page():
 
 @bp.route("/history/export")
 def history_export():
-    items, _, _ = filter_history_items(
+    items, _total = query_task_history(
         request.args.get("q", ""),
         request.args.get("status", ""),
+        limit=None,
     )
     output = io.StringIO(newline="")
     writer = csv.writer(output)
@@ -728,11 +737,10 @@ def dashboard():
     panel_cpu_peak_period = panel_cpu_peak_slot_text()
     panel_uptime = fmt_duration(time.time() - PANEL_START_TIME)
     scheduler_state = get_scheduler_state()
-    history = load_task_history()
-    abnormal_history = [
-        item for item in history
-        if str(item.get("status") or "") in ("failed", "timeout", "start_failed", "unknown")
-    ][:8]
+    abnormal_history, _abnormal_total = query_task_history(
+        statuses=("failed", "timeout", "start_failed", "unknown"),
+        limit=8,
+    )
 
     try:
         disk = shutil.disk_usage(str(BASE_DIR))
