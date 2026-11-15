@@ -6,6 +6,10 @@ SENSITIVE_KEY_RE = re.compile(
     r"(token|secret|password|passwd|pwd|cookie|authorization|auth|api[_-]?key|access[_-]?token|refresh[_-]?token|session|key)$",
     re.IGNORECASE,
 )
+SENSITIVE_TEXT_MARKER_RE = re.compile(
+    r"(?:token|secret|password|passwd|pwd|cookie|authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|session|key)",
+    re.IGNORECASE,
+)
 
 
 def is_sensitive_key(key):
@@ -72,6 +76,8 @@ def mask_sensitive_url(value):
 
 def mask_sensitive_text(text):
     text = str(text if text is not None else "")
+    if not SENSITIVE_TEXT_MARKER_RE.search(text):
+        return text
 
     def replace_json(match):
         return match.group(1) + mask_secret_value(match.group(2)) + match.group(3)

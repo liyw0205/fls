@@ -906,6 +906,28 @@ class ProxyQualityTests(unittest.TestCase):
             self.assertIn("timed out", result[1]["elapsed"])
 
 
+class SensitiveTextTests(unittest.TestCase):
+    def test_mask_sensitive_text_preserves_plain_logs_and_masks_supported_formats(self):
+        with isolated_fls_modules():
+            from fls_manager.sensitive import mask_sensitive_text, mask_secret_value
+
+            plain = "2026-11-16 12:34:56 INFO synthetic task event payload=ready"
+            self.assertEqual(mask_sensitive_text(plain), plain)
+
+            text = (
+                "{'api_key': 'plain-secret-value'} passwd=other-password "
+                "Authorization: Bearer bearer-value-123 "
+                "next?refresh_token=query-token&mode=fast"
+            )
+            expected = (
+                "{'api_key': '" + mask_secret_value("plain-secret-value") + "'} "
+                "passwd=" + mask_secret_value("other-password") + " "
+                "Authorization: Bearer " + mask_secret_value("bearer-value-123") + " "
+                "next?refresh_token=" + mask_secret_value("query-token") + "&mode=fast"
+            )
+            self.assertEqual(mask_sensitive_text(text), expected)
+
+
 class LogBoundaryTests(unittest.TestCase):
     def test_tail_file_bounds_bytes_for_a_newline_free_log(self):
         with isolated_fls_modules() as base_dir:

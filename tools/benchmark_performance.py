@@ -10,6 +10,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import resource
 import statistics
 import sys
@@ -40,6 +41,7 @@ P95_THRESHOLDS_MS = {
     "status": 5.0,
     "toggle": 15.0,
     "export": 125.0,
+    "task_log_tail": 150.0,
 }
 RSS_THRESHOLD_MB = 128.0
 
@@ -123,6 +125,59 @@ def _write_fixture(base_dir, row_count=DEFAULT_ROWS, task_count=DEFAULT_TASKS):
         json.dumps(history, ensure_ascii=False), encoding="utf-8"
     )
     return {"history_rows": len(history), "task_rows": len(tasks)}
+
+
+def _write_task_log_fixture(base_dir, line_count=10_000):
+    """Create one deterministic 7.68MB task log for the real tail endpoint."""
+    log_dir = Path(base_dir) / "log"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    path = log_dir / "Synthetic Task 0001-benchmark.log"
+    with path.open("wb") as target:
+        for index in range(line_count):
+            prefix = f"2026-11-16 12:34:56 INFO synthetic task event {index:06d} "
+            target.write((prefix + "x" * (767 - len(prefix)) + "\n").encode("ascii"))
+    expected_bytes = line_count * 768
+    if path.stat().st_size != expected_bytes:
+        raise RuntimeError("task log fixture size is not deterministic")
+    return {"lines": line_count, "file_bytes": expected_bytes, "path": str(path)}
+
+
+def _legacy_mask_sensitive_text(text):
+    """Mirror the four replacement passes used before the log fast path."""
+    from fls_manager.sensitive import mask_secret_value
+
+    text = str(text if text is not None else "")
+
+    def replace_json(match):
+        return match.group(1) + mask_secret_value(match.group(2)) + match.group(3)
+
+    def replace_pair(match):
+        return match.group(1) + mask_secret_value(match.group(2))
+
+    text = re.sub(
+        r'((?:"|\')?(?:token|secret|password|passwd|pwd|cookie|authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|session|key)(?:"|\')?\s*:\s*["\'])([^"\']+)(["\'])',
+        replace_json,
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"(\b(?:token|secret|password|passwd|pwd|cookie|authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|session|key)\s*=\s*)([^\s,;&]+)",
+        replace_pair,
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"(\bAuthorization\s*:\s*Bearer\s+)([A-Za-z0-9._~+/=-]+)",
+        replace_pair,
+        text,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(
+        r"([?&](?:token|secret|password|passwd|pwd|cookie|api[_-]?key|access[_-]?token|refresh[_-]?token|session|key)=)([^&\s]+)",
+        replace_pair,
+        text,
+        flags=re.IGNORECASE,
+    )
 
 
 def _percentile(values, percentile):
@@ -369,13 +424,25 @@ def validate_thresholds(report):
     return True
 
 
-def run_benchmark(mode="optimized", row_count=DEFAULT_ROWS, iterations=DEFAULT_ITERATIONS, run_browser=False, check=False, only=None):
+def run_benchmark(
+    mode="optimized",
+    row_count=DEFAULT_ROWS,
+    iterations=DEFAULT_ITERATIONS,
+    run_browser=False,
+    check=False,
+    only=None,
+    mask_implementation="current",
+):
     if row_count != DEFAULT_ROWS or row_count > MAX_ROWS:
         raise ValueError(f"This benchmark is fixed at exactly {DEFAULT_ROWS} rows")
     if not 1 <= iterations <= MAX_ITERATIONS:
         raise ValueError(f"iterations must be between 1 and {MAX_ITERATIONS}")
     if mode not in ("baseline", "optimized"):
         raise ValueError("mode must be baseline or optimized")
+    if mask_implementation not in ("legacy", "current"):
+        raise ValueError("mask_implementation must be legacy or current")
+    if mask_implementation != "current" and only != "task_log_tail":
+        raise ValueError("mask_implementation applies only to task_log_tail")
     valid_scenarios = (
         None,
         "dashboard",
@@ -392,6 +459,7 @@ def run_benchmark(mode="optimized", row_count=DEFAULT_ROWS, iterations=DEFAULT_I
         "status",
         "toggle",
         "export",
+        "task_log_tail",
     )
     if only not in valid_scenarios:
         raise ValueError("only must name a known benchmark scenario")
@@ -416,9 +484,14 @@ def run_benchmark(mode="optimized", row_count=DEFAULT_ROWS, iterations=DEFAULT_I
             from fls_manager import models
 
             fixture = _write_fixture(temp_dir, row_count=row_count)
+            task_log_fixture = (
+                _write_task_log_fixture(temp_dir)
+                if only == "task_log_tail"
+                else None
+            )
             index_build_ms = None
             history_index_rows = None
-            if mode == "optimized":
+            if mode == "optimized" and only != "task_log_tail":
                 index_started = time.perf_counter()
                 index_connection = models._open_current_task_history_index()
                 index_build_ms = round((time.perf_counter() - index_started) * 1000, 3)
@@ -435,6 +508,10 @@ def run_benchmark(mode="optimized", row_count=DEFAULT_ROWS, iterations=DEFAULT_I
             with contextlib.redirect_stdout(sys.stderr):
                 app = create_app()
                 app.config.update(TESTING=True)
+                if only == "task_log_tail" and mask_implementation == "legacy":
+                    from fls_manager import logs
+
+                    logs.mask_sensitive_text = _legacy_mask_sensitive_text
                 client = app.test_client()
                 with client.session_transaction() as session:
                     session["csrf_token"] = "performance-benchmark-csrf-token"
@@ -452,6 +529,7 @@ def run_benchmark(mode="optimized", row_count=DEFAULT_ROWS, iterations=DEFAULT_I
                     ("status", "get", "/api/status"),
                     ("toggle", "post", "/api/task/action/toggle/bench-task-0001"),
                     ("export", "get", "/history/export"),
+                    ("task_log_tail", "get", "/api/log/bench-task-0001?lines=1200"),
                 ]
                 if only == "search_suite":
                     routes = [route for route in routes if route[0].startswith("search")]
@@ -461,39 +539,49 @@ def run_benchmark(mode="optimized", row_count=DEFAULT_ROWS, iterations=DEFAULT_I
                     _measure(client, name, method, path, iterations)
                     for name, method, path in routes
                 ]
-                explain = {
-                    "status": models.explain_task_history_query(status="failed"),
-                    "task": models.explain_task_history_query(task_id="bench-task-0001"),
-                    "search": models.explain_task_history_query(q="Synthetic Task 0001"),
-                    "search_short": models.explain_task_history_query(q="zz"),
-                    "search_short_common": models.explain_task_history_query(q="sy"),
-                    "search_like_percent": models.explain_task_history_query(q="literal%v"),
-                    "search_like_underscore": models.explain_task_history_query(q="literal_v"),
-                    "export": models.explain_task_history_query(),
-                    "dashboard_abnormal": models.explain_task_history_query(
-                        statuses=("failed", "timeout", "start_failed", "unknown"),
-                    ),
-                }
-                search_diagnostics = {
-                    "regular": _history_search_diagnostics(models, "Synthetic Task 0001"),
-                    "short_selective": _history_search_diagnostics(models, "zz"),
-                    "short_common": _history_search_diagnostics(models, "sy"),
-                    "literal_percent": _history_search_diagnostics(models, "literal%v"),
-                    "literal_underscore": _history_search_diagnostics(models, "literal_v"),
-                }
-                search_correctness = _history_search_correctness(models)
+                if only == "task_log_tail":
+                    explain = {"task_log_tail": "bounded filesystem tail; no SQL query"}
+                    search_diagnostics = {}
+                    search_correctness = {"status": "not_applicable"}
+                else:
+                    explain = {
+                        "status": models.explain_task_history_query(status="failed"),
+                        "task": models.explain_task_history_query(task_id="bench-task-0001"),
+                        "search": models.explain_task_history_query(q="Synthetic Task 0001"),
+                        "search_short": models.explain_task_history_query(q="zz"),
+                        "search_short_common": models.explain_task_history_query(q="sy"),
+                        "search_like_percent": models.explain_task_history_query(q="literal%v"),
+                        "search_like_underscore": models.explain_task_history_query(q="literal_v"),
+                        "export": models.explain_task_history_query(),
+                        "dashboard_abnormal": models.explain_task_history_query(
+                            statuses=("failed", "timeout", "start_failed", "unknown"),
+                        ),
+                    }
+                    search_diagnostics = {
+                        "regular": _history_search_diagnostics(models, "Synthetic Task 0001"),
+                        "short_selective": _history_search_diagnostics(models, "zz"),
+                        "short_common": _history_search_diagnostics(models, "sy"),
+                        "literal_percent": _history_search_diagnostics(models, "literal%v"),
+                        "literal_underscore": _history_search_diagnostics(models, "literal_v"),
+                    }
+                    search_correctness = _history_search_correctness(models)
                 browser = _run_playwright(app, temp_dir) if run_browser else {"status": "not_requested"}
             result = {
                 "benchmark": "fls-high-frequency-routes",
                 "mode": mode,
                 "only": only,
+                "mask_implementation": (
+                    mask_implementation if only == "task_log_tail" else None
+                ),
                 "fixture": fixture,
                 "iterations": iterations,
                 "temporary_fixture": temp_dir,
                 "fixture_sha256": {
                     "tasks": _sha256(Path(temp_dir) / "data" / "tasks.json"),
                     "history": _sha256(Path(temp_dir) / "data" / "task_history.json"),
+                    "task_log": _sha256(task_log_fixture["path"]) if task_log_fixture else None,
                 },
+                "task_log_fixture": task_log_fixture,
                 "temporary_fixture_disk_bytes": _directory_size_bytes(temp_dir),
                 "history_index_bytes": (
                     (Path(temp_dir) / "data" / "task_history_index.sqlite3").stat().st_size
@@ -536,6 +624,12 @@ def main(argv=None):
     parser.add_argument("--playwright", action="store_true")
     parser.add_argument("--check", action="store_true", help="enforce optimized p95/RSS/error thresholds")
     parser.add_argument(
+        "--mask-implementation",
+        choices=("legacy", "current"),
+        default="current",
+        help="select the pre-fast-path or current log masking implementation",
+    )
+    parser.add_argument(
         "--only",
         choices=(
             "dashboard",
@@ -552,11 +646,20 @@ def main(argv=None):
             "status",
             "toggle",
             "export",
+            "task_log_tail",
         ),
         help="measure one scenario while keeping the standard bounded fixture",
     )
     args = parser.parse_args(argv)
-    run_benchmark(args.mode, args.rows, args.iterations, args.playwright, args.check, args.only)
+    run_benchmark(
+        args.mode,
+        args.rows,
+        args.iterations,
+        args.playwright,
+        args.check,
+        args.only,
+        args.mask_implementation,
+    )
 
 
 if __name__ == "__main__":
