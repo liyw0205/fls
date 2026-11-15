@@ -588,6 +588,17 @@ def query_task_history(q="", status="", limit=30, offset=0, task_id="", statuses
             limit = 30
 
     with storage_transaction():
+        if (
+            limit is None
+            and offset == 0
+            and not q
+            and not status
+            and not task_id
+            and not status_values
+        ):
+            items = load_task_history()
+            return items, len(items)
+
         conn = _open_current_task_history_index()
         if conn is None:
             items = load_task_history()

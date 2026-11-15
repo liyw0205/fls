@@ -8,6 +8,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,6 +54,28 @@ def load_benchmark_module():
 
 
 class HistoryPerformanceTests(unittest.TestCase):
+    def test_unfiltered_full_history_read_skips_nonselective_index(self):
+        with isolated_models():
+            from fls_manager import models, paths
+
+            rows = [
+                {"id": "h-1", "task_id": "task-a", "message": "first"},
+                None,
+                {"id": "h-2", "task_id": "task-b", "message": "second"},
+            ]
+            paths.TASK_HISTORY_FILE.write_text(json.dumps(rows), encoding="utf-8")
+
+            with patch.object(models, "_open_current_task_history_index") as open_index:
+                items, total = models.query_task_history(limit=None)
+
+            self.assertEqual(total, 2)
+            self.assertEqual([item["id"] for item in items], ["h-1", "h-2"])
+            open_index.assert_not_called()
+            self.assertFalse(paths.TASK_HISTORY_INDEX_FILE.exists())
+
+            plan = models.explain_task_history_query()
+            self.assertTrue(any("SCAN history_rows" in detail for detail in plan))
+
     def test_index_queries_match_json_order_and_invalidate_after_write(self):
         with isolated_models():
             from fls_manager import models, paths
@@ -214,6 +237,19 @@ class HistoryPerformanceTests(unittest.TestCase):
         benchmark = load_benchmark_module()
         self.assertEqual(benchmark.DEFAULT_ROWS, 10_000)
         self.assertEqual(benchmark.MAX_ROWS, 10_000)
+        self.assertEqual(benchmark.P95_THRESHOLDS_MS["export"], 125.0)
+        report = {
+            "measurements": [{
+                "scenario": "export",
+                "errors": 0,
+                "rss_peak_mb": 64,
+                "p95_ms": 124.9,
+            }],
+        }
+        self.assertTrue(benchmark.validate_thresholds(report))
+        report["measurements"][0]["p95_ms"] = 125.1
+        with self.assertRaises(RuntimeError):
+            benchmark.validate_thresholds(report)
         with tempfile.TemporaryDirectory(prefix="fls-benchmark-fixture-test-") as temp_dir:
             self.assertEqual(benchmark._write_fixture(temp_dir)["history_rows"], 10_000)
             with self.assertRaises(ValueError):

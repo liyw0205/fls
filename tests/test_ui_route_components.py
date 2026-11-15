@@ -1908,7 +1908,7 @@ class UiRouteComponentTests(unittest.TestCase):
                 "task_name": "Other task",
                 "command": "task other.py",
                 "status": "failed",
-                "message": "not part of the search",
+                "message": "  =1+1",
             })
             (data_dir / "task_history.json").write_text(
                 json.dumps(records, ensure_ascii=False),
@@ -1943,6 +1943,19 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertEqual(rows[-1][-1], "'=HYPERLINK(\"https://invalid\")")
             self.assertNotIn("Batch failed", csv_text)
             self.assertNotIn("Other task", csv_text)
+
+            unfiltered = client.get(
+                "/history/export",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(unfiltered.status_code, 200)
+            self.assertTrue(unfiltered.get_data().startswith(b"\xef\xbb\xbf"))
+            unfiltered_csv = list(csv.reader(io.StringIO(
+                unfiltered.get_data(as_text=True).lstrip("\ufeff")
+            )))
+            self.assertEqual(len(unfiltered_csv), len(records) + 1)
+            self.assertEqual(unfiltered_csv[-1][0], "Other task")
+            self.assertEqual(unfiltered_csv[-1][-1], "'  =1+1")
 
     def test_history_and_task_log_render_unknown_restart_result(self):
         with isolated_app() as (app, base_dir):

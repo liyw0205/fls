@@ -265,7 +265,12 @@ def filter_history_items(q="", status=""):
 
 def history_csv_cell(value):
     text = str(value if value is not None else "")
-    if text.lstrip().startswith(("=", "+", "-", "@", "\t", "\r")):
+    if not text:
+        return text
+
+    formula_prefixes = ("=", "+", "-", "@", "\t", "\r")
+    first = text[0]
+    if first in formula_prefixes or (first.isspace() and text.lstrip()[:1] in formula_prefixes):
         return "'" + text
     return text
 
@@ -675,8 +680,10 @@ def history_export():
         request.args.get("status", ""),
         limit=None,
     )
-    output = io.StringIO(newline="")
-    writer = csv.writer(output)
+    output = io.BytesIO()
+    output.write(b"\xef\xbb\xbf")
+    text_output = io.TextIOWrapper(output, encoding="utf-8", newline="")
+    writer = csv.writer(text_output)
     writer.writerow([
         "任务名",
         "任务 ID",
@@ -706,11 +713,12 @@ def history_export():
         "message",
     )
     for item in items:
-        writer.writerow([history_csv_cell(item.get(field, "")) for field in fields])
+        writer.writerow(history_csv_cell(item.get(field, "")) for field in fields)
 
     filename = datetime.now().strftime("fls-history-%Y%m%d-%H%M%S.csv")
+    text_output.flush()
     return Response(
-        "\ufeff" + output.getvalue(),
+        output.getvalue(),
         mimetype="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

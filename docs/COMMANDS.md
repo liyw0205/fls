@@ -193,6 +193,8 @@ raw 文件先流式下载到目标目录内唯一的 `.fls-download-*.part` 文�
 `GET /api/status` 和 `POST /api/task/action/toggle/<task_id>` 入口。它报告每个场景的
 p50/p95/p99、吞吐、错误率、CPU、峰值 RSS、响应体大小和 SQLite `EXPLAIN QUERY PLAN`；
 `--playwright` 只做历史搜索和任务详情两个浏览器流程，缺少浏览器时记录 skip。
+`--only export` 可只复测历史页全量 CSV 导出；该场景仍使用固定 10,000 行 fixture，并校验
+错误率、p95 和 RSS 阈值。无筛选导出会按 JSON 权威源顺序读取；带筛选导出继续使用派生索引。
 
 重任务必须先取得全局验证锁，锁被占用时不会创建 fixture、启动服务或浏览器：
 

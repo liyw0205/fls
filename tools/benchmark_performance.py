@@ -32,6 +32,7 @@ P95_THRESHOLDS_MS = {
     "detail": 5.0,
     "status": 5.0,
     "toggle": 15.0,
+    "export": 125.0,
 }
 RSS_THRESHOLD_MB = 128.0
 
@@ -243,13 +244,15 @@ def validate_thresholds(report):
     return True
 
 
-def run_benchmark(mode="optimized", row_count=DEFAULT_ROWS, iterations=DEFAULT_ITERATIONS, run_browser=False, check=False):
+def run_benchmark(mode="optimized", row_count=DEFAULT_ROWS, iterations=DEFAULT_ITERATIONS, run_browser=False, check=False, only=None):
     if row_count != DEFAULT_ROWS or row_count > MAX_ROWS:
         raise ValueError(f"This benchmark is fixed at exactly {DEFAULT_ROWS} rows")
     if not 1 <= iterations <= MAX_ITERATIONS:
         raise ValueError(f"iterations must be between 1 and {MAX_ITERATIONS}")
     if mode not in ("baseline", "optimized"):
         raise ValueError("mode must be baseline or optimized")
+    if only not in (None, "list_shallow", "pagination_deep", "search", "detail", "status", "toggle", "export"):
+        raise ValueError("only must name a known benchmark scenario")
 
     old_env = {
         key: os.environ.get(key)
@@ -283,7 +286,10 @@ def run_benchmark(mode="optimized", row_count=DEFAULT_ROWS, iterations=DEFAULT_I
                     ("detail", "get", "/log/bench-task-0001"),
                     ("status", "get", "/api/status"),
                     ("toggle", "post", "/api/task/action/toggle/bench-task-0001"),
+                    ("export", "get", "/history/export"),
                 ]
+                if only:
+                    routes = [route for route in routes if route[0] == only]
                 measurements = [
                     _measure(client, name, method, path, iterations)
                     for name, method, path in routes
@@ -292,11 +298,13 @@ def run_benchmark(mode="optimized", row_count=DEFAULT_ROWS, iterations=DEFAULT_I
                     "status": explain_task_history_query(status="failed"),
                     "task": explain_task_history_query(task_id="bench-task-0001"),
                     "search": explain_task_history_query(q="Synthetic Task 0001"),
+                    "export": explain_task_history_query(),
                 }
                 browser = _run_playwright(app, temp_dir) if run_browser else {"status": "not_requested"}
             result = {
                 "benchmark": "fls-high-frequency-routes",
                 "mode": mode,
+                "only": only,
                 "fixture": fixture,
                 "iterations": iterations,
                 "temporary_fixture": temp_dir,
@@ -331,8 +339,13 @@ def main(argv=None):
     parser.add_argument("--iterations", type=int, default=DEFAULT_ITERATIONS)
     parser.add_argument("--playwright", action="store_true")
     parser.add_argument("--check", action="store_true", help="enforce optimized p95/RSS/error thresholds")
+    parser.add_argument(
+        "--only",
+        choices=("list_shallow", "pagination_deep", "search", "detail", "status", "toggle", "export"),
+        help="measure one scenario while keeping the standard bounded fixture",
+    )
     args = parser.parse_args(argv)
-    run_benchmark(args.mode, args.rows, args.iterations, args.playwright, args.check)
+    run_benchmark(args.mode, args.rows, args.iterations, args.playwright, args.check, args.only)
 
 
 if __name__ == "__main__":

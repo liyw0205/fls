@@ -4,7 +4,8 @@
 
 本阶段只测真实前端/API 调用链：`GET /history`（浅分页、深分页、关键词搜索）、
 `GET /log/<task_id>`（详情历史）、`GET /api/status`（状态列表）和
-`POST /api/task/action/toggle/<task_id>`（状态变更）。基准在临时 `FLS_BASE_DIR` 中
+`POST /api/task/action/toggle/<task_id>`（状态变更），以及历史页按钮触发的
+`GET /history/export`（全量 CSV 导出）。基准在临时 `FLS_BASE_DIR` 中
 生成固定 10,000 条历史和 100 个任务，Flask `test_client` 从请求开始计时到响应体
 序列化完成；不连接生产服务，不生成百万用户/记录。
 
@@ -37,6 +38,13 @@ flock -w 600 /tmp/nonebot-project-validation.lock \
 | 详情 | 30.809 / 35.609 / 37.409 | 2.528 / 2.659 / 2.665 | 393.93 | 57.801 | 9,572 |
 | 状态列表 | 2.061 / 2.312 / 2.512 | 2.062 / 2.414 / 2.417 | 470.99 | 57.801 | 19,302 |
 | 状态变更 toggle | 6.296 / 11.774 / 16.619 | 6.319 / 6.434 / 6.447 | 158.65 | 57.801 | 54.5 |
+| 全量 CSV 导出 | 94.841 / 102.216 / 106.234 | 90.322 / 91.629 / 92.027 | 11.088 | 62.238 | 1,440,252 |
+
+全量导出优化前（v5.5 SQLite 路径）为 `126.314 / 133.679 / 135.774ms`、
+`7.869 req/s`、`73.820MB` RSS，响应体仍为 `1,440,252B`，错误率为 0%。
+优化后相对该路径 p50/p95/p99 分别降低约 29%/31%/32%，吞吐提升约 41%，RSS
+降低约 16%。原始 JSON 路径的对照 p95 为 `102.216ms`，用于确认全量读取不应绕经
+只能全表扫描的 SQLite 派生索引。
 
 CPU 占用（CPU 时间/墙钟时间）约为 95%-100%，属于单进程同步基准；两组 HTTP 错误率均为
 0%，响应字段和字节大小保持一致。优化组 `EXPLAIN QUERY PLAN` 对状态筛选使用
@@ -48,6 +56,12 @@ LIST SUBQUERY 1
 SEARCH history_ngrams USING COVERING INDEX history_ngrams_ngram_seq (ngram=?)
 ```
 
+无筛选的全量 CSV 计划是 `SCAN history_rows`：导出需要每一条记录，状态、任务或
+三元组索引都不能减少候选集。10k 实测 JSON 源顺序读取比逐条解码索引中的 `row_json`
+更快，因此仅对 `limit=None` 且无筛选的完整读取直接使用规范 JSON 源；有关键词、状态或
+任务条件的导出仍使用既有索引。CSV 写入采用 UTF-8 字节缓冲并逐字段写入，保留 BOM、
+公式中和、列顺序与筛选语义。
+
 基线搜索显示 `SCAN history_rows` 的原因是任意子串模式 `%query%` 无法使用普通 B-tree
 索引。优化索引将 task name、command、message、source 规范化为小写文本，按固定三元组
 建立派生候选表和频次表；查询先选最稀有三元组通过索引定位主键，再用原有转义 `LIKE`
@@ -57,6 +71,7 @@ Playwright 结果为 `skipped`（当前环境缺少 `playwright` Python 包）�
 ## 回归门槛
 
 在相同 10k fixture、12 次采样和共享锁下，优化组应保持 0 错误；p95 上限为浅页 5ms、
-深分页 8ms、搜索 15ms、详情 5ms、状态 5ms、toggle 15ms；峰值 RSS 不超过 128MB。
+深分页 8ms、搜索 15ms、详情 5ms、状态 5ms、toggle 15ms、全量导出 125ms；峰值 RSS
+不超过 128MB。
 机器差异较大时，以 CI 同一 runner 的连续两次结果为比较基线，不能放宽数据规模或跳过
 锁。失败时保留 stdout JSON 和 stderr 日志到 `/tmp` 供定位，不把临时数据库或结果提交。
