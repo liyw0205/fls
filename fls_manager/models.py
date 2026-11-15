@@ -661,8 +661,9 @@ def query_task_history(q="", status="", limit=30, offset=0, task_id="", statuses
             conn.close()
 
 
-def explain_task_history_query(q="", status="", task_id=""):
+def explain_task_history_query(q="", status="", task_id="", statuses=None):
     """Return SQLite query-plan details for the bounded performance benchmark."""
+    status_values = [str(value or "").strip() for value in (statuses or []) if str(value or "").strip()]
     with storage_transaction():
         conn = _open_current_task_history_index()
         if conn is None:
@@ -673,7 +674,11 @@ def explain_task_history_query(q="", status="", task_id=""):
             if task_id:
                 clauses.append("task_id = ?")
                 params.append(str(task_id))
-            if status:
+            if status_values:
+                placeholders = ", ".join("?" for _ in status_values)
+                clauses.append(f"status IN ({placeholders})")
+                params.extend(status_values)
+            elif status:
                 clauses.append("status = ?")
                 params.append(str(status))
             if q:

@@ -2,6 +2,7 @@ import csv
 import io
 import os
 import sys
+import threading
 import time
 import shutil
 import platform
@@ -27,6 +28,11 @@ bp = Blueprint("dashboard", __name__)
 # 面板进程 CPU 采样状态
 _PANEL_CPU_LAST = None
 _PANEL_CPU_PEAK = 0.0
+_HOST_CPU_LOCK = threading.Lock()
+_HOST_CPU_SAMPLE_INTERVAL = 0.5
+_HOST_CPU_LAST_SAMPLE_AT = None
+_HOST_CPU_PREVIOUS_TICK = None
+_HOST_CPU_PERCENT = "-"
 
 # 面板 CPU 峰值统计周期。
 # 每天 00:00 和 12:00 分成两个周期：
@@ -387,39 +393,45 @@ def read_proc_stat_cpu():
 
 def get_cpu_percent():
     """
-    读取系统 CPU 使用率。
-    不依赖 psutil，通过 /proc/stat 采样计算。
+    返回最近的系统 CPU 样本；采样节流，避免在请求内等待第二次 tick。
     """
-    first = read_proc_stat_cpu()
+    global _HOST_CPU_LAST_SAMPLE_AT, _HOST_CPU_PREVIOUS_TICK, _HOST_CPU_PERCENT
 
-    if not first:
-        return "-"
+    with _HOST_CPU_LOCK:
+        now = time.monotonic()
+        if (
+            _HOST_CPU_LAST_SAMPLE_AT is not None
+            and now - _HOST_CPU_LAST_SAMPLE_AT < _HOST_CPU_SAMPLE_INTERVAL
+        ):
+            return _HOST_CPU_PERCENT
 
-    time.sleep(0.08)
+        _HOST_CPU_LAST_SAMPLE_AT = now
+        raw_tick = read_proc_stat_cpu()
+        try:
+            idle, total = (int(value) for value in raw_tick)
+            if idle < 0 or total < 0:
+                raise ValueError("negative CPU tick")
+        except (OverflowError, TypeError, ValueError):
+            _HOST_CPU_PREVIOUS_TICK = None
+            _HOST_CPU_PERCENT = "-"
+            return _HOST_CPU_PERCENT
 
-    second = read_proc_stat_cpu()
+        previous_tick = _HOST_CPU_PREVIOUS_TICK
+        _HOST_CPU_PREVIOUS_TICK = (idle, total)
+        if previous_tick is None:
+            _HOST_CPU_PERCENT = "-"
+            return _HOST_CPU_PERCENT
 
-    if not second:
-        return "-"
+        idle_delta = idle - previous_tick[0]
+        total_delta = total - previous_tick[1]
+        if total_delta <= 0:
+            _HOST_CPU_PERCENT = "-"
+            return _HOST_CPU_PERCENT
 
-    idle1, total1 = first
-    idle2, total2 = second
-
-    idle_delta = idle2 - idle1
-    total_delta = total2 - total1
-
-    if total_delta <= 0:
-        return "-"
-
-    usage = (1 - idle_delta / total_delta) * 100
-
-    if usage < 0:
-        usage = 0
-
-    if usage > 100:
-        usage = 100
-
-    return f"{usage:.1f}%"
+        usage = (1 - idle_delta / total_delta) * 100
+        usage = min(100, max(0, usage))
+        _HOST_CPU_PERCENT = f"{usage:.1f}%"
+        return _HOST_CPU_PERCENT
 
 
 def get_load_avg_text():
@@ -587,6 +599,7 @@ def api_dashboard_runtime():
         "current_time": panel_now().strftime("%Y-%m-%d %H:%M:%S"),
         "timezone": get_panel_timezone_text(),
         "panel_uptime": fmt_duration(time.time() - PANEL_START_TIME),
+        "system_cpu_percent": get_cpu_percent(),
         "panel_cpu_current": panel_cpu_current,
         "panel_cpu_peak": panel_cpu_peak,
     })
@@ -925,7 +938,7 @@ def dashboard():
 
     <div class="stat">
         <div class="label">CPU 使用率</div>
-        <div class="num stat-warning">{h(cpu_percent)}</div>
+        <div class="num stat-warning" id="flsDashboardSystemCpu">{h(cpu_percent)}</div>
     </div>
 
     <div class="stat">
@@ -975,10 +988,11 @@ async function flsDashboardRefreshRuntime(){{
     try {{
         const nowEl = document.getElementById("flsDashboardNow");
         const uptimeEl = document.getElementById("flsDashboardUptime");
+        const systemCpuEl = document.getElementById("flsDashboardSystemCpu");
         const cpuEl = document.getElementById("flsDashboardPanelCpuCurrent");
         const peakEl = document.getElementById("flsDashboardPanelCpuPeak");
 
-        if(!nowEl && !uptimeEl && !cpuEl && !peakEl){{
+        if(!nowEl && !uptimeEl && !systemCpuEl && !cpuEl && !peakEl){{
             if(window.__FLS_DASHBOARD_RUNTIME_INTERVAL__){{
                 clearInterval(window.__FLS_DASHBOARD_RUNTIME_INTERVAL__);
                 window.__FLS_DASHBOARD_RUNTIME_INTERVAL__ = null;
@@ -993,6 +1007,7 @@ async function flsDashboardRefreshRuntime(){{
 
         if(nowEl) nowEl.textContent = json.current_time || "-";
         if(uptimeEl) uptimeEl.textContent = json.panel_uptime || "-";
+        if(systemCpuEl) systemCpuEl.textContent = json.system_cpu_percent || "-";
         if(cpuEl) cpuEl.textContent = json.panel_cpu_current || "-";
         if(peakEl) peakEl.textContent = json.panel_cpu_peak || "-";
     }} catch(e) {{}}

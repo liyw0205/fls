@@ -2062,6 +2062,103 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertNotIn("Broken <x>", html)
             self.assertNotIn("boom <bad>", html)
 
+    def test_system_cpu_sample_is_cached_and_nonblocking(self):
+        with isolated_app():
+            from fls_manager.routes import dashboard
+
+            mock_time = SimpleNamespace(
+                monotonic=Mock(side_effect=[1.0, 1.2, 1.6, 1.7]),
+                sleep=Mock(side_effect=AssertionError("CPU sampling must not sleep")),
+            )
+            with patch.object(dashboard, "time", mock_time), patch.object(
+                dashboard, "read_proc_stat_cpu", side_effect=[(100, 200), (120, 250)],
+            ) as read_tick:
+                self.assertEqual(dashboard.get_cpu_percent(), "-")
+                self.assertEqual(dashboard.get_cpu_percent(), "-")
+                self.assertEqual(dashboard.get_cpu_percent(), "60.0%")
+                self.assertEqual(dashboard.get_cpu_percent(), "60.0%")
+
+            self.assertEqual(read_tick.call_count, 2)
+            mock_time.sleep.assert_not_called()
+
+    def test_system_cpu_sample_recovers_from_invalid_and_stalled_ticks(self):
+        with isolated_app():
+            from fls_manager.routes import dashboard
+
+            mock_time = SimpleNamespace(monotonic=Mock(side_effect=[1.0, 1.6, 2.2, 2.8]))
+            with patch.object(dashboard, "time", mock_time), patch.object(
+                dashboard,
+                "read_proc_stat_cpu",
+                side_effect=[("malformed", 10), (100, 200), (100, 200), (120, 250)],
+            ):
+                self.assertEqual(dashboard.get_cpu_percent(), "-")
+                self.assertEqual(dashboard.get_cpu_percent(), "-")
+                self.assertEqual(dashboard.get_cpu_percent(), "-")
+                self.assertEqual(dashboard.get_cpu_percent(), "60.0%")
+
+    def test_system_cpu_sample_keeps_percentage_bounds(self):
+        with isolated_app():
+            from fls_manager.routes import dashboard
+
+            mock_time = SimpleNamespace(monotonic=Mock(side_effect=[1.0, 1.6, 2.2, 2.8]))
+            with patch.object(dashboard, "time", mock_time), patch.object(
+                dashboard,
+                "read_proc_stat_cpu",
+                side_effect=[(10, 20), (5, 30), (5, 40), (20, 50)],
+            ):
+                self.assertEqual(dashboard.get_cpu_percent(), "-")
+                self.assertEqual(dashboard.get_cpu_percent(), "100.0%")
+                self.assertEqual(dashboard.get_cpu_percent(), "100.0%")
+                self.assertEqual(dashboard.get_cpu_percent(), "0.0%")
+
+    def test_system_cpu_concurrent_requests_share_one_tick_read(self):
+        with isolated_app():
+            from fls_manager.routes import dashboard
+
+            results = []
+            results_lock = threading.Lock()
+            mock_time = SimpleNamespace(monotonic=Mock(return_value=1.0))
+            read_tick = Mock(return_value=(100, 200))
+
+            def read_sample():
+                value = dashboard.get_cpu_percent()
+                with results_lock:
+                    results.append(value)
+
+            with patch.object(dashboard, "time", mock_time), patch.object(
+                dashboard, "read_proc_stat_cpu", read_tick,
+            ):
+                workers = [threading.Thread(target=read_sample) for _ in range(8)]
+                for worker in workers:
+                    worker.start()
+                for worker in workers:
+                    worker.join(timeout=2)
+
+            self.assertTrue(all(not worker.is_alive() for worker in workers))
+            self.assertEqual(results, ["-"] * 8)
+            read_tick.assert_called_once_with()
+
+    def test_dashboard_system_cpu_matches_runtime_api(self):
+        with isolated_app() as (app, _base_dir):
+            client = app.test_client()
+            with patch(
+                "fls_manager.routes.dashboard.get_cpu_percent",
+                side_effect=["12.0%", "13.0%"],
+            ):
+                page = client.get("/", headers={"X-Token": TOKEN})
+                runtime = client.get("/api/dashboard/runtime", headers={"X-Token": TOKEN})
+
+            self.assertEqual(page.status_code, 200)
+            page_html = page.get_data(as_text=True)
+            self.assertIn('id="flsDashboardSystemCpu">12.0%', page_html)
+            self.assertIn('systemCpuEl.textContent = json.system_cpu_percent || "-"', page_html)
+            self.assertEqual(runtime.status_code, 200)
+            runtime_json = runtime.get_json()
+            self.assertEqual(runtime_json["system_cpu_percent"], "13.0%")
+            self.assertTrue(runtime_json["ok"])
+            self.assertIn("panel_cpu_current", runtime_json)
+            self.assertIn("panel_cpu_peak", runtime_json)
+
     def test_deps_page_renders_table_card_and_escapes_rows(self):
         with isolated_app() as (app, _base_dir):
             packages = [

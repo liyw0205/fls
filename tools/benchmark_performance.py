@@ -26,6 +26,8 @@ DEFAULT_ITERATIONS = 12
 MAX_ITERATIONS = 40
 TOKEN = "performance-benchmark-token"
 P95_THRESHOLDS_MS = {
+    "dashboard": 50.0,
+    "dashboard_runtime": 20.0,
     "list_shallow": 5.0,
     "pagination_deep": 8.0,
     "search": 15.0,
@@ -209,6 +211,16 @@ def _run_playwright(app, base_dir):
             try:
                 context = browser.new_context(extra_http_headers={"X-Token": TOKEN})
                 page = context.new_page()
+                with page.expect_response(
+                    lambda response: response.url.endswith("/api/dashboard/runtime")
+                ) as runtime_response:
+                    page.goto(f"{url}/", wait_until="domcontentloaded")
+                runtime = runtime_response.value
+                dashboard_ok = page.locator("#flsDashboardSystemCpu").count() == 1
+                runtime_ok = (
+                    runtime.status == 200
+                    and "system_cpu_percent" in runtime.json()
+                )
                 page.goto(f"{url}/history?page=1", wait_until="domcontentloaded")
                 page.locator("#history-search").fill("Synthetic Task 0001")
                 page.locator("#history-filters button[type='submit']").first.click()
@@ -217,7 +229,13 @@ def _run_playwright(app, base_dir):
                 page.goto(f"{url}/log/bench-task-0001", wait_until="domcontentloaded")
                 detail_ok = page.locator("#task-log-history").count() == 1
                 return {
-                    "status": "passed" if history_ok and detail_ok else "failed",
+                    "status": (
+                        "passed"
+                        if dashboard_ok and runtime_ok and history_ok and detail_ok
+                        else "failed"
+                    ),
+                    "dashboard_cpu_rendered": dashboard_ok,
+                    "dashboard_runtime_contract": runtime_ok,
                     "history_search_rendered": history_ok,
                     "detail_rendered": detail_ok,
                 }
@@ -251,7 +269,19 @@ def run_benchmark(mode="optimized", row_count=DEFAULT_ROWS, iterations=DEFAULT_I
         raise ValueError(f"iterations must be between 1 and {MAX_ITERATIONS}")
     if mode not in ("baseline", "optimized"):
         raise ValueError("mode must be baseline or optimized")
-    if only not in (None, "list_shallow", "pagination_deep", "search", "detail", "status", "toggle", "export"):
+    valid_scenarios = (
+        None,
+        "dashboard",
+        "dashboard_runtime",
+        "list_shallow",
+        "pagination_deep",
+        "search",
+        "detail",
+        "status",
+        "toggle",
+        "export",
+    )
+    if only not in valid_scenarios:
         raise ValueError("only must name a known benchmark scenario")
 
     old_env = {
@@ -280,6 +310,8 @@ def run_benchmark(mode="optimized", row_count=DEFAULT_ROWS, iterations=DEFAULT_I
                 app.config.update(TESTING=True)
                 client = app.test_client()
                 routes = [
+                    ("dashboard", "get", "/"),
+                    ("dashboard_runtime", "get", "/api/dashboard/runtime"),
                     ("list_shallow", "get", "/history?page=1"),
                     ("pagination_deep", "get", "/history?page=250"),
                     ("search", "get", "/history?q=Synthetic%20Task%200001&page=1"),
@@ -299,6 +331,9 @@ def run_benchmark(mode="optimized", row_count=DEFAULT_ROWS, iterations=DEFAULT_I
                     "task": explain_task_history_query(task_id="bench-task-0001"),
                     "search": explain_task_history_query(q="Synthetic Task 0001"),
                     "export": explain_task_history_query(),
+                    "dashboard_abnormal": explain_task_history_query(
+                        statuses=("failed", "timeout", "start_failed", "unknown"),
+                    ),
                 }
                 browser = _run_playwright(app, temp_dir) if run_browser else {"status": "not_requested"}
             result = {
@@ -341,7 +376,17 @@ def main(argv=None):
     parser.add_argument("--check", action="store_true", help="enforce optimized p95/RSS/error thresholds")
     parser.add_argument(
         "--only",
-        choices=("list_shallow", "pagination_deep", "search", "detail", "status", "toggle", "export"),
+        choices=(
+            "dashboard",
+            "dashboard_runtime",
+            "list_shallow",
+            "pagination_deep",
+            "search",
+            "detail",
+            "status",
+            "toggle",
+            "export",
+        ),
         help="measure one scenario while keeping the standard bounded fixture",
     )
     args = parser.parse_args(argv)

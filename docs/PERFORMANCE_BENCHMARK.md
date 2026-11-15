@@ -2,7 +2,8 @@
 
 ## 范围与方法
 
-本阶段只测真实前端/API 调用链：`GET /history`（浅分页、深分页、关键词搜索）、
+本阶段只测真实前端/API 调用链：`GET /` 与 `GET /api/dashboard/runtime`（仪表盘及其动态刷新）、
+`GET /history`（浅分页、深分页、关键词搜索）、
 `GET /log/<task_id>`（详情历史）、`GET /api/status`（状态列表）和
 `POST /api/task/action/toggle/<task_id>`（状态变更），以及历史页按钮触发的
 `GET /history/export`（全量 CSV 导出）。基准在临时 `FLS_BASE_DIR` 中
@@ -25,7 +26,32 @@ flock -w 600 /tmp/nonebot-project-validation.lock \
 服务或浏览器前退出。Playwright 缺少 Python 包或 Chromium 时只报告 `skipped`，不伪造
 通过。
 
-## 2026-11-15 结果
+## 仪表盘结果
+
+相同 Linux 主机、10,000 条历史、100 个任务、预热 2 次、采样 12 次，并全部通过共享
+flock。首页改 CPU 采样前，JSON 基线 p95 为 `119.031ms`，SQLite 索引态 p95 为
+`85.385ms`；异常历史 EXPLAIN 使用 `history_rows_status_seq`，附带的排序临时 B-tree
+不是主要延迟。原实现还在每个首页请求中固定等待 80ms 采集系统 CPU。
+
+| 场景 | p50/p95/p99 ms | 吞吐 req/s | 错误数/率 | CPU/墙钟 | RSS MB | 响应体 avg/max B |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 首页 JSON 基线（改前） | 117.411 / 119.031 / 119.336 | 8.512 | 0 / 0% | 31.84% | 58.344 | 17,395.3 / 17,397 |
+| 首页索引态（改前） | 84.667 / 85.385 / 85.445 | 11.798 | 0 / 0% | 5.53% | 58.035 | 17,393.8 / 17,395 |
+| 首页 CPU 缓存后 | 3.483 / 3.786 / 3.970 | 286.949 | 0 / 0% | 100.02% | 57.938 | 17,601.3 / 17,604 |
+| runtime API | 0.597 / 0.672 / 0.680 | 1,657.194 | 0 / 0% | 100.09% | 56.109 | 170 / 170 |
+
+相对改前索引态，首页 p95 降低约 95.6%，吞吐提升约 24.3 倍。响应体增加约 207B
+来自首页 CPU 值的 DOM 标识及动态刷新脚本；runtime API 增加的 `system_cpu_percent`
+是向后兼容的 JSON 字段。首页 CPU 采样以锁保护 tick 和时间戳，500ms 内请求复用缓存，
+不在请求中 sleep；每次 runtime 轮询刷新时，前端同步更新该字段。两条路径错误率均为
+0%，RSS 低于 59MB。有限 Playwright 流程覆盖首页 CPU 元素、runtime JSON、历史搜索和详情；
+本次因未安装 Playwright Python 包报告 `skipped`，首页与 runtime API 仍由 Flask 定向契约测试覆盖。
+
+当前异常历史 EXPLAIN 仍为 `SEARCH history_rows USING INDEX history_rows_status_seq`
+并 `USE TEMP B-TREE FOR ORDER BY`。10k 基准证明该排序不是当前主页瓶颈，因此本阶段不
+引入额外索引写放大。
+
+## 2026-11-15 历史列表与导出结果
 
 本机 Linux、10,000 行、100 任务、12 次采样；RSS 为进程峰值，响应大小为每次响应体
 字节数。两组 HTTP 错误率均为 0%，响应大小和字段契约保持一致。
@@ -70,7 +96,8 @@ Playwright 结果为 `skipped`（当前环境缺少 `playwright` Python 包）�
 
 ## 回归门槛
 
-在相同 10k fixture、12 次采样和共享锁下，优化组应保持 0 错误；p95 上限为浅页 5ms、
+在相同 10k fixture、12 次采样和共享锁下，优化组应保持 0 错误；p95 上限为首页 50ms、
+runtime API 20ms、浅页 5ms、
 深分页 8ms、搜索 15ms、详情 5ms、状态 5ms、toggle 15ms、全量导出 125ms；峰值 RSS
 不超过 128MB。
 机器差异较大时，以 CI 同一 runner 的连续两次结果为比较基线，不能放宽数据规模或跳过

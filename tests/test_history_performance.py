@@ -97,6 +97,10 @@ class HistoryPerformanceTests(unittest.TestCase):
             self.assertEqual(total, 3)
             self.assertEqual([item["id"] for item in items], ["h-0", "h-1"])
             self.assertTrue(any("history_rows_task_seq" in plan for plan in models.explain_task_history_query(task_id="task-a")))
+            abnormal_plan = models.explain_task_history_query(
+                statuses=("failed", "timeout", "start_failed", "unknown"),
+            )
+            self.assertTrue(any("history_rows_status_seq" in detail for detail in abnormal_plan))
 
             models.add_task_history({
                 "id": "h-new",
@@ -237,6 +241,8 @@ class HistoryPerformanceTests(unittest.TestCase):
         benchmark = load_benchmark_module()
         self.assertEqual(benchmark.DEFAULT_ROWS, 10_000)
         self.assertEqual(benchmark.MAX_ROWS, 10_000)
+        self.assertEqual(benchmark.P95_THRESHOLDS_MS["dashboard"], 50.0)
+        self.assertEqual(benchmark.P95_THRESHOLDS_MS["dashboard_runtime"], 20.0)
         self.assertEqual(benchmark.P95_THRESHOLDS_MS["export"], 125.0)
         report = {
             "measurements": [{
@@ -250,6 +256,14 @@ class HistoryPerformanceTests(unittest.TestCase):
         report["measurements"][0]["p95_ms"] = 125.1
         with self.assertRaises(RuntimeError):
             benchmark.validate_thresholds(report)
+        self.assertTrue(benchmark.validate_thresholds({
+            "measurements": [{
+                "scenario": "dashboard_runtime",
+                "errors": 0,
+                "rss_peak_mb": 64,
+                "p95_ms": 19.9,
+            }],
+        }))
         with tempfile.TemporaryDirectory(prefix="fls-benchmark-fixture-test-") as temp_dir:
             self.assertEqual(benchmark._write_fixture(temp_dir)["history_rows"], 10_000)
             with self.assertRaises(ValueError):
