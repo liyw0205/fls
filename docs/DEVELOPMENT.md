@@ -14,7 +14,7 @@ git diff --check
 
 `run_fast_regression.sh --all` 在同一个 `flock -w 600 /tmp/nonebot-project-validation.lock`
 临界区内分两层执行：一次定向 pytest 进程验证任务详情和各类日志路由/脱敏边界，随后一次
-10k 固定 fixture 的详情响应 before/after 对照。`--tests-only` 和 `--benchmark-only` 可单独
+10k task/log fixture 的日志尾读 API before/after 对照。`--tests-only` 和 `--benchmark-only` 可单独
 运行一层；完整验收时用 `--all`，避免重复构造 fixture 或重复执行相同命令。
 
 性能阶段的 API 和浏览器重测必须使用共享验证锁，避免与其他项目重任务并发：

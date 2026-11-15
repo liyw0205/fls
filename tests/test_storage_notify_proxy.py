@@ -927,6 +927,24 @@ class SensitiveTextTests(unittest.TestCase):
             )
             self.assertEqual(mask_sensitive_text(text), expected)
 
+    def test_ascii_plain_log_uses_literal_marker_scan_and_unicode_falls_back(self):
+        with isolated_fls_modules():
+            from fls_manager import sensitive
+
+            plain = "2026-11-16 INFO synthetic task event payload=ready"
+            with mock.patch.object(
+                sensitive,
+                "SENSITIVE_TEXT_MARKER_RE",
+                side_effect=AssertionError("ASCII fast scan should not call regex"),
+            ):
+                self.assertEqual(sensitive.mask_sensitive_text(plain), plain)
+
+            text = "任务失败：password=unicode-secret"
+            self.assertEqual(
+                sensitive.mask_sensitive_text(text),
+                "任务失败：password=" + sensitive.mask_secret_value("unicode-secret"),
+            )
+
 
 class LogBoundaryTests(unittest.TestCase):
     def test_tail_file_bounds_bytes_for_a_newline_free_log(self):

@@ -496,6 +496,7 @@ def run_detail_comparison(iterations=40, check=False):
                     "latency": "current p50/p95 improve; p99 does not regress",
                 },
             }
+            print(json.dumps(result, ensure_ascii=False, indent=2))
             if check:
                 validate_thresholds({"measurements": [current]})
                 if not response_unchanged:
@@ -508,7 +509,154 @@ def run_detail_comparison(iterations=40, check=False):
                     and current["p99_ms"] <= legacy["p99_ms"]
                 ):
                     raise RuntimeError("detail latency improvement was not consistent")
+            return result
+    finally:
+        _shutdown_fls_scheduler()
+        _purge_fls_modules()
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def _run_task_log_tail_worker(base_dir, iterations, implementation):
+    os.environ["FLS_BASE_DIR"] = str(base_dir)
+    os.environ["FLS_TOKEN"] = TOKEN
+    os.environ["FLS_SECRET_KEY"] = "performance-benchmark-secret"
+    _purge_fls_modules()
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+
+    try:
+        from fls_manager.app import create_app
+        from fls_manager import sensitive
+
+        if implementation == "legacy":
+            sensitive._has_sensitive_text_marker = lambda text: bool(
+                sensitive.SENSITIVE_TEXT_MARKER_RE.search(text)
+            )
+
+        with contextlib.redirect_stdout(sys.stderr):
+            app = create_app()
+            app.config.update(TESTING=True)
+            client = app.test_client()
+            with client.session_transaction() as session:
+                session["csrf_token"] = "performance-benchmark-csrf-token"
+            measurement = _measure(
+                client,
+                "task_log_tail",
+                "get",
+                "/api/log/bench-task-0001?lines=1200",
+                iterations,
+            )
+        print(json.dumps({
+            "implementation": implementation,
+            "measurement": measurement,
+            "query_plan": "bounded task-log file tail; no SQL query",
+        }, ensure_ascii=False))
+    finally:
+        _shutdown_fls_scheduler()
+        _purge_fls_modules()
+
+
+def run_task_log_tail_comparison(iterations=40, check=False):
+    if not 1 <= iterations <= MAX_ITERATIONS:
+        raise ValueError(f"iterations must be between 1 and {MAX_ITERATIONS}")
+
+    keys = ("FLS_BASE_DIR", "FLS_TOKEN", "FLS_SECRET_KEY")
+    old_env = {key: os.environ.get(key) for key in keys}
+    try:
+        with tempfile.TemporaryDirectory(prefix="fls-task-log-tail-compare-10k-") as temp_dir:
+            os.environ["FLS_BASE_DIR"] = temp_dir
+            os.environ["FLS_TOKEN"] = TOKEN
+            os.environ["FLS_SECRET_KEY"] = "performance-benchmark-secret"
+            _purge_fls_modules()
+
+            fixture = _write_fixture(temp_dir)
+            task_log_fixture = _write_task_log_fixture(temp_dir)
+            fixture_hashes = {
+                "tasks": _sha256(Path(temp_dir) / "data" / "tasks.json"),
+                "history": _sha256(Path(temp_dir) / "data" / "task_history.json"),
+                "task_log": _sha256(task_log_fixture["path"]),
+            }
+            _purge_fls_modules()
+
+            worker_reports = {}
+            worker_env = os.environ.copy()
+            for implementation in ("legacy", "current"):
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        str(Path(__file__).resolve()),
+                        "--task-log-tail-worker",
+                        implementation,
+                        "--base-dir",
+                        temp_dir,
+                        "--iterations",
+                        str(iterations),
+                    ],
+                    cwd=str(ROOT),
+                    env=worker_env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if completed.returncode:
+                    raise RuntimeError(
+                        f"{implementation} task-log worker failed: {completed.stderr.strip()}"
+                    )
+                worker_reports[implementation] = json.loads(completed.stdout)
+
+            legacy = worker_reports["legacy"]["measurement"]
+            current = worker_reports["current"]["measurement"]
+            response_unchanged = (
+                legacy["response_body_sha256"] == current["response_body_sha256"]
+                and legacy["response_bytes_avg"] == current["response_bytes_avg"]
+                and legacy["http_statuses"] == current["http_statuses"]
+            )
+            result = {
+                "benchmark": "fls-task-log-tail-sensitive-marker-compare",
+                "iterations_per_implementation": iterations,
+                "request": "GET /api/log/bench-task-0001?lines=1200",
+                "fixture": fixture,
+                "fixture_sha256": fixture_hashes,
+                "task_log_fixture": {
+                    "lines": task_log_fixture["lines"],
+                    "file_bytes": task_log_fixture["file_bytes"],
+                },
+                "fixture_generations": 1,
+                "history_index_builds": 0,
+                "workers": 2,
+                "measured_requests": sum(
+                    item["measurement"]["samples"] for item in worker_reports.values()
+                ),
+                "temporary_fixture_disk_bytes": _directory_size_bytes(temp_dir),
+                "history_index": "not used by the task-log tail route",
+                "lock": "flock -w 600 /tmp/nonebot-project-validation.lock",
+                "legacy": worker_reports["legacy"],
+                "current": worker_reports["current"],
+                "response_unchanged": response_unchanged,
+                "thresholds": {
+                    "current_p95_ms": P95_THRESHOLDS_MS["task_log_tail"],
+                    "rss_peak_mb": RSS_THRESHOLD_MB,
+                    "errors": 0,
+                    "latency": "current p50/p95 improve; p99 does not regress",
+                },
+            }
             print(json.dumps(result, ensure_ascii=False, indent=2))
+            if check:
+                validate_thresholds({"measurements": [current]})
+                if not response_unchanged:
+                    raise RuntimeError("task-log response changed between workers")
+                if legacy["errors"] or current["errors"]:
+                    raise RuntimeError("task-log comparison returned errors")
+                if not (
+                    current["p50_ms"] < legacy["p50_ms"]
+                    and current["p95_ms"] < legacy["p95_ms"]
+                    and current["p99_ms"] <= legacy["p99_ms"]
+                ):
+                    raise RuntimeError("task-log latency improvement was not consistent")
             return result
     finally:
         _shutdown_fls_scheduler()
@@ -800,7 +948,17 @@ def main(argv=None):
         help="compare the legacy and current task-detail response on one shared 10k fixture",
     )
     parser.add_argument(
+        "--compare-task-log-tail",
+        action="store_true",
+        help="compare regex and literal marker checks on one shared 10k task-log fixture",
+    )
+    parser.add_argument(
         "--detail-worker",
+        choices=("legacy", "current"),
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--task-log-tail-worker",
         choices=("legacy", "current"),
         help=argparse.SUPPRESS,
     )
@@ -843,8 +1001,20 @@ def main(argv=None):
             parser.error("--detail-worker requires --base-dir")
         _run_detail_worker(args.base_dir, args.iterations, args.detail_worker)
         return
+    if args.task_log_tail_worker:
+        if not args.base_dir:
+            parser.error("--task-log-tail-worker requires --base-dir")
+        _run_task_log_tail_worker(
+            args.base_dir,
+            args.iterations,
+            args.task_log_tail_worker,
+        )
+        return
     if args.compare_detail:
         run_detail_comparison(args.iterations, args.check)
+        return
+    if args.compare_task_log_tail:
+        run_task_log_tail_comparison(args.iterations, args.check)
         return
     run_benchmark(
         args.mode,

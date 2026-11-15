@@ -25,17 +25,21 @@ tools/run_performance_benchmark.sh --mode optimized --iterations 12 --playwright
 服务或浏览器前退出。Playwright 缺少 Python 包或 Chromium 时只报告 `skipped`，不伪造
 通过。
 
-任务详情的聚焦回归和响应对照使用一个入口：
+任务/日志的聚焦回归和真实日志尾读响应对照使用一个入口：
 
 ```bash
 tools/run_fast_regression.sh --all
 ```
 
 入口先在一条 pytest 进程中独立验证各类日志路由、脱敏/截断边界和详情历史查询，再对同一
-10,000 条历史、100 个任务及 7.68MB 任务日志 fixture 各执行 40 次 legacy/current 详情请求。
-fixture 与 history SQLite 索引只生成一次，两个隔离 worker 共用；报告响应 p50/p95/p99、吞吐、
-CPU、RSS、响应大小、错误率、响应哈希和 `EXPLAIN QUERY PLAN`。`--tests-only` 与
+10,000 条历史、100 个任务及 7.68MB 任务日志 fixture 各执行 40 次 legacy/current 日志 API 请求。
+fixture 只生成一次；该文件尾读路径不使用 SQLite 索引。两个隔离 worker 共用 fixture；报告响应
+p50/p95/p99、吞吐、CPU、RSS、响应大小、错误率、响应哈希。`--tests-only` 与
 `--benchmark-only` 可单独执行一层，但两层串行验收应使用 `--all`，由一个 flock 覆盖整个流程。
+
+比较器固定请求 `GET /api/log/bench-task-0001?lines=1200`。legacy 对整段尾部文本执行原有
+Unicode 不区分大小写 marker 正则；current 对 ASCII 文本先用小写字面 marker 查找，非 ASCII
+仍使用原正则。后续脱敏替换、Unicode 解码、返回行数和 1MB 读取上限不变。
 
 远程 Linux 性能基准和开发测试使用 `/home/nonebot-shared-venv/bin/python`；仓库 Linux
 安装/运行默认仍使用 `/root/myenv`。Docker、Windows 和 GitHub Actions 继续使用各自隔离的解释器配置。
@@ -55,13 +59,37 @@ current 的 p50/p95/p99 分别改善约 1.6%/18.2%/7.6%，吞吐提升约 2.8%�
 200，响应 SHA-256 均为 `eab9bf0d22e03541af99e4d454a4a5484ac595eaf24835bb2084b0e162714bdf`；
 `EXPLAIN QUERY PLAN` 两组都使用 `history_rows_task_seq (task_id=?)`，无 schema 或索引写入成本变化。
 
-任务/日志回归流程也已收敛到 `tools/run_fast_regression.sh --all`：改前分别启动 2 个 pytest
-命令（各 2 个通过，pytest 报告耗时 0.16s 与 0.53s）和 2 个 before/after 基准命令；两次各自
-构建 10k fixture 与索引，索引构建耗时约 2.999760s + 2.981053s，合计测量 80 个请求。改后一次
-命令在同一 flock 临界区内启动 1 个 pytest 进程和 1 个 before/after 比较器：29 个测试与 48 个
-subtest 通过，pytest 阶段 1.841s；基准阶段 4.115s，包含 1 次 fixture 生成、1 次索引构建
-（2.848s）和同样 80 个请求，总计 5.956s。旧基准命令的整体墙钟时间未记录，故仅比较可核实的
-索引构建与 pytest 阶段用时。每个路由的状态码/参数边界/脱敏覆盖仍独立断言。
+任务/日志回归流程已收敛到 `tools/run_fast_regression.sh --all`。改前分别启动 2 个 pytest
+命令（各 2 个通过，pytest 报告耗时 0.16s 与 0.53s）及 legacy/current 两个基准命令；详情对照
+每次各自构建 10k fixture 与索引，索引构建耗时约 2.999760s + 2.981053s。改后一次命令在同一
+flock 临界区内启动 1 个 pytest 进程和 1 个 before/after 比较器，使用 1 份共享 task/log fixture，
+采样仍为 80 个请求。详情对照的一次验证为 29 个测试、48 个 subtest 通过，pytest 阶段 1.841s，
+比较器阶段 4.115s，索引仅构建 1 次（2.848s）。旧基准整体墙钟时间未记录，故只列出可核实的
+pytest 与索引耗时；每个路由的状态码/参数边界/脱敏覆盖仍独立断言。
+
+当前快速入口的日志尾读验收为 30 个测试、48 个 subtest 通过，pytest 阶段 1.844s；单次
+before/after API 比较阶段 6.436s，总计 8.280s，task/history/log fixture 仅构造 1 次（11,466,940B），
+索引构建 0 次，因为该文件读取路由不使用 SQLite。此前 legacy/current 两个独立基准调用各自构造
+同 SHA 的临时 fixture；现在 40+40 个请求由两个隔离 worker 共用一份 fixture。旧的完整命令墙钟
+时间未留存。
+
+## 2026-11-16 日志尾读跳过 marker 正则扫描
+
+固定 10,000 条历史、100 个任务、7.68MB 日志，各执行 40 次真实
+`GET /api/log/bench-task-0001?lines=1200`。cProfile 单请求显示 `mask_sensitive_text` 的 marker
+正则搜索累计 0.107s/0.121s，文件尾读取及其余调用约 0.014s。对 ASCII 文本改用小写字面 marker
+快筛；出现 marker 时仍执行同样的正则替换，非 ASCII 文本继续使用原 Unicode 正则筛查。
+
+| 实现 | p50/p95/p99 ms | 吞吐 req/s | 错误数/率 | CPU 秒 | RSS MB | 响应体 B |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| legacy（regex marker scan） | 116.078 / 133.176 / 157.182 | 8.351 | 0 / 0% | 4.786832 | 54.160 | 921,599 |
+| current（ASCII literal marker scan） | 11.621 / 17.432 / 21.183 | 79.562 | 0 / 0% | 0.502717 | 54.199 | 921,599 |
+
+current 的 p50/p95/p99 分别改善约 90.0%/86.9%/86.5%，吞吐约提升 9.5 倍，CPU 时间减少
+约 89.5%。两组均返回 HTTP 200，响应体 SHA-256 同为
+`5fef9bdb0357547a8d64f40572fe583b77e025e2e6e35590f0818365b3ed5d28`，0 错误，RSS 差异不足
+0.04MB；尾读是有界文件读取，无 SQL/EXPLAIN 路径。初步增加反向读取块大小曾使 p95 从
+131.893ms 升至 138.468ms，因此未保留；profile 后改为优化 marker 检查。
 
 ## 2026-11-16 两字符短搜索
 

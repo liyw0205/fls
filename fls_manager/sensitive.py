@@ -10,6 +10,17 @@ SENSITIVE_TEXT_MARKER_RE = re.compile(
     r"(?:token|secret|password|passwd|pwd|cookie|authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|session|key)",
     re.IGNORECASE,
 )
+SENSITIVE_TEXT_MARKERS = (
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "pwd",
+    "cookie",
+    "authorization",
+    "session",
+    "key",
+)
 
 
 def is_sensitive_key(key):
@@ -74,9 +85,16 @@ def mask_sensitive_url(value):
         return text
 
 
+def _has_sensitive_text_marker(text):
+    if text.isascii():
+        lowered = text.lower()
+        return any(marker in lowered for marker in SENSITIVE_TEXT_MARKERS)
+    return bool(SENSITIVE_TEXT_MARKER_RE.search(text))
+
+
 def mask_sensitive_text(text):
     text = str(text if text is not None else "")
-    if not SENSITIVE_TEXT_MARKER_RE.search(text):
+    if not _has_sensitive_text_marker(text):
         return text
 
     def replace_json(match):

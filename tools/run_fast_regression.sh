@@ -35,9 +35,9 @@ else
         cat <<'EOF'
 Usage: tools/run_fast_regression.sh [--all|--tests-only|--benchmark-only] [--iterations N]
 
-Runs the bounded task/log correctness regression and/or the task-detail before/after
-response comparison under /tmp/nonebot-project-validation.lock. The comparison is
-fixed at 10,000 history rows and defaults to 40 requests per implementation.
+Runs the bounded task/log correctness regression and/or the task-log before/after
+response comparison under /tmp/nonebot-project-validation.lock. The comparison uses
+10,000 history rows and a 7.68MB task log, and defaults to 40 requests per implementation.
 EOF
         exit 0
         ;;
@@ -80,8 +80,8 @@ if [ "$MODE" = all ] || [ "$MODE" = tests ]; then
 fi
 
 if [ "$MODE" = all ] || [ "$MODE" = benchmark ]; then
-  printf '%s\n' '== Task-detail before/after response benchmark =='
+  printf '%s\n' '== Task-log tail before/after response benchmark =='
   TIMEFORMAT='fast-regression phase=benchmark elapsed=%3R seconds'
   time "$PYTHON" "$ROOT/tools/benchmark_performance.py" \
-    --compare-detail --iterations "$ITERATIONS" --check
+    --compare-task-log-tail --iterations "$ITERATIONS" --check
 fi

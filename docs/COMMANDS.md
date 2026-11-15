@@ -194,7 +194,7 @@ raw 文件先流式下载到目标目录内唯一的 `.fls-download-*.part` 文�
 tools/run_fast_regression.sh --all
 ```
 
-它在同一 flock 内运行一轮定向 pytest 与一次 10k 详情比较。`--tests-only`、
+它在同一 flock 内运行一轮定向 pytest 与一次 10k 任务日志尾读比较。`--tests-only`、
 `--benchmark-only` 可单独选择层；完整验收不要拆成重复调用。
 
 `tools/benchmark_performance.py` 只创建约 **10,000 条**合成历史和最多 100 个合成任务，
