@@ -103,7 +103,46 @@ DATA_DIR="$BASE_DIR/data"
 LOG_DIR="$BASE_DIR/log"
 PID_FILE="$DATA_DIR/fls-manager.pid"
 DAEMON_LOG="$LOG_DIR/fls-manager-daemon.log"
-VENV_DIR="$BASE_DIR/.venv"
+VENV_PATH_FILE="$DATA_DIR/python-venv-path"
+
+is_isolated_runtime() {
+  [ "${CI:-}" = "true" ] || [ "${GITHUB_ACTIONS:-}" = "true" ] ||
+    [ -f /.dockerenv ] || [ -f /run/.containerenv ]
+}
+
+default_venv_dir() {
+  if is_termux || is_isolated_runtime; then
+    echo "$BASE_DIR/.venv"
+  else
+    echo "/home/nonebot-shared-venv"
+  fi
+}
+
+absolute_path() {
+  case "$1" in
+    /*) echo "$1" ;;
+    *) echo "$CURRENT_DIR/$1" ;;
+  esac
+}
+
+VENV_PATH_SOURCE="default"
+if [ -n "${FLS_VENV_PATH:-}" ]; then
+  VENV_DIR="$(absolute_path "$FLS_VENV_PATH")"
+  VENV_PATH_SOURCE="explicit"
+elif [ -r "$VENV_PATH_FILE" ]; then
+  saved_venv="$(sed -n '1p' "$VENV_PATH_FILE" 2>/dev/null)"
+  saved_source="$(sed -n '2p' "$VENV_PATH_FILE" 2>/dev/null)"
+  VENV_DIR="$(absolute_path "${saved_venv:-$(default_venv_dir)}")"
+  VENV_PATH_SOURCE="${saved_source:-saved}"
+  if [ "$VENV_PATH_SOURCE" != "explicit" ] && ! is_termux && ! is_isolated_runtime &&
+      [ "$VENV_DIR" = "$BASE_DIR/.venv" ]; then
+    VENV_DIR="$(default_venv_dir)"
+    VENV_PATH_SOURCE="default"
+  fi
+else
+  VENV_DIR="$(default_venv_dir)"
+fi
+VENV_DIR="$(absolute_path "$VENV_DIR")"
 
 mkdir -p "$DATA_DIR" "$LOG_DIR" 2>/dev/null || true
 
@@ -349,7 +388,16 @@ ensure_python_env() {
     return 0
   fi
 
-  echo "$py_sys"
+  err "无法创建 Python 环境：$VENV_DIR"
+  err "请检查目录权限，或使用 FLS_VENV_PATH / --venv 指定可写目录"
+  exit 1
+}
+
+persist_venv_path() {
+  mkdir -p "$DATA_DIR" 2>/dev/null || return 1
+  venv_path_tmp="$VENV_PATH_FILE.tmp.$$"
+  printf '%s\n%s\n' "$VENV_DIR" "$VENV_PATH_SOURCE" > "$venv_path_tmp" || return 1
+  mv -f "$venv_path_tmp" "$VENV_PATH_FILE"
 }
 
 install_basic_deps() {
@@ -476,6 +524,7 @@ find_running_pids() {
 parse_start_opts() {
   TEMP_TOKEN=""
   TEMP_PORT=""
+  TEMP_VENV=""
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -494,6 +543,16 @@ parse_start_opts() {
           exit 1
         fi
         TEMP_PORT="$1"
+        ;;
+      --venv|-V)
+        shift
+        if [ "$#" -eq 0 ]; then
+          err "--venv 后面需要填写虚拟环境目录"
+          exit 1
+        fi
+        TEMP_VENV="$(absolute_path "$1")"
+        VENV_DIR="$TEMP_VENV"
+        VENV_PATH_SOURCE="explicit"
         ;;
       -h|--help)
         usage
@@ -539,10 +598,15 @@ start_fls() {
   py_bin="$(ensure_python_env)"
   validate_python_files "$py_bin"
   install_basic_deps "$py_bin"
+  persist_venv_path || {
+    err "无法保存 Python 环境路径：$VENV_PATH_FILE"
+    exit 1
+  }
 
   cd "$BASE_DIR" || exit 1
 
   export FLS_BASE_DIR="$BASE_DIR"
+  export FLS_VENV_PATH="$VENV_DIR"
   export FLS_PYTHON="$py_bin"
 
   if [ -n "$TEMP_TOKEN" ]; then
@@ -653,6 +717,7 @@ status_fls() {
   echo "工作目录：$BASE_DIR"
   echo "主文件：$MANAGER_FILE"
   echo "模块目录：$PACKAGE_DIR"
+  echo "Python 环境：$VENV_DIR"
   echo "PID 文件：$PID_FILE"
   echo "日志文件：$DAEMON_LOG"
   echo "配置端口：$cfg_port"
@@ -726,6 +791,11 @@ update_repo() {
 }
 
 bstart_fls() {
+  parse_start_opts "$@"
+  persist_venv_path || {
+    err "无法保存 Python 环境路径：$VENV_PATH_FILE"
+    exit 1
+  }
   ensure_repo
 
   if is_termux; then
@@ -819,9 +889,9 @@ usage() {
 FLS Manager
 
 命令：
-  start [-p 端口] [-t Token]   启动
+  start [-p 端口] [-t Token] [--venv 路径] 启动
   stop                         停止
-  restart [-p 端口] [-t Token] 重启
+  restart [-p 端口] [-t Token] [--venv 路径] 重启
   status                       状态
   log                          日志
   update                       git pull 更新
@@ -832,6 +902,7 @@ FLS Manager
 
 示例：
   sh fls.sh start
+  sh fls.sh start --venv /home/nonebot-shared-venv
   sh fls.sh restart -p 5701 -t 123456
   sh fls.sh update
   sh fls.sh clone
