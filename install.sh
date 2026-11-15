@@ -17,7 +17,7 @@ usage() {
     cat <<'EOF'
 用法：install.sh [--venv PATH]
 
-默认使用 /home/nonebot-shared-venv；可用 FLS_VENV_PATH 或 --venv PATH 覆盖。
+Linux 默认使用 /root/myenv；可用 FLS_VENV_PATH 或 --venv PATH 覆盖。
 容器和 CI 环境沿用安装目录内的 .venv。
 EOF
 }
@@ -30,7 +30,7 @@ is_isolated_runtime() {
 if is_isolated_runtime; then
     DEFAULT_VENV_PATH="$INSTALL_DIR/.venv"
 else
-    DEFAULT_VENV_PATH="/home/nonebot-shared-venv"
+    DEFAULT_VENV_PATH="/root/myenv"
 fi
 if [ -n "${FLS_VENV_PATH:-}" ]; then
     VENV_PATH_SOURCE="explicit"
@@ -38,13 +38,9 @@ if [ -n "${FLS_VENV_PATH:-}" ]; then
 elif [ -r "$INSTALL_DIR/data/python-venv-path" ]; then
     SAVED_VENV_PATH="$(sed -n '1p' "$INSTALL_DIR/data/python-venv-path")"
     SAVED_VENV_SOURCE="$(sed -n '2p' "$INSTALL_DIR/data/python-venv-path")"
-    if [ -n "$SAVED_VENV_PATH" ] && {
-        [ "$SAVED_VENV_SOURCE" = "explicit" ] ||
-        [ "$SAVED_VENV_PATH" != "$INSTALL_DIR/.venv" ] ||
-        is_isolated_runtime
-    }; then
+    if [ -n "$SAVED_VENV_PATH" ] && [ "$SAVED_VENV_SOURCE" = "explicit" ]; then
         DEFAULT_VENV_PATH="$SAVED_VENV_PATH"
-        VENV_PATH_SOURCE="${SAVED_VENV_SOURCE:-saved}"
+        VENV_PATH_SOURCE="explicit"
     else
         VENV_PATH_SOURCE="default"
     fi

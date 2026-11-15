@@ -17,6 +17,8 @@ sh fls.sh start
 
 其他发行版只需提供 Python 3、pip、venv 和 Git。FLS 默认使用当前项目目录保存
 `data/`、`log/`、`scripts/`，访问 `http://服务器IP:5700`。
+Linux 安装和运行默认使用 `/root/myenv` 作为 Python 环境；可通过 `FLS_VENV_PATH` 或
+`fls.sh start --venv PATH` 指定独立路径。容器和 CI 继续使用隔离环境。
 
 ## Windows
 

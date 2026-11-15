@@ -114,7 +114,7 @@ default_venv_dir() {
   if is_termux || is_isolated_runtime; then
     echo "$BASE_DIR/.venv"
   else
-    echo "/home/nonebot-shared-venv"
+    echo "/root/myenv"
   fi
 }
 
@@ -134,8 +134,7 @@ elif [ -r "$VENV_PATH_FILE" ]; then
   saved_source="$(sed -n '2p' "$VENV_PATH_FILE" 2>/dev/null)"
   VENV_DIR="$(absolute_path "${saved_venv:-$(default_venv_dir)}")"
   VENV_PATH_SOURCE="${saved_source:-saved}"
-  if [ "$VENV_PATH_SOURCE" != "explicit" ] && ! is_termux && ! is_isolated_runtime &&
-      [ "$VENV_DIR" = "$BASE_DIR/.venv" ]; then
+  if [ "$VENV_PATH_SOURCE" != "explicit" ]; then
     VENV_DIR="$(default_venv_dir)"
     VENV_PATH_SOURCE="default"
   fi
@@ -902,7 +901,7 @@ FLS Manager
 
 示例：
   sh fls.sh start
-  sh fls.sh start --venv /home/nonebot-shared-venv
+  sh fls.sh start --venv /root/myenv
   sh fls.sh restart -p 5701 -t 123456
   sh fls.sh update
   sh fls.sh clone
