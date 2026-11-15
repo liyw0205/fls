@@ -100,7 +100,8 @@ class HistoryPerformanceTests(unittest.TestCase):
             abnormal_plan = models.explain_task_history_query(
                 statuses=("failed", "timeout", "start_failed", "unknown"),
             )
-            self.assertTrue(any("history_rows_status_seq" in detail for detail in abnormal_plan))
+            self.assertTrue(any("history_rows_abnormal_seq" in detail for detail in abnormal_plan))
+            self.assertFalse(any("TEMP B-TREE" in detail for detail in abnormal_plan))
 
             models.add_task_history({
                 "id": "h-new",
@@ -112,6 +113,84 @@ class HistoryPerformanceTests(unittest.TestCase):
             items, total = models.query_task_history(task_id="task-a", limit=1)
             self.assertEqual(total, 4)
             self.assertEqual(items[0]["id"], "h-new")
+
+    def test_abnormal_dashboard_rows_skip_count_and_preserve_source_order(self):
+        with isolated_models():
+            from fls_manager import models, paths
+
+            abnormal_statuses = ("failed", "timeout", "start_failed", "unknown")
+            all_statuses = ("success", "failed", "timeout", "stopped", "unknown")
+            rows = [
+                {"id": f"h-{index}", "task_id": "task-a", "status": all_statuses[index % 5]}
+                for index in range(30)
+            ]
+            expected = [row for row in rows if row["status"] in abnormal_statuses][:8]
+            paths.TASK_HISTORY_FILE.write_text(json.dumps(rows), encoding="utf-8")
+
+            statements = []
+            open_index = models._open_current_task_history_index
+
+            def open_traced_index():
+                conn = open_index()
+                conn.set_trace_callback(statements.append)
+                return conn
+
+            with patch.object(models, "_open_current_task_history_index", side_effect=open_traced_index):
+                items, total = models.query_task_history(
+                    statuses=abnormal_statuses,
+                    limit=8,
+                    include_total=False,
+                )
+            self.assertIsNone(total)
+            self.assertEqual(items, expected)
+            self.assertFalse(any(sql.lstrip().upper().startswith("SELECT COUNT(*)") for sql in statements))
+
+            statements.clear()
+            with patch.object(models, "_open_current_task_history_index", side_effect=open_traced_index):
+                default_items, default_total = models.query_task_history(
+                    statuses=abnormal_statuses,
+                    limit=8,
+                )
+            self.assertEqual(default_items, expected)
+            self.assertEqual(default_total, sum(row["status"] in abnormal_statuses for row in rows))
+            self.assertTrue(any(sql.lstrip().upper().startswith("SELECT COUNT(*)") for sql in statements))
+
+            os.environ["FLS_DISABLE_HISTORY_INDEX"] = "1"
+            fallback_items, fallback_total = models.query_task_history(
+                statuses=abnormal_statuses,
+                limit=8,
+                include_total=False,
+            )
+            self.assertEqual(fallback_items, expected)
+            self.assertIsNone(fallback_total)
+
+    def test_missing_abnormal_index_rebuilds_and_uses_ordered_plan(self):
+        with isolated_models():
+            from fls_manager import models, paths
+
+            rows = [
+                {"id": f"h-{index}", "task_id": "task-a", "status": ("failed", "success")[index % 2]}
+                for index in range(20)
+            ]
+            paths.TASK_HISTORY_FILE.write_text(json.dumps(rows), encoding="utf-8")
+            models.query_task_history(
+                statuses=models.ABNORMAL_HISTORY_STATUSES,
+                limit=8,
+                include_total=False,
+            )
+            with sqlite3.connect(str(paths.TASK_HISTORY_INDEX_FILE)) as conn:
+                conn.execute("DROP INDEX history_rows_abnormal_seq")
+
+            items, total = models.query_task_history(
+                statuses=models.ABNORMAL_HISTORY_STATUSES,
+                limit=8,
+                include_total=False,
+            )
+            self.assertEqual([item["id"] for item in items], [f"h-{index}" for index in range(0, 16, 2)])
+            self.assertIsNone(total)
+            plan = models.explain_task_history_query(statuses=models.ABNORMAL_HISTORY_STATUSES)
+            self.assertTrue(any("history_rows_abnormal_seq" in detail for detail in plan))
+            self.assertFalse(any("TEMP B-TREE" in detail for detail in plan))
 
     def test_corrupt_or_disabled_index_falls_back_without_changing_contract(self):
         with isolated_models():

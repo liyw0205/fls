@@ -761,6 +761,7 @@ def dashboard():
     abnormal_history, _abnormal_total = query_task_history(
         statuses=("failed", "timeout", "start_failed", "unknown"),
         limit=8,
+        include_total=False,
     )
 
     try:

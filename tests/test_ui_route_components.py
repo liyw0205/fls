@@ -2159,6 +2159,21 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn("panel_cpu_current", runtime_json)
             self.assertIn("panel_cpu_peak", runtime_json)
 
+    def test_dashboard_requests_abnormal_rows_without_total(self):
+        with isolated_app() as (app, _base_dir):
+            with patch(
+                "fls_manager.routes.dashboard.query_task_history",
+                return_value=([], None),
+            ) as query_history:
+                response = app.test_client().get("/", headers={"X-Token": TOKEN})
+
+            self.assertEqual(response.status_code, 200)
+            query_history.assert_called_once_with(
+                statuses=("failed", "timeout", "start_failed", "unknown"),
+                limit=8,
+                include_total=False,
+            )
+
     def test_deps_page_renders_table_card_and_escapes_rows(self):
         with isolated_app() as (app, _base_dir):
             packages = [

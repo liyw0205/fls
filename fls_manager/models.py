@@ -25,8 +25,11 @@ TASK_RANDOM_DELAY_MODES = ("none", "default", "custom")
 PROXY_TYPES = ("http", "https", "socks4", "socks5", "socks5h", "github")
 TASK_HISTORY_IN_FLIGHT_STATUSES = frozenset(("starting", "delaying", "running"))
 TASK_HISTORY_INDEX_LOCK = threading.RLock()
-TASK_HISTORY_INDEX_SCHEMA = 3
+TASK_HISTORY_INDEX_SCHEMA = 4
 MAX_HISTORY_SEARCH_NGRAM_CANDIDATES = 64
+ABNORMAL_HISTORY_STATUSES = ("failed", "timeout", "start_failed", "unknown")
+ABNORMAL_HISTORY_STATUS_SET = frozenset(ABNORMAL_HISTORY_STATUSES)
+ABNORMAL_HISTORY_STATUSES_SQL = "'failed', 'timeout', 'start_failed', 'unknown'"
 
 
 def _history_index_disabled():
@@ -408,7 +411,7 @@ def _history_search_ngrams(query):
 
 def _history_index_schema(conn):
     conn.executescript(
-        """
+        f"""
         CREATE TABLE history_meta (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -425,6 +428,9 @@ def _history_index_schema(conn):
             ON history_rows(status, seq);
         CREATE INDEX history_rows_task_seq
             ON history_rows(task_id, seq);
+        CREATE INDEX history_rows_abnormal_seq
+            ON history_rows(seq)
+            WHERE status IN ({ABNORMAL_HISTORY_STATUSES_SQL});
         CREATE TABLE history_ngrams (
             ngram TEXT NOT NULL,
             seq INTEGER NOT NULL,
@@ -527,6 +533,7 @@ def _open_current_task_history_index():
                         "history_rows",
                         "history_rows_status_seq",
                         "history_rows_task_seq",
+                        "history_rows_abnormal_seq",
                         "history_ngrams",
                         "history_ngrams_ngram_seq",
                         "history_ngram_stats",
@@ -571,7 +578,19 @@ def _history_search_candidate(conn, ngrams):
     return str(row[0]) if row else ngrams[0]
 
 
-def query_task_history(q="", status="", limit=30, offset=0, task_id="", statuses=None):
+def _history_status_filter(status_values, params):
+    if frozenset(status_values) == ABNORMAL_HISTORY_STATUS_SET:
+        return (
+            f"status IN ({ABNORMAL_HISTORY_STATUSES_SQL})",
+            "history_rows INDEXED BY history_rows_abnormal_seq",
+        )
+
+    placeholders = ", ".join("?" for _ in status_values)
+    params.extend(status_values)
+    return f"status IN ({placeholders})", "history_rows"
+
+
+def query_task_history(q="", status="", limit=30, offset=0, task_id="", statuses=None, include_total=True):
     """Query the history read index while retaining the JSON fallback contract."""
     q = str(q or "").strip()
     status = str(status or "").strip()
@@ -597,7 +616,7 @@ def query_task_history(q="", status="", limit=30, offset=0, task_id="", statuses
             and not status_values
         ):
             items = load_task_history()
-            return items, len(items)
+            return items, len(items) if include_total else None
 
         conn = _open_current_task_history_index()
         if conn is None:
@@ -612,7 +631,7 @@ def query_task_history(q="", status="", limit=30, offset=0, task_id="", statuses
             if q:
                 needle = q.lower()
                 items = [item for item in items if needle in _history_search_text(item)]
-            total = len(items)
+            total = len(items) if include_total else None
             if limit is None:
                 return items[offset:], total
             return items[offset:offset + limit], total
@@ -620,13 +639,13 @@ def query_task_history(q="", status="", limit=30, offset=0, task_id="", statuses
         try:
             clauses = []
             params = []
+            query_table = "history_rows"
             if task_id:
                 clauses.append("task_id = ?")
                 params.append(task_id)
             if status_values:
-                placeholders = ", ".join("?" for _ in status_values)
-                clauses.append(f"status IN ({placeholders})")
-                params.extend(status_values)
+                status_clause, query_table = _history_status_filter(status_values, params)
+                clauses.append(status_clause)
             elif status:
                 clauses.append("status = ?")
                 params.append(status)
@@ -642,8 +661,12 @@ def query_task_history(q="", status="", limit=30, offset=0, task_id="", statuses
                 clauses.append("search_text LIKE ? ESCAPE '\\'")
                 params.append(_history_like_pattern(q))
             where = " WHERE " + " AND ".join(clauses) if clauses else ""
-            total = int(conn.execute(f"SELECT COUNT(*) FROM history_rows{where}", params).fetchone()[0])
-            query = f"SELECT row_json FROM history_rows{where} ORDER BY seq"
+            total = (
+                int(conn.execute(f"SELECT COUNT(*) FROM history_rows{where}", params).fetchone()[0])
+                if include_total
+                else None
+            )
+            query = f"SELECT row_json FROM {query_table}{where} ORDER BY seq"
             if limit is not None:
                 query += " LIMIT ? OFFSET ?"
                 params = [*params, limit, offset]
@@ -671,13 +694,13 @@ def explain_task_history_query(q="", status="", task_id="", statuses=None):
         try:
             clauses = []
             params = []
+            query_table = "history_rows"
             if task_id:
                 clauses.append("task_id = ?")
                 params.append(str(task_id))
             if status_values:
-                placeholders = ", ".join("?" for _ in status_values)
-                clauses.append(f"status IN ({placeholders})")
-                params.extend(status_values)
+                status_clause, query_table = _history_status_filter(status_values, params)
+                clauses.append(status_clause)
             elif status:
                 clauses.append("status = ?")
                 params.append(str(status))
@@ -694,7 +717,7 @@ def explain_task_history_query(q="", status="", task_id="", statuses=None):
                 params.append(_history_like_pattern(q))
             where = " WHERE " + " AND ".join(clauses) if clauses else ""
             rows = conn.execute(
-                f"EXPLAIN QUERY PLAN SELECT row_json FROM history_rows{where} ORDER BY seq LIMIT 30",
+                f"EXPLAIN QUERY PLAN SELECT row_json FROM {query_table}{where} ORDER BY seq LIMIT 30",
                 params,
             )
             return [str(row[3]) for row in rows]

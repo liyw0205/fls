@@ -47,9 +47,24 @@ flock。首页改 CPU 采样前，JSON 基线 p95 为 `119.031ms`，SQLite 索�
 0%，RSS 低于 59MB。有限 Playwright 流程覆盖首页 CPU 元素、runtime JSON、历史搜索和详情；
 本次因未安装 Playwright Python 包报告 `skipped`，首页与 runtime API 仍由 Flask 定向契约测试覆盖。
 
-当前异常历史 EXPLAIN 仍为 `SEARCH history_rows USING INDEX history_rows_status_seq`
-并 `USE TEMP B-TREE FOR ORDER BY`。10k 基准证明该排序不是当前主页瓶颈，因此本阶段不
-引入额外索引写放大。
+## 2026-11-16 仪表盘异常历史读取
+
+固定 10,000 条历史、100 个任务、12 次采样，在同一 Linux 主机和共享锁下比较 v7 与
+v8 首页真实路由。v7 只读取最多 8 条异常记录但仍计算并丢弃总数，EXPLAIN 通过状态索引
+筛选后再使用临时 B-tree 排序；v8 关闭该路由未使用的总数统计，并以异常状态部分索引按
+源顺序读取。JSON 文件仍是权威数据，SQLite 索引缺失或损坏时继续回退 JSON。
+
+| 版本 | p50/p95/p99 ms | 吞吐 req/s | 错误数/率 | CPU/墙钟 | RSS MB | 响应体 avg/max B |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| v7 基线 | 3.483 / 3.786 / 3.970 | 286.949 | 0 / 0% | 100.02% | 57.938 | 17,601.3 / 17,604 |
+| v8 优化 | 2.958 / 3.253 / 3.313 | 333.944 | 0 / 0% | 99.91% | 58.000 | 17,600.8 / 17,604 |
+
+首页 p50/p95/p99 分别降低约 15.1%/14.1%/16.6%，吞吐提升约 16.4%；峰值 RSS 增加
+0.062MB，响应字段和状态码不变。`EXPLAIN QUERY PLAN` 从 v7 的
+`SEARCH history_rows USING INDEX history_rows_status_seq` 加
+`USE TEMP B-TREE FOR ORDER BY` 变为 v8 的
+`SCAN history_rows USING INDEX history_rows_abnormal_seq`，无临时排序。查询微基准的
+COUNT+排序路径 p50/p95 为 0.762/0.985ms；有序部分索引且只取 8 行为 0.298/0.421ms。
 
 ## 2026-11-15 历史列表与导出结果
 
