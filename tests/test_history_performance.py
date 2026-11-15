@@ -2,6 +2,7 @@ import contextlib
 import importlib.util
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -99,6 +100,79 @@ class HistoryPerformanceTests(unittest.TestCase):
             os.environ["FLS_DISABLE_HISTORY_INDEX"] = "1"
             items, total = models.query_task_history(status="failed")
             self.assertEqual((items[0]["id"], total), ("h1", 1))
+
+    def test_search_uses_ngram_index_and_matches_json_fallback(self):
+        with isolated_models():
+            from fls_manager import models, paths
+
+            rows = [
+                {
+                    "id": "h-needle",
+                    "task_id": "task-a",
+                    "task_name": "Alpha Task",
+                    "command": "echo Synthetic Needle",
+                    "status": "success",
+                    "message": "literal%value_literal",
+                    "source": "manual",
+                },
+                {
+                    "id": "h-case",
+                    "task_id": "task-b",
+                    "task_name": "beta",
+                    "command": "echo needle suffix",
+                    "status": "failed",
+                    "message": "other",
+                    "source": "retry",
+                },
+                {
+                    "id": "h-short",
+                    "task_id": "task-c",
+                    "task_name": "ab",
+                    "command": "echo short",
+                    "status": "success",
+                    "message": "short",
+                    "source": "manual",
+                },
+            ]
+            paths.TASK_HISTORY_FILE.write_text(json.dumps(rows), encoding="utf-8")
+
+            for query in ("Needle", "synthetic", "literal%v", "literal_v", "ab"):
+                indexed_items, indexed_total = models.query_task_history(q=query, limit=None)
+                os.environ["FLS_DISABLE_HISTORY_INDEX"] = "1"
+                fallback_items, fallback_total = models.query_task_history(q=query, limit=None)
+                os.environ.pop("FLS_DISABLE_HISTORY_INDEX", None)
+                self.assertEqual(indexed_total, fallback_total, query)
+                self.assertEqual(indexed_items, fallback_items, query)
+
+            plan = models.explain_task_history_query(q="Needle")
+            self.assertTrue(any("history_ngrams_ngram_seq" in detail for detail in plan))
+            self.assertFalse(any("SCAN history_rows" in detail for detail in plan))
+
+    def test_search_index_rebuilds_when_ngram_table_is_missing(self):
+        with isolated_models():
+            from fls_manager import models, paths
+
+            rows = [{
+                "id": "h1",
+                "task_id": "task-a",
+                "task_name": "Alpha",
+                "status": "success",
+                "message": "needle in message",
+            }]
+            paths.TASK_HISTORY_FILE.write_text(json.dumps(rows), encoding="utf-8")
+            self.assertEqual(models.query_task_history(q="needle")[1], 1)
+
+            with models.TASK_HISTORY_INDEX_LOCK:
+                connection = sqlite3.connect(str(paths.TASK_HISTORY_INDEX_FILE))
+                try:
+                    connection.execute("DROP TABLE history_ngrams")
+                    connection.commit()
+                finally:
+                    connection.close()
+
+            items, total = models.query_task_history(q="needle")
+            self.assertEqual((items[0]["id"], total), ("h1", 1))
+            self.assertTrue(any("history_ngrams_ngram_seq" in detail for detail in models.explain_task_history_query(q="needle")))
 
     def test_concurrent_reads_and_writes_are_bounded_and_error_free(self):
         with isolated_models():
