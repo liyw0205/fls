@@ -18,16 +18,45 @@ JSON 全量读取；优化组使用派生 SQLite 索引和 storage 锁。结果�
 所有 API 或 Playwright 重测都必须先执行：
 
 ```bash
-flock -w 600 /tmp/nonebot-project-validation.lock \
-  /home/nonebot-shared-venv/bin/python tools/benchmark_performance.py --mode optimized --iterations 12 --playwright
+tools/run_performance_benchmark.sh --mode optimized --iterations 12 --playwright
 ```
 
 推荐使用 `tools/run_performance_benchmark.sh`，锁被占用时它在创建临时 fixture、测试
 服务或浏览器前退出。Playwright 缺少 Python 包或 Chromium 时只报告 `skipped`，不伪造
 通过。
 
-Linux 性能、测试和运行统一使用 `/home/nonebot-shared-venv/bin/python`。Docker、Windows
-和 GitHub Actions 继续使用各自隔离的解释器配置。
+远程 Linux 性能基准和开发测试使用 `/home/nonebot-shared-venv/bin/python`；仓库 Linux
+安装/运行默认仍使用 `/root/myenv`。Docker、Windows 和 GitHub Actions 继续使用各自隔离的解释器配置。
+
+## 2026-11-16 两字符短搜索
+
+使用 develop 原始提交 `8a6df7a`（`v20261116.1`）和当前实现，通过同一基准脚本、共享
+flock、固定 fixture SHA-256 对照；每组均为 10,000 条历史、100 个任务、预热 2 次、采样
+40 次。基准在两组中逐项校验 5 类搜索结果与 JSON 回退一致，再比较跨版本结果摘要；
+搜索页面的 HTTP 状态、响应大小和稳定 CSRF 会话下的响应 body hash 也逐项相同。
+
+| 搜索 | 基线 p50/p95/p99 ms | 当前 p50/p95/p99 ms | 基线/当前 req/s | 错误数 | 响应体 B | EXPLAIN |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| 常规文本 `Synthetic Task 0001` | 4.230 / 4.845 / 5.079 | 4.294 / 4.804 / 5.972 | 233.625 / 227.782 | 0 / 0 | 16,888 | 二元组/三元组候选索引 |
+| 选择性二字符 `zz` | 7.682 / 10.985 / 11.623 | 1.385 / 1.530 / 2.555 | 120.957 / 696.381 | 0 / 0 | 5,429 | 基线全扫；当前候选索引，0 行 |
+| 常见二字符 `sy` | 5.111 / 7.554 / 7.655 | 5.132 / 6.706 / 7.183 | 187.222 / 186.133 | 0 / 0 | 16,963 | 两组均 `SCAN history_rows` |
+| 字面 `%` `literal%v` | 1.440 / 1.972 / 3.409 | 1.423 / 1.649 / 2.374 | 643.466 / 672.941 | 0 / 0 | 5,611 | 候选索引后精确 LIKE 校验 |
+| 字面 `_` `literal_v` | 1.396 / 1.467 / 2.627 | 1.371 / 1.580 / 2.230 | 693.261 / 704.050 | 0 / 0 | 5,436 | 候选索引后精确 LIKE 校验 |
+
+选择性二字符查询 p50/p95/p99 分别降低约 82.0%/86.1%/78.0%，吞吐提升约 5.76 倍；
+结果为 0 条且与 JSON 回退摘要一致。`sy` 在 fixture 的 10,000 条记录中命中
+10,000 条，候选集没有筛选能力，继续扫描比读取全部候选 postings 再逐条查主表更合适。
+曾失败的中间实现把这个密集二元组也写入 posting 表并强制走候选查询，导致
+`search_short_common` p95 达 15.436ms，超过 15ms 门槛；当前按频次跳过覆盖至少一半
+历史行的二元组，并在候选选择阶段拒绝密集候选。当前 `--check` p95 为 6.706ms，门槛
+15ms，错误率为 0%。因此 `SCAN history_rows` 是保留的正确退化路径，不是缺失索引。
+
+所有场景错误率为 0%，响应体大小和页面内容一致；两组进程峰值 RSS 为 59.004/59.008MB，
+CPU/墙钟约为 100%。临时 fixture 目录为 33,216,700/35,809,468B。稀疏二元组新增
+55,465 条 posting（497,419 -> 552,884，+11.1%）；索引文件由 29,429,760B 增至
+32,022,528B（+8.8%），一次建索引时间由 2,379.998ms 增至 3,042.130ms（+27.8%）。
+额外索引成本换来选择性二字符查询的明显收益；常规文本和字面通配符语义、状态码、
+页面内容及响应大小未变化。
 
 ## 仪表盘结果
 

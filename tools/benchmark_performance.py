@@ -7,6 +7,7 @@ lock is acquired before the fixture or application is created.
 
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 import resource
@@ -31,6 +32,10 @@ P95_THRESHOLDS_MS = {
     "list_shallow": 5.0,
     "pagination_deep": 8.0,
     "search": 15.0,
+    "search_short": 15.0,
+    "search_short_common": 15.0,
+    "search_like_percent": 15.0,
+    "search_like_underscore": 15.0,
     "detail": 5.0,
     "status": 5.0,
     "toggle": 15.0,
@@ -105,7 +110,9 @@ def _write_fixture(base_dir, row_count=DEFAULT_ROWS, task_count=DEFAULT_TASKS):
             "source": "benchmark",
             "retry_attempt": index % 3,
             "max_retries": 2,
-            "message": f"synthetic message {index:06d}",
+            "message": (
+                "literal%value_literal " if index == 0 else ""
+            ) + f"synthetic message {index:06d}",
             "log_file": "",
         })
 
@@ -135,6 +142,103 @@ def _rss_mb(value):
     return float(value) / divisor
 
 
+def _directory_size_bytes(root):
+    total = 0
+    for path in Path(root).rglob("*"):
+        if path.is_file():
+            try:
+                total += path.stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def _sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _history_search_diagnostics(models, query):
+    ngrams = models._history_search_ngrams(query)
+    connection = models._open_current_task_history_index()
+    if connection is None:
+        return {
+            "query": query,
+            "indexable_ngrams": len(ngrams),
+            "candidate_ngram": None,
+            "candidate_rows": None,
+            "candidate_used": False,
+            "plan": models.explain_task_history_query(q=query),
+        }
+    try:
+        counts = {}
+        if ngrams:
+            placeholders = ", ".join("?" for _ in ngrams)
+            counts = {
+                str(row[0]): int(row[1])
+                for row in connection.execute(
+                    "SELECT ngram, row_count FROM history_ngram_stats "
+                    f"WHERE ngram IN ({placeholders})",
+                    ngrams,
+                ).fetchall()
+            }
+        rarest = min(counts, key=lambda value: (counts[value], value)) if counts else None
+        candidate_ngram = rarest or (ngrams[0] if ngrams else None)
+        candidate_rows = counts.get(candidate_ngram, 0) if candidate_ngram else None
+        candidate = models._history_search_candidate(connection, ngrams)
+        return {
+            "query": query,
+            "indexable_ngrams": len(ngrams),
+            "candidate_ngram": candidate_ngram,
+            "candidate_rows": candidate_rows,
+            "candidate_used": bool(candidate),
+            "plan": models.explain_task_history_query(q=query),
+        }
+    finally:
+        connection.close()
+
+
+def _history_search_correctness(models):
+    cases = {
+        "regular": "Synthetic Task 0001",
+        "short_selective": "zz",
+        "short_common": "sy",
+        "literal_percent": "literal%v",
+        "literal_underscore": "literal_v",
+    }
+    previous = os.environ.get("FLS_DISABLE_HISTORY_INDEX")
+    results = {}
+    try:
+        for name, query in cases.items():
+            os.environ.pop("FLS_DISABLE_HISTORY_INDEX", None)
+            indexed = models.query_task_history(q=query, limit=None)
+            os.environ["FLS_DISABLE_HISTORY_INDEX"] = "1"
+            fallback = models.query_task_history(q=query, limit=None)
+            if indexed != fallback:
+                raise RuntimeError(f"indexed search differs from JSON fallback: {name}")
+            payload = json.dumps(
+                {"items": indexed[0], "total": indexed[1]},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            results[name] = {
+                "query": query,
+                "matched": True,
+                "total": indexed[1],
+                "result_sha256": hashlib.sha256(payload).hexdigest(),
+            }
+    finally:
+        if previous is None:
+            os.environ.pop("FLS_DISABLE_HISTORY_INDEX", None)
+        else:
+            os.environ["FLS_DISABLE_HISTORY_INDEX"] = previous
+    return {"all_matched": True, "cases": results}
+
+
 def _measure(client, name, method, path, iterations):
     for _ in range(2):
         response = getattr(client, method)(path, headers={"X-Token": TOKEN})
@@ -142,6 +246,7 @@ def _measure(client, name, method, path, iterations):
 
     durations = []
     response_sizes = []
+    response_hashes = set()
     errors = 0
     statuses = {}
     before_cpu = resource.getrusage(resource.RUSAGE_SELF)
@@ -152,6 +257,7 @@ def _measure(client, name, method, path, iterations):
             response = getattr(client, method)(path, headers={"X-Token": TOKEN})
             body = response.get_data()
             status_code = int(response.status_code)
+            response_hashes.add(hashlib.sha256(body).hexdigest())
         except Exception:
             errors += 1
             durations.append((time.perf_counter() - started) * 1000)
@@ -185,6 +291,7 @@ def _measure(client, name, method, path, iterations):
         "rss_peak_mb": round(_rss_mb(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss), 3),
         "response_bytes_avg": round(statistics.mean(response_sizes), 1) if response_sizes else 0,
         "response_bytes_max": max(response_sizes, default=0),
+        "response_body_sha256": sorted(response_hashes),
         "http_statuses": statuses,
         "scenario": name,
     }
@@ -276,6 +383,11 @@ def run_benchmark(mode="optimized", row_count=DEFAULT_ROWS, iterations=DEFAULT_I
         "list_shallow",
         "pagination_deep",
         "search",
+        "search_short",
+        "search_short_common",
+        "search_like_percent",
+        "search_like_underscore",
+        "search_suite",
         "detail",
         "status",
         "toggle",
@@ -301,40 +413,75 @@ def run_benchmark(mode="optimized", row_count=DEFAULT_ROWS, iterations=DEFAULT_I
             if str(ROOT) not in sys.path:
                 sys.path.insert(0, str(ROOT))
             from fls_manager.app import create_app
-            from fls_manager.models import explain_task_history_query
+            from fls_manager import models
 
             fixture = _write_fixture(temp_dir, row_count=row_count)
+            index_build_ms = None
+            history_index_rows = None
+            if mode == "optimized":
+                index_started = time.perf_counter()
+                index_connection = models._open_current_task_history_index()
+                index_build_ms = round((time.perf_counter() - index_started) * 1000, 3)
+                if index_connection is not None:
+                    try:
+                        history_index_rows = int(
+                            index_connection.execute(
+                                "SELECT COUNT(*) FROM history_ngrams"
+                            ).fetchone()[0]
+                        )
+                    finally:
+                        index_connection.close()
             # Keep scheduler diagnostics out of the machine-readable benchmark result.
             with contextlib.redirect_stdout(sys.stderr):
                 app = create_app()
                 app.config.update(TESTING=True)
                 client = app.test_client()
+                with client.session_transaction() as session:
+                    session["csrf_token"] = "performance-benchmark-csrf-token"
                 routes = [
                     ("dashboard", "get", "/"),
                     ("dashboard_runtime", "get", "/api/dashboard/runtime"),
                     ("list_shallow", "get", "/history?page=1"),
                     ("pagination_deep", "get", "/history?page=250"),
                     ("search", "get", "/history?q=Synthetic%20Task%200001&page=1"),
+                    ("search_short", "get", "/history?q=zz&page=1"),
+                    ("search_short_common", "get", "/history?q=sy&page=1"),
+                    ("search_like_percent", "get", "/history?q=literal%25v&page=1"),
+                    ("search_like_underscore", "get", "/history?q=literal_v&page=1"),
                     ("detail", "get", "/log/bench-task-0001"),
                     ("status", "get", "/api/status"),
                     ("toggle", "post", "/api/task/action/toggle/bench-task-0001"),
                     ("export", "get", "/history/export"),
                 ]
-                if only:
+                if only == "search_suite":
+                    routes = [route for route in routes if route[0].startswith("search")]
+                elif only:
                     routes = [route for route in routes if route[0] == only]
                 measurements = [
                     _measure(client, name, method, path, iterations)
                     for name, method, path in routes
                 ]
                 explain = {
-                    "status": explain_task_history_query(status="failed"),
-                    "task": explain_task_history_query(task_id="bench-task-0001"),
-                    "search": explain_task_history_query(q="Synthetic Task 0001"),
-                    "export": explain_task_history_query(),
-                    "dashboard_abnormal": explain_task_history_query(
+                    "status": models.explain_task_history_query(status="failed"),
+                    "task": models.explain_task_history_query(task_id="bench-task-0001"),
+                    "search": models.explain_task_history_query(q="Synthetic Task 0001"),
+                    "search_short": models.explain_task_history_query(q="zz"),
+                    "search_short_common": models.explain_task_history_query(q="sy"),
+                    "search_like_percent": models.explain_task_history_query(q="literal%v"),
+                    "search_like_underscore": models.explain_task_history_query(q="literal_v"),
+                    "export": models.explain_task_history_query(),
+                    "dashboard_abnormal": models.explain_task_history_query(
                         statuses=("failed", "timeout", "start_failed", "unknown"),
                     ),
                 }
+                search_diagnostics = {
+                    "regular": _history_search_diagnostics(models, "Synthetic Task 0001"),
+                    "short_selective": _history_search_diagnostics(models, "zz"),
+                    "short_common": _history_search_diagnostics(models, "sy"),
+                    "literal_percent": _history_search_diagnostics(models, "literal%v"),
+                    "literal_underscore": _history_search_diagnostics(models, "literal_v"),
+                }
+                search_correctness = _history_search_correctness(models)
                 browser = _run_playwright(app, temp_dir) if run_browser else {"status": "not_requested"}
             result = {
                 "benchmark": "fls-high-frequency-routes",
@@ -343,9 +490,23 @@ def run_benchmark(mode="optimized", row_count=DEFAULT_ROWS, iterations=DEFAULT_I
                 "fixture": fixture,
                 "iterations": iterations,
                 "temporary_fixture": temp_dir,
+                "fixture_sha256": {
+                    "tasks": _sha256(Path(temp_dir) / "data" / "tasks.json"),
+                    "history": _sha256(Path(temp_dir) / "data" / "task_history.json"),
+                },
+                "temporary_fixture_disk_bytes": _directory_size_bytes(temp_dir),
+                "history_index_bytes": (
+                    (Path(temp_dir) / "data" / "task_history_index.sqlite3").stat().st_size
+                    if (Path(temp_dir) / "data" / "task_history_index.sqlite3").exists()
+                    else None
+                ),
+                "history_index_build_ms": index_build_ms,
+                "history_index_gram_rows": history_index_rows,
                 "lock": "flock -w 600 /tmp/nonebot-project-validation.lock",
                 "measurements": measurements,
                 "explain_query_plan": explain,
+                "search_diagnostics": search_diagnostics,
+                "search_correctness": search_correctness,
                 "playwright": browser,
                 "thresholds": {
                     "p95_ms": P95_THRESHOLDS_MS,
@@ -382,6 +543,11 @@ def main(argv=None):
             "list_shallow",
             "pagination_deep",
             "search",
+            "search_short",
+            "search_short_common",
+            "search_like_percent",
+            "search_like_underscore",
+            "search_suite",
             "detail",
             "status",
             "toggle",

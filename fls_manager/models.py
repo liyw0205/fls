@@ -3,6 +3,7 @@ import uuid
 import json
 import os
 import sqlite3
+from collections import Counter
 from pathlib import Path
 
 from .paths import (
@@ -25,7 +26,7 @@ TASK_RANDOM_DELAY_MODES = ("none", "default", "custom")
 PROXY_TYPES = ("http", "https", "socks4", "socks5", "socks5h", "github")
 TASK_HISTORY_IN_FLIGHT_STATUSES = frozenset(("starting", "delaying", "running"))
 TASK_HISTORY_INDEX_LOCK = threading.RLock()
-TASK_HISTORY_INDEX_SCHEMA = 4
+TASK_HISTORY_INDEX_SCHEMA = 6
 MAX_HISTORY_SEARCH_NGRAM_CANDIDATES = 64
 ABNORMAL_HISTORY_STATUSES = ("failed", "timeout", "start_failed", "unknown")
 ABNORMAL_HISTORY_STATUS_SET = frozenset(ABNORMAL_HISTORY_STATUSES)
@@ -417,11 +418,25 @@ def _history_like_pattern(query):
 
 
 def _history_search_ngrams(query):
-    """Return unique lowercase trigrams used to narrow substring searches."""
+    """Return indexed substrings that can narrow without changing LIKE semantics."""
     text = str(query or "").lower()
-    if len(text) < 3:
+    if len(text) < 2:
         return []
-    return sorted({text[index:index + 3] for index in range(len(text) - 2)})
+    size = 2 if len(text) == 2 else 3
+    return sorted({text[index:index + size] for index in range(len(text) - size + 1)})
+
+
+def _history_index_ngrams(text):
+    """Store bigrams for two-character searches and trigrams for longer ones."""
+    return {
+        text[index:index + size]
+        for size in (2, 3)
+        for index in range(len(text) - size + 1)
+    }
+
+
+def _history_bigrams(text):
+    return {text[index:index + 2] for index in range(len(text) - 1)}
 
 
 def _history_index_schema(conn):
@@ -465,6 +480,14 @@ def _build_task_history_index(signature):
     """Build a derived SQLite read index without changing the JSON source."""
     data = read_json(TASK_HISTORY_FILE, [])
     rows = [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
+    bigram_counts = Counter()
+    for item in rows:
+        bigram_counts.update(_history_bigrams(_history_search_text(item)))
+    selective_bigrams = {
+        ngram
+        for ngram, count in bigram_counts.items()
+        if count * 2 < len(rows)
+    }
     index_path = Path(TASK_HISTORY_INDEX_FILE)
     temp_path = index_path.with_name(
         f"{index_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
@@ -493,12 +516,18 @@ def _build_task_history_index(signature):
                 (
                     (ngram, index)
                     for index, item in enumerate(rows)
-                    for ngram in _history_search_ngrams(_history_search_text(item))
+                    for ngram in _history_index_ngrams(_history_search_text(item))
+                    if len(ngram) > 2 or ngram in selective_bigrams
                 ),
             )
+            conn.executemany(
+                "INSERT INTO history_ngram_stats(ngram, row_count) VALUES (?, ?)",
+                bigram_counts.items(),
+            )
             conn.execute(
-                "INSERT INTO history_ngram_stats(ngram, row_count) "
-                "SELECT ngram, COUNT(*) FROM history_ngrams GROUP BY ngram"
+                "INSERT OR REPLACE INTO history_ngram_stats(ngram, row_count) "
+                "SELECT ngram, COUNT(*) FROM history_ngrams "
+                "WHERE length(ngram) > 2 GROUP BY ngram"
             )
             conn.execute(
                 "INSERT INTO history_meta(key, value) VALUES('schema', ?)",
@@ -507,6 +536,10 @@ def _build_task_history_index(signature):
             conn.execute(
                 "INSERT INTO history_meta(key, value) VALUES('source_signature', ?)",
                 (signature,),
+            )
+            conn.execute(
+                "INSERT INTO history_meta(key, value) VALUES('row_count', ?)",
+                (str(len(rows)),),
             )
             conn.commit()
         finally:
@@ -543,6 +576,7 @@ def _open_current_task_history_index():
                 current = (
                     meta.get("schema") == str(TASK_HISTORY_INDEX_SCHEMA)
                     and meta.get("source_signature") == signature
+                    and meta.get("row_count") is not None
                     and {
                         "history_meta",
                         "history_rows",
@@ -579,18 +613,26 @@ def load_task_history():
 
 
 def _history_search_candidate(conn, ngrams):
-    """Choose the rarest indexed trigram before applying exact LIKE semantics."""
+    """Choose a selective indexed substring before applying exact LIKE semantics."""
     if not ngrams:
         return None
     ngrams = list(ngrams[:MAX_HISTORY_SEARCH_NGRAM_CANDIDATES])
     placeholders = ", ".join("?" for _ in ngrams)
     row = conn.execute(
-        "SELECT ngram FROM history_ngram_stats "
-        f"WHERE ngram IN ({placeholders}) "
-        "ORDER BY row_count, ngram LIMIT 1",
+        "SELECT stats.ngram, stats.row_count, CAST(meta.value AS INTEGER) "
+        "FROM history_ngram_stats AS stats "
+        "CROSS JOIN history_meta AS meta "
+        f"WHERE stats.ngram IN ({placeholders}) AND meta.key = 'row_count' "
+        "ORDER BY stats.row_count, stats.ngram LIMIT 1",
         ngrams,
     ).fetchone()
-    return str(row[0]) if row else ngrams[0]
+    if row is None:
+        return ngrams[0]
+    candidate_count = int(row[1])
+    total_count = max(0, int(row[2] or 0))
+    if total_count and candidate_count * 2 >= total_count:
+        return None
+    return str(row[0])
 
 
 def _history_status_filter(status_values, params):
@@ -668,11 +710,12 @@ def query_task_history(q="", status="", limit=30, offset=0, task_id="", statuses
                 ngrams = _history_search_ngrams(q)
                 if ngrams:
                     candidate = _history_search_candidate(conn, ngrams)
-                    clauses.append(
-                        "seq IN (SELECT seq FROM history_ngrams "
-                        "WHERE ngram = ?)"
-                    )
-                    params.append(candidate)
+                    if candidate:
+                        clauses.append(
+                            "seq IN (SELECT seq FROM history_ngrams "
+                            "WHERE ngram = ?)"
+                        )
+                        params.append(candidate)
                 clauses.append("search_text LIKE ? ESCAPE '\\'")
                 params.append(_history_like_pattern(q))
             where = " WHERE " + " AND ".join(clauses) if clauses else ""
@@ -723,11 +766,12 @@ def explain_task_history_query(q="", status="", task_id="", statuses=None):
                 ngrams = _history_search_ngrams(q)
                 if ngrams:
                     candidate = _history_search_candidate(conn, ngrams)
-                    clauses.append(
-                        "seq IN (SELECT seq FROM history_ngrams "
-                        "WHERE ngram = ?)"
-                    )
-                    params.append(candidate)
+                    if candidate:
+                        clauses.append(
+                            "seq IN (SELECT seq FROM history_ngrams "
+                            "WHERE ngram = ?)"
+                        )
+                        params.append(candidate)
                 clauses.append("search_text LIKE ? ESCAPE '\\'")
                 params.append(_history_like_pattern(q))
             where = " WHERE " + " AND ".join(clauses) if clauses else ""

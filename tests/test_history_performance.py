@@ -239,10 +239,37 @@ class HistoryPerformanceTests(unittest.TestCase):
                     "message": "short",
                     "source": "manual",
                 },
+                {
+                    "id": "h-filler-1",
+                    "task_id": "task-d",
+                    "task_name": "other one",
+                    "command": "true",
+                    "status": "success",
+                    "message": "nothing to match",
+                    "source": "manual",
+                },
+                {
+                    "id": "h-filler-2",
+                    "task_id": "task-e",
+                    "task_name": "other two",
+                    "command": "true",
+                    "status": "success",
+                    "message": "nothing to match",
+                    "source": "manual",
+                },
+                {
+                    "id": "h-filler-3",
+                    "task_id": "task-f",
+                    "task_name": "other three",
+                    "command": "true",
+                    "status": "success",
+                    "message": "nothing to match",
+                    "source": "manual",
+                },
             ]
             paths.TASK_HISTORY_FILE.write_text(json.dumps(rows), encoding="utf-8")
 
-            for query in ("Needle", "synthetic", "literal%v", "literal_v", "ab"):
+            for query in ("Needle", "synthetic", "literal%v", "literal_v", "ab", "ec", "a"):
                 indexed_items, indexed_total = models.query_task_history(q=query, limit=None)
                 os.environ["FLS_DISABLE_HISTORY_INDEX"] = "1"
                 fallback_items, fallback_total = models.query_task_history(q=query, limit=None)
@@ -254,6 +281,33 @@ class HistoryPerformanceTests(unittest.TestCase):
             self.assertTrue(any("history_ngrams_ngram_seq" in detail for detail in plan))
             self.assertFalse(any("SCAN history_rows" in detail for detail in plan))
 
+            short_plan = models.explain_task_history_query(q="ab")
+            self.assertTrue(any("history_ngrams_ngram_seq" in detail for detail in short_plan))
+            self.assertFalse(any("SCAN history_rows" in detail for detail in short_plan))
+            dense_plan = models.explain_task_history_query(q="ec")
+            self.assertTrue(any("SCAN history_rows" in detail for detail in dense_plan))
+            connection = sqlite3.connect(str(paths.TASK_HISTORY_INDEX_FILE))
+            try:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM history_ngrams WHERE ngram = 'ec'"
+                    ).fetchone()[0],
+                    0,
+                )
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT row_count FROM history_ngram_stats WHERE ngram = 'ec'"
+                    ).fetchone()[0],
+                    3,
+                )
+            finally:
+                connection.close()
+            one_character_plan = models.explain_task_history_query(q="a")
+            self.assertTrue(any("SCAN history_rows" in detail for detail in one_character_plan))
+            correctness = load_benchmark_module()._history_search_correctness(models)
+            self.assertTrue(correctness["all_matched"])
+            self.assertEqual(correctness["cases"]["literal_percent"]["total"], 1)
+
     def test_search_index_rebuilds_when_ngram_table_is_missing(self):
         with isolated_models():
             from fls_manager import models, paths
@@ -264,6 +318,18 @@ class HistoryPerformanceTests(unittest.TestCase):
                 "task_name": "Alpha",
                 "status": "success",
                 "message": "needle in message",
+            }, {
+                "id": "h2",
+                "task_id": "task-b",
+                "task_name": "Beta",
+                "status": "success",
+                "message": "other",
+            }, {
+                "id": "h3",
+                "task_id": "task-c",
+                "task_name": "Gamma",
+                "status": "success",
+                "message": "other",
             }]
             paths.TASK_HISTORY_FILE.write_text(json.dumps(rows), encoding="utf-8")
             self.assertEqual(models.query_task_history(q="needle")[1], 1)
@@ -272,6 +338,7 @@ class HistoryPerformanceTests(unittest.TestCase):
                 connection = sqlite3.connect(str(paths.TASK_HISTORY_INDEX_FILE))
                 try:
                     connection.execute("DROP TABLE history_ngrams")
+                    connection.execute("DELETE FROM history_meta WHERE key = 'row_count'")
                     connection.commit()
                 finally:
                     connection.close()
@@ -320,6 +387,7 @@ class HistoryPerformanceTests(unittest.TestCase):
         benchmark = load_benchmark_module()
         self.assertEqual(benchmark.DEFAULT_ROWS, 10_000)
         self.assertEqual(benchmark.MAX_ROWS, 10_000)
+        self.assertEqual(benchmark.P95_THRESHOLDS_MS["search_short_common"], 15.0)
         self.assertEqual(benchmark.P95_THRESHOLDS_MS["dashboard"], 50.0)
         self.assertEqual(benchmark.P95_THRESHOLDS_MS["dashboard_runtime"], 20.0)
         self.assertEqual(benchmark.P95_THRESHOLDS_MS["export"], 125.0)
@@ -348,7 +416,8 @@ class HistoryPerformanceTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 benchmark._write_fixture(temp_dir, row_count=1_000_000)
         wrapper = (ROOT / "tools" / "run_performance_benchmark.sh").read_text(encoding="utf-8")
-        self.assertIn("flock -w 600 /tmp/nonebot-project-validation.lock", wrapper)
+        self.assertIn("LOCK_PATH=/tmp/nonebot-project-validation.lock", wrapper)
+        self.assertIn('flock -w 600 "$LOCK_PATH"', wrapper)
         self.assertEqual(benchmark._percentile([1, 2, 3, 4], 50), 2.5)
 
 
