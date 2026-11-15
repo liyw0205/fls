@@ -879,6 +879,7 @@ def task_history_for_task(task_id, limit=20):
     result, _total = query_task_history(
         task_id=str(task_id or ""),
         limit=max(1, int(limit or 20)),
+        include_total=False,
     )
     return result
 

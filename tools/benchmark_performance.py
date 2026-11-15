@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Bounded local benchmark for the high-frequency FLS read and mutation paths.
 
-Run this file through tools/run_performance_benchmark.sh so the global validation
-lock is acquired before the fixture or application is created.
+Run this file through tools/run_performance_benchmark.sh or
+tools/run_fast_regression.sh so the global validation lock is acquired before
+the fixture or application is created.
 """
 
 import argparse
@@ -13,6 +14,7 @@ import os
 import re
 import resource
 import statistics
+import subprocess
 import sys
 import tempfile
 import threading
@@ -352,6 +354,172 @@ def _measure(client, name, method, path, iterations):
     }
 
 
+def _run_detail_worker(base_dir, iterations, implementation):
+    os.environ["FLS_BASE_DIR"] = str(base_dir)
+    os.environ["FLS_TOKEN"] = TOKEN
+    os.environ["FLS_SECRET_KEY"] = "performance-benchmark-secret"
+    _purge_fls_modules()
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+
+    try:
+        from fls_manager.app import create_app
+        from fls_manager import models
+
+        with contextlib.redirect_stdout(sys.stderr):
+            app = create_app()
+            app.config.update(TESTING=True)
+            if implementation == "legacy":
+                from fls_manager.routes.tasks import logs as task_log_routes
+
+                def legacy_task_history_for_task(task_id, limit=20):
+                    result, _total = models.query_task_history(
+                        task_id=str(task_id or ""),
+                        limit=max(1, int(limit or 20)),
+                    )
+                    return result
+
+                task_log_routes.task_history_for_task = legacy_task_history_for_task
+
+            client = app.test_client()
+            with client.session_transaction() as session:
+                session["csrf_token"] = "performance-benchmark-csrf-token"
+            measurement = _measure(
+                client,
+                "detail",
+                "get",
+                "/log/bench-task-0001",
+                iterations,
+            )
+            explain = models.explain_task_history_query(task_id="bench-task-0001")
+        print(json.dumps({
+            "implementation": implementation,
+            "measurement": measurement,
+            "explain_query_plan": explain,
+        }, ensure_ascii=False))
+    finally:
+        _shutdown_fls_scheduler()
+        _purge_fls_modules()
+
+
+def run_detail_comparison(iterations=40, check=False):
+    if not 1 <= iterations <= MAX_ITERATIONS:
+        raise ValueError(f"iterations must be between 1 and {MAX_ITERATIONS}")
+
+    keys = ("FLS_BASE_DIR", "FLS_TOKEN", "FLS_SECRET_KEY", "FLS_DISABLE_HISTORY_INDEX")
+    old_env = {key: os.environ.get(key) for key in keys}
+    try:
+        with tempfile.TemporaryDirectory(prefix="fls-detail-compare-10k-") as temp_dir:
+            os.environ["FLS_BASE_DIR"] = temp_dir
+            os.environ["FLS_TOKEN"] = TOKEN
+            os.environ["FLS_SECRET_KEY"] = "performance-benchmark-secret"
+            os.environ.pop("FLS_DISABLE_HISTORY_INDEX", None)
+            _purge_fls_modules()
+            if str(ROOT) not in sys.path:
+                sys.path.insert(0, str(ROOT))
+            from fls_manager import models
+
+            fixture = _write_fixture(temp_dir)
+            task_log_fixture = _write_task_log_fixture(temp_dir)
+            index_started = time.perf_counter()
+            index_connection = models._open_current_task_history_index()
+            index_build_ms = round((time.perf_counter() - index_started) * 1000, 3)
+            if index_connection is None:
+                raise RuntimeError("could not build the 10k task-history index")
+            index_connection.close()
+            _purge_fls_modules()
+
+            worker_reports = {}
+            worker_env = os.environ.copy()
+            for implementation in ("legacy", "current"):
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        str(Path(__file__).resolve()),
+                        "--detail-worker",
+                        implementation,
+                        "--base-dir",
+                        temp_dir,
+                        "--iterations",
+                        str(iterations),
+                    ],
+                    cwd=str(ROOT),
+                    env=worker_env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if completed.returncode:
+                    raise RuntimeError(
+                        f"{implementation} detail worker failed: {completed.stderr.strip()}"
+                    )
+                worker_reports[implementation] = json.loads(completed.stdout)
+
+            legacy = worker_reports["legacy"]["measurement"]
+            current = worker_reports["current"]["measurement"]
+            fixture_hashes = {
+                "tasks": _sha256(Path(temp_dir) / "data" / "tasks.json"),
+                "history": _sha256(Path(temp_dir) / "data" / "task_history.json"),
+                "task_log": _sha256(task_log_fixture["path"]),
+            }
+            response_unchanged = (
+                legacy["response_body_sha256"] == current["response_body_sha256"]
+                and legacy["response_bytes_avg"] == current["response_bytes_avg"]
+                and legacy["http_statuses"] == current["http_statuses"]
+            )
+            result = {
+                "benchmark": "fls-task-detail-history-total-compare",
+                "iterations_per_implementation": iterations,
+                "request": "GET /log/bench-task-0001",
+                "fixture": fixture,
+                "fixture_sha256": fixture_hashes,
+                "task_log_fixture": {
+                    "lines": task_log_fixture["lines"],
+                    "file_bytes": task_log_fixture["file_bytes"],
+                },
+                "fixture_generations": 1,
+                "history_index_builds": 1,
+                "workers": 2,
+                "measured_requests": sum(
+                    item["measurement"]["samples"] for item in worker_reports.values()
+                ),
+                "temporary_fixture_disk_bytes": _directory_size_bytes(temp_dir),
+                "history_index_build_ms": index_build_ms,
+                "lock": "flock -w 600 /tmp/nonebot-project-validation.lock",
+                "legacy": worker_reports["legacy"],
+                "current": worker_reports["current"],
+                "response_unchanged": response_unchanged,
+                "thresholds": {
+                    "current_p95_ms": P95_THRESHOLDS_MS["detail"],
+                    "rss_peak_mb": RSS_THRESHOLD_MB,
+                    "errors": 0,
+                    "latency": "current p50/p95 improve; p99 does not regress",
+                },
+            }
+            if check:
+                validate_thresholds({"measurements": [current]})
+                if not response_unchanged:
+                    raise RuntimeError("detail response contract changed between workers")
+                if legacy["errors"] or current["errors"]:
+                    raise RuntimeError("detail comparison returned errors")
+                if not (
+                    current["p50_ms"] < legacy["p50_ms"]
+                    and current["p95_ms"] < legacy["p95_ms"]
+                    and current["p99_ms"] <= legacy["p99_ms"]
+                ):
+                    raise RuntimeError("detail latency improvement was not consistent")
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return result
+    finally:
+        _shutdown_fls_scheduler()
+        _purge_fls_modules()
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def _run_playwright(app, base_dir):
     """Run two bounded browser checks without requiring Playwright in CI."""
     try:
@@ -543,6 +711,14 @@ def run_benchmark(
                     explain = {"task_log_tail": "bounded filesystem tail; no SQL query"}
                     search_diagnostics = {}
                     search_correctness = {"status": "not_applicable"}
+                elif only == "detail":
+                    explain = {
+                        "task_history": models.explain_task_history_query(
+                            task_id="bench-task-0001",
+                        ),
+                    }
+                    search_diagnostics = {}
+                    search_correctness = {"status": "not_applicable"}
                 else:
                     explain = {
                         "status": models.explain_task_history_query(status="failed"),
@@ -618,6 +794,17 @@ def run_benchmark(
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--compare-detail",
+        action="store_true",
+        help="compare the legacy and current task-detail response on one shared 10k fixture",
+    )
+    parser.add_argument(
+        "--detail-worker",
+        choices=("legacy", "current"),
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument("--base-dir", help=argparse.SUPPRESS)
     parser.add_argument("--mode", choices=("baseline", "optimized"), default="optimized")
     parser.add_argument("--rows", type=int, default=DEFAULT_ROWS)
     parser.add_argument("--iterations", type=int, default=DEFAULT_ITERATIONS)
@@ -651,6 +838,14 @@ def main(argv=None):
         help="measure one scenario while keeping the standard bounded fixture",
     )
     args = parser.parse_args(argv)
+    if args.detail_worker:
+        if not args.base_dir:
+            parser.error("--detail-worker requires --base-dir")
+        _run_detail_worker(args.base_dir, args.iterations, args.detail_worker)
+        return
+    if args.compare_detail:
+        run_detail_comparison(args.iterations, args.check)
+        return
     run_benchmark(
         args.mode,
         args.rows,

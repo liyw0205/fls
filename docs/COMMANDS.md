@@ -188,6 +188,15 @@ raw 文件先流式下载到目标目录内唯一的 `.fls-download-*.part` 文�
 
 ## 有界性能基准
 
+任务/日志快速回归及详情 before/after 对照使用单一串行入口：
+
+```bash
+tools/run_fast_regression.sh --all
+```
+
+它在同一 flock 内运行一轮定向 pytest 与一次 10k 详情比较。`--tests-only`、
+`--benchmark-only` 可单独选择层；完整验收不要拆成重复调用。
+
 `tools/benchmark_performance.py` 只创建约 **10,000 条**合成历史和最多 100 个合成任务，
 写入临时 `FLS_BASE_DIR` 后通过 Flask `test_client` 访问真实的列表、深分页、搜索、详情、
 `GET /api/status` 和 `POST /api/task/action/toggle/<task_id>` 入口。它报告每个场景的

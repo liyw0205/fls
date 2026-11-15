@@ -25,8 +25,43 @@ tools/run_performance_benchmark.sh --mode optimized --iterations 12 --playwright
 服务或浏览器前退出。Playwright 缺少 Python 包或 Chromium 时只报告 `skipped`，不伪造
 通过。
 
+任务详情的聚焦回归和响应对照使用一个入口：
+
+```bash
+tools/run_fast_regression.sh --all
+```
+
+入口先在一条 pytest 进程中独立验证各类日志路由、脱敏/截断边界和详情历史查询，再对同一
+10,000 条历史、100 个任务及 7.68MB 任务日志 fixture 各执行 40 次 legacy/current 详情请求。
+fixture 与 history SQLite 索引只生成一次，两个隔离 worker 共用；报告响应 p50/p95/p99、吞吐、
+CPU、RSS、响应大小、错误率、响应哈希和 `EXPLAIN QUERY PLAN`。`--tests-only` 与
+`--benchmark-only` 可单独执行一层，但两层串行验收应使用 `--all`，由一个 flock 覆盖整个流程。
+
 远程 Linux 性能基准和开发测试使用 `/home/nonebot-shared-venv/bin/python`；仓库 Linux
 安装/运行默认仍使用 `/root/myenv`。Docker、Windows 和 GitHub Actions 继续使用各自隔离的解释器配置。
+
+## 2026-11-16 详情历史跳过未使用的总数
+
+`GET /log/<task_id>` 只展示最近 10 条任务历史，之前调用通用历史查询时还会计算总数，随后丢弃。
+详情专用读取现在关闭未使用的 total count；按任务索引取历史、JSON 回退和渲染内容保持不变。
+相同的 10,000 条历史、100 个任务和固定 7.68MB 任务日志下，legacy/current 各 40 次真实详情路由：
+
+| 实现 | p50/p95/p99 ms | 吞吐 req/s | 错误数/率 | CPU 秒 | RSS MB | 响应体 B |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| legacy（计算后丢弃 total） | 2.577 / 3.364 / 10.380 | 342.892 | 0 / 0% | 0.116652 | 53.844 | 9,607 |
+| current（不计算 total） | 2.536 / 2.753 / 9.592 | 352.645 | 0 / 0% | 0.113439 | 53.848 | 9,607 |
+
+current 的 p50/p95/p99 分别改善约 1.6%/18.2%/7.6%，吞吐提升约 2.8%。两组状态码均为
+200，响应 SHA-256 均为 `eab9bf0d22e03541af99e4d454a4a5484ac595eaf24835bb2084b0e162714bdf`；
+`EXPLAIN QUERY PLAN` 两组都使用 `history_rows_task_seq (task_id=?)`，无 schema 或索引写入成本变化。
+
+任务/日志回归流程也已收敛到 `tools/run_fast_regression.sh --all`：改前分别启动 2 个 pytest
+命令（各 2 个通过，pytest 报告耗时 0.16s 与 0.53s）和 2 个 before/after 基准命令；两次各自
+构建 10k fixture 与索引，索引构建耗时约 2.999760s + 2.981053s，合计测量 80 个请求。改后一次
+命令在同一 flock 临界区内启动 1 个 pytest 进程和 1 个 before/after 比较器：29 个测试与 48 个
+subtest 通过，pytest 阶段 1.841s；基准阶段 4.115s，包含 1 次 fixture 生成、1 次索引构建
+（2.848s）和同样 80 个请求，总计 5.956s。旧基准命令的整体墙钟时间未记录，故仅比较可核实的
+索引构建与 pytest 阶段用时。每个路由的状态码/参数边界/脱敏覆盖仍独立断言。
 
 ## 2026-11-16 两字符短搜索
 

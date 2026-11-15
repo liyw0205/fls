@@ -1761,6 +1761,54 @@ class UiRouteComponentTests(unittest.TestCase):
             )
             self.assertNotIn("example.invalid", html)
 
+    def test_task_log_history_skips_unused_total_count(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager import models
+
+            models.save_tasks([{
+                "id": "task-history-count",
+                "name": "History Count Task",
+                "command": "echo ok",
+            }])
+            models.save_task_history([{
+                "id": "history-count-1",
+                "task_id": "task-history-count",
+                "task_name": "History Count Task",
+                "status": "success",
+                "start_at": "2026-11-16 00:00:00",
+                "duration_seconds": 1,
+                "return_code": 0,
+                "source": "manual",
+                "message": "completed",
+            }])
+            index = models._open_current_task_history_index()
+            self.assertIsNotNone(index)
+            index.close()
+
+            statements = []
+            open_index = models._open_current_task_history_index
+
+            def traced_index():
+                connection = open_index()
+                if connection is not None:
+                    connection.set_trace_callback(statements.append)
+                return connection
+
+            with patch.object(
+                models,
+                "_open_current_task_history_index",
+                side_effect=traced_index,
+            ):
+                response = app.test_client().get(
+                    "/log/task-history-count",
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("2026-11-16 00:00:00", response.get_data(as_text=True))
+            self.assertTrue(any("SELECT row_json" in sql for sql in statements))
+            self.assertFalse(any("COUNT(*)" in sql for sql in statements))
+
     def test_history_page_filters_rows_and_escapes_history_fields(self):
         with isolated_app() as (app, base_dir):
             data_dir = base_dir / "data"
