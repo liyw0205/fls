@@ -4,4 +4,4 @@ set -euo pipefail
 # Acquire the shared validation lock before creating the 10k fixture or starting
 # a local application/browser. flock itself prevents a contended run from starting.
 exec flock -w 600 /tmp/nonebot-project-validation.lock \
-  python3 "$(dirname "$0")/benchmark_performance.py" "$@"
+  /home/nonebot-shared-venv/bin/python "$(dirname "$0")/benchmark_performance.py" "$@"

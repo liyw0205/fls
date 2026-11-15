@@ -380,12 +380,27 @@ def get_task(task_id):
     return None
 
 
+def _task_history_source_stat():
+    with storage_transaction():
+        try:
+            return Path(TASK_HISTORY_FILE).stat()
+        except OSError:
+            return None
+
+
+def task_history_source_signature():
+    """Return a stable signature for the authoritative history file, if available."""
+    stat = _task_history_source_stat()
+    if stat is None:
+        return None
+    return f"{stat.st_dev}:{stat.st_ino}:{stat.st_mtime_ns}:{stat.st_size}"
+
+
 def _history_source_signature():
-    try:
-        stat = Path(TASK_HISTORY_FILE).stat()
-        return f"{stat.st_mtime_ns}:{stat.st_size}"
-    except OSError:
+    stat = _task_history_source_stat()
+    if stat is None:
         return "missing"
+    return f"{stat.st_mtime_ns}:{stat.st_size}"
 
 
 def _history_search_text(item):

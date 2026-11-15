@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from html import escape
 from pathlib import Path
 from types import SimpleNamespace
@@ -1956,6 +1957,100 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertEqual(len(unfiltered_csv), len(records) + 1)
             self.assertEqual(unfiltered_csv[-1][0], "Other task")
             self.assertEqual(unfiltered_csv[-1][-1], "'  =1+1")
+
+    def test_history_export_cache_hits_invalidates_and_skips_filtered_and_oversize(self):
+        with isolated_app() as (app, base_dir):
+            data_dir = base_dir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            history_path = data_dir / "task_history.json"
+            records = [{
+                "id": "history-a",
+                "task_id": "task-a",
+                "task_name": "Alpha",
+                "command": "echo alpha",
+                "status": "success",
+                "message": "done",
+            }]
+            history_path.write_text(json.dumps(records), encoding="utf-8")
+
+            route_module = sys.modules["fls_manager.routes.dashboard"]
+            original_query = route_module.query_task_history
+            client = app.test_client()
+            with patch.object(route_module, "query_task_history", wraps=original_query) as query:
+                first = client.get("/history/export", headers={"X-Token": TOKEN})
+                first_body = first.get_data()
+                second = client.get("/history/export", headers={"X-Token": TOKEN})
+                self.assertEqual(second.get_data(), first_body)
+                self.assertEqual(query.call_count, 1)
+
+                filtered_one = client.get(
+                    "/history/export?q=Alpha", headers={"X-Token": TOKEN}
+                )
+                filtered_two = client.get(
+                    "/history/export?q=Alpha", headers={"X-Token": TOKEN}
+                )
+                self.assertEqual(filtered_one.get_data(), filtered_two.get_data())
+                self.assertEqual(query.call_count, 3)
+
+                records.append({
+                    "id": "history-b",
+                    "task_id": "task-b",
+                    "task_name": "Beta",
+                    "status": "failed",
+                    "message": "new row",
+                })
+                sys.modules["fls_manager.models"].save_task_history(records)
+                updated = client.get("/history/export", headers={"X-Token": TOKEN})
+                self.assertNotEqual(updated.get_data(), first_body)
+                self.assertIn(b"Beta", updated.get_data())
+                self.assertEqual(query.call_count, 4)
+
+            records.append({"id": "history-c", "task_id": "task-c", "task_name": "Gamma"})
+            sys.modules["fls_manager.models"].save_task_history(records)
+            with patch.object(route_module, "_HISTORY_EXPORT_CACHE_MAX_BYTES", 1):
+                with patch.object(route_module, "query_task_history", wraps=original_query) as query:
+                    client.get("/history/export", headers={"X-Token": TOKEN}).get_data()
+                    client.get("/history/export", headers={"X-Token": TOKEN}).get_data()
+                    self.assertEqual(query.call_count, 2)
+
+    def test_history_export_cache_coalesces_concurrent_cold_requests(self):
+        with isolated_app() as (app, base_dir):
+            data_dir = base_dir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            (data_dir / "task_history.json").write_text(
+                json.dumps([{
+                    "id": "history-a",
+                    "task_id": "task-a",
+                    "task_name": "Concurrent export",
+                    "status": "success",
+                }]),
+                encoding="utf-8",
+            )
+            route_module = sys.modules["fls_manager.routes.dashboard"]
+            original_query = route_module.query_task_history
+            calls = []
+            calls_lock = threading.Lock()
+            barrier = threading.Barrier(4)
+
+            def delayed_query(*args, **kwargs):
+                with calls_lock:
+                    calls.append(1)
+                time.sleep(0.02)
+                return original_query(*args, **kwargs)
+
+            def fetch_export():
+                barrier.wait()
+                with app.test_client() as client:
+                    response = client.get("/history/export", headers={"X-Token": TOKEN})
+                    return response.status_code, response.get_data()
+
+            with patch.object(route_module, "query_task_history", side_effect=delayed_query):
+                with ThreadPoolExecutor(max_workers=4) as pool:
+                    responses = list(pool.map(lambda _index: fetch_export(), range(4)))
+
+            self.assertEqual(len(calls), 1)
+            self.assertTrue(all(status == 200 for status, _body in responses))
+            self.assertTrue(all(body == responses[0][1] for _status, body in responses))
 
     def test_history_and_task_log_render_unknown_restart_result(self):
         with isolated_app() as (app, base_dir):

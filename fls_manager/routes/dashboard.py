@@ -12,7 +12,12 @@ from urllib.parse import quote
 
 from flask import Blueprint, Response, jsonify, redirect, request
 
-from ..models import load_tasks, load_task_history, query_task_history
+from ..models import (
+    load_tasks,
+    load_task_history,
+    query_task_history,
+    task_history_source_signature,
+)
 from ..task_runner import is_running
 from ..ui.layout import layout
 from ..ui.components import table_card, page_header, section, data_toolbar, empty_table_row, status_badge
@@ -33,6 +38,9 @@ _HOST_CPU_SAMPLE_INTERVAL = 0.5
 _HOST_CPU_LAST_SAMPLE_AT = None
 _HOST_CPU_PREVIOUS_TICK = None
 _HOST_CPU_PERCENT = "-"
+_HISTORY_EXPORT_CACHE_LOCK = threading.Lock()
+_HISTORY_EXPORT_CACHE = None
+_HISTORY_EXPORT_CACHE_MAX_BYTES = 4 * 1024 * 1024
 
 # 面板 CPU 峰值统计周期。
 # 每天 00:00 和 12:00 分成两个周期：
@@ -279,6 +287,54 @@ def history_csv_cell(value):
     if first in formula_prefixes or (first.isspace() and text.lstrip()[:1] in formula_prefixes):
         return "'" + text
     return text
+
+
+def _history_export_bytes(items):
+    output = io.BytesIO()
+    output.write(b"\xef\xbb\xbf")
+    text_output = io.TextIOWrapper(output, encoding="utf-8", newline="")
+    writer = csv.writer(text_output)
+    writer.writerow([
+        "任务名",
+        "任务 ID",
+        "命令",
+        "状态",
+        "开始时间",
+        "结束时间",
+        "耗时（秒）",
+        "退出码",
+        "来源",
+        "重试次数",
+        "最大重试次数",
+        "说明",
+    ])
+    fields = (
+        "task_name",
+        "task_id",
+        "command",
+        "status",
+        "start_at",
+        "end_at",
+        "duration_seconds",
+        "return_code",
+        "source",
+        "retry_attempt",
+        "max_retries",
+        "message",
+    )
+    for item in items:
+        writer.writerow(history_csv_cell(item.get(field, "")) for field in fields)
+    text_output.flush()
+    return output.getvalue()
+
+
+def _history_export_response(body):
+    filename = datetime.now().strftime("fls-history-%Y%m%d-%H%M%S.csv")
+    return Response(
+        body,
+        mimetype="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 def panel_cpu_peak_slot():
@@ -688,53 +744,37 @@ def history_page():
 
 @bp.route("/history/export")
 def history_export():
-    items, _total = query_task_history(
-        request.args.get("q", ""),
-        request.args.get("status", ""),
-        limit=None,
-    )
-    output = io.BytesIO()
-    output.write(b"\xef\xbb\xbf")
-    text_output = io.TextIOWrapper(output, encoding="utf-8", newline="")
-    writer = csv.writer(text_output)
-    writer.writerow([
-        "任务名",
-        "任务 ID",
-        "命令",
-        "状态",
-        "开始时间",
-        "结束时间",
-        "耗时（秒）",
-        "退出码",
-        "来源",
-        "重试次数",
-        "最大重试次数",
-        "说明",
-    ])
-    fields = (
-        "task_name",
-        "task_id",
-        "command",
-        "status",
-        "start_at",
-        "end_at",
-        "duration_seconds",
-        "return_code",
-        "source",
-        "retry_attempt",
-        "max_retries",
-        "message",
-    )
-    for item in items:
-        writer.writerow(history_csv_cell(item.get(field, "")) for field in fields)
+    q = request.args.get("q", "")
+    status = request.args.get("status", "")
+    cacheable = not str(q or "").strip() and not str(status or "").strip()
 
-    filename = datetime.now().strftime("fls-history-%Y%m%d-%H%M%S.csv")
-    text_output.flush()
-    return Response(
-        output.getvalue(),
-        mimetype="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
+    if cacheable:
+        global _HISTORY_EXPORT_CACHE
+        with _HISTORY_EXPORT_CACHE_LOCK:
+            signature = task_history_source_signature()
+            if signature is not None and _HISTORY_EXPORT_CACHE is not None:
+                cached_signature, cached_body = _HISTORY_EXPORT_CACHE
+                if (
+                    cached_signature == signature
+                    and len(cached_body) <= _HISTORY_EXPORT_CACHE_MAX_BYTES
+                ):
+                    return _history_export_response(cached_body)
+
+            items, _total = query_task_history(q, status, limit=None)
+            body = _history_export_bytes(items)
+            signature_after = task_history_source_signature()
+            if (
+                signature is not None
+                and signature_after == signature
+                and len(body) <= _HISTORY_EXPORT_CACHE_MAX_BYTES
+            ):
+                _HISTORY_EXPORT_CACHE = (signature, body)
+            else:
+                _HISTORY_EXPORT_CACHE = None
+            return _history_export_response(body)
+
+    items, _total = query_task_history(q, status, limit=None)
+    return _history_export_response(_history_export_bytes(items))
 
 
 @bp.route("/")

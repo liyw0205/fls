@@ -2,9 +2,14 @@
 
 ## 本地检查
 
+Linux 测试和运行统一使用 `/home/nonebot-shared-venv/bin/python`；只有显式设置
+`XIUXIAN_VENV_PATH`、`VENV_PATH`、`XIUPET_VENV`、`FLS_VENV_PATH` 或传入 `--venv` 才使用独立环境。
+Docker、Windows 和 GitHub Actions 继续使用各自隔离的解释器。
+
 ```bash
-PYTHONPATH=. pytest -q
-python3 -m compileall -q fls_manager
+/home/nonebot-shared-venv/bin/python -m compileall -q fls_manager
+flock -w 600 /tmp/nonebot-project-validation.lock \
+  env PYTHONPATH=. /home/nonebot-shared-venv/bin/python -m pytest -q
 git diff --check
 ```
 
@@ -26,7 +31,12 @@ done
 
 ## 浏览器回归
 
-前端修改需要通过 Chromium 回归手机和桌面视口。可运行 `python3 tools/browser_regression.py`；
+前端修改需要通过 Chromium 回归手机和桌面视口，可运行：
+```bash
+flock -w 600 /tmp/nonebot-project-validation.lock \
+  /home/nonebot-shared-venv/bin/python tools/browser_regression.py
+```
+
 Playwright Core 或 Chromium 不在默认路径时，使用 `FLS_PLAYWRIGHT_CORE` 和 `FLS_CHROMIUM` 指定。
 至少覆盖：
 
@@ -45,7 +55,9 @@ Playwright Core 或 Chromium 不在默认路径时，使用 `FLS_PLAYWRIGHT_CORE
 测试时设置独立的 `FLS_BASE_DIR`，不要直接使用真实运行数据：
 
 ```bash
-FLS_BASE_DIR="$PWD/.test-fls" PYTHONPATH=. pytest -q
+flock -w 600 /tmp/nonebot-project-validation.lock \
+  env FLS_BASE_DIR="$PWD/.test-fls" PYTHONPATH=. \
+  /home/nonebot-shared-venv/bin/python -m pytest -q
 ```
 
 运行应用或浏览器回归时，将 `FLS_BASE_DIR` 指向隔离目录，避免测试读写真实实例的配置、日志和脚本。回归结束后检查工作区，只保留预期的源码或测试变更：

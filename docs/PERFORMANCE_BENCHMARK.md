@@ -19,12 +19,15 @@ JSON 全量读取；优化组使用派生 SQLite 索引和 storage 锁。结果�
 
 ```bash
 flock -w 600 /tmp/nonebot-project-validation.lock \
-  python3 tools/benchmark_performance.py --mode optimized --iterations 12 --playwright
+  /home/nonebot-shared-venv/bin/python tools/benchmark_performance.py --mode optimized --iterations 12 --playwright
 ```
 
 推荐使用 `tools/run_performance_benchmark.sh`，锁被占用时它在创建临时 fixture、测试
 服务或浏览器前退出。Playwright 缺少 Python 包或 Chromium 时只报告 `skipped`，不伪造
 通过。
+
+Linux 性能、测试和运行统一使用 `/home/nonebot-shared-venv/bin/python`。Docker、Windows
+和 GitHub Actions 继续使用各自隔离的解释器配置。
 
 ## 仪表盘结果
 
@@ -65,6 +68,25 @@ v8 首页真实路由。v7 只读取最多 8 条异常记录但仍计算并丢�
 `USE TEMP B-TREE FOR ORDER BY` 变为 v8 的
 `SCAN history_rows USING INDEX history_rows_abnormal_seq`，无临时排序。查询微基准的
 COUNT+排序路径 p50/p95 为 0.762/0.985ms；有序部分索引且只取 8 行为 0.298/0.421ms。
+
+## 2026-11-16 全量 CSV 热缓存
+
+固定 10,000 条历史、100 个任务、12 次采样，同一 Linux 主机和共享锁下比较无缓存
+基线与 v9 warm 导出。无筛选的 CSV 字节缓存在进程内最多保留一份、上限 4MiB，以源文件
+设备号、inode、mtime 纳秒和大小作为签名；查询和序列化前后签名不同则不缓存。筛选导出
+不使用缓存，JSON 源仍是权威数据。首次生成沿用现有 JSON 全量读取和 CSV 序列化；热命中
+跳过历史读取与序列化。`EXPLAIN QUERY PLAN` 仍显示 `SCAN history_rows`，这是没有过滤条件
+且需要全量导出时的预期计划，不代表热命中会扫描数据库。
+
+| 状态 | p50/p95/p99 ms | 吞吐 req/s | 错误数/率 | CPU/墙钟 | RSS MB | 响应体 avg/max B |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| v8 无缓存（共享解释器复测） | 91.642 / 110.750 / 121.042 | 10.492 | 0 / 0% | 99.97% | 62.578 | 1,440,252 / 1,440,252 |
+| 20261116.1 warm 缓存 | 0.407 / 0.518 / 0.527 | 2,335.184 | 0 / 0% | 100.14% | 58.012 | 1,440,252 / 1,440,252 |
+
+热导出 p50/p95/p99 分别降低约 99.6%、99.5%、99.6%，吞吐约提升 222 倍，峰值 RSS
+降低 4.566MB。完整 9 路径回归中导出 p50/p95/p99 为 `0.460/0.503/0.507ms`，其余列表、深分页、
+搜索、详情、状态和 toggle 均通过既有阈值；全部路由 0 错误。路由测试验证了并发冷请求
+合并为一次源查询、源文件更新失效、筛选绕过、超限不驻留及 CSV 字节与公式中和合同。
 
 ## 2026-11-15 历史列表与导出结果
 
