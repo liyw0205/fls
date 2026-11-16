@@ -1611,6 +1611,49 @@ if (document.readyState === "loading") {
         await replaceHtmlText(text, res.url || location.href, push);
     }
 
+    function restoreFormSubmission(form, submitter){
+        if(form) delete form.dataset.submitting;
+
+        const button = submitter || (form && form.querySelector('button[type="submit"], input[type="submit"]'));
+        if(button) flsRestoreButton(button);
+    }
+
+    async function handleFormErrorResponse(res, fetchUrl, form, submitter){
+        const contentType = String(res.headers.get("content-type") || "").toLowerCase();
+        let body = "";
+
+        try {
+            body = await res.text();
+        } catch(e) {}
+
+        if(contentType.indexOf("text/html") >= 0 && body.trim()){
+            try {
+                const errorDoc = new DOMParser().parseFromString(body, "text/html");
+                if(errorDoc.querySelector(".content") && document.querySelector(".content")){
+                    await replaceHtmlText(body, res.url || fetchUrl, false);
+                    return;
+                }
+            } catch(e) {}
+        }
+
+        let message = "";
+        if(contentType.indexOf("application/json") >= 0){
+            try {
+                const payload = JSON.parse(body);
+                message = payload.msg || payload.error || payload.message || "";
+            } catch(e) {}
+        }
+
+        if(!message) message = body.trim().slice(0, 500);
+        if(!message) message = "HTTP " + res.status;
+
+        const nextStep = (res.status === 401 || res.status === 403)
+            ? "重新登录后重试"
+            : (res.status === 409 ? "刷新状态后重试" : "检查服务状态后重试");
+        restoreFormSubmission(form, submitter);
+        flsToast(flsActionFailure(message, nextStep), "error", 6000);
+    }
+
     async function ajaxLoad(url, push, options){
         options = options || {};
         const canCache = flsIsCacheablePage(url);
@@ -1761,14 +1804,17 @@ if (document.readyState === "loading") {
             const res = await fetch(fetchUrl, opts);
 
             if (!res.ok) {
-                location.href = fetchUrl;
+                await handleFormErrorResponse(res, fetchUrl, form, submitter);
+                setLoading(false);
                 return;
             }
 
             await replaceHtml(res, true);
             setLoading(false);
         } catch(err) {
-            form.submit();
+            setLoading(false);
+            restoreFormSubmission(form, submitter);
+            flsToast(flsActionFailure("请求失败：" + String(err), "检查网络或登录状态后重试"), "error", 6000);
         }
     }, true);
 

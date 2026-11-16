@@ -96,7 +96,7 @@ def layout(title, active, body):
     </main>
 </div>
 
-<script src="/static/fls.js?v=20260920-3&actions=3"></script>
+<script src="/static/fls.js?v=20260920-3&actions=4"></script>
 </body>
 </html>
 '''

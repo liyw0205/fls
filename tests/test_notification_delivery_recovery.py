@@ -272,6 +272,50 @@ class NotificationDeliveryRecoveryTests(unittest.TestCase):
             missing = client.post("/api/notify/retry/missing", headers=headers)
             self.assertEqual(missing.status_code, 404)
 
+    def test_page_retry_conflict_returns_recoverable_html_error(self):
+        with isolated_modules() as base_dir:
+            from fls_manager import notify, paths
+            from fls_manager.storage import write_json
+
+            write_json(
+                paths.CONFIG_FILE,
+                {
+                    "notify_items": [
+                        {"id": "n1", "name": "One", "channel": "bark", "enabled": True, "config": {}},
+                    ],
+                },
+            )
+            write_json(
+                paths.NOTIFY_HISTORY_FILE,
+                [{
+                    "id": "delivery-running",
+                    "item_id": "n1",
+                    "item_name": "One",
+                    "channel": "bark",
+                    "title": "Title",
+                    "content": "Body",
+                    "status": "running",
+                    "attempt": 1,
+                    "message": "发送中",
+                }],
+            )
+            notify.NOTIFY_ACTIVE_DELIVERIES.add("delivery-running")
+
+            try:
+                from fls_manager.app import create_app
+
+                client = create_app().test_client()
+                response = client.post(
+                    "/notify/retry/delivery-running",
+                    headers={"X-Token": TOKEN},
+                )
+            finally:
+                notify.NOTIFY_ACTIVE_DELIVERIES.discard("delivery-running")
+
+            self.assertEqual(response.status_code, 409)
+            self.assertIn("通知投递正在发送", response.get_data(as_text=True))
+            self.assertIn("text/html", response.content_type)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -61,7 +61,7 @@ class FrontendOptimizationTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertIn('/static/favicon-generated.png?v=20260920-1', html)
             self.assertIn('/static/fls.css?v=20260920-3', html)
-            self.assertIn('/static/fls.js?v=20260920-3&actions=3', html)
+            self.assertIn('/static/fls.js?v=20260920-3&actions=4', html)
             self.assertIn('/static/fls_theme.css?v=20260920-3', html)
             self.assertIn('theme=neumorphism&rev=20260930-1', html)
             self.assertIn('/static/fls_density.css?v=20260930-2', html)
@@ -141,6 +141,16 @@ class FrontendOptimizationTests(unittest.TestCase):
         self.assertNotIn("flsOriginalButtonsInViewport", js)
         self.assertNotIn("flsUpdateFloatingFormVisibility", js)
         self.assertNotIn("hide-near-original", js)
+
+    def test_form_errors_render_server_response_without_getting_post_url(self):
+        js = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+
+        self.assertIn("async function handleFormErrorResponse", js)
+        self.assertIn('errorDoc.querySelector(".content")', js)
+        self.assertIn("await replaceHtmlText(body, res.url || fetchUrl, false)", js)
+        self.assertIn("res.status === 409", js)
+        self.assertIn("重新登录后重试", js)
+        self.assertNotIn("location.href = fetchUrl", js)
 
     def test_density_styles_preserve_table_details_and_mobile_targets(self):
         css = (ROOT / "fls_manager" / "static" / "fls_density.css").read_text(encoding="utf-8")
