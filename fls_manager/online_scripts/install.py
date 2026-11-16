@@ -27,7 +27,7 @@ from .constants import (
     persist_online_install,
 )
 from .logs import append_log
-from .tasks import import_task_if_needed
+from .tasks import import_task_if_needed, validate_online_task_import
 
 requests = LazyModule("requests")
 
@@ -432,6 +432,9 @@ def install_worker(
         append_log(log_file, f"导入后启用任务: {'是' if enable_task else '否'}")
         append_log(log_file, f"允许覆盖/更新: {'是' if force else '否'}")
         append_log(log_file, "============================================================")
+
+        if import_task:
+            validate_online_task_import(item, selected_task_indexes)
 
         download_online_script_logged(
             item=item,

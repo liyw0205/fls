@@ -15,6 +15,7 @@ def _task_import_error(script_id, message, status_code, persisted=False):
         actions_html=(
             f'<a class="btn btn-gray" href="/online-scripts/install-select/{h(script_id)}">重新选择任务</a>'
             '<a class="btn btn-blue" href="/tasks">查看已保存任务</a>'
+            '<a class="btn btn-orange" href="/online-scripts/source">检查脚本源数据</a>'
             + scheduler_action
         ),
     )
@@ -38,8 +39,11 @@ def online_scripts_import_tasks_only(script_id):
     try:
         selected_task_indexes = selected_task_indexes_from_form(item)
         selected_task_indexes = validated_install_task_indexes(item, selected_task_indexes)
+        validate_online_task_import(item, selected_task_indexes)
     except ValueError as e:
         return _task_import_error(script_id, f"{e}。请重新选择任务后重试。", 400)
+    except Exception as e:
+        return _task_import_error(script_id, f"任务校验失败：{e}。请检查服务状态后重试。", 500)
 
     try:
         ok, msg = import_task_if_needed(
@@ -60,6 +64,8 @@ def online_scripts_import_tasks_only(script_id):
             )
         )
 
+    except OnlineTaskValidationError as e:
+        return _task_import_error(script_id, str(e), 400)
     except TaskSchedulerReloadError as e:
         return _task_import_error(
             script_id, f"任务已持久化，但调度器重载失败：{e}。请重新加载调度器，无需重复导入。",
@@ -151,6 +157,11 @@ def online_scripts_install_select(script_id):
                 env_text = "\n".join([f"{k}={v}" for k, v in env.items()])
 
             checked = "" if idx in excluded_set else "checked"
+            validation_html = ""
+            try:
+                validate_online_task_import(item, [idx])
+            except OnlineTaskValidationError as e:
+                validation_html = f'<div class="notice red" role="status">{h(e)}</div>'
 
             remark_html = ""
             if remark:
@@ -191,6 +202,8 @@ def online_scripts_install_select(script_id):
         <div class="fls-install-task-meta">
             <b>Cron：</b>{h(cron)}
         </div>
+
+        {validation_html}
 
         {remark_html}
         {config_html}

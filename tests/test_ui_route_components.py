@@ -2723,6 +2723,7 @@ class UiRouteComponentTests(unittest.TestCase):
                 "link": "https://example.invalid/demo.sh",
                 "link_name": "demo.sh",
                 "install": "echo install",
+                "task_cron": [{"name": "Demo task", "command": "task demo.sh"}],
             }
 
             with patch("fls_manager.online_scripts.install.append_log"):

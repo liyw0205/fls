@@ -43,6 +43,8 @@ from ...online_scripts.tasks import (
     guess_task_command,
     script_has_task,
     import_task_if_needed,
+    validate_online_task_import,
+    OnlineTaskValidationError,
 )
 
 from ...online_scripts.install import (
@@ -203,6 +205,7 @@ def validated_install_retry_task_indexes(item, info):
     previous = info.get("selected_tasks")
     if previous is not None and previous != selected_tasks:
         raise ValueError("脚本源任务已变更，请重新选择任务")
+    validate_online_task_import(item, indexes)
     return indexes
 
 def install_task_page_links(script_id, task_page, task_pages, excluded="", task_q=""):

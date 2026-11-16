@@ -162,12 +162,22 @@ def online_scripts_install(script_id):
         try:
             selected_task_indexes = selected_task_indexes_from_form(item)
             selected_task_indexes = validated_install_task_indexes(item, selected_task_indexes)
+            validate_online_task_import(item, selected_task_indexes)
         except ValueError as e:
             body = page_header_card(
                 "任务选择无效", help_html=f"{h(e)}。请重新选择任务后重试。",
-                actions_html=f'<a class="btn btn-gray" href="/online-scripts/install-select/{h(script_id)}">重新选择任务</a>',
+                actions_html=(
+                    f'<a class="btn btn-gray" href="/online-scripts/install-select/{h(script_id)}">重新选择任务</a>'
+                    '<a class="btn btn-orange" href="/online-scripts/source">检查脚本源数据</a>'
+                ),
             )
             return layout("在线脚本安装失败", "online_scripts", body), 400
+        except Exception as e:
+            body = page_header_card(
+                "任务校验失败", help_html=f"{h(e)}。请检查服务状态后重试。",
+                actions_html=f'<a class="btn btn-gray" href="/online-scripts/install-select/{h(script_id)}">重新选择任务</a>',
+            )
+            return layout("在线脚本安装失败", "online_scripts", body), 500
 
     try:
         target = online_script_target(item)
@@ -445,11 +455,11 @@ def online_scripts_install_retry(install_id):
                 validated_install_retry_task_indexes(item, info)
                 if import_task else []
             )
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as e:
             return _install_retry_error(
                 install_id,
                 "无法重试在线安装",
-                "原安装记录的任务选择已失效，请重新选择任务后重试。",
+                f"原安装记录的任务选择已失效：{e}。请重新选择任务后重试。",
                 409,
                 actions_html=f'<a class="btn btn-primary" href="/online-scripts/install-select/{h(script_id)}">重新选择任务</a>',
             )
