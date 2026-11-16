@@ -1036,17 +1036,30 @@ window.__FLS_ASSET_PROMISES__ = window.__FLS_ASSET_PROMISES__ || {};
 
 function flsLoadStyleOnce(href){
     href = String(href || "");
-    if(!href) return;
-
-    if(document.querySelector('link[data-fls-href="' + href + '"]')) {
-        return;
-    }
-
-    const link = document.createElement("link");
-    link.rel = "stylesheet";
-    link.href = href;
-    link.setAttribute("data-fls-href", href);
-    document.head.appendChild(link);
+    if(!href) return Promise.resolve(false);
+    const key = "style:" + href;
+    if(window.__FLS_ASSET_PROMISES__[key]) return window.__FLS_ASSET_PROMISES__[key];
+    window.__FLS_ASSET_PROMISES__[key] = new Promise(function(resolve){
+        const link = document.createElement("link");
+        let timer;
+        const finish = function(ok){
+            clearTimeout(timer);
+            link.onload = link.onerror = null;
+            if(!ok){
+                link.remove();
+                delete window.__FLS_ASSET_PROMISES__[key];
+            }
+            resolve(ok);
+        };
+        link.rel = "stylesheet";
+        link.href = href;
+        link.setAttribute("data-fls-href", href);
+        link.onload = function(){ finish(true); };
+        link.onerror = function(){ finish(false); };
+        timer = setTimeout(function(){ finish(false); }, 8000);
+        document.head.appendChild(link);
+    });
+    return window.__FLS_ASSET_PROMISES__[key];
 }
 
 function flsLoadScriptOnce(src){
@@ -1060,69 +1073,40 @@ function flsLoadScriptOnce(src){
     }
 
     window.__FLS_ASSET_PROMISES__[key] = new Promise(function(resolve, reject){
-        const existing = document.querySelector('script[data-fls-src="' + src + '"]');
-
-        if(existing && existing.dataset.loaded === "1"){
-            resolve();
-            return;
-        }
-
-        const script = existing || document.createElement("script");
+        const script = document.createElement("script");
+        let timer;
+        const finish = function(error){
+            clearTimeout(timer);
+            script.onload = script.onerror = null;
+            if(error){
+                script.remove();
+                delete window.__FLS_ASSET_PROMISES__[key];
+                reject(error);
+            }else{
+                script.dataset.loaded = "1";
+                resolve();
+            }
+        };
 
         script.src = src;
         script.async = false;
         script.setAttribute("data-fls-src", src);
 
-        script.addEventListener("load", function(){
-            script.dataset.loaded = "1";
-            resolve();
-        }, {once:true});
-
-        script.addEventListener("error", function(){
-            delete window.__FLS_ASSET_PROMISES__[key];
-            reject(new Error("资源加载失败：" + src));
-        }, {once:true});
-
-        if(!existing){
-            document.head.appendChild(script);
-        }
+        script.onload = function(){ finish(); };
+        script.onerror = function(){ finish(new Error("资源加载失败：" + src)); };
+        timer = setTimeout(function(){ finish(new Error("资源加载超时：" + src)); }, 8000);
+        document.head.appendChild(script);
     });
 
     return window.__FLS_ASSET_PROMISES__[key];
 }
 
 async function flsEnsureCodeMirrorLoaded(){
-    if(typeof CodeMirror !== "undefined") {
-        return true;
-    }
-
-    const base = "https://cdn.jsdelivr.net/npm/codemirror@5.65.16/";
-
-    flsLoadStyleOnce(base + "lib/codemirror.css");
-
+    const base = "/static/vendor/codemirror-5.65.16/";
     try {
-        await flsLoadScriptOnce(base + "lib/codemirror.min.js");
-
-        const modes = [
-            "mode/python/python.min.js",
-            "mode/shell/shell.min.js",
-            "mode/javascript/javascript.min.js",
-            "mode/yaml/yaml.min.js",
-            "mode/xml/xml.min.js",
-            "mode/css/css.min.js",
-            "mode/htmlmixed/htmlmixed.min.js",
-            "mode/php/php.min.js",
-            "mode/ruby/ruby.min.js",
-            "mode/perl/perl.min.js",
-            "mode/lua/lua.min.js",
-            "mode/clike/clike.min.js",
-            "mode/markdown/markdown.min.js"
-        ];
-
-        for(const mode of modes){
-            await flsLoadScriptOnce(base + mode);
-        }
-
+        const styled = await flsLoadStyleOnce(base + "codemirror.css");
+        if(!styled) return false;
+        if(typeof CodeMirror === "undefined") await flsLoadScriptOnce(base + "codemirror.min.js");
         return typeof CodeMirror !== "undefined";
     } catch(e) {
         return false;
@@ -1166,18 +1150,18 @@ async function flsInitCodeEditors(root){
     if(!loaded || typeof CodeMirror === "undefined") {
         return;
     }
+    if(!flsShouldUseCodeMirror()) return;
 
     textareas.forEach(function(textarea){
         if(!document.body.contains(textarea)) return;
         if(textarea.dataset.cmInited === "1") return;
-
-        textarea.dataset.cmInited = "1";
 
         var filename = textarea.getAttribute("data-filename") || "";
         var mode = flsCodeModeFromFilename(filename);
 
         var cm = CodeMirror.fromTextArea(textarea, {
             lineNumbers: true,
+            screenReaderLabel: textarea.getAttribute("aria-label") || textarea.name || "代码编辑器",
             mode: mode,
             theme: "default",
             lineWrapping: true,
@@ -1196,6 +1180,7 @@ async function flsInitCodeEditors(root){
         cm.setSize("100%", "680px");
 
         textarea.__flsCodeMirror = cm;
+        textarea.dataset.cmInited = "1";
         window.__FLS_CODE_MIRRORS__.push(cm);
 
         setTimeout(function(){
@@ -1215,6 +1200,17 @@ function flsSaveCodeMirrors(root){
                 textarea.__flsCodeMirror.save();
             } catch(e) {}
         }
+    });
+}
+
+function flsDisposeCodeEditors(root){
+    root.querySelectorAll("textarea.fls-code-editor").forEach(function(textarea){
+        const cm = textarea.__flsCodeMirror;
+        if(!cm) return;
+        cm.toTextArea();
+        delete textarea.__flsCodeMirror;
+        delete textarea.dataset.cmInited;
+        window.__FLS_CODE_MIRRORS__ = window.__FLS_CODE_MIRRORS__.filter(function(item){ return item !== cm; });
     });
 }
 
@@ -1608,6 +1604,7 @@ if (document.readyState === "loading") {
             window.__FLS_DASHBOARD_RUNTIME_INTERVAL__ = null;
         }
 
+        flsDisposeCodeEditors(oldContent);
         oldContent.innerHTML = newContent.innerHTML;
         flsConvertFeedbackCards(oldContent);
 

@@ -77,6 +77,21 @@ class FrontendOptimizationTests(unittest.TestCase):
             self.assertIn("image/png", response.content_type)
             self.assertTrue(data.startswith(b"\x89PNG\r\n\x1a\n"))
 
+    def test_editor_bundle_and_styles_are_available_without_external_network_or_auth(self):
+        with isolated_app() as app:
+            client = app.test_client()
+            for name, content_type, marker in (
+                ("codemirror.min.js", "javascript", b"CodeMirror"),
+                ("codemirror.css", "text/css", b".CodeMirror"),
+                ("LICENSE", "application/octet-stream", b"MIT"),
+            ):
+                with self.subTest(name=name):
+                    response = client.get("/static/vendor/codemirror-5.65.16/" + name)
+                    self.assertEqual(response.status_code, 200)
+                    self.assertIn(content_type, response.content_type)
+                    self.assertIn(marker, response.get_data())
+                    response.close()
+
     def test_long_pages_expose_section_navigation_targets(self):
         with isolated_app() as app:
             client = app.test_client()

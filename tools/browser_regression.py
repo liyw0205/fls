@@ -685,6 +685,124 @@ async function runActionAudit(page, audit) {
   if (logs.state && (logs.state.disabled || logs.state.busy)) issue(audit, "button-state", "log delete not restored");
 }
 
+async function runEditorAudit(browser, results) {
+  const base = process.env.FLS_BASE_URL;
+  for (const scenario of [
+    {width:390, height:844, fail:""},
+    {width:1280, height:800, fail:""},
+    {width:1280, height:800, fail:"codemirror.min.js"},
+    {width:1280, height:800, fail:"codemirror.css"}
+  ]) {
+    const audit = {width:scenario.width, height:scenario.height, path:"/__editor-recovery__/"+scenario.fail, issues:[]};
+    results.push(audit);
+    const context = await browser.newContext({viewport:{width:scenario.width,height:scenario.height}});
+    const page = await context.newPage();
+    const external = [];
+    page.on("pageerror", error => issue(audit, "editor-pageerror", String(error)));
+    const blocked = async route => {
+      const url = new URL(route.request().url());
+      if(url.origin !== new URL(base).origin){
+        external.push(url.href);
+        return route.abort();
+      }
+      if(scenario.fail && url.pathname.endsWith('/'+scenario.fail)) return route.abort();
+      return route.continue();
+    };
+    await context.route("**/*", blocked);
+    try {
+      await page.goto(base+"/login");
+      await page.locator('input[name="token"]').fill(process.env.FLS_TOKEN);
+      await page.locator('button[type="submit"]').click();
+      await page.waitForURL(url => url.pathname !== "/login");
+      await page.goto(base+"/scripts/view?path=browser.py");
+      const desktop = scenario.width >= 768;
+      if(desktop && !scenario.fail) await page.waitForFunction(() => !!document.querySelector('textarea[name="content"]').__flsCodeMirror);
+      if(desktop && scenario.fail){
+        await page.evaluate(() => flsInitCodeEditors(document));
+        if(await page.locator(".CodeMirror").count()) issue(audit,"editor-fallback","initialized with missing asset");
+        if(!await page.locator('textarea[name="content"]').isVisible()) issue(audit,"editor-fallback","native draft hidden");
+      }
+      if(!desktop && await page.locator(".CodeMirror").count()) issue(audit,"editor-mobile","native editor replaced");
+      const draft = "# offline editor "+scenario.fail+"\nprint('browser recovery')\n";
+      await page.locator('textarea[name="content"]').evaluate((el,value) => {
+        if(el.__flsCodeMirror) el.__flsCodeMirror.setValue(value); else el.value=value;
+      },draft);
+      if(scenario.fail){
+        await context.unroute("**/*",blocked);
+        scenario.fail = "";
+        await context.route("**/*",blocked);
+        await page.evaluate(() => Promise.all([flsInitCodeEditors(document),flsInitCodeEditors(document)]));
+        await page.waitForFunction(() => !!document.querySelector('textarea[name="content"]').__flsCodeMirror);
+        const value = await page.locator('textarea[name="content"]').evaluate(el => el.__flsCodeMirror.getValue());
+        if(value !== draft) issue(audit,"editor-retry","native draft lost");
+      }
+      if(desktop){
+        const modes = await page.evaluate(() => ["python","shell","javascript","yaml","xml","css","htmlmixed","php","ruby","perl","lua","clike","markdown"].filter(mode => !CodeMirror.modes[mode]));
+        if(modes.length) issue(audit,"editor-modes",modes.join(","));
+        if(await page.locator(".CodeMirror").count() !== 1) issue(audit,"editor-duplicate","expected one editor");
+        const input = page.locator('.CodeMirror textarea');
+        if(await input.getAttribute('aria-label') !== '脚本文件内容') issue(audit,'editor-name','missing editor label');
+        await page.locator('.CodeMirror').click();
+        await page.keyboard.press('Control+Home');
+        await page.keyboard.type('# keyboard input\n');
+        const typed = await page.locator('textarea[name="content"]').evaluate(el => el.__flsCodeMirror.getValue());
+        if(typed !== '# keyboard input\n'+draft) issue(audit,'editor-keyboard','keyboard content differs');
+        await page.locator('textarea[name="content"]').evaluate((el,value) => el.__flsCodeMirror.setValue(value),draft);
+      }
+      const submit = async expected => {
+        const response = page.waitForResponse(r => new URL(r.url()).pathname === "/scripts/view" && r.request().method() === "POST");
+        await page.locator('form button[type="submit"]').click();
+        if((await response).status() !== expected) issue(audit,"editor-save-status",String(expected));
+        await page.waitForFunction(() => !document.querySelector('form').dataset.submitting);
+        if(desktop) await page.waitForFunction(() => !!document.querySelector('textarea[name="content"]').__flsCodeMirror);
+      };
+      const revision = await page.locator('input[name="file_revision"]').inputValue();
+      const externalSave = await page.request.post(base+"/scripts/view?path=browser.py",{
+        headers:{"X-Token":process.env.FLS_TOKEN},form:{file_revision:revision,content:"# concurrent server edit\n"}
+      });
+      if(externalSave.status() !== 200) issue(audit,"editor-fixture","external save failed");
+      await submit(409);
+      const retained = await page.locator('textarea[name="content"]').evaluate(el => el.__flsCodeMirror ? el.__flsCodeMirror.getValue() : el.value);
+      if(retained !== draft) issue(audit,"editor-conflict","draft lost after AJAX 409");
+      await submit(200);
+      const saved = await page.evaluate(async () => {
+        const html = await (await fetch('/scripts/view?path=browser.py')).text();
+        return new DOMParser().parseFromString(html,'text/html').querySelector('textarea[name="content"]').value;
+      });
+      if(saved !== draft) issue(audit,"editor-content","submitted stale textarea instead of current editor");
+      await page.locator('.content a[href="/pull"]').first().click();
+      await page.waitForURL(url => url.pathname === "/pull");
+      const active = await page.evaluate(() => window.__FLS_CODE_MIRRORS__.length);
+      if(active) issue(audit,"editor-dispose",String(active));
+      await page.goto(base+"/task/config/browser-task");
+      const configDraft = "enabled: true\nnote: offline editor recovery\n";
+      await page.locator('textarea[name="content"]').fill(configDraft);
+      const configRevision = await page.locator('input[name="config_revision"]').inputValue();
+      const configExternal = await page.request.post(base+"/task/config/browser-task",{
+        headers:{"X-Token":process.env.FLS_TOKEN},form:{config_revision:configRevision,content:"enabled: false\n"}
+      });
+      if(configExternal.status() !== 200) issue(audit,"config-fixture","external save failed");
+      for(const expected of [409,200]){
+        const response = page.waitForResponse(r => new URL(r.url()).pathname === "/task/config/browser-task" && r.request().method() === "POST");
+        await page.locator('form button[type="submit"]:not([formaction])').click();
+        if((await response).status() !== expected) issue(audit,"config-save-status",String(expected));
+        await page.waitForFunction(() => !document.querySelector('form').dataset.submitting);
+        if(await page.locator('textarea[name="content"]').inputValue() !== configDraft) issue(audit,"config-draft","draft lost");
+      }
+      const configSaved = await page.evaluate(async () => {
+        const html = await (await fetch('/task/config/browser-task')).text();
+        return new DOMParser().parseFromString(html,'text/html').querySelector('textarea[name="content"]').value;
+      });
+      if(configSaved !== configDraft) issue(audit,"config-persistence","saved content differs from draft");
+      if(external.length) issue(audit,"editor-external-resource",external.join(" | "));
+    } catch(error) {
+      issue(audit,"editor-recovery",String(error));
+    } finally {
+      await context.close();
+    }
+  }
+}
+
 (async()=>{
   const browser = await chromium.launch({
     headless: true,
@@ -692,6 +810,14 @@ async function runActionAudit(page, audit) {
     args: ["--no-sandbox", "--disable-dev-shm-usage"]
   });
   const results = [];
+  const requestedPaths = JSON.parse(process.env.FLS_BROWSER_PATHS || "[]");
+  if(process.env.FLS_EDITOR_ONLY === "1"){
+    await runEditorAudit(browser,results);
+    await browser.close();
+    const failures = results.filter(item => item.issues.length);
+    console.log(JSON.stringify({total:results.length,failures},null,2));
+    process.exit(failures.length ? 1 : 0);
+  }
   for (const [width, height] of viewports) {
     const context = await browser.newContext({
       viewport: {width, height},
@@ -708,9 +834,10 @@ async function runActionAudit(page, audit) {
     page.on("requestfailed", request => {
       if (current) current.requestFailures.push(request.url());
     });
-    const pageSet = (width === 390 || width === 1280)
+    let pageSet = (width === 390 || width === 1280)
       ? pages
       : pages.filter(item => !focusedFormPaths.has(item[0]));
+    if(requestedPaths.length) pageSet = pageSet.filter(item => requestedPaths.includes(item[0]));
     for (const [path, expectedClass] of pageSet) {
       const result = {width, height, path, issues: []};
       result.consoleErrors = [];
@@ -896,6 +1023,12 @@ async function runActionAudit(page, audit) {
               return !(el.getAttribute("aria-label") || el.title || el.textContent?.trim() || el.labels?.length);
             }).length,
             undersizedControls: Array.from(document.querySelectorAll("button, a, input, select, textarea")).filter(el => {
+              const editor = el.closest('.CodeMirror');
+              if(editor && editor.CodeMirror && el === editor.CodeMirror.getInputField()){
+                // CodeMirror uses a clipped input; the visible editor receives pointer actions.
+                const box = editor.getBoundingClientRect();
+                return box.width < 32 || box.height < 32;
+              }
               if (el.closest(".code, .help, .fls-source-code, pre")) return false;
               if (getComputedStyle(el).display === "none" || el.type === "hidden" || el.type === "checkbox" || el.type === "radio") return false;
               const r = el.getBoundingClientRect();
@@ -1174,6 +1307,9 @@ async function runActionAudit(page, audit) {
     await actionContext.close();
     results.push(actionAudit);
   }
+  if (process.env.FLS_ACTION_FIXTURE === "1") {
+    await runEditorAudit(browser, results);
+  }
   await browser.close();
   const failures = results.filter(item => item.issues.length);
   console.log(JSON.stringify({total: results.length, failures}, null, 2));
@@ -1182,7 +1318,7 @@ async function runActionAudit(page, audit) {
 '''
 
 
-def run_node(base_url, playwright_core, chromium, token, action_fixture=False):
+def run_node(base_url, playwright_core, chromium, token, action_fixture=False, editors_only=False, paths=None):
     env = os.environ.copy()
     env.update(
         FLS_BASE_URL=base_url.rstrip("/"),
@@ -1190,6 +1326,8 @@ def run_node(base_url, playwright_core, chromium, token, action_fixture=False):
         FLS_PLAYWRIGHT_CORE=str(playwright_core),
         FLS_CHROMIUM=chromium,
         FLS_ACTION_FIXTURE="1" if action_fixture else "0",
+        FLS_EDITOR_ONLY="1" if editors_only else "0",
+        FLS_BROWSER_PATHS=json.dumps(paths or []),
     )
     # Chromium inherits the Node stdout descriptor.  A temporary regular file
     # avoids waiting on an inherited pipe after Playwright closes the browser.
@@ -1222,7 +1360,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", help="reuse an already running FLS server")
     parser.add_argument("--token", default=TOKEN, help="token sent in X-Token header")
+    parser.add_argument("--editors-only", action="store_true", help="run editor save/recovery workflows in an isolated fixture")
+    parser.add_argument("--path", action="append", help="check only this page path (repeatable), plus navigation and action workflows")
     args = parser.parse_args()
+    if args.editors_only and args.base_url:
+        parser.error("--editors-only requires an isolated fixture; omit --base-url")
 
     playwright_core = find_playwright_core()
     chromium = find_chromium()
@@ -1268,6 +1410,8 @@ def main():
             chromium,
             args.token,
             action_fixture=bool(temp_dir),
+            editors_only=args.editors_only,
+            paths=args.path,
         )
         print(result.stdout, end="")
         return result.returncode
