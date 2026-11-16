@@ -58,7 +58,10 @@ def api_proxy_quality_form():
 
 @bp.route("/api/proxy/test/<proxy_id>", methods=["GET", "POST"])
 def api_proxy_test_saved(proxy_id):
-    proxy = get_proxy_for_test(proxy_id)
+    try:
+        proxy = get_proxy_for_test(proxy_id)
+    except Exception as e:
+        return jsonify(ok=False, error=str(e), recovery_url="/proxy/diagnostics"), 500
 
     if not proxy:
         return jsonify({
@@ -79,22 +82,28 @@ def api_proxy_test_saved(proxy_id):
             "status_code": result["status_code"],
             "elapsed_ms": result["elapsed_ms"],
         })
+    except ProxyDiagnosticPersistenceError as e:
+        return _diagnostic_persistence_error(e, proxy.get("name", ""))
     except Exception as e:
         if diagnostic_id:
             try:
                 finish_proxy_diagnostic(diagnostic_id, "failed", [], str(e), str(e))
-            except Exception:
-                pass
+            except ProxyDiagnosticPersistenceError as saved_error:
+                return _diagnostic_persistence_error(saved_error, proxy.get("name", ""))
         return jsonify({
             "ok": False,
             "name": proxy.get("name", ""),
             "error": str(e),
-        })
+            "recovery_url": "/proxy/diagnostics",
+        }), 502 if diagnostic_id else 500
 
 
 @bp.route("/api/proxy/quality/<proxy_id>", methods=["GET", "POST"])
 def api_proxy_quality_saved(proxy_id):
-    proxy = get_proxy_for_test(proxy_id)
+    try:
+        proxy = get_proxy_for_test(proxy_id)
+    except Exception as e:
+        return jsonify(ok=False, error=str(e), recovery_url="/proxy/diagnostics"), 500
 
     if not proxy:
         return jsonify({
@@ -117,34 +126,36 @@ def api_proxy_quality_saved(proxy_id):
             "name": proxy.get("name", ""),
             "items": items,
         })
+    except ProxyDiagnosticPersistenceError as e:
+        return _diagnostic_persistence_error(e, proxy.get("name", ""))
     except Exception as e:
         if diagnostic_id:
             try:
                 finish_proxy_diagnostic(diagnostic_id, "failed", [], str(e), str(e))
-            except Exception:
-                pass
+            except ProxyDiagnosticPersistenceError as saved_error:
+                return _diagnostic_persistence_error(saved_error, proxy.get("name", ""))
         return jsonify({
             "ok": False,
             "name": proxy.get("name", ""),
             "error": str(e),
-        })
+            "recovery_url": "/proxy/diagnostics",
+        }), 502 if diagnostic_id else 500
 
 
 @bp.route("/api/proxy/diagnostics")
 def api_proxy_diagnostics():
     try:
-        limit = int(request.args.get("limit", "50"))
-    except (TypeError, ValueError):
-        return jsonify({"ok": False, "error": "limit 必须是整数", "items": []}), 400
-
-    status = str(request.args.get("status") or "").strip()
-    proxy_id = str(request.args.get("proxy_id") or "").strip()
-    if status and status not in PROXY_DIAGNOSTIC_STATUSES:
-        return jsonify({"ok": False, "error": "未知诊断状态", "items": []}), 400
+        limit, status, proxy_id = diagnostic_filters(request.args)
+    except ValueError as e:
+        return jsonify(ok=False, error=str(e), items=[]), 400
+    try:
+        items = load_proxy_diagnostics(limit=limit, status=status, proxy_id=proxy_id)
+    except Exception as e:
+        return jsonify(ok=False, error=str(e), items=[], recovery_url="/proxy/diagnostics"), 500
     return jsonify({
         "ok": True,
-        "items": load_proxy_diagnostics(limit=max(1, min(100, limit)), status=status, proxy_id=proxy_id),
-        "limit": max(1, min(100, limit)),
+        "items": items,
+        "limit": limit,
         "status": status,
         "proxy_id": proxy_id,
     })
@@ -154,6 +165,8 @@ def api_proxy_diagnostics():
 def api_proxy_diagnostic_retry(diagnostic_id):
     try:
         ok, message, row = retry_proxy_diagnostic(diagnostic_id)
+    except ProxyDiagnosticPersistenceError as e:
+        return _diagnostic_persistence_error(e)
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
     payload = {"ok": ok, "error": message}
@@ -166,3 +179,8 @@ def api_proxy_diagnostic_retry(diagnostic_id):
     if message in ("代理诊断正在检测", "代理诊断已成功，无需重试"):
         return jsonify(payload), 409
     return jsonify(payload), 500
+
+
+def _diagnostic_persistence_error(error, name=""):
+    return jsonify(ok=False, error=str(error), name=name, diagnostic_id=error.diagnostic_id,
+                   recovery_url="/proxy/diagnostics", status="unknown"), 500

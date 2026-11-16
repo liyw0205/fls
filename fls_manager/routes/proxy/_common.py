@@ -17,7 +17,27 @@ from ...proxy import (
     create_proxy_diagnostic,
     finish_proxy_diagnostic,
     retry_proxy_diagnostic,
+    ProxyDiagnosticPersistenceError,
 )
+
+
+def diagnostic_filters(args):
+    if any(len(args.getlist(key)) > 1 for key in ("limit", "status", "proxy_id")):
+        raise ValueError("筛选项不能重复")
+    try:
+        limit = int(args.get("limit", "50"))
+    except (TypeError, ValueError):
+        raise ValueError("limit 必须是整数") from None
+    if not 1 <= limit <= 100:
+        raise ValueError("显示条数必须在 1 到 100 之间")
+    status = args.get("status", "").strip()
+    if status and status not in PROXY_DIAGNOSTIC_STATUSES:
+        raise ValueError("未知诊断状态")
+    proxy_id = args.get("proxy_id", "").strip()
+    if len(proxy_id) > 200 or any(ord(char) < 32 for char in proxy_id):
+        raise ValueError("代理筛选标识无效")
+    return limit, status, proxy_id
+
 
 def proxy_form(proxy=None, mode="new"):
     if proxy is None:

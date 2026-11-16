@@ -1,4 +1,5 @@
 from ._common import *
+from urllib.parse import urlencode
 from ...ui.components import empty_state, empty_table_row, page_header_card, table_card
 
 
@@ -22,21 +23,14 @@ def _diagnostic_items_text(items):
 
 
 def proxy_diagnostics_page(notice="", error=False):
-    status = request.args.get("status", "").strip()
-    if status not in PROXY_DIAGNOSTIC_STATUSES:
-        status = ""
-    proxy_id = request.args.get("proxy_id", "").strip()
-    try:
-        limit = max(1, min(100, int(request.args.get("limit", "50"))))
-    except (TypeError, ValueError):
-        limit = 50
-
+    limit, status, proxy_id = diagnostic_filters(request.args)
+    filter_query = urlencode({"status": status, "proxy_id": proxy_id, "limit": limit})
     records = load_proxy_diagnostics(limit=limit, status=status, proxy_id=proxy_id)
     rows = ""
     for record in records:
         retry = ""
         if record.get("status") in ("failed", "unknown"):
-            retry = f'''<form class="inline-form" method="post" action="/proxy/diagnostics/retry/{h(record.get("id"))}">
+            retry = f'''<form class="inline-form" method="post" action="/proxy/diagnostics/retry/{h(record.get("id"))}?{h(filter_query)}">
                 <button class="btn btn-orange" type="submit">重新检测</button>
             </form>'''
         else:
@@ -58,28 +52,33 @@ def proxy_diagnostics_page(notice="", error=False):
     if not rows:
         rows = empty_table_row(8, "暂无代理诊断记录", '<a class="btn btn-gray" href="/proxy">返回代理管理</a>')
 
+    proxies = load_proxies()
     options = "".join(
         f'<option value="{h(item.get("id"))}" {"selected" if item.get("id") == proxy_id else ""}>{h(item.get("name") or item.get("id"))}</option>'
-        for item in load_proxies()
+        for item in proxies
     )
+    if proxy_id and not any(item.get("id") == proxy_id for item in proxies):
+        options += f'<option value="{h(proxy_id)}" selected>{h(proxy_id)}（已删除）</option>'
     status_options = "".join(
         f'<option value="{h(value)}" {"selected" if value == status else ""}>{h(label)}</option>'
         for value, label in (("", "全部状态"), ("succeeded", "成功"), ("failed", "失败"), ("unknown", "结果未知"), ("running", "检测中"))
     )
-    notice_html = f'<div class="notice {"red" if error else "green"}" role="status">{h(notice)}</div>' if notice else ""
+    notice_html = f'<section class="section" role="alert" data-diagnostic-notice><p>{h(notice)}</p></section>' if notice else ""
     header = page_header_card(
         "代理诊断记录",
         "查看保存代理的连接测试和质量检测结果；失败或结果未知的记录可以重新检测。",
         '<a class="btn btn-gray" href="/proxy">返回代理管理</a>',
     )
     filters = f"""
-<form method="get" class="section fls-form-section">
+<form method="get" action="/proxy/diagnostics">
+<section class="section fls-form-section">
     <div class="form-grid">
-        <div class="form-item"><label>代理</label><select name="proxy_id"><option value="">全部代理</option>{options}</select></div>
-        <div class="form-item"><label>状态</label><select name="status">{status_options}</select></div>
-        <div class="form-item"><label>显示条数</label><input name="limit" type="number" min="1" max="100" value="{limit}"></div>
+        <div class="form-item"><label for="diagnostic-proxy">代理</label><select id="diagnostic-proxy" name="proxy_id"><option value="">全部代理</option>{options}</select></div>
+        <div class="form-item"><label for="diagnostic-status">状态</label><select id="diagnostic-status" name="status">{status_options}</select></div>
+        <div class="form-item"><label for="diagnostic-limit">显示条数</label><input id="diagnostic-limit" name="limit" type="number" min="1" max="100" value="{limit}"></div>
     </div>
     <br><button class="btn btn-blue" type="submit">筛选记录</button>
+</section>
 </form>
 """
     table = table_card(
@@ -90,24 +89,43 @@ def proxy_diagnostics_page(notice="", error=False):
     return layout("代理诊断记录", "proxy", f"{header}{notice_html}{filters}{table}")
 
 
+def _diagnostic_page_error(message):
+    body = page_header_card("代理诊断记录", "记录未读取或操作未确认，请检查诊断记录文件和权限后重新读取。")
+    body += f'<section class="section" role="alert" data-diagnostic-notice><p>{h(message)}</p><a class="btn btn-blue" href="/proxy/diagnostics">重新读取诊断记录</a><a class="btn btn-gray" href="/proxy">返回代理管理</a></section>'
+    return layout("代理诊断记录", "proxy", body)
+
+
+def _diagnostic_page_response(notice="", error=False, status=200):
+    try:
+        return proxy_diagnostics_page(notice, error), status
+    except ValueError as e:
+        return _diagnostic_page_error(str(e)), 400
+    except Exception as e:
+        return _diagnostic_page_error(f"{notice}；记录读取失败：{e}" if notice else f"记录读取失败：{e}"), 500
+
+
 @bp.route("/proxy/diagnostics")
 def proxy_diagnostics():
-    return proxy_diagnostics_page()
+    return _diagnostic_page_response()
 
 
 @bp.route("/proxy/diagnostics/retry/<diagnostic_id>", methods=["POST"])
 def proxy_diagnostics_retry(diagnostic_id):
     try:
+        diagnostic_filters(request.args)
+    except ValueError as e:
+        return _diagnostic_page_error(str(e)), 400
+    try:
         ok, message, _row = retry_proxy_diagnostic(diagnostic_id)
     except Exception as exc:
-        return proxy_diagnostics_page(f"重新检测失败：{exc}", True), 500
+        return _diagnostic_page_response(f"重新检测失败：{exc}", True, 500)
     if ok:
-        return proxy_diagnostics_page(f"重新检测成功：{message}")
+        return _diagnostic_page_response(f"重新检测成功：{message}")
     if message == "代理诊断不存在":
-        return proxy_diagnostics_page(message, True), 404
+        return _diagnostic_page_response(message, True, 404)
     if message in ("代理诊断正在检测", "代理诊断已成功，无需重试"):
-        return proxy_diagnostics_page(message, True), 409
-    return proxy_diagnostics_page(f"重新检测失败：{message}", True), 500
+        return _diagnostic_page_response(message, True, 409)
+    return _diagnostic_page_response(f"重新检测失败：{message}", True, 500)
 
 
 @bp.route("/proxy")
@@ -260,6 +278,14 @@ function showProxyResult(html){{
     document.getElementById("proxyResultText").innerHTML = html;
 }}
 
+function showProxyFailure(error){{
+    let html = escapeHtml(flsActionFailure("请求失败：" + String(error), "检查服务状态后重试"));
+    if(error.payload && error.payload.recovery_url === "/proxy/diagnostics"){{
+        html += '<br><a class="btn btn-orange" href="/proxy/diagnostics">查看诊断记录并恢复</a>';
+    }}
+    showProxyResult(html);
+}}
+
 async function flsProxyTest(proxyId, source){{
     if(!flsMarkButtonBusy(source, "测试中...")) return;
     showProxyResult("正在测试代理，请稍候...");
@@ -280,7 +306,7 @@ async function flsProxyTest(proxyId, source){{
             showProxyResult(escapeHtml(flsActionFailure("失败：" + (json.error || "未知错误"), "检查代理配置后重试")));
         }}
     }} catch(e) {{
-        showProxyResult(escapeHtml(flsActionFailure("请求失败：" + String(e), "检查服务状态后重试")));
+        showProxyFailure(e);
     }} finally {{
         flsRestoreButton(source);
     }}
@@ -317,7 +343,7 @@ async function flsProxyQuality(proxyId, source){{
         html += "</tbody></table></div>";
         showProxyResult(html);
     }} catch(e) {{
-        showProxyResult(escapeHtml(flsActionFailure("请求失败：" + String(e), "检查服务状态后重试")));
+        showProxyFailure(e);
     }} finally {{
         flsRestoreButton(source);
     }}
