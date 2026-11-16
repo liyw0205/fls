@@ -37,6 +37,7 @@ NOTIFY_HISTORY_STATUSES = (
 )
 NOTIFY_HISTORY_LOCK = threading.RLock()
 NOTIFY_ACTIVE_DELIVERIES = set()
+_NOTIFY_HISTORY_CACHE = None
 
 
 def _notify_text(value, default=""):
@@ -114,27 +115,59 @@ def _notify_history_rows(raw):
     return limited, changed
 
 
+def _notify_history_file_signature():
+    try:
+        stat = NOTIFY_HISTORY_FILE.stat()
+    except OSError:
+        return (False, 0, 0, 0)
+    return (True, stat.st_ino, stat.st_mtime_ns, stat.st_size)
+
+
+def _invalidate_notify_history_cache():
+    global _NOTIFY_HISTORY_CACHE
+    _NOTIFY_HISTORY_CACHE = None
+
+
+def _load_notify_history_rows():
+    """Load normalized rows once per file/active-delivery state."""
+    global _NOTIFY_HISTORY_CACHE
+    signature = _notify_history_file_signature()
+    active = frozenset(NOTIFY_ACTIVE_DELIVERIES)
+    if (
+        _NOTIFY_HISTORY_CACHE is not None
+        and _NOTIFY_HISTORY_CACHE[0] == signature
+        and _NOTIFY_HISTORY_CACHE[1] == active
+    ):
+        return _NOTIFY_HISTORY_CACHE[2]
+
+    raw = read_json(NOTIFY_HISTORY_FILE, [])
+    rows, changed = _notify_history_rows(raw)
+    if changed:
+        write_json(NOTIFY_HISTORY_FILE, rows)
+        signature = _notify_history_file_signature()
+
+    _NOTIFY_HISTORY_CACHE = (signature, active, rows)
+    return rows
+
+
 def load_notify_history(limit=None, status=""):
     """Return newest delivery rows and persist restart recovery when needed."""
     with NOTIFY_HISTORY_LOCK:
-        raw = read_json(NOTIFY_HISTORY_FILE, [])
-        rows, changed = _notify_history_rows(raw)
-        if changed:
-            write_json(NOTIFY_HISTORY_FILE, rows)
+        rows = _load_notify_history_rows()
 
         status = _notify_text(status).strip()
         if status in NOTIFY_HISTORY_STATUSES:
             rows = [row for row in rows if row.get("status") == status]
 
         if limit is None:
-            return rows
+            return [dict(row) for row in rows]
 
         try:
             limit = int(limit)
         except Exception:
             limit = 50
 
-        return rows[:max(1, min(100, limit))]
+        return [dict(row) for row in rows[:max(1, min(100, limit))]]
 
 
 def get_notify_delivery(delivery_id):
@@ -177,6 +210,7 @@ def create_notify_delivery(item, title, content, source="manual", retry_of=""):
         rows.insert(0, row)
         write_json(NOTIFY_HISTORY_FILE, rows[:NOTIFY_HISTORY_LIMIT])
         NOTIFY_ACTIVE_DELIVERIES.add(row["id"])
+        _invalidate_notify_history_cache()
 
     return row["id"]
 
@@ -199,6 +233,7 @@ def finish_notify_delivery(delivery_id, ok, message):
 
         if not found:
             NOTIFY_ACTIVE_DELIVERIES.discard(delivery_id)
+            _invalidate_notify_history_cache()
             return False
 
         try:
@@ -206,9 +241,11 @@ def finish_notify_delivery(delivery_id, ok, message):
         except Exception:
             # Let the next read expose the row as unknown so it can be retried.
             NOTIFY_ACTIVE_DELIVERIES.discard(delivery_id)
+            _invalidate_notify_history_cache()
             raise
 
         NOTIFY_ACTIVE_DELIVERIES.discard(delivery_id)
+        _invalidate_notify_history_cache()
         return True
 
 
@@ -241,6 +278,7 @@ def _claim_notify_delivery(delivery_id):
         target["updated_at"] = now_str()
         write_json(NOTIFY_HISTORY_FILE, rows[:NOTIFY_HISTORY_LIMIT])
         NOTIFY_ACTIVE_DELIVERIES.add(target["id"])
+        _invalidate_notify_history_cache()
         return dict(target), ""
 
 

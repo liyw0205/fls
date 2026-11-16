@@ -44,6 +44,7 @@ P95_THRESHOLDS_MS = {
     "toggle": 15.0,
     "export": 125.0,
     "task_log_tail": 150.0,
+    "notify_history": 15.0,
 }
 RSS_THRESHOLD_MB = 128.0
 
@@ -142,6 +143,38 @@ def _write_task_log_fixture(base_dir, line_count=10_000):
     if path.stat().st_size != expected_bytes:
         raise RuntimeError("task log fixture size is not deterministic")
     return {"lines": line_count, "file_bytes": expected_bytes, "path": str(path)}
+
+
+def _write_notify_history_fixture(base_dir, row_count=300):
+    """Create the bounded notification history used by the history endpoint."""
+    if row_count != 300:
+        raise ValueError("notification fixture must contain exactly 300 rows")
+
+    data_dir = Path(base_dir) / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    statuses = ("failed", "succeeded", "unknown")
+    rows = []
+    for index in range(row_count):
+        task_index = index % DEFAULT_TASKS
+        rows.append({
+            "id": f"bench-delivery-{index:04d}",
+            "item_id": f"notify-item-{index % 4}",
+            "item_name": f"Synthetic Channel {index % 4}",
+            "channel": "bark",
+            "title": f"Synthetic notification {index:04d}",
+            "content": f"Synthetic delivery body for task {task_index:04d}",
+            "content_truncated": False,
+            "source": "benchmark",
+            "status": statuses[index % len(statuses)],
+            "attempt": 1 + index % 3,
+            "message": "remote rejected" if index % len(statuses) == 0 else "accepted",
+            "created_at": f"2026-11-16 00:{index // 60:02d}:{index % 60:02d}",
+            "updated_at": f"2026-11-16 00:{index // 60:02d}:{index % 60:02d}",
+            "retry_of": "",
+        })
+    path = data_dir / "notify_history.json"
+    path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"rows": len(rows), "path": str(path)}
 
 
 def _legacy_mask_sensitive_text(text):
@@ -676,6 +709,166 @@ def run_status_comparison(iterations=20, check=False):
                 os.environ[key] = value
 
 
+def _run_notify_history_worker(base_dir, iterations, implementation):
+    os.environ["FLS_BASE_DIR"] = str(base_dir)
+    os.environ["FLS_TOKEN"] = TOKEN
+    os.environ["FLS_SECRET_KEY"] = "performance-benchmark-secret"
+    _purge_fls_modules()
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+
+    try:
+        from fls_manager.app import create_app
+        from fls_manager import notify, paths
+
+        reads = {"count": 0}
+        original_read_json = notify.read_json
+
+        def counted_read_json(file_path, default):
+            if Path(file_path) == paths.NOTIFY_HISTORY_FILE:
+                reads["count"] += 1
+            return original_read_json(file_path, default)
+
+        notify.read_json = counted_read_json
+        if implementation == "legacy":
+            def uncached_notify_history_rows():
+                raw = notify.read_json(paths.NOTIFY_HISTORY_FILE, [])
+                rows, changed = notify._notify_history_rows(raw)
+                if changed:
+                    notify.write_json(paths.NOTIFY_HISTORY_FILE, rows)
+                return rows
+
+            notify._load_notify_history_rows = uncached_notify_history_rows
+
+        with contextlib.redirect_stdout(sys.stderr):
+            app = create_app()
+            app.config.update(TESTING=True)
+            client = app.test_client()
+            with client.session_transaction() as session:
+                session["csrf_token"] = "performance-benchmark-csrf-token"
+            measurement = _measure(
+                client,
+                "notify_history",
+                "get",
+                "/api/notify/history?status=failed&limit=100",
+                iterations,
+            )
+        measurement["notify_history_file_reads"] = reads["count"]
+        print(json.dumps({
+            "implementation": implementation,
+            "measurement": measurement,
+            "query_plan": "bounded JSON history read; cache keyed by file stat and active delivery set",
+        }, ensure_ascii=False))
+    finally:
+        _shutdown_fls_scheduler()
+        _purge_fls_modules()
+
+
+def run_notify_history_comparison(iterations=40, check=False):
+    if not 1 <= iterations <= MAX_ITERATIONS:
+        raise ValueError(f"iterations must be between 1 and {MAX_ITERATIONS}")
+
+    keys = ("FLS_BASE_DIR", "FLS_TOKEN", "FLS_SECRET_KEY")
+    old_env = {key: os.environ.get(key) for key in keys}
+    try:
+        with tempfile.TemporaryDirectory(prefix="fls-notify-history-10k-") as temp_dir:
+            os.environ["FLS_BASE_DIR"] = temp_dir
+            os.environ["FLS_TOKEN"] = TOKEN
+            os.environ["FLS_SECRET_KEY"] = "performance-benchmark-secret"
+            _purge_fls_modules()
+
+            fixture = _write_fixture(temp_dir)
+            notify_fixture = _write_notify_history_fixture(temp_dir)
+            fixture_hashes = {
+                "tasks": _sha256(Path(temp_dir) / "data" / "tasks.json"),
+                "history": _sha256(Path(temp_dir) / "data" / "task_history.json"),
+                "notify_history": _sha256(Path(temp_dir) / "data" / "notify_history.json"),
+            }
+            _purge_fls_modules()
+
+            worker_reports = {}
+            worker_env = os.environ.copy()
+            for implementation in ("legacy", "current"):
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        str(Path(__file__).resolve()),
+                        "--notify-history-worker",
+                        implementation,
+                        "--base-dir",
+                        temp_dir,
+                        "--iterations",
+                        str(iterations),
+                    ],
+                    cwd=str(ROOT),
+                    env=worker_env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if completed.returncode:
+                    raise RuntimeError(
+                        f"{implementation} notify-history worker failed: {completed.stderr.strip()}"
+                    )
+                worker_reports[implementation] = json.loads(completed.stdout)
+
+            legacy = worker_reports["legacy"]["measurement"]
+            current = worker_reports["current"]["measurement"]
+            response_unchanged = (
+                legacy["response_body_sha256"] == current["response_body_sha256"]
+                and legacy["response_bytes_avg"] == current["response_bytes_avg"]
+                and legacy["http_statuses"] == current["http_statuses"]
+            )
+            result = {
+                "benchmark": "fls-notify-history-cache-compare",
+                "iterations_per_implementation": iterations,
+                "request": "GET /api/notify/history?status=failed&limit=100",
+                "fixture": fixture,
+                "notify_history_fixture": notify_fixture,
+                "fixture_sha256": fixture_hashes,
+                "fixture_generations": 1,
+                "workers": 2,
+                "measured_requests": sum(
+                    item["measurement"]["samples"] for item in worker_reports.values()
+                ),
+                "temporary_fixture_disk_bytes": _directory_size_bytes(temp_dir),
+                "lock": "flock -w 600 /tmp/nonebot-project-validation.lock",
+                "legacy": worker_reports["legacy"],
+                "current": worker_reports["current"],
+                "response_unchanged": response_unchanged,
+                "thresholds": {
+                    "current_p95_ms": P95_THRESHOLDS_MS["notify_history"],
+                    "rss_peak_mb": RSS_THRESHOLD_MB,
+                    "errors": 0,
+                    "latency": "current p50/p95/p99 improve; response reads decrease",
+                },
+            }
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            if check:
+                validate_thresholds({"measurements": [current]})
+                if not response_unchanged:
+                    raise RuntimeError("notification history response changed between workers")
+                if legacy["errors"] or current["errors"]:
+                    raise RuntimeError("notification history comparison returned errors")
+                if current["notify_history_file_reads"] >= legacy["notify_history_file_reads"]:
+                    raise RuntimeError("notification history cache did not reduce file reads")
+                if not (
+                    current["p50_ms"] < legacy["p50_ms"]
+                    and current["p95_ms"] < legacy["p95_ms"]
+                    and current["p99_ms"] <= legacy["p99_ms"]
+                ):
+                    raise RuntimeError("notification history latency improvement was not consistent")
+            return result
+    finally:
+        _shutdown_fls_scheduler()
+        _purge_fls_modules()
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def _run_task_log_tail_worker(base_dir, iterations, implementation):
     os.environ["FLS_BASE_DIR"] = str(base_dir)
     os.environ["FLS_TOKEN"] = TOKEN
@@ -932,6 +1125,7 @@ def run_benchmark(
         "toggle",
         "export",
         "task_log_tail",
+        "notify_history",
     )
     if only not in valid_scenarios:
         raise ValueError("only must name a known benchmark scenario")
@@ -959,6 +1153,11 @@ def run_benchmark(
             task_log_fixture = (
                 _write_task_log_fixture(temp_dir)
                 if only == "task_log_tail"
+                else None
+            )
+            notify_history_fixture = (
+                _write_notify_history_fixture(temp_dir)
+                if only == "notify_history"
                 else None
             )
             index_build_ms = None
@@ -1002,6 +1201,7 @@ def run_benchmark(
                     ("toggle", "post", "/api/task/action/toggle/bench-task-0001"),
                     ("export", "get", "/history/export"),
                     ("task_log_tail", "get", "/api/log/bench-task-0001?lines=1200"),
+                    ("notify_history", "get", "/api/notify/history?status=failed&limit=100"),
                 ]
                 if only == "search_suite":
                     routes = [route for route in routes if route[0].startswith("search")]
@@ -1013,6 +1213,12 @@ def run_benchmark(
                 ]
                 if only == "task_log_tail":
                     explain = {"task_log_tail": "bounded filesystem tail; no SQL query"}
+                    search_diagnostics = {}
+                    search_correctness = {"status": "not_applicable"}
+                elif only == "notify_history":
+                    explain = {
+                        "notify_history": "bounded JSON history read; cache keyed by file stat and active delivery set",
+                    }
                     search_diagnostics = {}
                     search_correctness = {"status": "not_applicable"}
                 elif only == "detail":
@@ -1060,8 +1266,14 @@ def run_benchmark(
                     "tasks": _sha256(Path(temp_dir) / "data" / "tasks.json"),
                     "history": _sha256(Path(temp_dir) / "data" / "task_history.json"),
                     "task_log": _sha256(task_log_fixture["path"]) if task_log_fixture else None,
+                    "notify_history": (
+                        _sha256(notify_history_fixture["path"])
+                        if notify_history_fixture
+                        else None
+                    ),
                 },
                 "task_log_fixture": task_log_fixture,
+                "notify_history_fixture": notify_history_fixture,
                 "temporary_fixture_disk_bytes": _directory_size_bytes(temp_dir),
                 "history_index_bytes": (
                     (Path(temp_dir) / "data" / "task_history_index.sqlite3").stat().st_size
@@ -1114,6 +1326,11 @@ def main(argv=None):
         help="compare per-task runtime checks with one batched status snapshot on one shared fixture",
     )
     parser.add_argument(
+        "--compare-notify-history",
+        action="store_true",
+        help="compare uncached and cached notification history reads on one shared fixture",
+    )
+    parser.add_argument(
         "--detail-worker",
         choices=("legacy", "current"),
         help=argparse.SUPPRESS,
@@ -1124,6 +1341,11 @@ def main(argv=None):
         help=argparse.SUPPRESS,
     )
     parser.add_argument("--status-worker", choices=("legacy", "current"), help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--notify-history-worker",
+        choices=("legacy", "current"),
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--base-dir", help=argparse.SUPPRESS)
     parser.add_argument("--mode", choices=("baseline", "optimized"), default="optimized")
     parser.add_argument("--rows", type=int, default=DEFAULT_ROWS)
@@ -1154,6 +1376,7 @@ def main(argv=None):
             "toggle",
             "export",
             "task_log_tail",
+            "notify_history",
         ),
         help="measure one scenario while keeping the standard bounded fixture",
     )
@@ -1177,6 +1400,15 @@ def main(argv=None):
             parser.error("--status-worker requires --base-dir")
         _run_status_worker(args.base_dir, args.iterations, args.status_worker)
         return
+    if args.notify_history_worker:
+        if not args.base_dir:
+            parser.error("--notify-history-worker requires --base-dir")
+        _run_notify_history_worker(
+            args.base_dir,
+            args.iterations,
+            args.notify_history_worker,
+        )
+        return
     if args.compare_detail:
         run_detail_comparison(args.iterations, args.check)
         return
@@ -1185,6 +1417,9 @@ def main(argv=None):
         return
     if args.compare_status:
         run_status_comparison(args.iterations, args.check)
+        return
+    if args.compare_notify_history:
+        run_notify_history_comparison(args.iterations, args.check)
         return
     run_benchmark(
         args.mode,

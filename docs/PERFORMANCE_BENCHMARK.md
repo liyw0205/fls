@@ -257,3 +257,31 @@ current 的 p50/p95/p99 分别降低约 64.3%/68.2%/87.7%，吞吐提升约 3.26
 完全一致。该接口只读取任务 JSON 和内存运行态，不执行 SQL；benchmark 的计划证据为
 `tasks.json normalization plus runtime snapshot; no SQL query`。定向回归为 `78 passed, 9 subtests`
 （含运行态变化、任务文件写入后的签名失效和错误响应合同）。
+
+## 2026-11-16 通知历史签名缓存
+
+`GET /api/notify/history?status=failed&limit=100` 和 `/notify/history` 是通知管理页及外部面板
+读取投递结果的真实入口。旧路径每次请求都会读取并规范化最多 300 条
+`data/notify_history.json`，即使文件和活动投递状态都没有变化。当前路径以文件设备号/inode、mtime
+纳秒、大小和 `NOTIFY_ACTIVE_DELIVERIES` 集合作为缓存键，复用规范化行并向调用方返回副本；原子写入、
+创建/完成/重试状态变化会主动失效，重启时仍将无法确认的 `running` 行恢复为 `unknown`。JSON 文件仍是
+权威数据，缺失或损坏文件继续返回既有空列表/规范化结果。该读路径不执行 SQL，等价计划为
+`bounded JSON history read; cache keyed by file stat and active delivery set`。
+
+在 `flock -w 600 /tmp/nonebot-project-validation.lock` 内，以同一份临时 fixture 各执行 40 次真实 API
+请求。fixture 固定 10,000 条任务历史、100 个任务和 300 条通知记录，只生成一次；tasks/history/notify
+SHA-256 分别为
+`be7ad454975049c1541cf6c5ff442a3a8551a1d11ab8fed526a8875c917e13b2`、
+`adde4a00dc4a430071f9e605b58ffeb821abc51cb72570a2055343264531eb72`、
+`2b50ab2d9bbb703894e0374683ab27de3c45d9a18fbc0952757d97522fab5ca8`；临时目录为 `3,927,842B`，
+测试后由 `TemporaryDirectory` 清理。
+
+| 实现 | p50/p95/p99 ms | 吞吐 req/s | CPU 秒 | 错误数/率 | RSS MB | 响应体 B | 通知文件读取 | body SHA-256 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| legacy（每请求读取/规范化） | 2.506 / 2.805 / 3.338 | 387.508 | 0.103190 | 0 / 0% | 55.016 | 38,352 | 42 | `5d4b61947b5d39c88af7dbc363c93a98a3a7d19372ee0afe26b932676b2e35c1` |
+| current（签名/活动态缓存） | 1.613 / 1.712 / 1.761 | 615.485 | 0.065001 | 0 / 0% | 55.223 | 38,352 | 1 | 同上 |
+
+current 的 p50/p95/p99 分别降低约 35.6%/39.0%/47.2%，吞吐提升约 58.8%，CPU 时间降低约
+36.9%，峰值 RSS 增加 0.207MB；稳定请求的通知文件读取从 42 次降至 1 次。两组均返回 HTTP 200，
+字段、排序、过滤和响应字节/hash 完全一致。6 个通知恢复/缓存定向测试通过，覆盖 API/UI 对等响应、
+副本隔离、外部文件更新失效、活动投递状态切换、重启恢复、并发重试和错误码。

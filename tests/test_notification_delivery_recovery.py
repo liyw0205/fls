@@ -127,6 +127,67 @@ class NotificationDeliveryRecoveryTests(unittest.TestCase):
             self.assertEqual(row["attempt"], 2)
             self.assertEqual(read_json(base_dir / "data" / "notify_history.json")[0]["status"], "succeeded")
 
+    def test_history_cache_reuses_stable_file_and_returns_copies(self):
+        with isolated_modules() as base_dir:
+            from fls_manager import notify, paths
+            from fls_manager.storage import write_json
+
+            row = {
+                "id": "delivery-cache",
+                "item_id": "n1",
+                "item_name": "One",
+                "channel": "bark",
+                "title": "Title",
+                "content": "Body",
+                "status": "failed",
+                "attempt": 1,
+                "message": "failed",
+                "created_at": "2026-11-16 00:00:00",
+                "updated_at": "2026-11-16 00:00:00",
+            }
+            write_json(paths.NOTIFY_HISTORY_FILE, [row])
+
+            with patch.object(notify, "read_json", wraps=notify.read_json) as read:
+                first = notify.load_notify_history()
+                second = notify.load_notify_history()
+
+            self.assertEqual(read.call_count, 1)
+            self.assertEqual(first, second)
+            first[0]["status"] = "succeeded"
+            self.assertEqual(second[0]["status"], "failed")
+
+            write_json(paths.NOTIFY_HISTORY_FILE, [{**row, "status": "succeeded"}])
+            refreshed = notify.load_notify_history()
+            self.assertEqual(refreshed[0]["status"], "succeeded")
+
+    def test_history_cache_tracks_active_delivery_and_restart_recovery(self):
+        with isolated_modules() as base_dir:
+            from fls_manager import notify, paths
+            from fls_manager.storage import write_json
+
+            row = {
+                "id": "delivery-running",
+                "item_id": "n1",
+                "item_name": "One",
+                "channel": "bark",
+                "title": "Title",
+                "content": "Body",
+                "status": "running",
+                "attempt": 1,
+                "message": "发送中",
+            }
+            write_json(paths.NOTIFY_HISTORY_FILE, [row])
+            notify.NOTIFY_ACTIVE_DELIVERIES.add(row["id"])
+            try:
+                self.assertEqual(notify.load_notify_history()[0]["status"], "running")
+            finally:
+                notify.NOTIFY_ACTIVE_DELIVERIES.clear()
+
+            recovered = notify.load_notify_history()
+            self.assertEqual(recovered[0]["status"], "unknown")
+            self.assertIn("无法确认", recovered[0]["message"])
+            self.assertEqual(read_json(base_dir / "data" / "notify_history.json")[0]["status"], "unknown")
+
     def test_concurrent_retry_allows_one_claim(self):
         with isolated_modules():
             from fls_manager import notify, paths
