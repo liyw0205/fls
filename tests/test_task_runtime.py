@@ -133,6 +133,20 @@ class ImmediateThread:
         self.started = True
 
 
+class FailingStartThread:
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+
+    def start(self):
+        raise RuntimeError("thread quota exhausted")
+
+
+class FailingConstructThread:
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError("thread construction failed")
+
+
 class RecordingTimer:
     created = []
 
@@ -325,6 +339,43 @@ class TaskRuntimeTests(unittest.TestCase):
             self.assertEqual(len(ImmediateThread.created), 1)
             self.assertTrue(ImmediateThread.created[0].started)
             self.assertEqual(ImmediateThread.created[0].args[0], "t1")
+
+        cleanup_runtime_state()
+
+    def test_run_task_now_rolls_back_when_start_thread_fails(self):
+        with isolated_fls_modules():
+            from fls_manager import paths, task_runner
+
+            task = {
+                "id": "t1",
+                "name": "Thread failure",
+                "command": "echo ok",
+                "retry": {"attempts": 0, "interval_seconds": 5},
+            }
+            log_dir = Path(os.environ["FLS_BASE_DIR"]) / "log"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_file = log_dir / "thread-failure.log"
+            cmd_info = {
+                "cmd": "echo ok",
+                "shell": True,
+                "cwd": str(Path(os.environ["FLS_BASE_DIR"])),
+                "display_cmd": "echo ok",
+            }
+
+            with mock.patch.object(task_runner, "get_task", return_value=task), \
+                    mock.patch.object(task_runner, "build_command", return_value=cmd_info), \
+                    mock.patch.object(task_runner, "log_file_for_task", return_value=log_file), \
+                    mock.patch.object(task_runner.threading, "Thread", FailingStartThread):
+                ok, msg = task_runner.run_task_now("t1", source="manual")
+
+            self.assertFalse(ok)
+            self.assertIn("后台线程启动失败", msg)
+            self.assertNotIn("t1", task_runner.RUNNING)
+            history = read_json(paths.TASK_HISTORY_FILE)
+            self.assertEqual(history[0]["status"], "start_failed")
+            self.assertTrue(history[0]["end_at"])
+            self.assertIn("后台线程启动失败", history[0]["message"])
+            self.assertIn("thread quota exhausted", log_file.read_text(encoding="utf-8"))
 
         cleanup_runtime_state()
 
@@ -1019,6 +1070,108 @@ class TaskRuntimeTests(unittest.TestCase):
             self.assertIs(watcher.args[2], fake_proc)
             self.assertEqual(watcher.args[-3:], ("history-1", 100.0, 0))
             self.assertTrue(watcher.started)
+
+    def test_start_task_worker_falls_back_to_current_worker_when_watcher_thread_fails(self):
+        with isolated_fls_modules():
+            from fls_manager import task_runner
+
+            task_runner.RUNNING["t1"] = {
+                "status": "starting",
+                "history_id": "history-1",
+            }
+            log_file = Path(os.environ["FLS_BASE_DIR"]) / "log" / "watcher-failure.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_fp = open(log_file, "ab", buffering=0)
+            fake_proc = FakeProc(return_code=0)
+            task = {"id": "t1", "name": "Watcher failure", "command": "echo ok"}
+            cmd_info = {
+                "cmd": ["python", "demo.py"],
+                "shell": False,
+                "cwd": str(Path(os.environ["FLS_BASE_DIR"])),
+                "display_cmd": "python demo.py",
+            }
+
+            try:
+                with mock.patch.object(task_runner, "load_global_env", return_value={}), \
+                        mock.patch.object(task_runner, "apply_proxy_env", side_effect=lambda env, proxy_id: env), \
+                        mock.patch.object(task_runner, "task_random_delay_seconds", return_value=0), \
+                        mock.patch.object(task_runner.subprocess, "Popen", return_value=fake_proc), \
+                        mock.patch.object(task_runner, "increase_run_count"), \
+                        mock.patch.object(task_runner, "task_finish_watcher") as watcher, \
+                        mock.patch.object(task_runner.threading, "Thread", FailingStartThread):
+                    task_runner._start_task_worker(
+                        "t1",
+                        task,
+                        cmd_info,
+                        "FLS-Watcher-failure",
+                        str(log_file),
+                        log_fp,
+                        "manual",
+                        "history-1",
+                        100.0,
+                        0,
+                    )
+            finally:
+                with contextlib.suppress(Exception):
+                    log_fp.close()
+
+            watcher.assert_called_once()
+            self.assertIs(task_runner.RUNNING["t1"]["process"], fake_proc)
+            self.assertIn("监听线程启动失败", log_file.read_text(encoding="utf-8"))
+            task_runner.RUNNING.clear()
+
+        cleanup_runtime_state()
+
+    def test_start_task_worker_falls_back_when_watcher_thread_construction_fails(self):
+        with isolated_fls_modules():
+            from fls_manager import task_runner
+
+            task_runner.RUNNING["t1"] = {
+                "status": "starting",
+                "history_id": "history-1",
+            }
+            log_file = Path(os.environ["FLS_BASE_DIR"]) / "log" / "watcher-construction-failure.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_fp = open(log_file, "ab", buffering=0)
+            fake_proc = FakeProc(return_code=0)
+            task = {"id": "t1", "name": "Watcher construction", "command": "echo ok"}
+            cmd_info = {
+                "cmd": ["python", "demo.py"],
+                "shell": False,
+                "cwd": str(Path(os.environ["FLS_BASE_DIR"])),
+                "display_cmd": "python demo.py",
+            }
+
+            try:
+                with mock.patch.object(task_runner, "load_global_env", return_value={}), \
+                        mock.patch.object(task_runner, "apply_proxy_env", side_effect=lambda env, proxy_id: env), \
+                        mock.patch.object(task_runner, "task_random_delay_seconds", return_value=0), \
+                        mock.patch.object(task_runner.subprocess, "Popen", return_value=fake_proc), \
+                        mock.patch.object(task_runner, "increase_run_count"), \
+                        mock.patch.object(task_runner, "task_finish_watcher") as watcher, \
+                        mock.patch.object(task_runner.threading, "Thread", FailingConstructThread):
+                    task_runner._start_task_worker(
+                        "t1",
+                        task,
+                        cmd_info,
+                        "FLS-Watcher-construction",
+                        str(log_file),
+                        log_fp,
+                        "manual",
+                        "history-1",
+                        100.0,
+                        0,
+                    )
+            finally:
+                with contextlib.suppress(Exception):
+                    log_fp.close()
+
+            watcher.assert_called_once()
+            self.assertIs(task_runner.RUNNING["t1"]["process"], fake_proc)
+            self.assertIn("监听线程启动失败", log_file.read_text(encoding="utf-8"))
+            task_runner.RUNNING.clear()
+
+        cleanup_runtime_state()
 
     def test_stale_start_worker_cannot_claim_a_new_reservation(self):
         with isolated_fls_modules():

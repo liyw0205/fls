@@ -145,7 +145,12 @@ def run_task_route(task_id):
     back_url = get_back_url("/tasks")
 
     if not ok:
-        status_code = 404 if msg == "任务不存在" else 400
+        if msg == "任务不存在":
+            status_code = 404
+        elif msg.startswith("任务启动失败"):
+            status_code = 500
+        else:
+            status_code = 400
         body = f"""
 {message_card(msg, "error", strong=True, title="运行失败")}
 <div class="card">

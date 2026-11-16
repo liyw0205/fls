@@ -133,6 +133,9 @@ def _task_action_result(ok, msg):
     ):
         return jsonify(payload), 409
 
+    if not ok and msg.startswith("任务启动失败"):
+        return jsonify(payload), 500
+
     return jsonify(payload)
 
 

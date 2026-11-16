@@ -721,13 +721,32 @@ def _start_task_worker(task_id, task_snapshot, cmd_info, process_name, log_file,
 
         increase_run_count(task_id)
 
-        th = threading.Thread(
-            target=task_finish_watcher,
-            args=(task_id, dict(task_snapshot), proc, str(log_file), log_fp, history_id, history_start_ts, retry_attempt),
-            daemon=True,
-            name=f"fls-task-watch-{task_id[:8]}",
-        )
-        th.start()
+        try:
+            th = threading.Thread(
+                target=task_finish_watcher,
+                args=(task_id, dict(task_snapshot), proc, str(log_file), log_fp, history_id, history_start_ts, retry_attempt),
+                daemon=True,
+                name=f"fls-task-watch-{task_id[:8]}",
+            )
+            th.start()
+        except Exception as watcher_error:
+            # A process is already owned by RUNNING at this point. If the
+            # watcher cannot get a thread, finish it from the current worker
+            # instead of closing the log and losing the child process.
+            append_task_log(
+                log_file,
+                f"\n===== 任务监听线程启动失败，改为当前 worker 监听: {watcher_error} =====\n",
+            )
+            task_finish_watcher(
+                task_id,
+                dict(task_snapshot),
+                proc,
+                str(log_file),
+                log_fp,
+                history_id,
+                history_start_ts,
+                retry_attempt,
+            )
 
     except Exception as e:
         try:
@@ -775,6 +794,8 @@ def run_task_now(task_id, source="manual", retry_attempt=0, retry_token=None):
     if source != "retry":
         source_label = {"manual": "手动运行", "cron": "定时运行"}.get(source, "新运行请求")
         cancel_task_retry(task_id, source_label)
+
+    submission_error = None
 
     with _RUNNING_LOCK:
         if is_running(task_id):
@@ -842,13 +863,46 @@ def run_task_now(task_id, source="manual", retry_attempt=0, retry_token=None):
         }
         STOPPED_MANUALLY.discard((task_id, history_id))
 
-        th = threading.Thread(
-            target=_start_task_worker,
-            args=(task_id, dict(task), cmd_info, process_name, str(log_file), log_fp, source, history_id, history_start_ts, retry_attempt),
-            daemon=True,
-            name=f"fls-task-start-{task_id[:8]}",
+        try:
+            th = threading.Thread(
+                target=_start_task_worker,
+                args=(task_id, dict(task), cmd_info, process_name, str(log_file), log_fp, source, history_id, history_start_ts, retry_attempt),
+                daemon=True,
+                name=f"fls-task-start-{task_id[:8]}",
+            )
+            th.start()
+        except Exception as exc:
+            submission_error = exc
+            RUNNING.pop(task_id, None)
+            STOPPED_MANUALLY.discard((task_id, history_id))
+
+    if submission_error is not None:
+        error_text = f"后台线程启动失败：{submission_error}"
+        append_task_log(log_file, f"\n===== 任务启动失败: {error_text} =====\n")
+        try:
+            log_fp.close()
+        except Exception:
+            pass
+
+        try:
+            retry_scheduled, retry_msg = schedule_task_retry(
+                task_id,
+                task,
+                retry_attempt,
+                error_text,
+                str(log_file),
+            )
+        except Exception as retry_error:
+            retry_scheduled = False
+            retry_msg = f"{error_text}；重试计划失败：{retry_error}"
+        finish_task_history(
+            history_id,
+            history_start_ts,
+            "start_failed",
+            log_file=str(log_file),
+            message=retry_msg if retry_scheduled else error_text,
         )
-        th.start()
+        return False, f"任务启动失败：{retry_msg if retry_scheduled else error_text}"
 
     return True, "已提交启动"
 

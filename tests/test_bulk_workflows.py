@@ -1315,6 +1315,24 @@ class BulkWorkflowTests(unittest.TestCase):
             save_tasks.assert_not_called()
             reload_scheduler.assert_not_called()
 
+    def test_task_action_run_thread_start_failure_returns_500(self):
+        with isolated_app() as (app, _base_dir):
+            with patch(
+                "fls_manager.routes.api.run_task_now",
+                return_value=(False, "任务启动失败：后台线程启动失败：thread quota exhausted"),
+            ) as run_task_now:
+                response = app.test_client().post(
+                    "/api/task/action/run/t1",
+                    headers={"X-Token": TOKEN},
+                )
+
+            payload = response.get_json()
+
+            self.assertEqual(response.status_code, 500)
+            self.assertFalse(payload["ok"])
+            self.assertIn("后台线程启动失败", payload["msg"])
+            run_task_now.assert_called_once_with("t1", source="manual")
+
     def test_legacy_run_route_post_submits_task_and_uses_safe_back(self):
         with isolated_app() as (app, _base_dir):
             from fls_manager import paths
