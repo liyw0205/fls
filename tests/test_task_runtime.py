@@ -955,6 +955,7 @@ class TaskRuntimeTests(unittest.TestCase):
                 self.assertFalse(stopper.is_alive())
                 self.assertEqual(result, [(True, "已结束")])
                 self.assertNotIn("t1", task_runner.RUNNING)
+                self.assertNotIn(("t1", "history-1"), task_runner.STOPPED_MANUALLY)
             finally:
                 release_append.set()
                 with contextlib.suppress(Exception):
@@ -1621,6 +1622,70 @@ class TaskRuntimeTests(unittest.TestCase):
             self.assertEqual(history[0]["status"], "running")
             self.assertIn("无法确认任务进程已退出", history[0]["message"])
             self.assertIn("超时后停止失败", log_file.read_text(encoding="utf-8"))
+
+    def test_stop_after_timeout_failure_finalizes_history_and_clears_marker(self):
+        with isolated_fls_modules():
+            from fls_manager import paths, task_runner
+
+            log_file = Path(os.environ["FLS_BASE_DIR"]) / "log" / "timeout-recovery.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_fp = open(log_file, "ab", buffering=0)
+            proc = mock.Mock(
+                pid=4321,
+                wait=mock.Mock(side_effect=subprocess.TimeoutExpired("task", 5)),
+                poll=mock.Mock(return_value=None),
+            )
+            task_runner.RUNNING["t1"] = {
+                "status": "running",
+                "process": proc,
+                "history_id": "history-1",
+                "history_start_ts": 0,
+                "log_file": str(log_file),
+                "log_fp": log_fp,
+            }
+            write_json(
+                paths.TASK_HISTORY_FILE,
+                [{"id": "history-1", "task_id": "t1", "status": "running"}],
+            )
+
+            try:
+                with mock.patch.object(
+                    task_runner,
+                    "load_config",
+                    return_value={"task_timeout_seconds": 5},
+                ), mock.patch.object(
+                    task_runner,
+                    "force_kill_process",
+                    return_value=False,
+                ):
+                    task_runner.task_finish_watcher(
+                        "t1",
+                        {"id": "t1", "name": "Demo"},
+                        proc,
+                        str(log_file),
+                        log_fp,
+                        "history-1",
+                        0,
+                        0,
+                    )
+
+                self.assertTrue(task_runner.RUNNING["t1"]["watcher_done"])
+
+                with mock.patch.object(
+                    task_runner,
+                    "terminate_task_process",
+                    return_value=(True, ""),
+                ):
+                    self.assertEqual(task_runner.stop_task_now("t1"), (True, "已结束"))
+            finally:
+                with contextlib.suppress(Exception):
+                    log_fp.close()
+
+            self.assertNotIn("t1", task_runner.RUNNING)
+            self.assertNotIn(("t1", "history-1"), task_runner.STOPPED_MANUALLY)
+            history = read_json(paths.TASK_HISTORY_FILE)
+            self.assertEqual(history[0]["status"], "stopped")
+            self.assertEqual(history[0]["message"], "手动结束")
 
 
 class ProxyRuntimeTests(unittest.TestCase):

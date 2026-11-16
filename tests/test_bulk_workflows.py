@@ -917,11 +917,12 @@ class BulkWorkflowTests(unittest.TestCase):
                             headers={"X-Token": TOKEN},
                         )
 
-            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.status_code, 409)
+            self.assertFalse(response.get_json()["ok"])
             self.assertEqual(
                 response.get_json(),
                 {
-                    "ok": True,
+                    "ok": False,
                     "msg": "已删除 0 个任务；2 个删除失败：Task t1: 停止失败 1；Task t2: 停止失败 2",
                     "action": "delete",
                     "count": 2,
@@ -1152,7 +1153,7 @@ class BulkWorkflowTests(unittest.TestCase):
             self.assertEqual(payload["failures"], ["Task t3: 停止失败"])
             self.assertEqual(stop_task_now.call_count, 3)
 
-    def test_task_bulk_run_limits_failure_summary_to_first_three_tasks(self):
+    def test_task_bulk_run_all_failures_returns_409_and_limits_summary(self):
         with isolated_app() as (app, _base_dir):
             from fls_manager import paths
 
@@ -1171,8 +1172,8 @@ class BulkWorkflowTests(unittest.TestCase):
 
             payload = response.get_json()
 
-            self.assertEqual(response.status_code, 200)
-            self.assertTrue(payload["ok"])
+            self.assertEqual(response.status_code, 409)
+            self.assertFalse(payload["ok"])
             self.assertEqual(payload["submitted_count"], 0)
             self.assertEqual(payload["failed_count"], 5)
             self.assertEqual(
@@ -1293,7 +1294,35 @@ class BulkWorkflowTests(unittest.TestCase):
                 ["t1"],
             )
 
-    def test_task_action_run_business_failure_keeps_200_without_write_or_reload(self):
+    def test_task_mutation_requires_token_without_invoking_action(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import paths
+
+            write_json(paths.TASK_FILE, [sample_task("t1")])
+            client = app.test_client()
+            with client.session_transaction() as session:
+                session["csrf_token"] = "test-csrf"
+            headers = {"X-Token": "wrong-token", "X-CSRF-Token": "test-csrf"}
+
+            with patch("fls_manager.routes.api.run_task_now") as run_task_now:
+                run_response = client.post("/api/task/action/run/t1", headers=headers)
+                bulk_response = client.post(
+                    "/api/task/bulk-action",
+                    json={"action": "run", "task_ids": ["t1"]},
+                    headers=headers,
+                )
+
+            self.assertEqual(run_response.status_code, 401)
+            self.assertFalse(run_response.get_json()["ok"])
+            self.assertEqual(bulk_response.status_code, 401)
+            self.assertFalse(bulk_response.get_json()["ok"])
+            run_task_now.assert_not_called()
+            self.assertEqual(
+                [task["id"] for task in read_json(base_dir / "data" / "tasks.json")],
+                ["t1"],
+            )
+
+    def test_task_action_run_business_failure_returns_409_without_write_or_reload(self):
         with isolated_app() as (app, _base_dir):
             with patch(
                 "fls_manager.routes.api.run_task_now",
@@ -1308,7 +1337,7 @@ class BulkWorkflowTests(unittest.TestCase):
 
             payload = response.get_json()
 
-            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.status_code, 409)
             self.assertFalse(payload["ok"])
             self.assertEqual(payload["msg"], "任务已在运行")
             run_task_now.assert_called_once_with("t1", source="manual")
@@ -1444,7 +1473,7 @@ class BulkWorkflowTests(unittest.TestCase):
             self.assertEqual(payload["msg"], "任务不存在")
             stop_task_now.assert_not_called()
 
-    def test_task_action_stop_existing_not_running_keeps_200_failure(self):
+    def test_task_action_stop_existing_not_running_returns_409_failure(self):
         with isolated_app() as (app, _base_dir):
             from fls_manager import paths
 
@@ -1466,10 +1495,35 @@ class BulkWorkflowTests(unittest.TestCase):
 
             payload = response.get_json()
 
-            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.status_code, 409)
             self.assertFalse(payload["ok"])
             self.assertEqual(payload["msg"], "任务未运行")
             stop_task_now.assert_called_once_with("t1")
+
+    def test_task_bulk_stop_all_not_running_returns_409_without_false_success(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager import paths
+
+            task_ids = ["t1", "t2"]
+            write_json(paths.TASK_FILE, [sample_task(task_id) for task_id in task_ids])
+
+            with patch(
+                "fls_manager.routes.api.stop_task_now",
+                return_value=(False, "任务未运行"),
+            ) as stop_task_now:
+                response = app.test_client().post(
+                    "/api/task/bulk-action",
+                    json={"action": "stop", "task_ids": task_ids},
+                    headers={"X-Token": TOKEN},
+                )
+
+            payload = response.get_json()
+            self.assertEqual(response.status_code, 409)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["stopped_count"], 0)
+            self.assertEqual(payload["skipped_count"], 2)
+            self.assertEqual(payload["failed_count"], 0)
+            self.assertEqual(stop_task_now.call_count, 2)
 
     def test_task_action_stop_business_failure_returns_409_without_write_or_reload(self):
         with isolated_app() as (app, _base_dir):

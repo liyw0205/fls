@@ -124,18 +124,41 @@ def _task_exists(task_id):
 def _task_action_result(ok, msg):
     payload = {"ok": ok, "msg": msg}
 
-    if not ok and msg == "任务不存在":
-        return jsonify(payload), 404
+    if not ok:
+        if msg == "任务不存在":
+            return jsonify(payload), 404
 
-    if not ok and (
-        msg.startswith("停止失败")
-        or msg.startswith("任务已结束")
-    ):
-        return jsonify(payload), 409
+        if msg.startswith("任务启动失败"):
+            return jsonify(payload), 500
 
-    if not ok and msg.startswith("任务启动失败"):
-        return jsonify(payload), 500
+        if (
+            msg in ("任务已在运行", "任务已在运行中", "任务未运行")
+            or msg.startswith("停止失败")
+            or msg.startswith("任务已结束")
+        ):
+            return jsonify(payload), 409
 
+        return jsonify(payload), 400
+
+    return jsonify(payload)
+
+
+def _bulk_failure_status(action, failures):
+    if action == "run":
+        messages = [str(item or "") for item in failures]
+        if messages and all("任务启动失败" in item for item in messages):
+            return 500
+        if messages and all("命令解析失败" in item for item in messages):
+            return 400
+
+    return 409
+
+
+def _bulk_response(action, task_ids, payload, failures=None, completed_count=0, blocked_count=0):
+    failures = failures or []
+    if (failures or blocked_count) and completed_count == 0:
+        payload["ok"] = False
+        return jsonify(payload), _bulk_failure_status(action, failures)
     return jsonify(payload)
 
 
@@ -549,14 +572,20 @@ def api_task_bulk_action():
                 if len(failed) > 3:
                     parts.append(f"等 {len(failed)} 个")
 
-            return jsonify(_bulk_payload(
+            return _bulk_response(
                 action,
                 task_ids,
-                "；".join(parts),
-                submitted_count=ok_count,
-                failed_count=len(failed),
+                _bulk_payload(
+                    action,
+                    task_ids,
+                    "；".join(parts),
+                    submitted_count=ok_count,
+                    failed_count=len(failed),
+                    failures=failed,
+                ),
                 failures=failed,
-            ))
+                completed_count=ok_count,
+            )
 
         if action == "stop":
             ok_count = 0
@@ -582,15 +611,22 @@ def api_task_bulk_action():
                 if len(failed) > 3:
                     parts.append(f"等 {len(failed)} 个")
 
-            return jsonify(_bulk_payload(
+            return _bulk_response(
                 action,
                 task_ids,
-                "；".join(parts),
-                stopped_count=ok_count,
-                skipped_count=skipped,
-                failed_count=len(failed),
+                _bulk_payload(
+                    action,
+                    task_ids,
+                    "；".join(parts),
+                    stopped_count=ok_count,
+                    skipped_count=skipped,
+                    failed_count=len(failed),
+                    failures=failed,
+                ),
                 failures=failed,
-            ))
+                completed_count=ok_count,
+                blocked_count=skipped,
+            )
 
         if action == "delete":
             deleted_ids = []
@@ -625,14 +661,20 @@ def api_task_bulk_action():
                 if len(failed) > 3:
                     parts.append(f"等 {len(failed)} 个")
 
-            return jsonify(_bulk_payload(
+            return _bulk_response(
                 action,
                 task_ids,
-                "；".join(parts),
-                deleted_count=len(deleted_ids),
-                failed_count=len(failed),
+                _bulk_payload(
+                    action,
+                    task_ids,
+                    "；".join(parts),
+                    deleted_count=len(deleted_ids),
+                    failed_count=len(failed),
+                    failures=failed,
+                ),
                 failures=failed,
-            ))
+                completed_count=len(deleted_ids),
+            )
 
         if action == "clear_collection":
             result = {"changed_count": 0}

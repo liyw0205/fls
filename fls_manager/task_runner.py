@@ -76,6 +76,11 @@ def _cancel_task_retry_entry(pending, reason):
     return True
 
 
+def _clear_stopped_marker(task_id, history_id):
+    with _RUNNING_LOCK:
+        STOPPED_MANUALLY.discard((task_id, history_id))
+
+
 def cancel_task_retry(task_id, reason="收到新的任务操作"):
     with _RUNNING_LOCK:
         pending = PENDING_RETRIES.pop(task_id, None)
@@ -460,6 +465,7 @@ def task_finish_watcher(task_id, task_snapshot, proc, log_file, log_fp, history_
                     {
                         "status": "running",
                         "stop_error": "超时后停止失败：无法确认任务进程已退出",
+                        "watcher_done": True,
                     },
                 )
                 update_task_history(
@@ -591,6 +597,7 @@ def _start_task_worker(task_id, task_snapshot, cmd_info, process_name, log_file,
                 log_fp.close()
             except Exception:
                 pass
+            _clear_stopped_marker(task_id, history_id)
             finish_task_history(
                 history_id,
                 history_start_ts,
@@ -946,6 +953,10 @@ def stop_task_now(task_id):
                 )
             return False, f"停止失败：{detail}"
 
+        watcher_done = bool(info.get("watcher_done"))
+    else:
+        watcher_done = False
+
     try:
         log_file = info.get("log_file")
         if log_file:
@@ -953,7 +964,7 @@ def stop_task_now(task_id):
     except Exception:
         pass
 
-    if not proc:
+    if not proc or watcher_done:
         STOPPED_MANUALLY.discard((task_id, info.get("history_id")))
 
         try:
