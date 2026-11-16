@@ -520,6 +520,162 @@ def run_detail_comparison(iterations=40, check=False):
                 os.environ[key] = value
 
 
+def _run_status_worker(base_dir, iterations, implementation):
+    os.environ["FLS_BASE_DIR"] = str(base_dir)
+    os.environ["FLS_TOKEN"] = TOKEN
+    os.environ["FLS_SECRET_KEY"] = "performance-benchmark-secret"
+    _purge_fls_modules()
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+
+    try:
+        from fls_manager.app import create_app
+        from fls_manager import models
+        from fls_manager import task_runner
+        from fls_manager.routes import api as api_routes
+
+        if implementation == "legacy":
+            os.environ["FLS_DISABLE_STATUS_CACHE"] = "1"
+            api_routes.load_tasks_for_read = models.load_tasks_uncached
+
+            def legacy_running_snapshot(task_ids):
+                snapshot = {}
+                for task_id in task_ids:
+                    task_id = str(task_id or "")
+                    if not task_runner.is_running(task_id):
+                        continue
+                    with task_runner._RUNNING_LOCK:
+                        info = task_runner.RUNNING.get(task_id)
+                        if info:
+                            snapshot[task_id] = dict(info)
+                return snapshot
+
+            api_routes.running_task_snapshot = legacy_running_snapshot
+        else:
+            os.environ.pop("FLS_DISABLE_STATUS_CACHE", None)
+
+        with contextlib.redirect_stdout(sys.stderr):
+            app = create_app()
+            app.config.update(TESTING=True)
+            client = app.test_client()
+            with client.session_transaction() as session:
+                session["csrf_token"] = "performance-benchmark-csrf-token"
+            measurement = _measure(
+                client,
+                "status",
+                "get",
+                "/api/status",
+                iterations,
+            )
+        print(json.dumps({
+            "implementation": implementation,
+            "measurement": measurement,
+            "query_plan": "tasks.json normalization plus runtime snapshot; no SQL query",
+        }, ensure_ascii=False))
+    finally:
+        _shutdown_fls_scheduler()
+        _purge_fls_modules()
+
+
+def run_status_comparison(iterations=20, check=False):
+    if not 1 <= iterations <= MAX_ITERATIONS:
+        raise ValueError(f"iterations must be between 1 and {MAX_ITERATIONS}")
+
+    keys = ("FLS_BASE_DIR", "FLS_TOKEN", "FLS_SECRET_KEY")
+    old_env = {key: os.environ.get(key) for key in keys}
+    try:
+        with tempfile.TemporaryDirectory(prefix="fls-status-compare-10k-") as temp_dir:
+            os.environ["FLS_BASE_DIR"] = temp_dir
+            os.environ["FLS_TOKEN"] = TOKEN
+            os.environ["FLS_SECRET_KEY"] = "performance-benchmark-secret"
+            _purge_fls_modules()
+            fixture = _write_fixture(temp_dir)
+            fixture_hashes = {
+                "tasks": _sha256(Path(temp_dir) / "data" / "tasks.json"),
+                "history": _sha256(Path(temp_dir) / "data" / "task_history.json"),
+            }
+            _purge_fls_modules()
+
+            worker_reports = {}
+            worker_env = os.environ.copy()
+            for implementation in ("legacy", "current"):
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        str(Path(__file__).resolve()),
+                        "--status-worker",
+                        implementation,
+                        "--base-dir",
+                        temp_dir,
+                        "--iterations",
+                        str(iterations),
+                    ],
+                    cwd=str(ROOT),
+                    env=worker_env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if completed.returncode:
+                    raise RuntimeError(
+                        f"{implementation} status worker failed: {completed.stderr.strip()}"
+                    )
+                worker_reports[implementation] = json.loads(completed.stdout)
+
+            legacy = worker_reports["legacy"]["measurement"]
+            current = worker_reports["current"]["measurement"]
+            response_unchanged = (
+                legacy["response_body_sha256"] == current["response_body_sha256"]
+                and legacy["response_bytes_avg"] == current["response_bytes_avg"]
+                and legacy["http_statuses"] == current["http_statuses"]
+            )
+            result = {
+                "benchmark": "fls-status-runtime-snapshot-compare",
+                "iterations_per_implementation": iterations,
+                "request": "GET /api/status",
+                "fixture": fixture,
+                "fixture_sha256": fixture_hashes,
+                "fixture_generations": 1,
+                "workers": 2,
+                "measured_requests": sum(
+                    item["measurement"]["samples"] for item in worker_reports.values()
+                ),
+                "temporary_fixture_disk_bytes": _directory_size_bytes(temp_dir),
+                "lock": "flock -w 600 /tmp/nonebot-project-validation.lock",
+                "legacy": worker_reports["legacy"],
+                "current": worker_reports["current"],
+                "response_unchanged": response_unchanged,
+                "thresholds": {
+                    "current_p95_ms": P95_THRESHOLDS_MS["status"],
+                    "rss_peak_mb": RSS_THRESHOLD_MB,
+                    "errors": 0,
+                    "latency": "current p50/p95/p99 improve",
+                },
+            }
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            if check:
+                validate_thresholds({"measurements": [current]})
+                if not response_unchanged:
+                    raise RuntimeError("status response contract changed between workers")
+                if legacy["errors"] or current["errors"]:
+                    raise RuntimeError("status comparison returned errors")
+                if not (
+                    current["p50_ms"] < legacy["p50_ms"]
+                    and current["p95_ms"] < legacy["p95_ms"]
+                    and current["p99_ms"] < legacy["p99_ms"]
+                ):
+                    raise RuntimeError("status latency improvement was not consistent")
+            return result
+    finally:
+        _shutdown_fls_scheduler()
+        _purge_fls_modules()
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def _run_task_log_tail_worker(base_dir, iterations, implementation):
     os.environ["FLS_BASE_DIR"] = str(base_dir)
     os.environ["FLS_TOKEN"] = TOKEN
@@ -953,6 +1109,11 @@ def main(argv=None):
         help="compare regex and literal marker checks on one shared 10k task-log fixture",
     )
     parser.add_argument(
+        "--compare-status",
+        action="store_true",
+        help="compare per-task runtime checks with one batched status snapshot on one shared fixture",
+    )
+    parser.add_argument(
         "--detail-worker",
         choices=("legacy", "current"),
         help=argparse.SUPPRESS,
@@ -962,6 +1123,7 @@ def main(argv=None):
         choices=("legacy", "current"),
         help=argparse.SUPPRESS,
     )
+    parser.add_argument("--status-worker", choices=("legacy", "current"), help=argparse.SUPPRESS)
     parser.add_argument("--base-dir", help=argparse.SUPPRESS)
     parser.add_argument("--mode", choices=("baseline", "optimized"), default="optimized")
     parser.add_argument("--rows", type=int, default=DEFAULT_ROWS)
@@ -1010,11 +1172,19 @@ def main(argv=None):
             args.task_log_tail_worker,
         )
         return
+    if args.status_worker:
+        if not args.base_dir:
+            parser.error("--status-worker requires --base-dir")
+        _run_status_worker(args.base_dir, args.iterations, args.status_worker)
+        return
     if args.compare_detail:
         run_detail_comparison(args.iterations, args.check)
         return
     if args.compare_task_log_tail:
         run_task_log_tail_comparison(args.iterations, args.check)
+        return
+    if args.compare_status:
+        run_status_comparison(args.iterations, args.check)
         return
     run_benchmark(
         args.mode,

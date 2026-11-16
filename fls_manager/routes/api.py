@@ -1,18 +1,19 @@
 import copy
+import os
+import threading
 import uuid
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, Response, jsonify, request
 
-from ..models import load_tasks, save_tasks, mutate_tasks
+from ..models import load_tasks, load_tasks_for_read, save_tasks, mutate_tasks
 from ..task_runner import (
     run_task_now,
     stop_task_now,
-    is_running,
+    running_task_snapshot,
     safe_process_name,
     cancel_task_retry,
 )
 from ..scheduler import get_scheduler_state, reload_scheduler, scheduler
-from ..state import RUNNING
 from ..utils import now_str
 from ..notify import (
     NOTIFY_HISTORY_STATUSES,
@@ -21,6 +22,9 @@ from ..notify import (
 )
 
 bp = Blueprint("api", __name__)
+_STATUS_STATIC_CACHE_LOCK = threading.RLock()
+_STATUS_STATIC_CACHE = None
+_STATUS_RESPONSE_CACHE = None
 
 
 def _notify_history_limit(value):
@@ -148,30 +152,101 @@ def _bulk_payload(action, task_ids, msg, **extra):
     return payload
 
 
+def _status_task_signature(tasks):
+    return tuple(
+        (
+            str(task.get("id") or ""),
+            str(task.get("name") or ""),
+            str(task.get("command") or ""),
+            str(task.get("cron") or ""),
+            bool(task.get("enabled", True)),
+            int(task.get("run_count", 0)),
+        )
+        for task in tasks
+    )
+
+
+def _status_static_rows(tasks):
+    """Cache task fields that cannot change during a status poll."""
+    global _STATUS_STATIC_CACHE
+    signature = _status_task_signature(tasks)
+    with _STATUS_STATIC_CACHE_LOCK:
+        if (
+            not os.environ.get("FLS_DISABLE_STATUS_CACHE")
+            and _STATUS_STATIC_CACHE is not None
+            and _STATUS_STATIC_CACHE[0] == signature
+        ):
+            return _STATUS_STATIC_CACHE[1]
+
+        rows = tuple(
+            {
+                "id": str(task.get("id") or ""),
+                "name": task.get("name"),
+                "command": task.get("command"),
+                "cron": task.get("cron"),
+                "enabled": task.get("enabled", True),
+                "run_count": int(task.get("run_count", 0)),
+                "idle_process_name": safe_process_name(
+                    task.get("name") or task.get("command")
+                ),
+            }
+            for task in tasks
+        )
+        if not os.environ.get("FLS_DISABLE_STATUS_CACHE"):
+            _STATUS_STATIC_CACHE = (signature, rows)
+        return rows
+
+
+def _status_running_signature(tasks, running_tasks):
+    return tuple(
+        (
+            str(task.get("id") or ""),
+            bool(running_tasks.get(str(task.get("id") or ""))),
+            str((running_tasks.get(str(task.get("id") or "")) or {}).get("pid") or ""),
+            str((running_tasks.get(str(task.get("id") or "")) or {}).get("process_name") or ""),
+        )
+        for task in tasks
+    )
+
+
 @bp.route("/api/status")
 def api_status():
+    global _STATUS_RESPONSE_CACHE
     result = []
 
     try:
-        for t in load_tasks():
-            task_id = t["id"]
-            running = is_running(task_id)
-            running_info = RUNNING.get(task_id, {}) if running else {}
+        tasks = load_tasks_for_read()
+        static_rows = _status_static_rows(tasks)
+        running_tasks = running_task_snapshot(task.get("id") for task in tasks)
+        cache_key = (
+            _status_task_signature(tasks),
+            _status_running_signature(tasks, running_tasks),
+        )
+        if not os.environ.get("FLS_DISABLE_STATUS_CACHE"):
+            with _STATUS_STATIC_CACHE_LOCK:
+                cached = _STATUS_RESPONSE_CACHE
+                if cached is not None and cached[0] == cache_key:
+                    return Response(cached[1], content_type=cached[2])
+        for static in static_rows:
+            task_id = static["id"]
+            running_info = running_tasks.get(task_id)
+            running = running_info is not None
+            running_info = running_info or {}
             runtime_process_name = running_info.get("process_name")
 
             if isinstance(runtime_process_name, str) and runtime_process_name.strip():
                 process_name = runtime_process_name
             else:
-                process_name = safe_process_name(t.get("name") or t.get("command"))
+                process_name = static["idle_process_name"]
 
             result.append({
                 "id": task_id,
-                "name": t.get("name"),
-                "command": t.get("command"),
-                "cron": t.get("cron"),
-                "enabled": t.get("enabled", True),
+                "name": static["name"],
+                "command": static["command"],
+                "cron": static["cron"],
+                "enabled": static["enabled"],
                 "running": running,
-                "run_count": int(t.get("run_count", 0)),
+                "run_count": static["run_count"],
                 "pid": running_info.get("pid") if running else None,
                 "process_name": process_name,
             })
@@ -183,7 +258,15 @@ def api_status():
             "tasks": [],
         }), 500
 
-    return jsonify(result)
+    response = jsonify(result)
+    if not os.environ.get("FLS_DISABLE_STATUS_CACHE"):
+        with _STATUS_STATIC_CACHE_LOCK:
+            _STATUS_RESPONSE_CACHE = (
+                cache_key,
+                response.get_data(),
+                response.content_type,
+            )
+    return response
 
 
 @bp.route("/api/scheduler/jobs")

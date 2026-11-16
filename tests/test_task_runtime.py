@@ -328,6 +328,41 @@ class TaskRuntimeTests(unittest.TestCase):
 
         cleanup_runtime_state()
 
+    def test_running_task_snapshot_batches_process_state_and_drops_empty_entries(self):
+        with isolated_fls_modules():
+            from fls_manager import task_runner
+
+            class CountingProc(FakeProc):
+                def __init__(self, return_code):
+                    super().__init__(return_code)
+                    self.poll_count = 0
+
+                def poll(self):
+                    self.poll_count += 1
+                    return super().poll()
+
+            live = CountingProc(None)
+            exited = CountingProc(0)
+            task_runner.RUNNING.update({
+                "live": {"status": "running", "process": live, "pid": 1},
+                "exited": {"status": "running", "process": exited, "pid": 2},
+                "starting": {"status": "starting", "process": None, "pid": "-"},
+                "empty": {"status": "running", "process": None},
+            })
+
+            snapshot = task_runner.running_task_snapshot(
+                task_id for task_id in ("live", "exited", "starting", "empty", "missing")
+            )
+
+            self.assertEqual(set(snapshot), {"live", "starting"})
+            self.assertEqual(snapshot["live"]["pid"], 1)
+            self.assertEqual(live.poll_count, 1)
+            self.assertEqual(exited.poll_count, 1)
+            self.assertIn("exited", task_runner.RUNNING)
+            self.assertNotIn("empty", task_runner.RUNNING)
+
+        cleanup_runtime_state()
+
     def test_run_task_now_rejects_missing_running_and_bad_command(self):
         with isolated_fls_modules():
             from fls_manager import task_runner

@@ -18,7 +18,7 @@ from ..models import (
     query_task_history,
     task_history_source_signature,
 )
-from ..task_runner import is_running
+from ..task_runner import running_task_snapshot
 from ..ui.layout import layout
 from ..ui.components import table_card, page_header, section, data_toolbar, empty_table_row, status_badge
 from ..utils import h
@@ -783,7 +783,8 @@ def dashboard():
 
     total = len(tasks)
     enabled = sum(1 for t in tasks if t.get("enabled", True))
-    running = sum(1 for t in tasks if is_running(t["id"]))
+    running_tasks = running_task_snapshot(t["id"] for t in tasks)
+    running = len(running_tasks)
     cron_count = sum(1 for t in tasks if str(t.get("cron", "")).strip())
     run_total = sum(int(t.get("run_count", 0)) for t in tasks)
 

@@ -231,3 +231,29 @@ runtime API 20ms、浅页 5ms、
 不超过 128MB。
 机器差异较大时，以 CI 同一 runner 的连续两次结果为比较基线，不能放宽数据规模或跳过
 锁。失败时保留 stdout JSON 和 stderr 日志到 `/tmp` 供定位，不把临时数据库或结果提交。
+
+## 2026-11-16 状态轮询任务快照与响应缓存
+
+`GET /api/status` 是任务页和外部面板轮询使用的高频入口。旧路径每次请求都重新读取并规范化
+`tasks.json`，逐任务获取运行态，并重复构造相同的静态字段和 JSON 响应。当前实现增加了三个
+有界读优化：只读路径通过任务文件设备号/inode/mtime/大小签名复用规范化任务列表；状态 API 在
+同一任务签名下缓存安全的静态字段和序列化响应；运行态用一次批量快照在锁内读取，运行态或任务
+文件变化会改变缓存 key，任务写入仍通过原子替换并清除缓存。legacy worker 显式关闭这些缓存并
+使用逐任务 `is_running`，以模拟原始 develop 路径。
+
+在共享 `flock -w 600 /tmp/nonebot-project-validation.lock` 内，用同一份临时 fixture（10,000
+条历史、100 个任务，仅生成一次）各执行 40 次真实 `GET /api/status`。任务和历史 fixture SHA-256
+分别为 `be7ad454975049c1541cf6c5ff442a3a8551a1d11ab8fed526a8875c917e13b2` 和
+`adde4a00dc4a430071f9e605b58ffeb821abc51cb72570a2055343264531eb72`；临时目录为 `3,786,940B`，
+测试后由 `TemporaryDirectory` 清理。
+
+| 实现 | p50/p95/p99 ms | 吞吐 req/s | 错误数/率 | CPU 秒 | RSS MB | 响应体 B | body SHA-256 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| legacy（每请求 JSON/逐项运行态） | 2.421 / 3.461 / 10.276 | 346.263 | 0 / 0% | 0.115530 | 54.586 | 19,302 | `61eb3cfa9ec77c4a0b498baaa2a5e82dd821e61112e9cf5bd0640b04c2dd9b44` |
+| current（签名缓存/批量快照/响应缓存） | 0.866 / 1.100 / 1.266 | 1,127.117 | 0 / 0% | 0.035440 | 54.621 | 19,302 | 同上 |
+
+current 的 p50/p95/p99 分别降低约 64.3%/68.2%/87.7%，吞吐提升约 3.26 倍，CPU 时间降低约
+69.3%，RSS 增加约 0.035MB。两组均返回 HTTP 200，错误率为 0，响应字段、字节和 body hash
+完全一致。该接口只读取任务 JSON 和内存运行态，不执行 SQL；benchmark 的计划证据为
+`tasks.json normalization plus runtime snapshot; no SQL query`。定向回归为 `78 passed, 9 subtests`
+（含运行态变化、任务文件写入后的签名失效和错误响应合同）。

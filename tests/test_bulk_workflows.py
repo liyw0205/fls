@@ -202,21 +202,17 @@ class BulkWorkflowTests(unittest.TestCase):
             )
 
             with patch(
-                "fls_manager.routes.api.is_running",
-                side_effect=lambda task_id: task_id == "t1",
-            ) as is_running:
+                "fls_manager.routes.api.running_task_snapshot",
+                return_value={"t1": {"pid": 2468, "process_name": "running-task-process"}},
+            ) as running_snapshot:
                 with patch(
                     "fls_manager.routes.api.safe_process_name",
                     return_value="idle-task-process",
                 ) as safe_process_name:
-                    with patch(
-                        "fls_manager.routes.api.RUNNING",
-                        {"t1": {"pid": 2468, "process_name": "running-task-process"}},
-                    ):
-                        response = app.test_client().get(
-                            "/api/status",
-                            headers={"X-Token": TOKEN},
-                        )
+                    response = app.test_client().get(
+                        "/api/status",
+                        headers={"X-Token": TOKEN},
+                    )
 
             self.assertEqual(response.status_code, 200)
             self.assertEqual(
@@ -246,8 +242,14 @@ class BulkWorkflowTests(unittest.TestCase):
                     },
                 ],
             )
-            self.assertEqual(is_running.call_count, 2)
-            safe_process_name.assert_called_once_with("Task t2")
+            running_snapshot.assert_called_once()
+            self.assertEqual(
+                safe_process_name.call_args_list,
+                [
+                    unittest.mock.call("Task t1"),
+                    unittest.mock.call("Task t2"),
+                ],
+            )
 
     def test_api_status_running_record_without_process_name_uses_safe_fallback(self):
         with isolated_app() as (app, _base_dir):
@@ -262,24 +264,20 @@ class BulkWorkflowTests(unittest.TestCase):
             )
 
             with patch(
-                "fls_manager.routes.api.is_running",
-                return_value=True,
-            ) as is_running:
+                "fls_manager.routes.api.running_task_snapshot",
+                return_value={
+                    "t1": {"pid": 3101, "status": "starting"},
+                    "t2": {"pid": 3102, "status": "starting"},
+                },
+            ) as running_snapshot:
                 with patch(
                     "fls_manager.routes.api.safe_process_name",
                     side_effect=lambda value: f"safe:{value}",
                 ) as safe_process_name:
-                    with patch(
-                        "fls_manager.routes.api.RUNNING",
-                        {
-                            "t1": {"pid": 3101, "status": "starting"},
-                            "t2": {"pid": 3102, "status": "starting"},
-                        },
-                    ):
-                        response = app.test_client().get(
-                            "/api/status",
-                            headers={"X-Token": TOKEN},
-                        )
+                    response = app.test_client().get(
+                        "/api/status",
+                        headers={"X-Token": TOKEN},
+                    )
 
             self.assertEqual(response.status_code, 200)
             self.assertEqual(
@@ -309,7 +307,7 @@ class BulkWorkflowTests(unittest.TestCase):
                     },
                 ],
             )
-            self.assertEqual(is_running.call_count, 2)
+            running_snapshot.assert_called_once()
             self.assertEqual(
                 safe_process_name.call_args_list,
                 [
@@ -321,7 +319,7 @@ class BulkWorkflowTests(unittest.TestCase):
     def test_api_status_returns_json_error_when_status_collection_fails(self):
         with isolated_app() as (app, _base_dir):
             with patch(
-                "fls_manager.routes.api.load_tasks",
+                "fls_manager.routes.api.load_tasks_for_read",
                 side_effect=RuntimeError("task storage unavailable"),
             ):
                 response = app.test_client().get(
@@ -349,19 +347,18 @@ class BulkWorkflowTests(unittest.TestCase):
                 [sample_task("t1", name="Typed running task", run_count=5)],
             )
 
-            with patch("fls_manager.routes.api.is_running", return_value=True):
+            with patch(
+                "fls_manager.routes.api.safe_process_name",
+                return_value="safe:Typed running task",
+            ) as safe_process_name:
                 with patch(
-                    "fls_manager.routes.api.safe_process_name",
-                    return_value="safe:Typed running task",
-                ) as safe_process_name:
-                    with patch(
-                        "fls_manager.routes.api.RUNNING",
-                        {"t1": {"pid": 3201, "process_name": 123}},
-                    ):
-                        response = app.test_client().get(
-                            "/api/status",
-                            headers={"X-Token": TOKEN},
-                        )
+                    "fls_manager.routes.api.running_task_snapshot",
+                    return_value={"t1": {"pid": 3201, "process_name": 123}},
+                ):
+                    response = app.test_client().get(
+                        "/api/status",
+                        headers={"X-Token": TOKEN},
+                    )
 
             self.assertEqual(response.status_code, 200)
             payload = response.get_json()
@@ -371,6 +368,70 @@ class BulkWorkflowTests(unittest.TestCase):
             self.assertEqual(payload[0]["process_name"], "safe:Typed running task")
             self.assertIsInstance(payload[0]["process_name"], str)
             safe_process_name.assert_called_once_with("Typed running task")
+
+    def test_api_status_reuses_static_rows_until_task_data_changes(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager import paths
+
+            tasks = [sample_task("t1", name="Cached task", run_count=1)]
+            write_json(paths.TASK_FILE, tasks)
+            with patch(
+                "fls_manager.routes.api.safe_process_name",
+                return_value="safe:Cached task",
+            ) as safe_process_name:
+                with patch(
+                    "fls_manager.routes.api.running_task_snapshot",
+                    return_value={},
+                ):
+                    client = app.test_client()
+                    first = client.get("/api/status", headers={"X-Token": TOKEN})
+                    second = client.get("/api/status", headers={"X-Token": TOKEN})
+                    self.assertEqual(first.get_data(), second.get_data())
+                    self.assertEqual(safe_process_name.call_count, 1)
+
+                    tasks[0]["run_count"] = 2
+                    write_json(paths.TASK_FILE, tasks)
+                    changed = client.get("/api/status", headers={"X-Token": TOKEN})
+
+            self.assertEqual(changed.status_code, 200)
+            self.assertEqual(changed.get_json()[0]["run_count"], 2)
+            self.assertEqual(safe_process_name.call_count, 2)
+
+    def test_api_status_response_cache_tracks_running_state_changes(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager import paths
+
+            write_json(paths.TASK_FILE, [sample_task("runtime-cache")])
+            snapshots = [{}, {"runtime-cache": {"pid": 4321, "process_name": "live-task"}}]
+            with patch(
+                "fls_manager.routes.api.running_task_snapshot",
+                side_effect=snapshots,
+            ):
+                client = app.test_client()
+                idle = client.get("/api/status", headers={"X-Token": TOKEN})
+                running = client.get("/api/status", headers={"X-Token": TOKEN})
+
+            self.assertFalse(idle.get_json()[0]["running"])
+            self.assertTrue(running.get_json()[0]["running"])
+            self.assertEqual(running.get_json()[0]["pid"], 4321)
+            self.assertEqual(running.get_json()[0]["process_name"], "live-task")
+
+    def test_load_tasks_reuses_signature_cache_and_invalidates_after_write(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager import models, paths
+
+            tasks = [sample_task("cached-task", run_count=1)]
+            write_json(paths.TASK_FILE, tasks)
+            with patch.object(models, "mutate_json", wraps=models.mutate_json) as mutate_json:
+                first = models.load_tasks()
+                second = models.load_tasks()
+                self.assertEqual(first, second)
+                self.assertEqual(mutate_json.call_count, 1)
+
+                tasks[0]["run_count"] = 2
+                models.save_tasks(tasks)
+                models.load_tasks()
+                self.assertEqual(mutate_json.call_count, 2)
 
     def test_task_copy_resets_runtime_fields_and_keeps_retry_config(self):
         with isolated_app() as (app, base_dir):

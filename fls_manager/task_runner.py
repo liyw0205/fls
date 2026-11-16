@@ -111,6 +111,41 @@ def is_running(task_id):
         return False
 
 
+def running_task_snapshot(task_ids=None):
+    """Return one consistent running-state snapshot for a batch read.
+
+    The status and task-list pages need the same process state for many tasks.
+    Keeping the lock across the batch avoids reacquiring it and looking up the
+    same runtime map once per row, while preserving ``is_running`` semantics.
+    """
+    requested = None
+    if task_ids is not None:
+        requested = {str(task_id or "") for task_id in task_ids}
+
+    with _RUNNING_LOCK:
+        task_keys = list(RUNNING) if requested is None else requested
+        snapshot = {}
+        for task_id in task_keys:
+            info = RUNNING.get(task_id)
+            if not info:
+                continue
+
+            status = info.get("status")
+            if status in ("starting", "delaying"):
+                snapshot[task_id] = dict(info)
+                continue
+
+            proc = info.get("process")
+            if not proc:
+                RUNNING.pop(task_id, None)
+                continue
+
+            if proc.poll() is None:
+                snapshot[task_id] = dict(info)
+
+        return snapshot
+
+
 def increase_run_count(task_id):
     def increment(tasks):
         for item in tasks:

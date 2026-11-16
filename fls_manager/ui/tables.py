@@ -1,6 +1,5 @@
 from ..utils import h
-from ..task_runner import is_running, safe_process_name
-from ..state import RUNNING
+from ..task_runner import running_task_snapshot, safe_process_name
 from ..scheduler import get_task_next_run_time_text
 from .components import empty_state, empty_table_row
 
@@ -80,11 +79,14 @@ def _task_action_buttons(task_id, enabled, config_path="", pinned=False, include
 """
 
 
-def task_row_model(task):
+def task_row_model(task, running_tasks=None):
     """Normalize task data once so desktop and mobile views share one row model."""
     task_id = str(task.get("id") or "")
     name = task.get("name") or task.get("command") or "未命名任务"
-    running = is_running(task_id)
+    if running_tasks is None:
+        running_tasks = running_task_snapshot((task_id,))
+    running = task_id in (running_tasks or {})
+    running_info = (running_tasks or {}).get(task_id, {})
     return {
         "id": task_id,
         "name": name,
@@ -96,9 +98,9 @@ def task_row_model(task):
         "pinned": bool(task.get("pinned", False)),
         "run_count": int(task.get("run_count", 0)),
         "running": running,
-        "pid": RUNNING.get(task_id, {}).get("pid", "-") if running else "-",
+        "pid": running_info.get("pid", "-") if running else "-",
         "process_name": (
-            RUNNING.get(task_id, {}).get("process_name", "-")
+            running_info.get("process_name", "-")
             if running else safe_process_name(name)
         ),
         "config_path": str(task.get("config_path", "") or "").strip(),
@@ -118,8 +120,9 @@ def tasks_table(tasks):
         desktop_rows = empty_table_row(11, "暂无任务，请创建第一个任务。", '<a class="btn btn-primary" href="/task/new">新建任务</a>')
         mobile_cards = empty
     else:
+        running_tasks = running_task_snapshot(task.get("id") for task in tasks)
         for task in tasks:
-            row = task_row_model(task)
+            row = task_row_model(task, running_tasks)
             task_id = row["id"]
             name = row["name"]
             remark = row["remark"]

@@ -1,3 +1,4 @@
+import copy
 import threading
 import uuid
 import json
@@ -322,13 +323,29 @@ def _normalize_list(data, normalizer):
 TASK_HISTORY_LIMIT = 500
 TASKS_MUTATION_LOCK = threading.RLock()
 COLLECTION_MUTATION_LOCK = threading.RLock()
+_TASKS_READ_CACHE_LOCK = threading.RLock()
+_TASKS_READ_CACHE = None
 
 
 class TaskSchedulerReloadError(RuntimeError):
     pass
 
 
-def load_tasks():
+def _task_file_signature():
+    try:
+        stat = Path(TASK_FILE).stat()
+    except OSError:
+        return None
+    return (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size)
+
+
+def _clear_tasks_read_cache():
+    global _TASKS_READ_CACHE
+    with _TASKS_READ_CACHE_LOCK:
+        _TASKS_READ_CACHE = None
+
+
+def _load_tasks_from_source():
     result = {}
 
     def normalize(data):
@@ -336,16 +353,43 @@ def load_tasks():
         result["tasks"] = tasks
         return tasks if changed else None
 
-    with TASKS_MUTATION_LOCK:
-        mutate_json(TASK_FILE, [], normalize)
-
+    mutate_json(TASK_FILE, [], normalize)
     return result.get("tasks", [])
+
+
+def load_tasks_uncached():
+    """Read and normalize tasks without the read cache for diagnostics/tests."""
+    with TASKS_MUTATION_LOCK:
+        return _load_tasks_from_source()
+
+
+def load_tasks_for_read():
+    global _TASKS_READ_CACHE
+
+    with TASKS_MUTATION_LOCK:
+        signature = _task_file_signature()
+        with _TASKS_READ_CACHE_LOCK:
+            cached = _TASKS_READ_CACHE
+            if cached is not None and cached[0] == signature:
+                return cached[1]
+
+        tasks = _load_tasks_from_source()
+        cache_signature = _task_file_signature()
+        with _TASKS_READ_CACHE_LOCK:
+            _TASKS_READ_CACHE = (cache_signature, tasks)
+        return tasks
+
+
+def load_tasks():
+    """Return an independent task list for callers that may mutate rows."""
+    return copy.deepcopy(load_tasks_for_read())
 
 
 def save_tasks(tasks):
     with TASKS_MUTATION_LOCK:
         normalized, _ = _normalize_list(tasks or [], normalize_task)
         write_json(TASK_FILE, normalized)
+        _clear_tasks_read_cache()
 
 
 def mutate_tasks(update_fn, reload_scheduler_fn=None, after_write=None):
@@ -361,6 +405,7 @@ def mutate_tasks(update_fn, reload_scheduler_fn=None, after_write=None):
             return tasks if changed or normalized else None
 
         mutate_json(TASK_FILE, [], update)
+        _clear_tasks_read_cache()
 
         if result.get("changed") and after_write:
             after_write()
