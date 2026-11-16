@@ -4,6 +4,9 @@ import time
 import subprocess
 import importlib
 import importlib.metadata
+import os
+import re
+from pathlib import Path
 
 from flask import Blueprint, request, redirect, url_for, jsonify
 
@@ -15,6 +18,73 @@ from ..ui.layout import layout
 from ..ui.components import page_header_card, page_header, table_card, empty_table_row
 
 bp = Blueprint("deps", __name__)
+
+
+def find_install_log_context(install_id):
+    """Recover a lost install's kind/name from its bounded log filename."""
+    install_id = str(install_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", install_id):
+        return None
+
+    log_dir = Path(LOG_DIR).resolve()
+    marker = f"-{install_id}.log"
+    candidates = (
+        ("dependency", "deps-install-"),
+        ("runtime", "system-install-"),
+    )
+
+    for kind, prefix in candidates:
+        pattern = f"{prefix}*-{install_id}.log"
+        try:
+            matches = sorted(log_dir.glob(pattern))
+        except OSError:
+            continue
+
+        for path in matches:
+            try:
+                if path.is_symlink() or not path.is_file():
+                    continue
+                resolved = path.resolve()
+                if resolved != log_dir and not str(resolved).startswith(str(log_dir) + os.sep):
+                    continue
+                name = path.name
+                if not name.startswith(prefix) or not name.endswith(marker):
+                    continue
+                package = name[len(prefix):-len(marker)].strip("-").strip()
+                if package:
+                    return {
+                        "kind": kind,
+                        "package": package,
+                        "log_file": str(resolved),
+                    }
+            except OSError:
+                continue
+
+    return None
+
+
+def install_recovery_action(context):
+    if not context:
+        return ""
+
+    package = str(context.get("package") or "").strip()
+    kind = str(context.get("kind") or "").strip()
+    if not package or kind not in ("dependency", "runtime"):
+        return ""
+
+    if kind == "runtime":
+        return (
+            f'<form class="inline-form" method="post" action="/install/runtime/{h(package)}">'
+            '<button class="btn btn-orange" type="submit">重新安装运行器</button>'
+            '</form>'
+        )
+
+    return (
+        '<form class="inline-form" method="post" action="/deps/install">'
+        f'<input type="hidden" name="name" value="{h(package)}">'
+        '<button class="btn btn-orange" type="submit">重新安装依赖</button>'
+        '</form>'
+    )
 
 
 def pip_cmd(args, timeout=600):
@@ -80,8 +150,15 @@ def deps_install_result(install_id):
     error = info.get("error", "") if info else ""
 
     if not info:
-        status, label = "missing", "无法追踪"
-        error = "安装记录不存在或面板已重启，请到日志管理查看 deps-install-*.log / system-install-*.log。"
+        context = find_install_log_context(install_id)
+        if context:
+            status, label = "unknown", "结果未知"
+            error = (
+                "面板重启后无法确认安装进程结果；已保留日志，请检查日志后重新安装。"
+            )
+        else:
+            status, label = "missing", "无法追踪"
+            error = "安装记录不存在或面板已重启，请到日志管理查看 deps-install-*.log / system-install-*.log。"
     elif running:
         status, label = "running", "安装中"
     elif error:
@@ -248,6 +325,7 @@ def deps_install():
 
     prune_completed_records(DEPS_RUNNING, finished_key="finished")
     info = {
+        "kind": "dependency",
         "process": None,
         "package": name,
         "log_file": str(log_file),
@@ -282,9 +360,21 @@ def deps_install():
 def deps_install_log(install_id):
     back_url = get_back_url("/deps")
     info = DEPS_RUNNING.get(install_id)
-    package = info.get("package") if info else "未知"
-    log_file = info.get("log_file") if info else ""
+    context = find_install_log_context(install_id) if not info else None
+    package = info.get("package") if info else (context or {}).get("package", "未知")
+    log_file = info.get("log_file") if info else (context or {}).get("log_file", "")
     result = deps_install_result(install_id)
+    recovery_action = ""
+    if not result.get("running") and result.get("status") in (
+        "unknown", "missing", "failed", "start_failed"
+    ):
+        recovery_action = install_recovery_action(
+            context
+            or {
+                "kind": info.get("kind", "dependency") if info else "",
+                "package": package,
+            }
+        )
 
     header_card = page_header_card(
         f"安装日志：{package}",
@@ -299,6 +389,7 @@ def deps_install_log(install_id):
 <form class="inline-form" method="post" action="/deps/refresh">
     <button class="btn btn-blue" type="submit">刷新依赖检测结果</button>
 </form>
+{recovery_action}
 """,
     )
 
@@ -351,10 +442,32 @@ window.__FLS_ACTIVE_LOG_INTERVAL__ = setInterval(loadLog, 2000);
 @bp.route("/api/deps/install-log/<install_id>")
 def api_deps_install_log(install_id):
     info = DEPS_RUNNING.get(install_id)
+    context = find_install_log_context(install_id) if not info else None
 
     if not info:
+        result = deps_install_result(install_id)
+        if context:
+            result["package"] = context["package"]
+            result["recovery"] = {
+                "kind": context["kind"],
+                "package": context["package"],
+            }
+
+            try:
+                lines = int(request.args.get("lines", "800"))
+            except (TypeError, ValueError):
+                return jsonify({
+                    "ok": False,
+                    "msg": "lines 必须为整数",
+                    "running": False,
+                    "log": "",
+                }), 400
+
+            result["log"] = tail_file(context["log_file"], lines)
+            return jsonify(result)
+
         return jsonify({
-            **deps_install_result(install_id),
+            **result,
             "log": "安装进程已结束或面板已重启，无法通过该 ID 继续追踪。请到日志管理查看 deps-install-*.log / system-install-*.log。",
         })
 

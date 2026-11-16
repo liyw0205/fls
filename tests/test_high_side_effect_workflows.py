@@ -293,6 +293,38 @@ class DependencyInstallIsolationTests(unittest.TestCase):
             page = client.get("/deps/install-log/missing", headers={"X-Token": TOKEN}).get_data(as_text=True)
             self.assertIn("无法追踪</b>", page)
 
+    def test_restart_lost_install_log_exposes_unknown_status_and_reinstall(self):
+        for prefix, kind, package, expected_action in (
+            ("deps-install", "dependency", "demo-package", "/deps/install"),
+            ("system-install", "runtime", "node", "/install/runtime/node"),
+        ):
+            with self.subTest(kind=kind):
+                with isolated_app() as (app, base_dir):
+                    install_id = "a" * 32
+                    log_file = base_dir / "log" / f"{prefix}-{package}-{install_id}.log"
+                    log_file.parent.mkdir(parents=True, exist_ok=True)
+                    log_file.write_text("install output\n", encoding="utf-8")
+                    client = app.test_client()
+
+                    result = client.get(
+                        f"/api/deps/install-log/{install_id}",
+                        headers={"X-Token": TOKEN},
+                    ).get_json()
+
+                    self.assertEqual(result["status"], "unknown")
+                    self.assertEqual(result["status_label"], "结果未知")
+                    self.assertEqual(result["package"], package)
+                    self.assertEqual(result["recovery"], {"kind": kind, "package": package})
+                    self.assertIn("install output", result["log"])
+
+                    page = client.get(
+                        f"/deps/install-log/{install_id}?back=/deps",
+                        headers={"X-Token": TOKEN},
+                    ).get_data(as_text=True)
+                    self.assertIn("结果未知</b>", page)
+                    self.assertIn(f'action="{expected_action}"', page)
+                    self.assertIn("重新安装", page)
+
     def test_log_write_failure_still_closes_handle_and_preserves_exit_code(self):
         with isolated_app() as (_app, _base_dir):
             from fls_manager.routes.deps import deps_install_result

@@ -173,6 +173,7 @@ def install_runtime(runtime):
 
     prune_completed_records(DEPS_RUNNING, finished_key="finished")
     info = {
+        "kind": "runtime",
         "process": None,
         "package": runtime,
         "log_file": str(log_file),
