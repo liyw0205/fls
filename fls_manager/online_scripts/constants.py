@@ -11,6 +11,7 @@ ONLINE_SCRIPT_CACHE_FILE = DATA_DIR / "online_scripts_cache.json"
 
 ONLINE_INSTALL_RUNNING = {}
 ONLINE_INSTALL_STOPPING = set()
+ONLINE_INSTALL_RETRYING = set()
 ONLINE_INSTALL_JOBS_FILE = DATA_DIR / "online_install_jobs.json"
 ONLINE_INSTALL_LOCK = threading.RLock()
 ONLINE_INSTALL_LIMIT = 100
@@ -107,6 +108,11 @@ def _install_snapshot(info):
         "script_id",
         "script_name",
         "log_file",
+        "proxy_id",
+        "import_task",
+        "enable_task",
+        "selected_task_indexes",
+        "force",
         "running",
         "status",
         "start_time",
@@ -150,6 +156,16 @@ def _load_persisted_online_install(install_id):
     return dict(info) if isinstance(info, dict) else None
 
 
+def _load_persisted_online_installs():
+    data = read_json(ONLINE_INSTALL_JOBS_FILE, {})
+    jobs = data if isinstance(data, dict) else {}
+    return {
+        str(install_id): dict(info)
+        for install_id, info in jobs.items()
+        if isinstance(info, dict)
+    }
+
+
 def get_online_install_job(install_id):
     """Return a live or persisted install, marking lost processes as unknown."""
     with ONLINE_INSTALL_LOCK:
@@ -183,3 +199,37 @@ def active_online_install_for_script(script_id):
             if info.get("script_id") == script_id and info.get("running"):
                 return install_id, dict(info)
     return "", None
+
+
+def latest_online_install_for_script(script_id):
+    """Return the newest install record, including a process lost on restart."""
+    script_id = str(script_id or "")
+    if not script_id:
+        return "", None
+
+    with ONLINE_INSTALL_LOCK:
+        jobs = _load_persisted_online_installs()
+        for install_id, info in ONLINE_INSTALL_RUNNING.items():
+            if isinstance(info, dict):
+                jobs[str(install_id)] = dict(info)
+
+        matches = []
+        for install_id, info in jobs.items():
+            if str(info.get("script_id") or "") != script_id:
+                continue
+            if install_id not in ONLINE_INSTALL_RUNNING and info.get("running"):
+                info = get_online_install_job(install_id) or info
+            matches.append((install_id, info))
+
+        if not matches:
+            return "", None
+
+        matches.sort(
+            key=lambda pair: (
+                str(pair[1].get("updated_at") or ""),
+                float(pair[1].get("start_time") or 0),
+            ),
+            reverse=True,
+        )
+        install_id, info = matches[0]
+        return install_id, dict(info)

@@ -373,6 +373,140 @@ class OnlineInstallLifecycleTests(unittest.TestCase):
                 self.assertEqual(client.post(path, headers={"X-Token": TOKEN}).status_code, 404)
             self.assertEqual(client.get("/online-scripts/log/missing", headers={"X-Token": TOKEN}).status_code, 404)
 
+    def test_restart_unknown_install_exposes_log_and_retries_with_saved_options(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE
+
+            item = self.item()
+            item["task_cron"] = [{"name": "Daily", "command": "task demo"}]
+            cache_file = base_dir / "data" / "online_scripts_cache.json"
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            cache_file.write_text(json.dumps([item]), encoding="utf-8")
+
+            log_file = base_dir / "log" / "restart-install.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_file.write_text("download started\n", encoding="utf-8")
+            snapshot = {
+                "id": "restart-install",
+                "script_id": "demo",
+                "script_name": "Demo",
+                "log_file": str(log_file),
+                "proxy_id": "proxy-1",
+                "import_task": True,
+                "enable_task": True,
+                "selected_task_indexes": ["1"],
+                "force": True,
+                "running": True,
+                "status": "运行中",
+                "start_time": 1,
+                "returncode": None,
+                "error": "",
+                "updated_at": "2026-11-14 04:00:00",
+            }
+            ONLINE_INSTALL_JOBS_FILE.write_text(
+                json.dumps({"restart-install": snapshot}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            client = app.test_client()
+            response = client.get(
+                "/api/online-scripts/log/restart-install",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload["status"], "结果未知")
+            self.assertTrue(payload["recovery"]["available"])
+            self.assertIn("/online-scripts/install-retry/restart-install", payload["recovery"]["action"])
+            self.assertIn("download started", payload["log"])
+
+            page = client.get(
+                "/online-scripts/log/restart-install",
+                headers={"X-Token": TOKEN},
+            ).get_data(as_text=True)
+            self.assertIn('action="/online-scripts/install-retry/restart-install"', page)
+            self.assertIn("重试安装", page)
+
+            with patch("fls_manager.routes.online_scripts.install.start_install_thread") as start:
+                retry = client.post(
+                    "/online-scripts/install-retry/restart-install",
+                    headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(retry.status_code, 302)
+            start.assert_called_once()
+            kwargs = start.call_args.kwargs
+            self.assertEqual(kwargs["proxy_id"], "proxy-1")
+            self.assertTrue(kwargs["import_task"])
+            self.assertTrue(kwargs["enable_task"])
+            self.assertEqual(kwargs["selected_task_indexes"], ["1"])
+            self.assertFalse(kwargs["force"])
+
+    def test_retry_unknown_install_reports_deleted_script_without_starting(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE
+
+            log_file = base_dir / "log" / "missing-script.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_file.write_text("partial install\n", encoding="utf-8")
+            snapshot = {
+                "id": "missing-script",
+                "script_id": "deleted",
+                "script_name": "Deleted",
+                "log_file": str(log_file),
+                "running": True,
+                "status": "运行中",
+                "start_time": 1,
+                "returncode": None,
+                "error": "",
+                "updated_at": "2026-11-14 04:00:00",
+            }
+            ONLINE_INSTALL_JOBS_FILE.write_text(
+                json.dumps({"missing-script": snapshot}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            client = app.test_client()
+
+            response = client.post(
+                "/online-scripts/install-retry/missing-script",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(response.status_code, 409)
+            self.assertIn("脚本已不在本地缓存中", response.get_data(as_text=True))
+            self.assertIn("同步在线脚本源", response.get_data(as_text=True))
+
+            payload = client.get(
+                "/api/online-scripts/log/missing-script",
+                headers={"X-Token": TOKEN},
+            ).get_json()
+            self.assertFalse(payload["recovery"]["available"])
+            self.assertIn("脚本已不在本地缓存中", payload["recovery"]["reason"])
+
+    def test_online_scripts_page_marks_restart_unknown_as_recoverable(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE
+
+            cache_file = base_dir / "data" / "online_scripts_cache.json"
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            cache_file.write_text(json.dumps([self.item()]), encoding="utf-8")
+            log_file = base_dir / "log" / "page-unknown.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_file.write_text("state uncertain\n", encoding="utf-8")
+            ONLINE_INSTALL_JOBS_FILE.write_text(json.dumps({
+                "page-unknown": {
+                    "id": "page-unknown", "script_id": "demo", "script_name": "Demo",
+                    "log_file": str(log_file), "running": True, "status": "运行中",
+                    "start_time": 1, "returncode": None, "error": "",
+                    "updated_at": "2026-11-14 04:00:00",
+                },
+            }, ensure_ascii=False), encoding="utf-8")
+
+            html = app.test_client().get(
+                "/online-scripts", headers={"X-Token": TOKEN},
+            ).get_data(as_text=True)
+            self.assertIn("上次安装状态：结果未知", html)
+            self.assertIn('action="/online-scripts/install-retry/page-unknown"', html)
+            self.assertIn("查看安装日志", html)
+
     def test_retention_keeps_new_results_when_timestamps_are_equal(self):
         with isolated_app() as (_app, base_dir):
             from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE, persist_online_install
@@ -426,6 +560,56 @@ setImmediate(() => {
                 input=json.dumps({"script": script, "payload": {
                     "running": False, "status": "失败", "returncode": 17,
                     "error": "TLS <peer> failed", "log": "command failed",
+                }}),
+                capture_output=True, text=True, timeout=5,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise the polling script")
+    def test_log_polling_inserts_recovery_action_for_terminal_unknown(self):
+        with isolated_app() as (app, base_dir):
+            self.register(base_dir)
+            response = app.test_client().get("/online-scripts/log/install", headers={"X-Token": TOKEN})
+            self.assertEqual(response.status_code, 200)
+            html = response.get_data(as_text=True)
+            scripts = re.findall(r"<script>(.*?)</script>", html, re.S)
+            script = next(script for script in scripts if "async function loadLog()" in script)
+            result = subprocess.run(
+                ["node", "-e", r"""
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+const elements = Object.fromEntries(['installStatus', 'installError', 'installReturncode',
+  'installStopAction', 'installRecoveryAction', 'log', 'flsLogNewTip']
+  .map(id => [id, {textContent: '', style: {}, dataset: {}, innerHTML: ''}]));
+const context = {
+  window: {innerHeight: 800, scrollY: 0, addEventListener() {}, scrollTo() {}},
+  document: {documentElement: {scrollHeight: 800}, getElementById: id => elements[id]},
+  flsGetCsrfToken: () => 'csrf-token',
+  flsReadJsonResponse: async response => {
+    if(!response.ok) throw new Error('HTTP ' + response.status);
+    return response.json();
+  },
+  fetch: async () => ({ok: true, status: 200, json: async () => input.payload}),
+  setInterval: () => 1, clearInterval() {},
+};
+vm.createContext(context);
+vm.runInContext(input.script, context);
+setImmediate(() => {
+  assert.equal(elements.installStatus.textContent, '结果未知');
+  assert.match(elements.installRecoveryAction.innerHTML, /install-retry\/install/);
+  assert.match(elements.installRecoveryAction.innerHTML, /csrf-token/);
+  assert.equal(elements.installRecoveryAction.dataset.ready, '1');
+  console.log('terminal recovery polling passed');
+});
+"""],
+                input=json.dumps({"script": script, "payload": {
+                    "running": False, "status": "结果未知", "returncode": None,
+                    "error": "panel restarted", "log": "uncertain",
+                    "recovery": {
+                        "available": True,
+                        "action": "/online-scripts/install-retry/install",
+                    },
                 }}),
                 capture_output=True, text=True, timeout=5,
             )

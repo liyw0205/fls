@@ -3,10 +3,102 @@ from ...utils import now_str
 from ...online_scripts.constants import (
     ONLINE_INSTALL_LOCK,
     ONLINE_INSTALL_RUNNING,
+    ONLINE_INSTALL_RETRYING,
     active_online_install_for_script,
     get_online_install_job,
     persist_online_install,
 )
+
+
+def _start_install_job(
+    script_id,
+    item,
+    proxy_id="",
+    import_task=False,
+    force=False,
+    enable_task=False,
+    selected_task_indexes=None,
+):
+    """Register and launch one install, keeping startup failures durable."""
+    install_id = uuid.uuid4().hex
+    log_file = online_install_log_file(
+        install_id,
+        item.get("name") or item.get("id"),
+    )
+    selected_task_indexes = list(selected_task_indexes or [])
+
+    with ONLINE_INSTALL_LOCK:
+        active_id, _ = active_online_install_for_script(script_id)
+        if active_id:
+            return redirect(
+                url_for(
+                    "online_scripts.online_scripts_page",
+                    msg="该脚本正在安装中",
+                )
+            )
+        prune_completed_records(ONLINE_INSTALL_RUNNING)
+        info = {
+            "id": install_id,
+            "script_id": script_id,
+            "script_name": item.get("name"),
+            "log_file": str(log_file),
+            "proxy_id": proxy_id,
+            "import_task": bool(import_task),
+            "enable_task": bool(enable_task),
+            "selected_task_indexes": selected_task_indexes,
+            "force": bool(force),
+            "running": True,
+            "status": "准备中",
+            "start_time": time.time(),
+            "returncode": None,
+            "error": "",
+            "process": None,
+            "updated_at": now_str(),
+        }
+        ONLINE_INSTALL_RUNNING[install_id] = info
+        try:
+            persist_online_install(info)
+        except Exception as e:
+            info.update(
+                running=False,
+                status="启动失败",
+                error=f"保存安装状态失败：{e}",
+                updated_at=now_str(),
+            )
+            return _install_start_error(install_id, info["error"])
+
+    try:
+        start_install_thread(
+            install_id=install_id,
+            item=item,
+            proxy_id=proxy_id,
+            import_task=import_task,
+            force=force,
+            enable_task=enable_task,
+            selected_task_indexes=selected_task_indexes,
+        )
+    except Exception as e:
+        with ONLINE_INSTALL_LOCK:
+            info = ONLINE_INSTALL_RUNNING[install_id]
+            info.update(
+                running=False,
+                status="启动失败",
+                error=f"启动安装线程失败：{e}",
+                updated_at=now_str(),
+            )
+            try:
+                persist_online_install(info)
+            except Exception as storage_error:
+                info["error"] += f"；保存安装状态失败：{storage_error}"
+        return _install_start_error(install_id, info["error"])
+
+    return redirect(
+        url_for(
+            "online_scripts.online_install_log",
+            install_id=install_id,
+            back="/online-scripts",
+        )
+    )
 
 
 @bp.route("/online-scripts/install/<script_id>", methods=["POST"])
@@ -139,69 +231,14 @@ def online_scripts_install(script_id):
 """
         return layout("目标已存在", "online_scripts", body)
 
-    install_id = uuid.uuid4().hex
-    log_file = online_install_log_file(
-        install_id,
-        item.get("name") or item.get("id"),
-    )
-
-    with ONLINE_INSTALL_LOCK:
-        active_id, _ = active_online_install_for_script(script_id)
-        if active_id:
-            return redirect(
-                url_for(
-                    "online_scripts.online_scripts_page",
-                    msg="该脚本正在安装中",
-                )
-            )
-        prune_completed_records(ONLINE_INSTALL_RUNNING)
-        ONLINE_INSTALL_RUNNING[install_id] = {
-            "id": install_id,
-            "script_id": script_id,
-            "script_name": item.get("name"),
-            "log_file": str(log_file),
-            "running": True,
-            "status": "准备中",
-            "start_time": time.time(),
-            "returncode": None,
-            "error": "",
-            "process": None,
-            "updated_at": now_str(),
-        }
-        try:
-            persist_online_install(ONLINE_INSTALL_RUNNING[install_id])
-        except Exception as e:
-            ONLINE_INSTALL_RUNNING[install_id].update(
-                running=False, status="启动失败", error=f"保存安装状态失败：{e}", updated_at=now_str(),
-            )
-            return _install_start_error(install_id, ONLINE_INSTALL_RUNNING[install_id]["error"])
-
-    try:
-        start_install_thread(
-            install_id=install_id,
-            item=item,
-            proxy_id=proxy_id,
-            import_task=import_task,
-            force=force,
-            enable_task=enable_task,
-            selected_task_indexes=selected_task_indexes,
-        )
-    except Exception as e:
-        with ONLINE_INSTALL_LOCK:
-            info = ONLINE_INSTALL_RUNNING[install_id]
-            info.update(running=False, status="启动失败", error=f"启动安装线程失败：{e}", updated_at=now_str())
-            try:
-                persist_online_install(info)
-            except Exception as storage_error:
-                info["error"] += f"；保存安装状态失败：{storage_error}"
-        return _install_start_error(install_id, info["error"])
-
-    return redirect(
-        url_for(
-            "online_scripts.online_install_log",
-            install_id=install_id,
-            back="/online-scripts",
-        )
+    return _start_install_job(
+        script_id=script_id,
+        item=item,
+        proxy_id=proxy_id,
+        import_task=import_task,
+        force=force,
+        enable_task=enable_task,
+        selected_task_indexes=selected_task_indexes,
     )
 
 
@@ -212,6 +249,104 @@ def _install_start_error(install_id, error):
         actions_html=f'<a class="btn btn-gray" href="/online-scripts/log/{h(install_id)}">查看安装记录</a>',
     )
     return layout("在线脚本安装失败", "online_scripts", body), 500
+
+
+def _install_retry_error(install_id, title, message, code):
+    body = page_header_card(
+        title,
+        help_html=h(message),
+        actions_html=(
+            f'<a class="btn btn-gray" href="/online-scripts/log/{h(install_id)}">查看安装记录</a>'
+            '<a class="btn btn-blue" href="/online-scripts">返回在线脚本</a>'
+        ),
+    )
+    return layout(title, "online_scripts", body), code
+
+
+@bp.route("/online-scripts/install-retry/<install_id>", methods=["POST"])
+def online_scripts_install_retry(install_id):
+    info = get_online_install_job(install_id)
+    if not info:
+        return _install_retry_error(
+            install_id,
+            "无法重试在线安装",
+            "安装记录不存在。请确认安装 ID 后重试。",
+            404,
+        )
+
+    if info.get("running"):
+        return _install_retry_error(
+            install_id,
+            "无法重试在线安装",
+            "该安装任务仍在运行，请等待完成或先停止任务。",
+            409,
+        )
+
+    if info.get("status") not in ("结果未知", "失败", "超时", "已停止", "启动失败"):
+        return _install_retry_error(
+            install_id,
+            "无法重试在线安装",
+            f"当前状态为 {info.get('status') or '未知'}，仅失败或结果未知的安装允许重试。",
+            409,
+        )
+
+    with ONLINE_INSTALL_LOCK:
+        if install_id in ONLINE_INSTALL_RETRYING:
+            return _install_retry_error(
+                install_id,
+                "无法重试在线安装",
+                "该安装任务正在提交重试，请勿重复提交。",
+                409,
+            )
+        ONLINE_INSTALL_RETRYING.add(install_id)
+
+    try:
+        script_id = str(info.get("script_id") or "").strip()
+        item = get_online_script(script_id)
+        if not item:
+            return _install_retry_error(
+                install_id,
+                "无法重试在线安装",
+                "脚本已不在本地缓存中，请先同步在线脚本源，再从脚本列表重试。",
+                409,
+            )
+
+        try:
+            online_script_target(item)
+        except Exception as e:
+            return _install_retry_error(
+                install_id,
+                "无法重试在线安装",
+                f"脚本目标路径非法：{e}。请检查脚本源数据后重试。",
+                400,
+            )
+
+        import_task = bool(info.get("import_task"))
+        enable_task = bool(info.get("enable_task")) and import_task
+        selected_task_indexes = info.get("selected_task_indexes") or []
+        if not isinstance(selected_task_indexes, list):
+            selected_task_indexes = []
+        if import_task and script_has_task(item) and not selected_task_indexes:
+            return _install_retry_error(
+                install_id,
+                "无法重试在线安装",
+                "原安装记录没有可恢复的任务选择，请返回选择页面重新选择任务后重试。",
+                409,
+            )
+
+        # Never carry force across a restart; a possibly partial target needs fresh confirmation.
+        return _start_install_job(
+            script_id=script_id,
+            item=item,
+            proxy_id=str(info.get("proxy_id") or ""),
+            import_task=import_task,
+            force=False,
+            enable_task=enable_task,
+            selected_task_indexes=selected_task_indexes,
+        )
+    finally:
+        with ONLINE_INSTALL_LOCK:
+            ONLINE_INSTALL_RETRYING.discard(install_id)
 
 
 def _stop_install_result(install_id):

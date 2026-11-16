@@ -2,6 +2,49 @@ from ._common import *
 from ...online_scripts.constants import get_online_install_job
 
 
+RECOVERY_STATUSES = {"结果未知", "失败", "超时", "已停止", "启动失败"}
+
+
+def _install_recovery(info):
+    status = str((info or {}).get("status") or "")
+    if status not in RECOVERY_STATUSES:
+        return {"available": False, "reason": "当前状态无需重试"}
+
+    script_id = str((info or {}).get("script_id") or "").strip()
+    if not script_id:
+        return {"available": False, "reason": "安装记录缺少脚本 ID"}
+
+    item = get_online_script(script_id)
+    if not item:
+        return {
+            "available": False,
+            "script_id": script_id,
+            "reason": "脚本已不在本地缓存中，请先同步在线脚本源，再从脚本列表重试。",
+        }
+
+    return {
+        "available": True,
+        "script_id": script_id,
+        "action": url_for("online_scripts.online_scripts_install_retry", install_id=info.get("id")),
+        "label": "重试安装",
+    }
+
+
+def _install_recovery_html(info, recovery):
+    if recovery.get("available"):
+        return (
+            '<form class="inline-form" method="post" '
+            f'action="{h(recovery.get("action"))}">'
+            '<button class="btn btn-primary" type="submit">重试安装</button>'
+            '</form>'
+        )
+
+    reason = recovery.get("reason") or "当前安装不可重试"
+    if recovery.get("script_id"):
+        return f'<span class="help" style="color:#dc2626;">{h(reason)}</span>'
+    return ""
+
+
 @bp.route("/api/online-scripts/log/<install_id>")
 def api_online_install_log(install_id):
     try:
@@ -31,15 +74,19 @@ def api_online_install_log(install_id):
         }), 404
 
     log_file = info.get("log_file", "")
+    recovery = _install_recovery(info)
 
-    return jsonify({
+    payload = {
         "running": bool(info.get("running")),
         "status": info.get("status") or "-",
         "returncode": info.get("returncode"),
         "error": info.get("error", ""),
         "log_file": log_file,
         "log": tail_file(log_file, lines),
-    })
+    }
+    if recovery.get("available") or recovery.get("script_id"):
+        payload["recovery"] = recovery
+    return jsonify(payload)
 
 
 @bp.route("/online-scripts/log/<install_id>")
@@ -60,6 +107,11 @@ def online_install_log(install_id):
 """,
         )
         return layout("在线脚本日志", "online_scripts", body), 404
+
+    recovery = _install_recovery(info)
+    recovery_html = _install_recovery_html(info, recovery)
+    if not recovery.get("available") and recovery.get("reason"):
+        recovery_html = f'<span class="help" style="color:#dc2626;">{h(recovery["reason"])}</span>'
 
     stop_install_button = ""
 
@@ -84,6 +136,7 @@ def online_install_log(install_id):
 <a class="btn btn-gray" href="{h(back_url)}">返回</a>
 <a class="btn btn-blue" href="/pull">脚本</a>
 <a class="btn btn-orange" href="/tasks">任务</a>
+<span id="installRecoveryAction">{recovery_html}</span>
 {stop_install_button}
 """,
     )
@@ -96,6 +149,12 @@ def online_install_log(install_id):
 <script>
 window.__FLS_LOG_LAST_TEXT__ = "";
 window.__FLS_LOG_NEAR_BOTTOM__ = true;
+
+function escapeHtml(value){{
+    return String(value).replace(/[&<>"']/g, function(char){{
+        return {{"&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"}}[char];
+    }});
+}}
 
 function nearBottom(){{
     return document.documentElement.scrollHeight - window.innerHeight - window.scrollY < 90;
@@ -149,6 +208,18 @@ async function loadLog(){{
         if(!json.running){{
             const stopAction = document.getElementById("installStopAction");
             if(stopAction) stopAction.hidden = true;
+            const recovery = json.recovery || {{}};
+            const recoveryEl = document.getElementById("installRecoveryAction");
+            if(recoveryEl && recovery.available && !recoveryEl.dataset.ready){{
+                const csrf = typeof flsGetCsrfToken === "function" ? flsGetCsrfToken() : "";
+                const csrfInput = csrf ?
+                    "<" + "input type=\\"hidden\\" name=\\"csrf_token\\" value=\\"" + escapeHtml(csrf) + "\\">" : "";
+                recoveryEl.innerHTML =
+                    "<" + "form class='inline-form' method='post' action='" + escapeHtml(recovery.action || "") + "'>" +
+                    csrfInput +
+                    "<button class='btn btn-primary' type='submit'>重试安装</button><" + "/form>";
+                recoveryEl.dataset.ready = "1";
+            }}
             clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
             window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
         }}
