@@ -7,7 +7,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from tests.test_ui_route_components import TOKEN, isolated_app
+from tests.test_ui_route_components import ROOT, TOKEN, isolated_app
 
 
 class OnlineSourceRefreshTests(unittest.TestCase):
@@ -141,12 +141,16 @@ class OnlineSourceRefreshTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             scripts = re.findall(r"<script>(.*?)</script>", response.get_data(as_text=True), re.S)
             script = next(script for script in scripts if "async function updateOnlineRefreshStatus()" in script)
+            source = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+            reader = source[source.index("async function flsReadJsonResponse("):source.index("async function flsReadTextResponse(")]
             result = subprocess.run(
                 ["node", "-e", r"""
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
-const elements = {
+(async () => {
+for(const status of [401, 403, 409, 500, 200]) {
+ const elements = {
   onlineRefreshStatusCard: {style: {}},
   onlineRefreshStatusText: {innerHTML: ''},
   onlineRefreshBtn: {disabled: true, textContent: '正在同步中...'},
@@ -154,25 +158,26 @@ const elements = {
 const context = {
   window: {},
   document: {getElementById: id => elements[id]},
-  fetch: async () => ({ok: false, status: 401}),
-  flsReadJsonResponse: async () => {
-    const error = new Error('登录已过期');
-    error.status = 401;
-    throw error;
-  },
+  fetch: async () => ({ok: status === 200, status, json: async () => {
+    if(status === 200) throw new Error('not JSON');
+    return {msg: 'backend diagnostic'};
+  }}),
 };
 vm.createContext(context);
-vm.runInContext(input.script, context);
-setImmediate(() => {
+vm.runInContext(input.reader + input.script, context);
+await new Promise(resolve => setImmediate(resolve));
   assert.equal(elements.onlineRefreshStatusCard.style.display, 'block');
-  assert.match(elements.onlineRefreshStatusText.innerHTML, /HTTP 401/);
-  assert.match(elements.onlineRefreshStatusText.innerHTML, /重新登录/);
+  assert.ok(elements.onlineRefreshStatusText.innerHTML.includes('HTTP ' + status));
+  assert.match(elements.onlineRefreshStatusText.innerHTML, status === 200 ? /响应解析失败/ : /backend diagnostic/);
+  if(status === 401 || status === 403) assert.match(elements.onlineRefreshStatusText.innerHTML, /重新登录/);
+  else assert.match(elements.onlineRefreshStatusText.innerHTML, /重新同步/);
   assert.equal(elements.onlineRefreshBtn.disabled, false);
   assert.equal(elements.onlineRefreshBtn.textContent, '重新同步在线脚本源');
+}
   console.log('refresh polling error recovery passed');
-});
+})().catch(error => { console.error(error); process.exitCode = 1; });
 """],
-                input=json.dumps({"script": script}),
+                input=json.dumps({"script": script, "reader": reader}),
                 capture_output=True,
                 text=True,
                 timeout=5,

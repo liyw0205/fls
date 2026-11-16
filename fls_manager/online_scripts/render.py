@@ -180,24 +180,29 @@ def render_online_script_rows(items):
 </form>
 """
         else:
+            recovery_html = ""
             latest_install_id, latest_install_info = latest_online_install_for_script(item_id)
             recovery_statuses = {"结果未知", "失败", "超时", "已停止", "启动失败"}
             if latest_install_id and (latest_install_info or {}).get("status") in recovery_statuses:
                 recovery_status = (latest_install_info or {}).get("status") or "结果未知"
                 recovery_error = (latest_install_info or {}).get("error") or "请查看安装日志确认结果"
-                install_action_html = f"""
+                retry_action = ""
+                if not (latest_install_info or {}).get("retried_by"):
+                    retry_action = f'''
+    <form class="inline-form" method="post" action="/online-scripts/install-retry/{h(latest_install_id)}">
+        <button class="btn btn-primary" type="submit">重试安装</button>
+    </form>'''
+                recovery_html = f"""
 <div class="help" style="margin:0 0 10px;color:#dc2626;font-weight:800;">
     上次安装状态：{h(recovery_status)}<br>
     {h(recovery_error)}
 </div>
 <div class="fls-btn-line">
     <a class="btn btn-orange" href="/online-scripts/log/{h(latest_install_id)}?back=/online-scripts">查看安装日志</a>
-    <form class="inline-form" method="post" action="/online-scripts/install-retry/{h(latest_install_id)}">
-        <button class="btn btn-primary" type="submit">重试安装</button>
-    </form>
+    {retry_action}
 </div>
 """
-            elif has_task:
+            if has_task:
                 install_action_html = f"""
 {task_link_hidden_form}
 
@@ -233,6 +238,7 @@ def render_online_script_rows(items):
     </div>
 </form>
 """
+            install_action_html = recovery_html + install_action_html
 
         doc_section = ""
         if has_doc:

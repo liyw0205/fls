@@ -112,7 +112,10 @@ def _install_snapshot(info):
         "import_task",
         "enable_task",
         "selected_task_indexes",
+        "selected_tasks",
         "force",
+        "retry_of",
+        "retried_by",
         "running",
         "status",
         "start_time",
@@ -137,6 +140,12 @@ def persist_online_install(info):
                 for key, value in jobs.items()
                 if isinstance(value, dict)
             }
+            retry_of = str(snapshot.get("retry_of") or "")
+            previous = jobs.get(retry_of)
+            if retry_of and isinstance(previous, dict):
+                previous = dict(previous)
+                previous["retried_by"] = install_id
+                jobs[retry_of] = previous
             jobs.pop(install_id, None)
             jobs = {install_id: snapshot, **jobs}
             ordered = sorted(
@@ -147,6 +156,9 @@ def persist_online_install(info):
             return dict(ordered[:ONLINE_INSTALL_LIMIT])
 
         mutate_json(ONLINE_INSTALL_JOBS_FILE, {}, update)
+        previous = ONLINE_INSTALL_RUNNING.get(str(snapshot.get("retry_of") or ""))
+        if isinstance(previous, dict):
+            previous["retried_by"] = install_id
 
 
 def _load_persisted_online_install(install_id):
@@ -187,7 +199,10 @@ def get_online_install_job(install_id):
             )
             info["error"] = "；".join(filter(None, (info.get("error"), restart_error)))
             info["updated_at"] = now_str()
-            persist_online_install(info)
+            try:
+                persist_online_install(info)
+            except Exception as e:
+                info["error"] += f"；保存恢复状态失败：{e}，请修复文件权限或磁盘空间后重试。"
 
         return info
 
@@ -224,12 +239,14 @@ def latest_online_install_for_script(script_id):
         if not matches:
             return "", None
 
-        matches.sort(
-            key=lambda pair: (
-                str(pair[1].get("updated_at") or ""),
-                float(pair[1].get("start_time") or 0),
-            ),
-            reverse=True,
-        )
+        def order(pair):
+            try:
+                started = float(pair[1].get("start_time") or 0)
+            except (ValueError, TypeError):
+                started = 0
+            return started, str(pair[1].get("updated_at") or "")
+
+        # Recovery changes updated_at, but must not promote an older attempt.
+        matches.sort(key=order, reverse=True)
         install_id, info = matches[0]
         return install_id, dict(info)

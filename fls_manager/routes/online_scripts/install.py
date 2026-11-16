@@ -18,18 +18,38 @@ def _start_install_job(
     force=False,
     enable_task=False,
     selected_task_indexes=None,
+    retry_of="",
 ):
     """Register and launch one install, keeping startup failures durable."""
+    if retry_of:
+        target = online_script_target(item)
+        if target.exists() and not force:
+            return _install_confirmation(
+                script_id, item, target, proxy_id, import_task, enable_task,
+                selected_task_indexes or [],
+                action=url_for("online_scripts.online_scripts_install_retry", install_id=retry_of),
+            )
+
     install_id = uuid.uuid4().hex
     log_file = online_install_log_file(
         install_id,
         item.get("name") or item.get("id"),
     )
     selected_task_indexes = list(selected_task_indexes or [])
+    task_crons = online_script_task_crons(item)
 
     with ONLINE_INSTALL_LOCK:
+        if retry_of:
+            previous = get_online_install_job(retry_of)
+            if previous and previous.get("retried_by"):
+                return _install_retry_consumed(retry_of, previous["retried_by"])
         active_id, _ = active_online_install_for_script(script_id)
         if active_id:
+            if retry_of:
+                return _install_retry_error(
+                    retry_of, "无法重试在线安装", "该脚本仍有安装任务正在运行，请先查看当前任务。", 409,
+                    actions_html=f'<a class="btn btn-orange" href="/online-scripts/log/{h(active_id)}">查看当前安装</a>',
+                )
             return redirect(
                 url_for(
                     "online_scripts.online_scripts_page",
@@ -46,7 +66,12 @@ def _start_install_job(
             "import_task": bool(import_task),
             "enable_task": bool(enable_task),
             "selected_task_indexes": selected_task_indexes,
+            "selected_tasks": [
+                task_crons[int(index) - 1]
+                for index in selected_task_indexes
+            ] if import_task else [],
             "force": bool(force),
+            "retry_of": retry_of,
             "running": True,
             "status": "准备中",
             "start_time": time.time(),
@@ -130,14 +155,15 @@ def online_scripts_install(script_id):
     if not import_task:
         enable_task = False
         selected_task_indexes = []
-
-    if import_task and script_has_task(item) and not selected_task_indexes:
-        return redirect(
-            url_for(
-                "online_scripts.online_scripts_page",
-                err="已勾选导入任务，但没有选择任何任务。下一步：返回选择页面勾选任务后重试",
+    else:
+        try:
+            selected_task_indexes = validated_install_task_indexes(item, selected_task_indexes)
+        except ValueError as e:
+            body = page_header_card(
+                "任务选择无效", help_html=f"{h(e)}。请重新选择任务后重试。",
+                actions_html=f'<a class="btn btn-gray" href="/online-scripts/install-select/{h(script_id)}">重新选择任务</a>',
             )
-        )
+            return layout("在线脚本安装失败", "online_scripts", body), 400
 
     try:
         target = online_script_target(item)
@@ -149,6 +175,27 @@ def online_scripts_install(script_id):
         )
         return layout("在线脚本安装失败", "online_scripts", body), 400
 
+    if target.exists() and not force:
+        return _install_confirmation(
+            script_id, item, target, proxy_id, import_task, enable_task, selected_task_indexes,
+            select_mode=select_mode, excluded_task_indexes=excluded_task_indexes,
+        )
+
+    return _start_install_job(
+        script_id=script_id,
+        item=item,
+        proxy_id=proxy_id,
+        import_task=import_task,
+        force=force,
+        enable_task=enable_task,
+        selected_task_indexes=selected_task_indexes,
+    )
+
+
+def _install_confirmation(
+    script_id, item, target, proxy_id, import_task, enable_task, selected_task_indexes,
+    select_mode="", excluded_task_indexes="", action="",
+):
     selected_task_hidden = ""
 
     for idx in selected_task_indexes:
@@ -175,24 +222,24 @@ def online_scripts_install(script_id):
     if excluded_task_indexes:
         select_mode_hidden += f'<input type="hidden" name="excluded_task_indexes" value="{h(excluded_task_indexes)}">'
 
-    if target.exists() and not force:
-        proxy_options = proxy_select_options(proxy_id)
-        has_task = script_has_task(item)
+    proxy_options = proxy_select_options(proxy_id)
+    has_task = script_has_task(item)
+    action = action or url_for("online_scripts.online_scripts_install", script_id=script_id)
 
-        header_card = page_header_card(
-            "目标已存在，请确认",
-            help_html=f"""
+    header_card = page_header_card(
+        "目标已存在，请确认",
+        help_html=f"""
         <span style="color:#dc2626;">检测到同名文件或文件夹已经存在。为避免意外覆盖，已暂停操作。</span><br>
         目标路径：<b>{h(target)}</b><br>
         如果是 Git 仓库目录，继续后会执行 <code>git pull</code> 更新。<br>
         如果是 raw 文件，继续后会覆盖该文件。<br>
         如果目标是非 Git 文件夹，继续也不会强行覆盖，需要你手动处理。
 """,
-        )
+    )
 
-        body = f"""
+    body = f"""
 {header_card}
-<form method="post" action="/online-scripts/install/{h(script_id)}">
+<form method="post" action="{h(action)}">
 <section class="section fls-form-section">
     <h2 class="section-title">覆盖确认</h2>
         <input type="hidden" name="force" value="1">
@@ -229,17 +276,7 @@ def online_scripts_install(script_id):
 </section>
 </form>
 """
-        return layout("目标已存在", "online_scripts", body)
-
-    return _start_install_job(
-        script_id=script_id,
-        item=item,
-        proxy_id=proxy_id,
-        import_task=import_task,
-        force=force,
-        enable_task=enable_task,
-        selected_task_indexes=selected_task_indexes,
-    )
+    return layout("目标已存在", "online_scripts", body)
 
 
 def _install_start_error(install_id, error):
@@ -251,16 +288,24 @@ def _install_start_error(install_id, error):
     return layout("在线脚本安装失败", "online_scripts", body), 500
 
 
-def _install_retry_error(install_id, title, message, code):
+def _install_retry_error(install_id, title, message, code, actions_html=""):
     body = page_header_card(
         title,
         help_html=h(message),
         actions_html=(
             f'<a class="btn btn-gray" href="/online-scripts/log/{h(install_id)}">查看安装记录</a>'
             '<a class="btn btn-blue" href="/online-scripts">返回在线脚本</a>'
+            + actions_html
         ),
     )
     return layout(title, "online_scripts", body), code
+
+
+def _install_retry_consumed(install_id, retry_id):
+    return _install_retry_error(
+        install_id, "无法重试在线安装", "该记录已发起重试，请查看新的安装记录。", 409,
+        actions_html=f'<a class="btn btn-orange" href="/online-scripts/log/{h(retry_id)}">查看重试记录</a>',
+    )
 
 
 @bp.route("/online-scripts/install-retry/<install_id>", methods=["POST"])
@@ -291,6 +336,17 @@ def online_scripts_install_retry(install_id):
         )
 
     with ONLINE_INSTALL_LOCK:
+        info = get_online_install_job(install_id)
+        if not info:
+            return _install_retry_error(install_id, "无法重试在线安装", "安装记录不存在。", 404)
+        if info.get("retried_by"):
+            return _install_retry_consumed(install_id, info["retried_by"])
+        active_id, _active = active_online_install_for_script(info.get("script_id"))
+        if active_id:
+            return _install_retry_error(
+                install_id, "无法重试在线安装", "该脚本仍有安装任务正在运行，请先查看当前任务。", 409,
+                actions_html=f'<a class="btn btn-orange" href="/online-scripts/log/{h(active_id)}">查看当前安装</a>',
+            )
         if install_id in ONLINE_INSTALL_RETRYING:
             return _install_retry_error(
                 install_id,
@@ -323,26 +379,30 @@ def online_scripts_install_retry(install_id):
 
         import_task = bool(info.get("import_task"))
         enable_task = bool(info.get("enable_task")) and import_task
-        selected_task_indexes = info.get("selected_task_indexes") or []
-        if not isinstance(selected_task_indexes, list):
-            selected_task_indexes = []
-        if import_task and script_has_task(item) and not selected_task_indexes:
+        try:
+            selected_task_indexes = (
+                validated_install_retry_task_indexes(item, info)
+                if import_task else []
+            )
+        except (TypeError, ValueError):
             return _install_retry_error(
                 install_id,
                 "无法重试在线安装",
-                "原安装记录没有可恢复的任务选择，请返回选择页面重新选择任务后重试。",
+                "原安装记录的任务选择已失效，请重新选择任务后重试。",
                 409,
+                actions_html=f'<a class="btn btn-primary" href="/online-scripts/install-select/{h(script_id)}">重新选择任务</a>',
             )
 
-        # Never carry force across a restart; a possibly partial target needs fresh confirmation.
+        # Only a new confirmation POST may authorize overwriting a partial target.
         return _start_install_job(
             script_id=script_id,
             item=item,
-            proxy_id=str(info.get("proxy_id") or ""),
+            proxy_id=request.form.get("proxy_id", str(info.get("proxy_id") or "")).strip(),
             import_task=import_task,
-            force=False,
+            force=request.form.get("force") == "1",
             enable_task=enable_task,
             selected_task_indexes=selected_task_indexes,
+            retry_of=install_id,
         )
     finally:
         with ONLINE_INSTALL_LOCK:

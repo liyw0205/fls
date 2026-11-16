@@ -170,6 +170,33 @@ def selected_task_indexes_from_form(item):
 
     return selected_task_indexes
 
+
+def validated_install_task_indexes(item, values):
+    if not isinstance(values, list) or not values:
+        raise ValueError("任务选择为空或已失效")
+    task_count = len(online_script_task_crons(item))
+    indexes = []
+    for value in values:
+        raw = str(value).strip()
+        if not raw.isdecimal():
+            raise ValueError("任务序号必须为整数")
+        index = int(raw)
+        if not 1 <= index <= task_count:
+            raise ValueError("任务选择已失效")
+        if str(index) not in indexes:
+            indexes.append(str(index))
+    return indexes
+
+
+def validated_install_retry_task_indexes(item, info):
+    indexes = validated_install_task_indexes(item, info.get("selected_task_indexes"))
+    task_crons = online_script_task_crons(item)
+    selected_tasks = [task_crons[int(index) - 1] for index in indexes]
+    previous = info.get("selected_tasks")
+    if previous is not None and previous != selected_tasks:
+        raise ValueError("脚本源任务已变更，请重新选择任务")
+    return indexes
+
 def install_task_page_links(script_id, task_page, task_pages, excluded="", task_q=""):
     if task_pages <= 1:
         return ""

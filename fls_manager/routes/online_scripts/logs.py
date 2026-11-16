@@ -8,7 +8,16 @@ RECOVERY_STATUSES = {"结果未知", "失败", "超时", "已停止", "启动失
 def _install_recovery(info):
     status = str((info or {}).get("status") or "")
     if status not in RECOVERY_STATUSES:
-        return {"available": False, "reason": "当前状态无需重试"}
+        return {"available": False}
+
+    retry_id = str((info or {}).get("retried_by") or "")
+    if retry_id:
+        return {
+            "available": False,
+            "reason": "该记录已发起重试，请查看新的安装记录。",
+            "href": url_for("online_scripts.online_install_log", install_id=retry_id),
+            "label": "查看重试记录",
+        }
 
     script_id = str((info or {}).get("script_id") or "").strip()
     if not script_id:
@@ -22,6 +31,22 @@ def _install_recovery(info):
             "reason": "脚本已不在本地缓存中，请先同步在线脚本源，再从脚本列表重试。",
         }
 
+    try:
+        online_script_target(item)
+        if info.get("import_task"):
+            validated_install_retry_task_indexes(item, info)
+    except (RuntimeError, ValueError, OSError):
+        return {
+            "available": False,
+            "script_id": script_id,
+            "reason": "脚本路径或任务选择已失效，请检查脚本源并重新选择安装选项。",
+            "href": (
+                url_for("online_scripts.online_scripts_install_select", script_id=script_id)
+                if script_has_task(item) else "/online-scripts"
+            ),
+            "label": "重新选择安装选项",
+        }
+
     return {
         "available": True,
         "script_id": script_id,
@@ -30,7 +55,7 @@ def _install_recovery(info):
     }
 
 
-def _install_recovery_html(info, recovery):
+def _install_recovery_html(recovery):
     if recovery.get("available"):
         return (
             '<form class="inline-form" method="post" '
@@ -39,10 +64,11 @@ def _install_recovery_html(info, recovery):
             '</form>'
         )
 
-    reason = recovery.get("reason") or "当前安装不可重试"
-    if recovery.get("script_id"):
-        return f'<span class="help" style="color:#dc2626;">{h(reason)}</span>'
-    return ""
+    reason = recovery.get("reason") or ""
+    html = f'<span class="help" style="color:#dc2626;">{h(reason)}</span>' if reason else ""
+    if recovery.get("href"):
+        html += f'<a class="btn btn-orange" href="{h(recovery["href"])}">{h(recovery["label"])}</a>'
+    return html
 
 
 @bp.route("/api/online-scripts/log/<install_id>")
@@ -84,7 +110,7 @@ def api_online_install_log(install_id):
         "log_file": log_file,
         "log": tail_file(log_file, lines),
     }
-    if recovery.get("available") or recovery.get("script_id"):
+    if recovery.get("available") or recovery.get("reason"):
         payload["recovery"] = recovery
     return jsonify(payload)
 
@@ -109,9 +135,7 @@ def online_install_log(install_id):
         return layout("在线脚本日志", "online_scripts", body), 404
 
     recovery = _install_recovery(info)
-    recovery_html = _install_recovery_html(info, recovery)
-    if not recovery.get("available") and recovery.get("reason"):
-        recovery_html = f'<span class="help" style="color:#dc2626;">{h(recovery["reason"])}</span>'
+    recovery_html = _install_recovery_html(recovery)
 
     stop_install_button = ""
 
@@ -136,13 +160,14 @@ def online_install_log(install_id):
 <a class="btn btn-gray" href="{h(back_url)}">返回</a>
 <a class="btn btn-blue" href="/pull">脚本</a>
 <a class="btn btn-orange" href="/tasks">任务</a>
-<span id="installRecoveryAction">{recovery_html}</span>
+<div id="installRecoveryAction">{recovery_html}</div>
 {stop_install_button}
 """,
     )
 
     body = f"""
 {header_card}
+<div class="notice red" id="installPollError" role="status" hidden></div>
 <pre class="log" id="log">加载中...</pre>
 {log_controls()}
 
@@ -172,6 +197,8 @@ async function loadLog(){{
 
         const res = await fetch("/api/online-scripts/log/{h(install_id)}?lines=1600", {{cache:"no-store"}});
         const json = await flsReadJsonResponse(res);
+        const pollError = document.getElementById("installPollError");
+        if(pollError) pollError.hidden = true;
 
         document.getElementById("installStatus").textContent = json.status || "-";
         const errorEl = document.getElementById("installError");
@@ -219,12 +246,37 @@ async function loadLog(){{
                     csrfInput +
                     "<button class='btn btn-primary' type='submit'>重试安装</button><" + "/form>";
                 recoveryEl.dataset.ready = "1";
+            }}else if(recoveryEl && !recovery.available){{
+                let html = recovery.reason ?
+                    "<span class='help' style='color:#dc2626;'>" + escapeHtml(recovery.reason) + "</span>" : "";
+                if(recovery.href) html +=
+                    "<a class='btn btn-orange' href='" + escapeHtml(recovery.href) + "'>" +
+                    escapeHtml(recovery.label || "查看安装选项") + "</a>";
+                recoveryEl.innerHTML = html;
+                delete recoveryEl.dataset.ready;
             }}
             clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
             window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
         }}
     }} catch(e) {{
-        document.getElementById("log").textContent = "日志读取失败：" + e + "。下一步：检查安装日志文件和服务状态后重试";
+        const pollError = document.getElementById("installPollError");
+        const message = e && e.message ? e.message : String(e);
+        const denied = e && (e.status === 401 || e.status === 403);
+        const missing = e && e.status === 404;
+        const next = denied ? "重新登录后刷新页面" :
+            (missing ? "到日志管理检查已保留的安装日志" : "检查安装日志文件和服务状态，稍后会重新读取");
+        if(pollError){{
+            pollError.textContent = "日志读取失败：" + message + "。下一步：" + next;
+            pollError.hidden = false;
+        }}
+        if(denied || missing){{
+            const stopAction = document.getElementById("installStopAction");
+            const recoveryEl = document.getElementById("installRecoveryAction");
+            if(stopAction) stopAction.hidden = true;
+            if(recoveryEl) recoveryEl.hidden = true;
+            clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
+            window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
+        }}
     }}
 }}
 
