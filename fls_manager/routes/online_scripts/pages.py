@@ -213,7 +213,25 @@ async function updateOnlineRefreshStatus(){{
             setTimeout(updateOnlineRefreshStatus, 2000);
         }}
 
-    }} catch(e) {{}}
+    }} catch(e) {{
+        const card = document.getElementById("onlineRefreshStatusCard");
+        const text = document.getElementById("onlineRefreshStatusText");
+        const btn = document.getElementById("onlineRefreshBtn");
+        const status = e && e.status ? "HTTP " + e.status : "请求失败";
+        const detail = e && e.message ? e.message : String(e || "未知错误");
+        const next = e && (e.status === 401 || e.status === 403)
+            ? "登录状态已失效，请重新登录后重试"
+            : "确认面板服务和网络后点击重新同步";
+        if(card) card.style.display = "block";
+        if(text) text.innerHTML =
+            "<span style='color:#dc2626;font-weight:900;'>同步状态读取失败（" +
+            escapeHtml(status) + "）：" + escapeHtml(detail) +
+            "。下一步：" + escapeHtml(next) + "</span>";
+        if(btn) {{
+            btn.disabled = false;
+            btn.textContent = "重新同步在线脚本源";
+        }}
+    }}
 }}
 
 updateOnlineRefreshStatus();

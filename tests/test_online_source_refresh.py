@@ -1,4 +1,7 @@
 import json
+import re
+import shutil
+import subprocess
 import threading
 import unittest
 from types import SimpleNamespace
@@ -130,6 +133,51 @@ class OnlineSourceRefreshTests(unittest.TestCase):
             page = app.test_client().get("/online-scripts", headers={"X-Token": TOKEN})
             self.assertEqual(page.status_code, 200)
             self.assertIn("结果未知", page.get_data(as_text=True))
+
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise the polling script")
+    def test_refresh_polling_surfaces_http_error_and_restores_retry_button(self):
+        with isolated_app() as (app, _base_dir):
+            response = app.test_client().get("/online-scripts", headers={"X-Token": TOKEN})
+            self.assertEqual(response.status_code, 200)
+            scripts = re.findall(r"<script>(.*?)</script>", response.get_data(as_text=True), re.S)
+            script = next(script for script in scripts if "async function updateOnlineRefreshStatus()" in script)
+            result = subprocess.run(
+                ["node", "-e", r"""
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+const elements = {
+  onlineRefreshStatusCard: {style: {}},
+  onlineRefreshStatusText: {innerHTML: ''},
+  onlineRefreshBtn: {disabled: true, textContent: '正在同步中...'},
+};
+const context = {
+  window: {},
+  document: {getElementById: id => elements[id]},
+  fetch: async () => ({ok: false, status: 401}),
+  flsReadJsonResponse: async () => {
+    const error = new Error('登录已过期');
+    error.status = 401;
+    throw error;
+  },
+};
+vm.createContext(context);
+vm.runInContext(input.script, context);
+setImmediate(() => {
+  assert.equal(elements.onlineRefreshStatusCard.style.display, 'block');
+  assert.match(elements.onlineRefreshStatusText.innerHTML, /HTTP 401/);
+  assert.match(elements.onlineRefreshStatusText.innerHTML, /重新登录/);
+  assert.equal(elements.onlineRefreshBtn.disabled, false);
+  assert.equal(elements.onlineRefreshBtn.textContent, '重新同步在线脚本源');
+  console.log('refresh polling error recovery passed');
+});
+"""],
+                input=json.dumps({"script": script}),
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":
