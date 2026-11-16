@@ -121,6 +121,8 @@ def _install_snapshot(info):
         "start_time",
         "returncode",
         "error",
+        "scheduler_reload_pending",
+        "scheduler_reload_error",
         "updated_at",
     )
     return {field: info.get(field) for field in fields}

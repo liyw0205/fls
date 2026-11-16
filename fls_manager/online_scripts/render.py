@@ -169,12 +169,18 @@ def render_online_script_rows(items):
         else:
             recovery_html = ""
             latest_install_id, latest_install_info = latest_online_install_for_script(item_id)
-            recovery_statuses = {"结果未知", "失败", "超时", "已停止", "启动失败"}
+            recovery_statuses = {"结果未知", "失败", "超时", "已停止", "启动失败", "部分完成"}
             if latest_install_id and (latest_install_info or {}).get("status") in recovery_statuses:
                 recovery_status = (latest_install_info or {}).get("status") or "结果未知"
                 recovery_error = (latest_install_info or {}).get("error") or "请查看安装日志确认结果"
                 retry_action = ""
-                if not (latest_install_info or {}).get("retried_by"):
+                if (latest_install_info or {}).get("scheduler_reload_pending"):
+                    recovery_error = (latest_install_info or {}).get("scheduler_reload_error") or recovery_error
+                    retry_action = f'''
+    <form class="inline-form" method="post" action="/online-scripts/install-reload/{h(latest_install_id)}">
+        <button class="btn btn-primary" type="submit">重新加载调度器</button>
+    </form>'''
+                elif not (latest_install_info or {}).get("retried_by"):
                     retry_action = f'''
     <form class="inline-form" method="post" action="/online-scripts/install-retry/{h(latest_install_id)}">
         <button class="btn btn-primary" type="submit">重试安装</button>

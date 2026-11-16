@@ -9,6 +9,7 @@ import uuid
 from contextlib import closing
 
 from ..paths import SCRIPT_DIR
+from ..models import TaskSchedulerReloadError
 from ..utils import now_str, LazyModule, prune_completed_records
 from ..proxy import (
     requests_proxy_dict,
@@ -446,12 +447,22 @@ def install_worker(
         if import_task:
             append_log(log_file, "")
             append_log(log_file, "===== 导入任务 =====")
-            import_task_if_needed(
-                item,
-                log_file=log_file,
-                enable_task=enable_task,
-                selected_task_indexes=selected_task_indexes,
-            )
+            try:
+                import_task_if_needed(
+                    item,
+                    log_file=log_file,
+                    enable_task=enable_task,
+                    selected_task_indexes=selected_task_indexes,
+                    raise_on_reload_error=True,
+                )
+            except TaskSchedulerReloadError as e:
+                with ONLINE_INSTALL_LOCK:
+                    info.update(
+                        scheduler_reload_pending=True,
+                        scheduler_reload_error=f"任务已保存，但调度器重载失败：{e}",
+                        updated_at=now_str(),
+                    )
+                    _persist_install_state(info)
 
         if online_install_should_stop(install_id):
             raise InstallStopped("安装已停止")
@@ -487,16 +498,19 @@ def install_worker(
                 return
             info.update({
                 "running": False,
-                "status": "已完成",
+                "status": "部分完成" if info.get("scheduler_reload_pending") else "已完成",
                 "returncode": 0,
-                "error": info.get("persistence_error", ""),
+                "error": "；".join(filter(None, (
+                    info.get("scheduler_reload_error"), info.get("persistence_error"),
+                ))),
                 "process": None,
                 "updated_at": now_str(),
             })
             _persist_install_state(info)
 
         append_log(log_file, "")
-        append_log(log_file, f"===== 全部完成: {now_str()} =====")
+        result = "安装完成，调度器待重载" if info.get("scheduler_reload_pending") else "全部完成"
+        append_log(log_file, f"===== {result}: {now_str()} =====")
 
     except Exception as e:
         stopped = isinstance(e, InstallStopped)

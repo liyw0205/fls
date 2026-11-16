@@ -5,8 +5,22 @@ from ...online_scripts.constants import get_online_install_job
 RECOVERY_STATUSES = {"结果未知", "失败", "超时", "已停止", "启动失败"}
 
 
+def _install_error(info):
+    errors = [info.get("error") or ""]
+    pending_error = info.get("scheduler_reload_error") or ""
+    if pending_error and pending_error not in errors[0]:
+        errors.append(pending_error)
+    return "；".join(filter(None, errors))
+
+
 def _install_recovery(info):
     status = str((info or {}).get("status") or "")
+    if not (info or {}).get("running") and (info or {}).get("scheduler_reload_pending"):
+        return {
+            "available": True,
+            "action": url_for("online_scripts.online_scripts_install_reload", install_id=info.get("id")),
+            "label": "重新加载调度器",
+        }
     if status not in RECOVERY_STATUSES:
         return {"available": False}
 
@@ -60,7 +74,7 @@ def _install_recovery_html(recovery):
         return (
             '<form class="inline-form" method="post" '
             f'action="{h(recovery.get("action"))}">'
-            '<button class="btn btn-primary" type="submit">重试安装</button>'
+            f'<button class="btn btn-primary" type="submit">{h(recovery.get("label") or "重试安装")}</button>'
             '</form>'
         )
 
@@ -106,10 +120,13 @@ def api_online_install_log(install_id):
         "running": bool(info.get("running")),
         "status": info.get("status") or "-",
         "returncode": info.get("returncode"),
-        "error": info.get("error", ""),
+        "error": _install_error(info),
         "log_file": log_file,
         "log": tail_file(log_file, lines),
     }
+    if info.get("scheduler_reload_pending"):
+        payload["scheduler_reload_pending"] = True
+        payload["scheduler_reload_error"] = info.get("scheduler_reload_error") or ""
     if recovery.get("available") or recovery.get("reason"):
         payload["recovery"] = recovery
     return jsonify(payload)
@@ -153,7 +170,7 @@ def online_install_log(install_id):
         help_html=f"""
         状态：<b id="installStatus">{h(info.get("status") or "-")}</b><br>
         退出码：<span id="installReturncode">{h(info.get("returncode") if info.get("returncode") is not None else "-")}</span><br>
-        <span id="installError">{"错误：" + h(info.get("error")) if info.get("error") else ""}</span><br>
+        <span id="installError">{"错误：" + h(_install_error(info)) if _install_error(info) else ""}</span><br>
         日志文件：{h(info.get("log_file") or "-")}
 """,
         actions_html=f"""
@@ -244,7 +261,8 @@ async function loadLog(){{
                 recoveryEl.innerHTML =
                     "<" + "form class='inline-form' method='post' action='" + escapeHtml(recovery.action || "") + "'>" +
                     csrfInput +
-                    "<button class='btn btn-primary' type='submit'>重试安装</button><" + "/form>";
+                    "<button class='btn btn-primary' type='submit'>" +
+                    escapeHtml(recovery.label || "重试安装") + "</button><" + "/form>";
                 recoveryEl.dataset.ready = "1";
             }}else if(recoveryEl && !recovery.available){{
                 let html = recovery.reason ?

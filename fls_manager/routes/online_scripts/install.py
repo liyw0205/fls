@@ -1,5 +1,6 @@
 from ._common import *
 from ...utils import now_str
+from ...scheduler import reload_scheduler
 from ...online_scripts.constants import (
     ONLINE_INSTALL_LOCK,
     ONLINE_INSTALL_RUNNING,
@@ -77,6 +78,8 @@ def _start_install_job(
             "start_time": time.time(),
             "returncode": None,
             "error": "",
+            "scheduler_reload_pending": False,
+            "scheduler_reload_error": "",
             "process": None,
             "updated_at": now_str(),
         }
@@ -309,6 +312,57 @@ def _install_retry_consumed(install_id, retry_id):
     )
 
 
+def _install_scheduler_reload_form(install_id):
+    return (
+        '<form class="inline-form" method="post" '
+        f'action="/online-scripts/install-reload/{h(quote(install_id, safe=""))}">'
+        '<button class="btn btn-primary" type="submit">重新加载调度器</button></form>'
+    )
+
+
+@bp.route("/online-scripts/install-reload/<install_id>", methods=["POST"])
+def online_scripts_install_reload(install_id):
+    with ONLINE_INSTALL_LOCK:
+        info = get_online_install_job(install_id)
+        if not info:
+            return _install_retry_error(install_id, "无法恢复任务调度", "安装记录不存在。", 404)
+        if info.get("running") or install_id in ONLINE_INSTALL_RETRYING:
+            return _install_retry_error(install_id, "无法恢复任务调度", "安装或恢复仍在进行，请稍后重试。", 409)
+        if not info.get("scheduler_reload_pending"):
+            return _install_retry_error(install_id, "无需恢复任务调度", "该安装没有待恢复的调度器重载。", 409)
+        ONLINE_INSTALL_RETRYING.add(install_id)
+
+    try:
+        try:
+            reload_scheduler()
+        except Exception as e:
+            return _install_retry_error(
+                install_id, "任务调度尚未恢复", f"任务保持已保存，调度器重载失败：{e}", 503,
+                actions_html=_install_scheduler_reload_form(install_id),
+            )
+
+        with ONLINE_INSTALL_LOCK:
+            updated = dict(info)
+            updated.update(scheduler_reload_pending=False, scheduler_reload_error="", updated_at=now_str())
+            if updated.get("status") == "部分完成":
+                updated.update(status="已完成", error="", persistence_error="")
+            try:
+                persist_online_install(updated)
+            except Exception as e:
+                return _install_retry_error(
+                    install_id, "恢复结果尚未保存",
+                    f"调度器已重新加载，但保存恢复结果失败：{e}。请修复文件权限或磁盘空间后重新加载以保存状态。",
+                    500, actions_html=_install_scheduler_reload_form(install_id),
+                )
+            live = ONLINE_INSTALL_RUNNING.get(install_id)
+            if isinstance(live, dict):
+                live.update(updated)
+        return redirect(url_for("online_scripts.online_install_log", install_id=install_id))
+    finally:
+        with ONLINE_INSTALL_LOCK:
+            ONLINE_INSTALL_RETRYING.discard(install_id)
+
+
 @bp.route("/online-scripts/install-retry/<install_id>", methods=["POST"])
 def online_scripts_install_retry(install_id):
     info = get_online_install_job(install_id)
@@ -326,6 +380,12 @@ def online_scripts_install_retry(install_id):
             "无法重试在线安装",
             "该安装任务仍在运行，请等待完成或先停止任务。",
             409,
+        )
+
+    if info.get("scheduler_reload_pending"):
+        return _install_retry_error(
+            install_id, "请先恢复任务调度", "任务已保存，请先重新加载调度器，再检查安装结果。", 409,
+            actions_html=_install_scheduler_reload_form(install_id),
         )
 
     if info.get("status") not in ("结果未知", "失败", "超时", "已停止", "启动失败"):
