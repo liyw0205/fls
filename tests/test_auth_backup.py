@@ -645,6 +645,39 @@ class BackupSafetyTests(unittest.TestCase):
                     datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S"),
                 )
 
+    def test_backup_symlink_is_not_listed_downloaded_or_deleted(self):
+        with isolated_fls_env(token="unit-token") as base_dir:
+            from fls_manager.routes.backup._common import backup_dir
+
+            outside = base_dir / "outside.tar.gz"
+            outside.write_bytes(b"secret backup")
+            link = backup_dir() / "linked.tar.gz"
+            try:
+                link.symlink_to(outside)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+
+            client = load_app().test_client()
+            listed = client.get("/api/backup/list", headers={"X-Token": "unit-token"})
+            self.assertEqual(listed.status_code, 200)
+            self.assertEqual(listed.get_json()["items"], [])
+
+            downloaded = client.get(
+                "/backup/download/linked.tar.gz",
+                headers={"X-Token": "unit-token"},
+            )
+            self.assertEqual(downloaded.status_code, 404)
+
+            deleted = client.post(
+                "/api/backup/delete",
+                data={"filename": "linked.tar.gz"},
+                headers={"X-Token": "unit-token"},
+            )
+            self.assertEqual(deleted.status_code, 400)
+            self.assertFalse(deleted.get_json()["ok"])
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(outside.read_bytes(), b"secret backup")
+
     def test_api_backup_delete_missing_file_is_idempotent(self):
         with isolated_fls_env(token="unit-token"):
             missing_target = MagicMock()

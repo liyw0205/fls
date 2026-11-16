@@ -189,11 +189,19 @@ def backup_safe_file(filename):
     if not filename:
         raise ValueError("文件名为空")
 
-    target = (backup_dir() / filename).resolve()
     base = backup_dir().resolve()
+    candidate = base / filename
+
+    if candidate.is_symlink():
+        raise ValueError("备份文件不能是符号链接")
+
+    target = candidate.resolve()
 
     if target != base and not str(target).startswith(str(base) + os.sep):
         raise ValueError("备份文件路径非法")
+
+    if target.exists() and not target.is_file():
+        raise ValueError("备份文件不是常规文件")
 
     return target
 
@@ -272,7 +280,7 @@ def list_backup_files():
     files = []
 
     for item in BACKUP_DIR.glob("*.tar.gz"):
-        if not item.is_file():
+        if item.is_symlink() or not item.is_file():
             continue
 
         try:

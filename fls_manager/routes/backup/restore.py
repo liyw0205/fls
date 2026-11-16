@@ -96,7 +96,10 @@ def _commit_restore_directories(entries):
 
 @bp.route("/backup/download/<path:filename>")
 def backup_download(filename):
-    target = backup_safe_file(filename)
+    try:
+        target = backup_safe_file(filename)
+    except ValueError:
+        abort(404)
 
     if not target.exists() or not target.is_file():
         abort(404)
