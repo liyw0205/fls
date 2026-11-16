@@ -35,6 +35,7 @@ LOG_DIR = BASE_DIR / "log"
 SCRIPT_DIR = BASE_DIR / "scripts"
 
 CONFIG_FILE = DATA_DIR / "config.json"
+CONFIG_APPLY_STATE_FILE = DATA_DIR / "config_apply_state.json"
 TASK_FILE = DATA_DIR / "tasks.json"
 TASK_HISTORY_FILE = DATA_DIR / "task_history.json"
 TASK_HISTORY_INDEX_FILE = DATA_DIR / "task_history_index.sqlite3"

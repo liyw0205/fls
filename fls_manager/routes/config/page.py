@@ -1,14 +1,159 @@
+import binascii
+import hashlib
+import json
+
+from flask import jsonify
+
 from ._common import *
+from ...config import DEFAULT_CONFIG, normalize_config_data
+from ...models import TASKS_MUTATION_LOCK
+from ...paths import CONFIG_FILE, CONFIG_APPLY_STATE_FILE
+from ...storage import storage_transaction, read_json, write_json
+from ...utils import now_str
 from ...ui.components import table_card, page_header
+
+
+def _config_snapshot():
+    with storage_transaction():
+        try:
+            raw = CONFIG_FILE.read_bytes()
+        except FileNotFoundError:
+            raw = b""
+            data = {}
+        else:
+            data = json.loads(raw.decode("utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("面板配置不是 JSON 对象，未覆盖原文件")
+        cfg = normalize_config_data(data)
+        return cfg, _apply_revision(cfg)
+
+
+def _apply_revision(cfg):
+    settings = {key: cfg.get(key) for key in DEFAULT_CONFIG}
+    return hashlib.sha256(json.dumps(settings, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _config_apply_state(cfg):
+    state = read_json(CONFIG_APPLY_STATE_FILE, {})
+    if (
+        not isinstance(state, dict) or not state
+        or state.get("status") not in ("running", "succeeded", "failed", "unknown")
+        or not isinstance(state.get("errors"), list)
+    ):
+        return {"status": "unknown", "errors": ["尚未记录当前已保存配置的应用结果，请重新应用已保存配置。"]} if CONFIG_FILE.exists() else {}
+    state["errors"] = [str(error) for error in state["errors"]]
+    if state.get("status") == "running" or state.get("revision") != _apply_revision(cfg):
+        state = {**state, "status": "unknown", "errors": ["无法确认当前已保存配置的应用结果，请重新应用已保存配置。"]}
+        try:
+            write_json(CONFIG_APPLY_STATE_FILE, state)
+        except Exception as e:
+            state["errors"].append(f"未知状态保存失败：{e}")
+    return state
+
+
+def _apply_saved_config(cfg):
+    state = {"status": "running", "revision": _apply_revision(cfg), "errors": [], "updated_at": now_str()}
+    try:
+        write_json(CONFIG_APPLY_STATE_FILE, state)
+    except Exception as e:
+        return {**state, "status": "unknown", "errors": [f"配置已保存，但应用状态记录失败，未开始应用：{e}"]}
+    for label, operation in (("日志清理", cleanup_logs), ("调度器重载", reload_scheduler)):
+        try:
+            operation()
+        except Exception as e:
+            state["errors"].append(f"{label}失败：{e}")
+    state["status"] = "failed" if state["errors"] else "succeeded"
+    state["updated_at"] = now_str()
+    try:
+        write_json(CONFIG_APPLY_STATE_FILE, state)
+    except Exception as e:
+        state = {**state, "status": "unknown", "errors": [*state["errors"], f"配置应用结果保存失败：{e}"]}
+    return state
+
+
+def _config_apply_error(state, logged_out=False):
+    actions = (
+        '<form class="inline-form" method="post" action="/config/apply">'
+        '<button class="btn btn-primary" type="submit">重新应用已保存配置</button></form>'
+        '<a class="btn btn-gray" href="/config">查看已保存配置</a>'
+    )
+    if logged_out:
+        actions = '<a class="btn btn-primary" href="/login?next=/config">重新登录</a>'
+    body = page_header("配置已保存，应用待恢复", help_html="认证设置已更新，请重新登录后恢复应用。" if logged_out else "不会再次保存配置。", actions_html=actions)
+    body += _config_message("配置已保存；" + "；".join(state.get("errors", [])))
+    return layout("面板配置应用待恢复", "config", body), 503
+
+
+def _config_message(message):
+    if not message:
+        return ""
+    return f'<section class="section fls-form-section" data-config-error role="alert"><h2 class="section-title">配置处理结果</h2><p class="help">{h(message)}</p></section>'
+
+
+def _config_read_error(error):
+    draft = json.dumps(request.form.to_dict(flat=False), ensure_ascii=False, indent=2) if request.method == "POST" else ""
+    body = page_header("配置读取失败", help_html=f"{h(error)}。未保存，请修复配置文件或恢复备份。", actions_html='<a class="btn btn-gray" href="/config">重新读取配置</a>')
+    if draft:
+        body += f'<section class="section"><h2 class="section-title">未保存的草稿</h2><textarea readonly aria-label="未保存的草稿">{h(draft)}</textarea></section>'
+    return layout("配置读取失败", "config", body), 500
+
+
+def _config_draft(old_cfg):
+    draft = {**old_cfg, **request.form.to_dict()}
+    draft["security_verify_enabled"] = request.form.get("security_verify_enabled") == "1"
+    draft["task_types"] = {key: request.form.get(f"type_{key}") == "1" for key in DEFAULT_CONFIG["task_types"]}
+    return draft
+
+
+@bp.route("/config/apply", methods=["POST"])
+@bp.route("/api/config/apply", methods=["POST"])
+def config_apply():
+    try:
+        with TASKS_MUTATION_LOCK:
+            cfg, _revision = _config_snapshot()
+            state = _apply_saved_config(cfg)
+    except Exception as e:
+        if request.path.startswith("/api/"):
+            return jsonify(ok=False, saved=None, status="unknown", msg=str(e)), 500
+        return _config_read_error(e)
+    if request.path.startswith("/api/"):
+        return jsonify(ok=state["status"] == "succeeded", saved=True, state=state), 200 if state["status"] == "succeeded" else 503
+    if state["status"] != "succeeded":
+        return _config_apply_error(state)
+    return redirect(url_for("config.config_page"))
 
 
 @bp.route("/config", methods=["GET", "POST"])
 def config_page():
+    try:
+        with TASKS_MUTATION_LOCK:
+            old_cfg, revision = _config_snapshot()
+            state = _config_apply_state(old_cfg) if request.method == "GET" else {}
+    except Exception as e:
+        return _config_read_error(e)
     if request.method == "POST":
-        old_cfg = load_config()
+        draft = _config_draft(old_cfg)
+        if request.form.get("config_revision") != revision:
+            return _render_config_form(draft, revision, "配置已变更或编辑状态失效，未保存。请对照当前配置合并后重试。", 409, current_cfg=old_cfg)
         theme = str(request.form.get("theme", "default") or "default").strip().lower()
         if theme not in THEME_OPTIONS:
-            theme = "default"
+            return _render_config_form(draft, revision, "主题选择无效，未保存。", 400)
+        if request.form.get("security_verify_type", "code").strip() not in ("code", "totp"):
+            return _render_config_form(draft, revision, "安全验证方式无效，未保存。", 400)
+        for key in ("security_verify_enabled", *(f"type_{key}" for key in DEFAULT_CONFIG["task_types"])):
+            if any(value not in ("", "1") for value in request.form.getlist(key)):
+                return _render_config_form(draft, revision, f"{key} 选择无效，未保存。", 400)
+        if any("\x00" in value for value in request.form.values()):
+            return _render_config_form(draft, revision, "配置包含 NUL 字符，未保存。", 400)
+        limits = {"port": (1, 65535), "log_cleanup_minutes": (1, 1440), "log_max_size_mb": (1, None),
+                  "log_keep_per_task": (1, None), "task_timeout_seconds": (0, None), "random_delay_seconds": (0, 120)}
+        for key, (minimum, maximum) in limits.items():
+            try:
+                value = int(request.form.get(key, old_cfg[key]))
+                if value < minimum or (maximum is not None and value > maximum):
+                    raise ValueError(key)
+            except ValueError:
+                return _render_config_form(draft, revision, f"{key} 必须为允许范围内的整数，未保存。", 400)
 
         # ============================================================
         # 脚本类型
@@ -22,7 +167,7 @@ def config_page():
         # 登录 Token
         # ============================================================
         old_admin_token = str(old_cfg.get("admin_token", "") or "").strip()
-        new_admin_token = request.form.get("admin_token", "").strip()
+        new_admin_token = request.form.get("admin_token", old_admin_token).strip()
 
         # ============================================================
         # 安全验证配置
@@ -62,12 +207,13 @@ def config_page():
 
             if need_totp_confirm:
                 totp_code = request.form.get("totp_code", "").strip()
-
-                if not verify_totp(totp_secret, totp_code):
-                    return (
-                        "2FA 验证码错误，未开启 2FA。"
-                        "下一步：用认证器生成当前验证码后重新保存。"
-                    ), 400
+                try:
+                    totp_valid = verify_totp(totp_secret, totp_code)
+                except (ValueError, binascii.Error):
+                    totp_valid = False
+                if not totp_valid:
+                    draft["totp_secret"] = totp_secret
+                    return _render_config_form(draft, revision, "2FA 验证码错误，未开启 2FA。请用认证器生成当前验证码后重新保存。", 400)
 
         elif security_verify_enabled and security_verify_type == "code":
             # 随机验证码模式不需要 TOTP 密钥。
@@ -138,18 +284,38 @@ def config_page():
             "task_types": task_types,
         }
 
-        save_config(cfg)
-        cleanup_logs()
-        reload_scheduler()
-
-        # 修改 Token / 开启安全验证 / 关闭安全验证 / 切换安全验证方式后自动登出。
+        with TASKS_MUTATION_LOCK:
+            try:
+                with storage_transaction():
+                    current_cfg, current_revision = _config_snapshot()
+                    if current_revision != revision:
+                        return _render_config_form(draft, current_revision, "配置在保存期间已变更，未覆盖新配置。请合并后重试。", 409, current_cfg=current_cfg)
+                    save_config(cfg)
+            except Exception as e:
+                return _render_config_form(draft, revision, f"配置保存失败：{e}。草稿已保留。", 500)
+            # Invalidate the old authenticated session as soon as credentials are published.
+            if token_changed or security_changed:
+                auth_clear_session()
+            try:
+                saved_cfg, _saved_revision = _config_snapshot()
+                state = _apply_saved_config(saved_cfg)
+            except Exception as e:
+                state = {"status": "unknown", "errors": [f"配置已保存，但重新读取失败：{e}"]}
+        if state["status"] != "succeeded":
+            return _config_apply_error(state, logged_out=token_changed or security_changed)
         if token_changed or security_changed:
-            auth_clear_session()
             return redirect(url_for("auth.login"))
 
         return redirect(url_for("config.config_page"))
 
-    cfg = load_config()
+    if state.get("status") in ("failed", "unknown"):
+        message = "已保存配置的应用待恢复：" + "；".join(state.get("errors", []))
+    else:
+        message = ""
+    return _render_config_form(old_cfg, revision, message)
+
+
+def _render_config_form(cfg, revision, message="", status=200, current_cfg=None):
     types = cfg.get("task_types", {})
 
     def checked(k):
@@ -226,10 +392,20 @@ def config_page():
     header = page_header(
         "面板配置",
         help_html="按主题管理登录、安全、在线脚本、日志和任务运行设置；保存后按提示重新加载面板。",
+        actions_html='<form class="inline-form" method="post" action="/config/apply"><button class="btn btn-primary" type="submit">重新应用已保存配置</button></form>',
     )
+    current_html = ""
+    if current_cfg is not None:
+        visible_cfg = {key: current_cfg[key] for key in DEFAULT_CONFIG}
+        for key in ("admin_token", "totp_secret"):
+            visible_cfg[key] = mask_secret_value(visible_cfg[key])
+        current_html = f'<section class="section"><h2 class="section-title">当前配置</h2><textarea readonly aria-label="当前配置">{h(json.dumps(visible_cfg, ensure_ascii=False, indent=2))}</textarea></section>'
     body = f"""
 {header}
-<form method="post">
+{_config_message(message)}
+{current_html}
+<form method="post" action="/config">
+<input type="hidden" name="config_revision" value="{h(revision)}">
 <nav class="fls-section-nav" aria-label="配置区块导航">
     <span class="fls-section-nav-label">配置区块</span>
     <a href="#config-login">登录</a>
@@ -465,4 +641,4 @@ flsToggleSecurityBox();
 </script>
 """
 
-    return layout("面板配置", "config", body)
+    return layout("面板配置", "config", body), status

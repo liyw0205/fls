@@ -463,7 +463,7 @@ async function runActionAudit(page, audit) {
   await page.goto(process.env.FLS_BASE_URL + "/config", {
     waitUntil: "domcontentloaded", timeout: 8000
   });
-  await submitForm(page, "/config", 'form[method="post"]', "configuration save", audit);
+  await submitForm(page, "/config", 'form[action="/config"]', "configuration save", audit);
 
   await page.goto(process.env.FLS_BASE_URL + "/logs", {
     waitUntil: "domcontentloaded", timeout: 8000
