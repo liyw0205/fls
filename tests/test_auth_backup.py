@@ -4,6 +4,7 @@ import io
 import json
 import os
 import re
+import stat
 import sys
 import tarfile
 import tempfile
@@ -719,6 +720,35 @@ class BackupSafetyTests(unittest.TestCase):
                         with zipfile.ZipFile(data, "r") as zf:
                             with self.assertRaises(RuntimeError):
                                 safe_extract_zip(zf, dest)
+
+    def test_safe_extract_zip_rejects_symlink_and_special_members(self):
+        cases = [
+            ("data/link", stat.S_IFLNK),
+            ("data/pipe", stat.S_IFIFO),
+            ("data/chardev", stat.S_IFCHR),
+        ]
+
+        for name, member_type in cases:
+            with self.subTest(name=name, member_type=member_type):
+                with isolated_fls_env(token="unit-token"):
+                    from fls_manager.routes.backup._common import safe_extract_zip
+
+                    with tempfile.TemporaryDirectory(prefix="fls-zip-special-") as dest:
+                        data = io.BytesIO()
+                        with zipfile.ZipFile(data, "w") as zf:
+                            info = zipfile.ZipInfo(name)
+                            info.create_system = 3
+                            info.external_attr = (member_type | 0o777) << 16
+                            zf.writestr(info, b"")
+
+                        data.seek(0)
+                        with zipfile.ZipFile(data, "r") as zf:
+                            with self.assertRaisesRegex(
+                                RuntimeError, "不安全链接或特殊文件"
+                            ):
+                                safe_extract_zip(zf, dest)
+
+                        self.assertEqual(list(Path(dest).iterdir()), [])
 
     def test_safe_extract_tar_accepts_regular_paths(self):
         with isolated_fls_env(token="unit-token"):

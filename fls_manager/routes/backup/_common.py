@@ -1,5 +1,6 @@
 from .bp import bp
 import os
+import stat
 import sys
 import time
 import uuid
@@ -695,6 +696,12 @@ def safe_extract_zip(zip_obj, path):
 
     for member in members:
         _archive_member_target(base, member.filename)
+
+        mode = (int(member.external_attr or 0) >> 16) & 0xFFFF
+        file_type = stat.S_IFMT(mode)
+        if file_type not in (0, stat.S_IFREG, stat.S_IFDIR):
+            raise RuntimeError("备份文件包含不安全链接或特殊文件")
+
         total_size += member.file_size
         if total_size > MAX_BACKUP_EXTRACTED_BYTES:
             raise BackupLimitExceeded(
