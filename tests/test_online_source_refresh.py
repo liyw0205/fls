@@ -78,6 +78,20 @@ class OnlineSourceRefreshTests(unittest.TestCase):
             payload = app.test_client().get("/api/online-scripts/refresh-status", headers={"X-Token": TOKEN}).json
             self.assertEqual(payload["status"], "失败")
 
+    def test_refresh_worker_publishes_real_fetched_cache_only_once(self):
+        with isolated_app() as (_app, base_dir):
+            from fls_manager.online_scripts import source
+            from fls_manager.online_scripts.constants import get_online_refresh_state
+
+            response = self.response('[{"id":"demo","name":"Demo","type":"raw","link":"https://example.invalid/demo.sh"}]')
+            with patch.object(source, "requests", SimpleNamespace(get=Mock(return_value=response))), patch.object(
+                source, "save_online_script_cache", wraps=source.save_online_script_cache,
+            ) as save:
+                source.refresh_worker("single-publish", log_file=str(base_dir / "refresh.log"))
+            save.assert_called_once()
+            self.assertEqual(source.load_online_script_cache()[0]["id"], "demo")
+            self.assertEqual(get_online_refresh_state()["status"], "已完成")
+
     def test_api_refresh_serializes_concurrent_starts_and_reports_start_failure(self):
         with isolated_app() as (app, _base_dir):
             import fls_manager.routes.online_scripts.refresh as refresh

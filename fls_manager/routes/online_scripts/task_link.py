@@ -1,31 +1,37 @@
 from ._common import *
+from ...online_scripts.source import merge_task_link_tasks, OnlineScriptCacheConflict
+
+
+def _task_link_error(script_id, message, status_code, proxy_id="", retry=False):
+    retry_form = ""
+    if retry:
+        retry_form = f'''
+<form class="inline-form" method="post" action="/online-scripts/task-link/{h(quote(script_id, safe=''))}">
+    <select name="proxy_id" aria-label="外部任务源代理">{proxy_select_options(proxy_id)}</select>
+    <button class="btn btn-primary" type="submit">重新同步外部任务源</button>
+</form>'''
+    body = page_header_card(
+        "外部任务源同步未完成",
+        help_html=h(message),
+        actions_html=(
+            retry_form
+            + '<a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>'
+            + '<a class="btn btn-blue" href="/online-scripts/source">检查脚本源数据</a>'
+        ),
+    )
+    return layout("外部任务源同步", "online_scripts", body), status_code
 
 
 @bp.route("/online-scripts/task-link/<script_id>", methods=["POST"])
 def online_scripts_pull_task_link(script_id):
-    items = load_online_script_cache()
-
-    item = None
-    item_index = -1
-
-    for idx, one in enumerate(items):
-        if one.get("id") == script_id:
-            item = one
-            item_index = idx
-            break
-
+    item = get_online_script(script_id)
     if not item:
-        abort(404)
+        return _task_link_error(script_id, "脚本已不在本地缓存中，请刷新在线脚本列表。", 404)
 
     task_link = str(item.get("task_link") or "").strip()
 
     if not task_link:
-        return redirect(
-            url_for(
-                "online_scripts.online_scripts_page",
-                err="该脚本没有配置外部任务源 task_link",
-            )
-        )
+        return _task_link_error(script_id, "该脚本没有配置外部任务源 task_link，请检查脚本源数据。", 400)
 
     proxy_id = request.form.get("proxy_id", "").strip()
 
@@ -36,59 +42,29 @@ def online_scripts_pull_task_link(script_id):
             timeout=20,
         )
 
-        if not linked_tasks:
-            return redirect(
-                url_for(
-                    "online_scripts.online_scripts_page",
-                    err="外部任务源同步完成，但没有可用任务",
-                )
-            )
-
-        old_tasks = online_script_task_crons(item)
-
-        exists_keys = set()
-        merged = []
-
-        for task in old_tasks:
-            key = (
-                str(task.get("name") or ""),
-                str(task.get("cron") or ""),
-                str(task.get("command") or ""),
-            )
-            exists_keys.add(key)
-            merged.append(task)
-
-        added = 0
-
-        for task in linked_tasks:
-            key = (
-                str(task.get("name") or ""),
-                str(task.get("cron") or ""),
-                str(task.get("command") or ""),
-            )
-
-            if key in exists_keys:
-                continue
-
-            exists_keys.add(key)
-            merged.append(task)
-            added += 1
-
-        item["task_cron"] = merged
-        items[item_index] = item
-        save_online_script_cache(items)
-
-        return redirect(
-            url_for(
-                "online_scripts.online_scripts_page",
-                msg=f"外部任务源同步完成，新增 {added} 个任务，当前共 {len(merged)} 个任务",
-            )
-        )
-
     except Exception as e:
-        return redirect(
-            url_for(
-                "online_scripts.online_scripts_page",
-                err=f"外部任务源同步失败：{e}。下一步：检查任务源地址和代理后重试",
-            )
+        return _task_link_error(
+            script_id, f"外部任务源请求失败：{e}。请检查任务源地址、代理和网络后重试。",
+            502, proxy_id=proxy_id, retry=True,
         )
+
+    if not linked_tasks:
+        return _task_link_error(
+            script_id, "外部任务源没有可用任务，请检查任务字段后重新同步。",
+            422, proxy_id=proxy_id, retry=True,
+        )
+
+    try:
+        added, total = merge_task_link_tasks(item, linked_tasks)
+    except OnlineScriptCacheConflict as e:
+        return _task_link_error(script_id, str(e), 409)
+    except Exception as e:
+        return _task_link_error(
+            script_id, f"外部任务源未保存：{e}。请检查缓存文件权限和磁盘空间后重试。",
+            500, proxy_id=proxy_id, retry=True,
+        )
+
+    return redirect(url_for(
+        "online_scripts.online_scripts_page",
+        msg=f"外部任务源同步完成，新增 {added} 个任务，当前共 {total} 个任务",
+    ))

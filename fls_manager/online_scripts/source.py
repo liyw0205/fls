@@ -6,6 +6,7 @@ from contextlib import closing
 from pathlib import Path
 
 from ..config import load_config
+from ..storage import storage_transaction
 from ..utils import now_str, LazyModule
 from ..proxy import requests_proxy_dict, github_proxy_url
 from .constants import (
@@ -14,7 +15,7 @@ from .constants import (
     update_online_refresh_state,
 )
 from .logs import append_log, online_refresh_log_file
-from .tasks import normalize_online_task_crons
+from .tasks import normalize_online_task_crons, online_script_task_crons
 
 requests = LazyModule("requests")
 
@@ -85,18 +86,47 @@ def load_online_script_cache():
 
 
 def save_online_script_cache(items):
-    ONLINE_SCRIPT_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    temp_file = ONLINE_SCRIPT_CACHE_FILE.with_name(
-        f".{ONLINE_SCRIPT_CACHE_FILE.name}.{uuid.uuid4().hex}.tmp"
-    )
-    try:
-        temp_file.write_text(
-            json.dumps(items, ensure_ascii=False, indent=2),
-            encoding="utf-8",
+    with storage_transaction():
+        ONLINE_SCRIPT_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        temp_file = ONLINE_SCRIPT_CACHE_FILE.with_name(
+            f".{ONLINE_SCRIPT_CACHE_FILE.name}.{uuid.uuid4().hex}.tmp"
         )
-        os.replace(temp_file, ONLINE_SCRIPT_CACHE_FILE)
-    finally:
-        temp_file.unlink(missing_ok=True)
+        try:
+            temp_file.write_text(
+                json.dumps(items, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            os.replace(temp_file, ONLINE_SCRIPT_CACHE_FILE)
+        finally:
+            temp_file.unlink(missing_ok=True)
+
+
+class OnlineScriptCacheConflict(RuntimeError):
+    pass
+
+
+def merge_task_link_tasks(expected_item, linked_tasks):
+    # Fetch outside the storage lock, then merge into the latest cache snapshot.
+    with storage_transaction():
+        items = load_online_script_cache()
+        item = next((one for one in items if one.get("id") == expected_item.get("id")), None)
+        expected_metadata = {key: value for key, value in expected_item.items() if key != "task_cron"}
+        if item is None or {key: value for key, value in item.items() if key != "task_cron"} != expected_metadata:
+            raise OnlineScriptCacheConflict("脚本源已更新或删除，请刷新列表后重新同步外部任务源")
+
+        merged = online_script_task_crons(item)
+        existing_keys = {(task["name"], task["cron"], task["command"]) for task in merged}
+        added = 0
+        for task in normalize_online_task_crons(linked_tasks):
+            key = (task["name"], task["cron"], task["command"])
+            if key not in existing_keys:
+                existing_keys.add(key)
+                merged.append(task)
+                added += 1
+        if added:
+            item["task_cron"] = merged
+            save_online_script_cache(items)
+        return added, len(merged)
 
 
 def read_cache_text():
@@ -162,7 +192,7 @@ def fetch_task_link_tasks(item, proxy_id="", timeout=12):
     return normalize_online_task_crons(data)
 
 
-def fetch_online_scripts(proxy_id="", timeout=12):
+def fetch_online_scripts(proxy_id="", timeout=12, publish_cache=True):
     url = get_online_script_source()
     real_url = github_proxy_url(url, proxy_id)
 
@@ -236,7 +266,8 @@ def fetch_online_scripts(proxy_id="", timeout=12):
                 f"{item.get('name')} task_link={task_link} error={e}"
             )
 
-    save_online_script_cache(items)
+    if publish_cache:
+        save_online_script_cache(items)
     return items
 
 
@@ -258,11 +289,8 @@ def refresh_worker(refresh_id, proxy_id="", log_file=""):
         append_log(log_file, f"代理ID: {proxy_id or '不使用代理'}")
         append_log(log_file, "============================================================")
 
-        items = fetch_online_scripts(proxy_id=proxy_id, timeout=20)
-        # fetch_online_scripts keeps its direct-call cache behavior; publish here too
-        # so a mocked or alternate fetcher cannot report success without a cache.
-        if load_online_script_cache() != items:
-            save_online_script_cache(items)
+        items = fetch_online_scripts(proxy_id=proxy_id, timeout=20, publish_cache=False)
+        save_online_script_cache(items)
         msg = f"同步在线脚本源成功，共 {len(items)} 条"
         append_log(log_file, msg)
 

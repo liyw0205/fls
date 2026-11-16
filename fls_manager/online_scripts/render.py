@@ -133,29 +133,16 @@ def render_online_script_rows(items):
         if has_doc:
             doc_btn = f'<a class="btn btn-orange" href="/online-scripts/doc/{h(item_id)}">查看文档</a>'
 
-        task_link_hidden_form = ""
-        task_link_btn_html = ""
+        task_link_form_html = ""
 
         if task_link_unloaded:
-            task_link_form_id = f"onlineTaskLinkForm-{item_id}"
-
-            task_link_hidden_form = f"""
-<form
-    id="{h(task_link_form_id)}"
-    method="post"
-    action="/online-scripts/task-link/{h(item_id)}"
-    style="display:none;"
-></form>
-"""
-
-            task_link_btn_html = f"""
-<button
-    class="btn btn-orange"
-    type="submit"
-    form="{h(task_link_form_id)}"
->
-    同步在线脚本源
-</button>
+            task_link_form_html = f"""
+<form method="post" action="/online-scripts/task-link/{h(item_id)}">
+    <div class="fls-action-line">
+        <select name="proxy_id" aria-label="外部任务源代理">{proxy_options}</select>
+        <button class="btn btn-orange" type="submit">同步外部任务源</button>
+    </div>
+</form>
 """
 
         running_install_id, running_install_info = get_running_install_by_script_id(item_id)
@@ -204,7 +191,7 @@ def render_online_script_rows(items):
 """
             if has_task:
                 install_action_html = f"""
-{task_link_hidden_form}
+{task_link_form_html}
 
 <div class="help" style="margin:0 0 10px;">
     该脚本包含 <b>{len(task_crons)}</b> 个任务。点击“选择任务并安装”后，可选择要导入的任务，默认全选。
@@ -213,13 +200,12 @@ def render_online_script_rows(items):
 <div class="fls-btn-line">
     <a class="btn btn-blue" href="{h(item.get("link"))}" target="_blank">查看源</a>
     {doc_btn}
-    {task_link_btn_html}
     <a class="btn btn-primary" href="/online-scripts/install-select/{h(item_id)}">选择任务并安装</a>
 </div>
 """
             else:
                 install_action_html = f"""
-{task_link_hidden_form}
+{task_link_form_html}
 
 <form method="post" action="/online-scripts/install/{h(item_id)}">
     <div class="fls-action-line">
@@ -227,13 +213,12 @@ def render_online_script_rows(items):
     </div>
 
     <div class="help" style="margin:6px 0 10px;">
-        {"该脚本配置了外部任务源，但尚未加载任务。可以先同步在线脚本源。" if task_link_unloaded else "该脚本没有内置任务。下载安装后可到任务页面手动创建任务。"}
+        {"该脚本配置了外部任务源，但尚未加载任务。可以先同步外部任务源。" if task_link_unloaded else "该脚本没有内置任务。下载安装后可到任务页面手动创建任务。"}
     </div>
 
     <div class="fls-btn-line">
         <a class="btn btn-blue" href="{h(item.get("link"))}" target="_blank">查看源</a>
         {doc_btn}
-        {task_link_btn_html}
         <button class="btn btn-primary" type="submit">下载安装</button>
     </div>
 </form>
