@@ -40,6 +40,15 @@ def render_task_history_rows(task_id):
             filename = log_file.split("/")[-1].split("\\")[-1]
             log_btn = f'<a class="btn btn-orange" href="/logfile/{h(filename)}?back=/log/{h(task_id)}">日志</a>'
 
+        rerun_btn = ""
+        if item.get("status") == "unknown":
+            rerun_btn = (
+                f'<form class="inline-form" method="post" '
+                f'action="/run/{h(task_id)}?back=/log/{h(task_id)}">'
+                '<button class="btn btn-orange" type="submit">重新运行</button>'
+                '</form>'
+            )
+
         rows += f"""
 <tr>
     <td>{h(item.get("start_at") or "-")}</td>
@@ -48,7 +57,7 @@ def render_task_history_rows(task_id):
     <td>{h(item.get("return_code") if item.get("return_code") is not None else "-")}</td>
     <td>{h(item.get("source") or "-")}</td>
     <td>{h(item.get("message") or "-")}</td>
-    <td>{log_btn}</td>
+    <td><div class="row-actions">{log_btn}{rerun_btn}</div></td>
 </tr>
 """
 

@@ -2142,8 +2142,12 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn('<option value="unknown" selected>结果未知</option>', history_html)
             self.assertIn('<span class="status-badge status-error" role="status">结果未知</span>', history_html)
             self.assertIn("面板重启后无法确认任务进程是否仍存活", history_html)
+            self.assertIn('action="/run/restart-task?back=/history"', history_html)
+            self.assertIn("重新运行", history_html)
             self.assertEqual(log_response.status_code, 200)
-            self.assertIn("结果未知", log_response.get_data(as_text=True))
+            log_html = log_response.get_data(as_text=True)
+            self.assertIn("结果未知", log_html)
+            self.assertIn('action="/run/restart-task?back=/log/restart-task"', log_html)
 
     def test_dashboard_keeps_abnormal_history_summary_without_recent_runs(self):
         with isolated_app() as (app, base_dir):

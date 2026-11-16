@@ -213,14 +213,34 @@ def history_page_links(q, status, page, pages):
 
 def history_table_rows(items):
     rows = ""
+    task_ids = {
+        str(task.get("id") or "")
+        for task in load_tasks()
+        if str(task.get("id") or "").strip()
+    }
 
     for item in items:
+        task_id = str(item.get("task_id") or "").strip()
         log_file = str(item.get("log_file") or "")
         log_btn = ""
 
         if log_file:
             filename = log_file.split("/")[-1].split("\\")[-1]
             log_btn = f'<a class="btn btn-orange" href="/logfile/{h(filename)}?back=/history">日志</a>'
+
+        rerun_btn = ""
+        if item.get("status") == "unknown":
+            if task_id in task_ids:
+                rerun_btn = (
+                    f'<form class="inline-form" method="post" '
+                    f'action="/run/{h(task_id)}?back=/history">'
+                    '<button class="btn btn-orange" type="submit">重新运行</button>'
+                    '</form>'
+                )
+            else:
+                rerun_btn = '<span class="muted">任务已删除</span>'
+
+        action_html = log_btn + rerun_btn
 
         rows += f"""
 <tr>
@@ -233,7 +253,7 @@ def history_table_rows(items):
     <td>{h(item.get("source") or "-")}</td>
     <td>{h(item.get("retry_attempt", 0))}/{h(item.get("max_retries", 0))}</td>
     <td>{h(item.get("message") or "-")}</td>
-    <td>{log_btn}</td>
+    <td><div class="row-actions">{action_html}</div></td>
 </tr>
 """
 
