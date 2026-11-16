@@ -129,12 +129,14 @@ def merge_task_link_tasks(expected_item, linked_tasks):
         return added, len(merged)
 
 
-def read_cache_text():
+def read_cache_text(strict=False):
     try:
-        if ONLINE_SCRIPT_CACHE_FILE.exists():
-            return ONLINE_SCRIPT_CACHE_FILE.read_text(encoding="utf-8")
+        return ONLINE_SCRIPT_CACHE_FILE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ""
     except Exception:
-        pass
+        if strict:
+            raise
 
     return ""
 
