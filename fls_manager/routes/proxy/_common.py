@@ -178,7 +178,7 @@ async function testProxyRealtime(source){{
             body: data,
             headers: {{"X-Requested-With":"XMLHttpRequest"}}
         }});
-        const json = await res.json();
+        const json = await flsReadJsonResponse(res);
 
         if(json.ok){{
             showProxyResult(
@@ -208,7 +208,7 @@ async function qualityProxyRealtime(source){{
             body: data,
             headers: {{"X-Requested-With":"XMLHttpRequest"}}
         }});
-        const json = await res.json();
+        const json = await flsReadJsonResponse(res);
 
         if(!json.ok){{
             showProxyResult(escapeHtml(flsActionFailure("检测失败：" + (json.error || "未知错误"), "检查代理配置后重试")));

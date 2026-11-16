@@ -316,6 +316,25 @@ class NotificationDeliveryRecoveryTests(unittest.TestCase):
             self.assertIn("通知投递正在发送", response.get_data(as_text=True))
             self.assertIn("text/html", response.content_type)
 
+    def test_retry_api_requires_authentication_before_delivery_claim(self):
+        with isolated_modules():
+            from fls_manager.app import create_app
+            from fls_manager import notify
+
+            client = create_app().test_client()
+            with client.session_transaction() as session:
+                session["csrf_token"] = "notify-csrf"
+
+            with patch.object(notify, "retry_notify_delivery") as retry:
+                response = client.post(
+                    "/api/notify/retry/delivery-1",
+                    headers={"X-CSRF-Token": "notify-csrf"},
+                )
+
+            self.assertEqual(response.status_code, 401)
+            self.assertFalse(response.get_json()["ok"])
+            retry.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -940,7 +940,7 @@ async function taskBulkAction(action, source){{
 
         let json;
         try {{
-            json = await res.json();
+            json = await flsReadJsonResponse(res);
         }} catch (parseErr) {{
             throw new Error(res.status === 400 ? "CSRF 校验失败或登录已失效，请刷新页面后重试" : ("响应解析失败：" + res.status));
         }}
@@ -1009,7 +1009,7 @@ async function taskAjaxAction(action, taskId, source){{
 
         let json;
         try {{
-            json = await res.json();
+            json = await flsReadJsonResponse(res);
         }} catch (parseErr) {{
             throw new Error(res.status === 400 ? "CSRF 校验失败或登录已失效，请刷新页面后重试" : ("响应解析失败：" + res.status));
         }}
@@ -1049,7 +1049,7 @@ async function refreshTasksBlockPartial(){{
             credentials: "same-origin"
         }});
 
-        const html = await res.text();
+        const html = await flsReadTextResponse(res);
         const doc = new DOMParser().parseFromString(html, "text/html");
 
         const newBlock = doc.querySelector("#tasksBlock");

@@ -165,7 +165,7 @@ async function flsCreateBackup(source){{
             credentials: "same-origin"
         }});
 
-        const json = await res.json();
+        const json = await flsReadJsonResponse(res);
 
         if(!json.ok){{
             if(json.job_id){{
@@ -180,6 +180,11 @@ async function flsCreateBackup(source){{
         await flsPollBackupJob(json.job_id, source);
 
     }} catch(e) {{
+        const payload = e && e.payload;
+        if(payload && payload.job_id) {{
+            await flsPollBackupJob(payload.job_id, source);
+            return;
+        }}
         flsShowBackupJob("<span style='color:#dc2626;font-weight:800;'>" + flsEscapeHtml(flsActionFailure("请求失败：" + String(e), "检查服务状态后重试")) + "</span>");
         flsRestoreButton(source);
     }}
@@ -192,7 +197,7 @@ async function flsPollBackupJob(jobId, source){{
             credentials: "same-origin"
         }});
 
-        const json = await res.json();
+        const json = await flsReadJsonResponse(res);
 
         if(!json.ok){{
             flsShowBackupJob("<span style='color:#dc2626;font-weight:800;'>" + flsEscapeHtml(flsActionFailure("任务不存在", "刷新页面后重试")) + "</span>");
@@ -252,7 +257,7 @@ async function flsCancelBackup(jobId, source){{
             credentials: "same-origin",
             headers: {{"X-Requested-With":"XMLHttpRequest"}}
         }});
-        const json = await res.json();
+        const json = await flsReadJsonResponse(res);
         if(!res.ok || !json.ok){{
             flsShowBackupJob("<span style='color:#dc2626;font-weight:800;'>" + flsEscapeHtml(flsActionFailure(json.msg || "取消失败", "刷新状态后重试")) + "</span>");
             flsRestoreButton(source);
@@ -274,7 +279,7 @@ async function flsRefreshBackupList(source){{
             credentials: "same-origin"
         }});
 
-        const json = await res.json();
+        const json = await flsReadJsonResponse(res);
         if(!res.ok || !json.ok){{
             throw new Error(flsActionFailure(json.msg || ("HTTP " + res.status), "检查服务状态后重试"));
         }}
@@ -331,7 +336,7 @@ async function flsDeleteBackup(filename, source){{
             credentials: "same-origin"
         }});
 
-        const json = await res.json();
+        const json = await flsReadJsonResponse(res);
 
         if(!json.ok){{
             alert(flsActionFailure(json.msg || "删除失败", "检查备份文件后重试"));

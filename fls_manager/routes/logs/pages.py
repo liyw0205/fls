@@ -371,7 +371,7 @@ async function flsLogsDeleteGroups(groups, source){
             body: JSON.stringify({groups: groups})
         });
 
-        var json = await res.json();
+        var json = await flsReadJsonResponse(res);
 
         if(!json.ok){
             alert(flsActionFailure(json.msg || "删除失败", "检查日志分组后重试"));

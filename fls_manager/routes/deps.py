@@ -311,7 +311,7 @@ def deps_install_log(install_id):
 async function loadLog(){{
     try {{
         const res = await fetch("/api/deps/install-log/{h(install_id)}?lines=1200", {{cache:"no-store"}});
-        const json = await res.json();
+        const json = await flsReadJsonResponse(res);
 
         document.getElementById("log").textContent = json.log || "暂无日志";
         var logEl = document.getElementById("log");

@@ -44,7 +44,7 @@ async function loadLog(){{
         const wasNearBottom = nearBottom();
 
         const res = await fetch("/api/logfile/{h(filename)}?lines=1500", {{cache:"no-store"}});
-        const text = await res.text();
+        const text = await flsReadTextResponse(res);
         const old = window.__FLS_LOG_LAST_TEXT__ || "";
         const changed = text !== old;
 

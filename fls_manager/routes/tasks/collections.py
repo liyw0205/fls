@@ -482,7 +482,7 @@ async function flsCollectionTaskBulkAction(collectionId, action, source){
             body: JSON.stringify({action: action, task_ids: ids})
         });
 
-        var json = await res.json();
+        var json = await flsReadJsonResponse(res);
 
         if(!json.ok){
             alert(flsActionFailure(flsBulkActionMessage(json, json.msg || (label + "失败")), "确认选择后重新提交"));
@@ -520,7 +520,7 @@ async function flsRefreshCollectionsBlockPartial(){
             credentials: "same-origin"
         });
 
-        var html = await res.text();
+        var html = await flsReadTextResponse(res);
         var doc = new DOMParser().parseFromString(html, "text/html");
         var newBlock = doc.querySelector("#collectionsPageBlock");
         var oldBlock = document.querySelector("#collectionsPageBlock");

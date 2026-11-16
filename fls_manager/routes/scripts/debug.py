@@ -589,7 +589,7 @@ async function loadScriptDebugLog(){{
         const wasNearBottom = nearBottom();
 
         const res = await fetch("/api/scripts/debug-log/{h(debug_id)}?lines=1600", {{cache:"no-store"}});
-        const json = await res.json();
+        const json = await flsReadJsonResponse(res);
 
         const statusEl = document.getElementById("debugStatus");
         if(statusEl) statusEl.textContent = json.status_label || (json.running ? "运行中" : "已结束");

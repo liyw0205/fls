@@ -153,7 +153,7 @@ function escapeHtml(s){{
 async function updateOnlineRefreshStatus(){{
     try {{
         const res = await fetch("/api/online-scripts/refresh-status", {{cache:"no-store"}});
-        const json = await res.json();
+        const json = await flsReadJsonResponse(res);
 
         const card = document.getElementById("onlineRefreshStatusCard");
         const text = document.getElementById("onlineRefreshStatusText");

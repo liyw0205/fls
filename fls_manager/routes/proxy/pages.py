@@ -268,7 +268,7 @@ async function flsProxyTest(proxyId, source){{
             method: "POST",
             headers: {{"X-Requested-With":"XMLHttpRequest"}}
         }});
-        const json = await res.json();
+        const json = await flsReadJsonResponse(res);
         if(json.ok){{
             showProxyResult(
                 "代理：<b>" + escapeHtml(json.name || "") + "</b><br>" +
@@ -294,7 +294,7 @@ async function flsProxyQuality(proxyId, source){{
             method: "POST",
             headers: {{"X-Requested-With":"XMLHttpRequest"}}
         }});
-        const json = await res.json();
+        const json = await flsReadJsonResponse(res);
         if(!json.ok){{
             showProxyResult(escapeHtml(flsActionFailure("失败：" + (json.error || "未知错误"), "检查代理配置后重试")));
             return;

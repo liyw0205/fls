@@ -61,7 +61,7 @@ class FrontendOptimizationTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertIn('/static/favicon-generated.png?v=20260920-1', html)
             self.assertIn('/static/fls.css?v=20260920-3', html)
-            self.assertIn('/static/fls.js?v=20260920-3&actions=4', html)
+            self.assertIn('/static/fls.js?v=20260920-3&actions=5', html)
             self.assertIn('/static/fls_theme.css?v=20260920-3', html)
             self.assertIn('theme=neumorphism&rev=20260930-1', html)
             self.assertIn('/static/fls_density.css?v=20260930-2', html)
@@ -151,6 +151,39 @@ class FrontendOptimizationTests(unittest.TestCase):
         self.assertIn("res.status === 409", js)
         self.assertIn("重新登录后重试", js)
         self.assertNotIn("location.href = fetchUrl", js)
+
+    def test_ajax_payload_readers_check_http_status_before_json_or_text(self):
+        js = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+
+        self.assertIn("async function flsReadJsonResponse(response)", js)
+        self.assertIn("async function flsReadTextResponse(response)", js)
+        self.assertIn("if(!response.ok)", js)
+        self.assertIn("error.payload = payload", js)
+        self.assertNotIn("await res.json()", js)
+
+        for relative in (
+            "ui/tables.py",
+            "routes/tasks/collections.py",
+            "routes/scripts/debug.py",
+            "routes/about/jobs.py",
+            "routes/online_scripts/logs.py",
+            "routes/online_scripts/pages.py",
+            "routes/deps.py",
+            "routes/dashboard.py",
+            "routes/proxy/_common.py",
+            "routes/proxy/pages.py",
+            "routes/backup/page.py",
+            "routes/logs/pages.py",
+            "routes/logs/files.py",
+            "routes/tasks/logs.py",
+        ):
+            source = (ROOT / "fls_manager" / relative).read_text(encoding="utf-8")
+            with self.subTest(relative=relative):
+                self.assertNotIn("await res.json()", source)
+                self.assertNotIn("await res.text()", source)
+
+        backup = (ROOT / "fls_manager" / "routes" / "backup" / "page.py").read_text(encoding="utf-8")
+        self.assertIn("if(payload && payload.job_id)", backup)
 
     def test_density_styles_preserve_table_details_and_mobile_targets(self):
         css = (ROOT / "fls_manager" / "static" / "fls_density.css").read_text(encoding="utf-8")

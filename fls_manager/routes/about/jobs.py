@@ -91,7 +91,7 @@ async function loadAboutJobLog(){{
         const wasNearBottom = nearBottom();
 
         const res = await fetch("/api/about/job-log/{h(job_id)}?lines=1600", {{cache:"no-store"}});
-        const json = await res.json();
+        const json = await flsReadJsonResponse(res);
 
         document.getElementById("aboutJobStatus").textContent = json.status || "-";
         document.getElementById("aboutJobUpdatedAt").textContent = json.updated_at || "-";

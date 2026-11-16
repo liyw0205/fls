@@ -112,7 +112,7 @@ async function loadLog(){{
         const wasNearBottom = nearBottom();
 
         const res = await fetch("/api/online-scripts/log/{h(install_id)}?lines=1600", {{cache:"no-store"}});
-        const json = await res.json();
+        const json = await flsReadJsonResponse(res);
 
         document.getElementById("installStatus").textContent = json.status || "-";
         const errorEl = document.getElementById("installError");

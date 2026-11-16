@@ -1043,7 +1043,7 @@ async function flsDashboardRefreshRuntime(){{
         }}
 
         const res = await fetch("/api/dashboard/runtime", {{cache:"no-store"}});
-        const json = await res.json();
+        const json = await flsReadJsonResponse(res);
 
         if(!json.ok) return;
 

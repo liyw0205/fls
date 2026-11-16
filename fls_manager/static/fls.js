@@ -105,6 +105,43 @@ function flsActionFailure(message, nextStep){
     return text + "。下一步：" + next;
 }
 
+async function flsReadJsonResponse(response){
+    if(!response || typeof response.ok !== "boolean"){
+        throw new Error("响应对象不可用");
+    }
+
+    if(!response.ok){
+        let payload = null;
+        try {
+            payload = await response.json();
+        } catch(e) {}
+
+        const message = payload && (payload.msg || payload.error || payload.message);
+        const error = new Error(String(message || ("HTTP " + response.status)));
+        error.status = response.status;
+        error.payload = payload;
+        throw error;
+    }
+
+    try {
+        return await response.json();
+    } catch(e) {
+        const error = new Error("响应解析失败：" + response.status);
+        error.status = response.status;
+        throw error;
+    }
+}
+
+async function flsReadTextResponse(response){
+    if(!response || typeof response.ok !== "boolean"){
+        throw new Error("响应对象不可用");
+    }
+    if(!response.ok){
+        throw new Error("HTTP " + response.status);
+    }
+    return response.text();
+}
+
 document.addEventListener("submit", function(event){
     const form = event.target;
     if(!form || String(form.dataset.noBusyState || "") === "true") return;
@@ -313,8 +350,7 @@ async function flsFetchUpdateInfo(){
         credentials:"same-origin"
     });
 
-    if(!response.ok) throw new Error("无法读取更新状态");
-    return response.json();
+    return flsReadJsonResponse(response);
 }
 
 function flsRenderUpdateNotice(info){
@@ -1822,7 +1858,13 @@ if (document.readyState === "loading") {
         ajaxLoad(location.href, false);
     });
 
-    flsSeedCurrentPageCache();
+    if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", function(){
+            flsSeedCurrentPageCache();
+        });
+    } else {
+        flsSeedCurrentPageCache();
+    }
 })();
 
 /* ============================================================

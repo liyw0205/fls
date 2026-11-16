@@ -404,7 +404,11 @@ const elements = Object.fromEntries(['installStatus', 'installError', 'installRe
 const context = {
   window: {innerHeight: 800, scrollY: 0, addEventListener() {}, scrollTo() {}},
   document: {documentElement: {scrollHeight: 800}, getElementById: id => elements[id]},
-  fetch: async () => ({json: async () => input.payload}),
+  flsReadJsonResponse: async response => {
+    if(!response.ok) throw new Error('HTTP ' + response.status);
+    return response.json();
+  },
+  fetch: async () => ({ok: true, status: 200, json: async () => input.payload}),
   setInterval: () => 1, clearInterval() {},
 };
 vm.createContext(context);
