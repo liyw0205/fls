@@ -707,10 +707,10 @@ class TaskRuntimeTests(unittest.TestCase):
             results = []
 
             def get_task(_task_id):
-                barrier.wait(timeout=2)
                 return task
 
             def call_run():
+                barrier.wait(timeout=2)
                 results.append(task_runner.run_task_now("t1"))
 
             try:

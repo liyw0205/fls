@@ -181,6 +181,15 @@ def task_config_edit(task_id):
             if str(latest_task.get("config_path") or "").strip() != config_path:
                 raise TaskConfigConflict("任务配置路径已变更，未保存。请刷新页面后重新检查配置。")
             target = task_config_safe_path(config_path)
+            from ...script_rename import pending_script_rename
+            pending = pending_script_rename(task_id=task_id, path=target)
+            if pending:
+                recovery_url = f"/scripts/rename-recovery/{pending['id']}"
+                body = page_header(
+                    "脚本重命名待恢复", help_html="配置未保存，请先完成或回滚重命名，再重新打开配置文件。",
+                    actions_html=f'<a class="btn btn-orange" href="{h(recovery_url)}">恢复重命名</a>',
+                ) + _unsaved_config_draft(submitted)
+                return layout("任务配置文件", "tasks", body), 409
             current_content, revision, metadata = _read_config_snapshot(target, config_path)
             exists = metadata is not None
             readable = True

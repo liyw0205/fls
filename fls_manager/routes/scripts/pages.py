@@ -7,6 +7,7 @@ from ...paths import SCRIPT_DIR
 from ...utils import h
 from ...ui.layout import layout
 from ...ui.components import code_card, page_header_card, table_card
+from ...script_rename import load_script_renames, RENAME_TERMINAL
 
 
 @bp.route("/pull")
@@ -51,8 +52,15 @@ task /root/fls/scripts/demo.sh arg1 arg2
         """,
     )
 
+    try:
+        pending = [row for row in load_script_renames() if row.get("status") not in RENAME_TERMINAL]
+        recovery = "".join(f'<li>{h(row["source"])} → {h(row["destination"])} <a class="btn btn-orange" href="/scripts/rename-recovery/{h(row["id"])}">恢复重命名</a></li>' for row in pending)
+        recovery = f'<section class="section"><h2 class="section-title">待恢复重命名</h2><ul>{recovery}</ul></section>' if recovery else ""
+    except Exception as e:
+        recovery = f'<section class="section" role="alert">恢复记录读取失败：{h(e)}</section>'
     body = f"""
 {header}
+{recovery}
 <div id="pullDesktopTable">{table}</div>
 {command_example}
 """

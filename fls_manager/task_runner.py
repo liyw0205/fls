@@ -793,6 +793,19 @@ def _start_task_worker(task_id, task_snapshot, cmd_info, process_name, log_file,
 
 
 def run_task_now(task_id, source="manual", retry_attempt=0, retry_token=None):
+    from .script_rename import pending_script_rename
+
+    with TASKS_MUTATION_LOCK:
+        try:
+            pending = pending_script_rename(task_id=task_id, task=get_task(task_id))
+        except Exception as e:
+            return False, f"任务启动失败：重命名恢复状态读取失败：{e}"
+        if pending:
+            return False, f"脚本重命名待恢复，请访问 /scripts/rename-recovery/{pending['id']} 完成恢复后运行"
+        return _submit_task_now(task_id, source, retry_attempt, retry_token)
+
+
+def _submit_task_now(task_id, source="manual", retry_attempt=0, retry_token=None):
     task = get_task(task_id)
 
     if not task:

@@ -535,7 +535,7 @@ class UiRouteComponentTests(unittest.TestCase):
     def test_scripts_new_failure_renders_error_message_and_preserves_form(self):
         with isolated_app() as (app, base_dir):
             with patch(
-                "fls_manager.routes.scripts.files.script_safe_path",
+                "fls_manager.routes.scripts.files.publish_script_file",
                 side_effect=RuntimeError('<bad & "x">'),
             ):
                 response = app.test_client().post(
@@ -550,7 +550,7 @@ class UiRouteComponentTests(unittest.TestCase):
 
             html = response.get_data(as_text=True)
 
-            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.status_code, 500)
             self.assertIn('style="color:#dc2626;font-weight:800;"', html)
             self.assertIn("新建失败：&lt;bad &amp; &quot;x&quot;&gt;", html)
             self.assertIn('value="new &lt;file&gt;.py"', html)
@@ -564,24 +564,19 @@ class UiRouteComponentTests(unittest.TestCase):
             script_file = base_dir / "scripts" / "demo.py"
             script_file.write_text('print("old")\n', encoding="utf-8")
 
-            real_write_text = Path.write_text
-
-            def fail_script_write(path, *args, **kwargs):
-                if path.name == "demo.py":
-                    raise RuntimeError('<bad & "x">')
-
-                return real_write_text(path, *args, **kwargs)
-
-            with patch("pathlib.Path.write_text", new=fail_script_write):
-                response = app.test_client().post(
+            client = app.test_client()
+            page = client.get("/scripts/view?path=demo.py", headers={"X-Token": TOKEN})
+            revision = re.search(r'name="file_revision" value="([^"]+)"', page.get_data(as_text=True)).group(1)
+            with patch("fls_manager.script_files.os.replace", side_effect=RuntimeError('<bad & "x">')):
+                response = client.post(
                     "/scripts/view?path=demo.py",
-                    data={"content": 'print("updated <x>")\n'},
+                    data={"content": 'print("updated <x>")\n', "file_revision": revision},
                     headers={"X-Token": TOKEN},
                 )
 
             html = response.get_data(as_text=True)
 
-            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.status_code, 500)
             self.assertIn('style="color:#dc2626;font-weight:800;"', html)
             self.assertIn("保存失败：&lt;bad &amp; &quot;x&quot;&gt;", html)
             self.assertIn("print(&quot;updated &lt;x&gt;&quot;)", html)
@@ -594,27 +589,23 @@ class UiRouteComponentTests(unittest.TestCase):
             script_file.write_text('print("old")\n', encoding="utf-8")
             new_name = '<renamed & "x">.py'
 
-            real_rename = Path.rename
-
-            def fail_rename(path, *args, **kwargs):
-                if path.name == "demo.py":
-                    raise RuntimeError('<bad & "x">')
-
-                return real_rename(path, *args, **kwargs)
-
-            with patch("pathlib.Path.rename", new=fail_rename):
-                response = app.test_client().post(
+            from tests.test_task_save_recovery import TaskFormParser
+            client = app.test_client()
+            page = client.get("/scripts/rename?path=demo.py", headers={"X-Token": TOKEN})
+            fields = TaskFormParser(page.get_data(as_text=True)).forms[0]["fields"]
+            with patch("fls_manager.script_rename._move_no_replace", side_effect=RuntimeError('<bad & "x">')):
+                response = client.post(
                     "/scripts/rename?path=demo.py",
-                    data={"new_name": new_name},
+                    data={**fields, "new_name": new_name, "confirm": "1"},
                     headers={"X-Token": TOKEN},
                 )
 
             html = response.get_data(as_text=True)
 
-            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.status_code, 503)
             self.assertIn('style="color:#dc2626;font-weight:800;"', html)
-            self.assertIn("改名失败：&lt;bad &amp; &quot;x&quot;&gt;", html)
-            self.assertIn('value="&lt;renamed &amp; &quot;x&quot;&gt;.py"', html)
+            self.assertIn("改名未完成：&lt;bad &amp; &quot;x&quot;&gt;", html)
+            self.assertIn('&lt;renamed &amp; &quot;x&quot;&gt;.py', html)
             self.assertNotIn("<bad", html)
             self.assertNotIn(new_name, html)
             self.assertEqual(script_file.read_text(encoding="utf-8"), 'print("old")\n')

@@ -145,6 +145,16 @@ def run_task_route(task_id):
     back_url = get_back_url("/tasks")
 
     if not ok:
+        if msg.startswith("脚本重命名待恢复"):
+            from ...script_rename import pending_script_rename
+            from ...ui.components import page_header
+            pending = pending_script_rename(task_id=task_id)
+            if pending:
+                body = page_header(
+                    "任务未启动", help_html=h(msg),
+                    actions_html=f'<a class="btn btn-orange" href="/scripts/rename-recovery/{h(pending["id"])}">恢复重命名</a>',
+                )
+                return layout("运行任务", "tasks", body), 409
         if msg == "任务不存在":
             status_code = 404
         elif msg.startswith("任务启动失败"):

@@ -938,15 +938,10 @@ async function taskBulkAction(action, source){{
             body: JSON.stringify({{action: action, task_ids: ids}})
         }});
 
-        let json;
-        try {{
-            json = await flsReadJsonResponse(res);
-        }} catch (parseErr) {{
-            throw new Error(res.status === 400 ? "CSRF 校验失败或登录已失效，请刷新页面后重试" : ("响应解析失败：" + res.status));
-        }}
+        const json = await flsReadJsonResponse(res);
 
         if(!json.ok){{
-            alert(flsActionFailure(flsBulkActionMessage(json, json.msg || (label + "失败")), "确认选择后重新提交"));
+            if(!taskShowRecovery(json)) alert(flsActionFailure(flsBulkActionMessage(json, json.msg || (label + "失败")), "确认选择后重新提交"));
             flsRestoreButton(source);
             ids.forEach(function(id){{
                 document.querySelectorAll('[data-task-id="' + taskCssValue(id) + '"]').forEach(function(row){{
@@ -966,9 +961,10 @@ async function taskBulkAction(action, source){{
         }}
 
         await refreshTasksBlockPartial();
+        taskShowRecovery(json);
 
     }}catch(e){{
-        alert(flsActionFailure("请求失败：" + e, "检查网络或登录状态后重试"));
+        if(!taskShowRecovery(e.payload)) alert(flsActionFailure("请求失败：" + e, "检查网络或登录状态后重试"));
         flsRestoreButton(source);
         ids.forEach(function(id){{
             document.querySelectorAll('[data-task-id="' + taskCssValue(id) + '"]').forEach(function(row){{
@@ -976,6 +972,29 @@ async function taskBulkAction(action, source){{
             }});
         }});
     }}
+}}
+
+function taskShowRecovery(payload){{
+    if(!payload || !new RegExp("^/scripts/rename-recovery/[a-f0-9]{{32}}$").test(payload.recovery_url || "")) return false;
+    const block = document.querySelector("#tasksBlock");
+    if(!block) return false;
+    let notice = block.querySelector("[data-task-recovery]");
+    if(!notice){{
+        notice = document.createElement("section");
+        notice.className = "section";
+        notice.setAttribute("data-task-recovery", "");
+        notice.setAttribute("role", "alert");
+        block.prepend(notice);
+    }}
+    notice.replaceChildren();
+    const message = document.createElement("p");
+    message.textContent = payload.msg || "脚本重命名待恢复，任务未启动";
+    const link = document.createElement("a");
+    link.className = "btn btn-orange";
+    link.href = payload.recovery_url;
+    link.textContent = "恢复重命名";
+    notice.append(message, link);
+    return true;
 }}
 
 async function taskAjaxAction(action, taskId, source){{
@@ -1007,15 +1026,10 @@ async function taskAjaxAction(action, taskId, source){{
             credentials: "same-origin"
         }});
 
-        let json;
-        try {{
-            json = await flsReadJsonResponse(res);
-        }} catch (parseErr) {{
-            throw new Error(res.status === 400 ? "CSRF 校验失败或登录已失效，请刷新页面后重试" : ("响应解析失败：" + res.status));
-        }}
+        const json = await flsReadJsonResponse(res);
 
         if(!json.ok){{
-            alert(flsActionFailure(json.msg || "任务操作未完成", "刷新任务列表后重试"));
+            if(!taskShowRecovery(json)) alert(flsActionFailure(json.msg || "任务操作未完成", "刷新任务列表后重试"));
             flsRestoreButton(source);
             rows.forEach(function(row){{
                 row.style.opacity = "1";
@@ -1034,7 +1048,7 @@ async function taskAjaxAction(action, taskId, source){{
         await refreshTasksBlockPartial();
 
     }}catch(e){{
-        alert(flsActionFailure("请求失败：" + e, "检查网络或登录状态后重试"));
+        if(!taskShowRecovery(e.payload)) alert(flsActionFailure("请求失败：" + e, "检查网络或登录状态后重试"));
         flsRestoreButton(source);
         rows.forEach(function(row){{
             row.style.opacity = "1";

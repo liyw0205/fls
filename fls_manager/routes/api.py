@@ -156,6 +156,14 @@ def _bulk_failure_status(action, failures):
 
 def _bulk_response(action, task_ids, payload, failures=None, completed_count=0, blocked_count=0):
     failures = failures or []
+    if action == "run" and any("脚本重命名待恢复" in str(item) for item in failures):
+        from ..models import get_task
+        from ..script_rename import pending_script_rename
+        for task_id in task_ids:
+            pending = pending_script_rename(task_id=task_id, task=get_task(task_id))
+            if pending:
+                payload["recovery_url"] = f"/scripts/rename-recovery/{pending['id']}"
+                break
     if (failures or blocked_count) and completed_count == 0:
         payload["ok"] = False
         return jsonify(payload), _bulk_failure_status(action, failures)
@@ -361,6 +369,12 @@ def api_task_action(action, task_id):
     try:
         if action == "run":
             ok, msg = run_task_now(task_id, source="manual")
+            if not ok and msg.startswith("脚本重命名待恢复"):
+                from ..models import get_task
+                from ..script_rename import pending_script_rename
+                pending = pending_script_rename(task_id=task_id, task=get_task(task_id))
+                if pending:
+                    return jsonify(ok=False, msg=msg, recovery_url=f"/scripts/rename-recovery/{pending['id']}"), 409
             return _task_action_result(ok, msg)
 
         if action == "stop":

@@ -23,7 +23,7 @@ from ...ui.layout import layout
 from ...ui.components import page_header_card
 from ...ui.log_controls import log_controls
 from ...logs import tail_file
-from ...models import load_global_env
+from ...models import load_global_env, TASKS_MUTATION_LOCK
 from ...constants import TASK_PROCESS_PREFIX
 
 SCRIPT_DEBUG_RUNNING = {}
@@ -311,6 +311,22 @@ def script_debug_watch(debug_id, proc, log_fp):
 
 @bp.route("/scripts/debug/<path:rel_path>")
 def scripts_debug_run(rel_path):
+    from ...script_rename import pending_script_rename
+
+    with TASKS_MUTATION_LOCK:
+        try:
+            target = script_safe_path(rel_path)
+            pending = pending_script_rename(path=target)
+        except ValueError as e:
+            return f"路径非法：{h(e)}", 400
+        except Exception as e:
+            return f"恢复状态读取失败：{h(e)}", 500
+        if pending:
+            return redirect(f"/scripts/rename-recovery/{pending['id']}")
+        return _scripts_debug_run(rel_path)
+
+
+def _scripts_debug_run(rel_path):
     back_url = get_back_url("/pull")
 
     try:
