@@ -230,6 +230,10 @@ async function flsPollBackupJob(jobId, source){{
             html += "<br><a class='btn btn-primary' href='/backup/download/" + encodeURIComponent(json.filename) + "'>下载备份</a>";
         }}
 
+        if(!json.running && !json.filename){{
+            html += "<br><button class='btn btn-orange' type='button' onclick='flsCreateBackup(this)'>重新创建备份</button>";
+        }}
+
         flsShowBackupJob(html);
 
         if(json.running){{

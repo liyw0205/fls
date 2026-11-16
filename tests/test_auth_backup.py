@@ -593,6 +593,7 @@ class BackupSafetyTests(unittest.TestCase):
             self.assertIn("flsCancelBackup", html)
             self.assertIn("/api/backup/cancel/", html)
             self.assertIn("状态读取失败", html)
+            self.assertIn("重新创建备份", html)
 
     def test_api_backup_list_returns_stable_file_fields_in_newest_order(self):
         with isolated_fls_env(token="unit-token"):
