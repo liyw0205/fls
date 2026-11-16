@@ -1,4 +1,4 @@
-import os
+from pathlib import PureWindowsPath
 from urllib.parse import quote
 
 from flask import request
@@ -21,15 +21,21 @@ def task_config_safe_path(rel_path):
       /etc/passwd
       ../../xxx
     """
-    rel_path = str(rel_path or "").strip().lstrip("/")
+    rel_path = str(rel_path or "").strip()
 
     if not rel_path:
         raise ValueError("配置文件路径为空")
+    if (
+        "\x00" in rel_path or rel_path.startswith(("/", "\\"))
+        or PureWindowsPath(rel_path).drive
+        or ".." in rel_path.replace("\\", "/").split("/")
+    ):
+        raise ValueError("配置文件路径非法，必须使用 scripts 目录内的相对文件路径")
 
     target = (SCRIPT_DIR / rel_path).resolve()
     base = SCRIPT_DIR.resolve()
 
-    if target != base and not str(target).startswith(str(base) + os.sep):
+    if target == base or base not in target.parents:
         raise ValueError("配置文件路径非法")
 
     return target

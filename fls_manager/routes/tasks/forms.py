@@ -1,3 +1,5 @@
+import uuid
+
 from flask import request
 
 from ...utils import h
@@ -196,7 +198,7 @@ def parse_retry_from_form():
     }
 
 
-def task_form(task=None, back_url="/tasks"):
+def task_form(task=None, back_url="/tasks", create_id=""):
     if task is None:
         task = {
             "name": "",
@@ -254,11 +256,15 @@ def task_form(task=None, back_url="/tasks"):
         page_title,
         help_html="设置任务信息、变量、通知和运行策略。",
     )
+    creation_field = ""
+    if not task.get("id"):
+        creation_field = f'<input type="hidden" name="create_id" value="{h(create_id or uuid.uuid4().hex)}">'
 
     body = f"""
 {header}
 <form method="post">
 <input type="hidden" name="back" value="{h(back_url)}">
+{creation_field}
 <section class="section fls-form-section">
     <h2 class="section-title">任务信息</h2>
     <div class="form-grid">

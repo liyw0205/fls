@@ -5,7 +5,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 
 from .state import scheduler
-from .models import load_tasks, get_task
+from .models import load_tasks, get_task, TASKS_MUTATION_LOCK
 from .task_runner import run_task_now
 from .logs import cleanup_logs
 from .paths import SCHEDULER_STATE_FILE
@@ -407,7 +407,15 @@ def scheduler_run(task_id):
 
 def _reload_scheduler_locked():
     print(f"[Scheduler] 开始重载 time={now_str()}")
-    tasks = load_tasks()
+    try:
+        tasks = load_tasks()
+    except Exception as exc:
+        error = f"任务文件读取失败，未更改现有调度：{exc}"
+        try:
+            _record_scheduler_state("failed", error=error, recovery="修复任务文件或恢复备份后重新加载调度器。")
+        except Exception as state_error:
+            error += f"；重载失败状态保存失败：{state_error}"
+        raise SchedulerReloadError(error) from exc
     try:
         _record_scheduler_state(
             "running",
@@ -454,7 +462,8 @@ def _reload_scheduler_locked():
 
 def reload_scheduler():
     global SCHEDULER_RELOAD_ACTIVE
-    with SCHEDULER_RELOAD_LOCK:
+    # Task writes also reload while holding this lock; use the same lock order.
+    with TASKS_MUTATION_LOCK, SCHEDULER_RELOAD_LOCK:
         SCHEDULER_RELOAD_ACTIVE = True
         try:
             return _reload_scheduler_locked()

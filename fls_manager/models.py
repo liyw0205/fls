@@ -334,7 +334,7 @@ class TaskSchedulerReloadError(RuntimeError):
 def _task_file_signature():
     try:
         stat = Path(TASK_FILE).stat()
-    except OSError:
+    except FileNotFoundError:
         return None
     return (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size)
 
@@ -349,11 +349,13 @@ def _load_tasks_from_source():
     result = {}
 
     def normalize(data):
+        if not isinstance(data, list):
+            raise RuntimeError("任务文件不是 JSON 数组，未覆盖原文件，请修复文件或从备份恢复")
         tasks, changed = _normalize_list(data, normalize_task)
         result["tasks"] = tasks
         return tasks if changed else None
 
-    mutate_json(TASK_FILE, [], normalize)
+    mutate_json(TASK_FILE, [], normalize, strict=True)
     return result.get("tasks", [])
 
 
@@ -398,13 +400,15 @@ def mutate_tasks(update_fn, reload_scheduler_fn=None, after_write=None):
 
     with TASKS_MUTATION_LOCK:
         def update(data):
+            if not isinstance(data, list):
+                raise RuntimeError("任务文件不是 JSON 数组，未覆盖原文件，请修复文件或从备份恢复")
             tasks, normalized = _normalize_list(data, normalize_task)
             changed = bool(update_fn(tasks))
             result["tasks"] = tasks
             result["changed"] = changed
             return tasks if changed or normalized else None
 
-        mutate_json(TASK_FILE, [], update)
+        mutate_json(TASK_FILE, [], update, strict=True)
         _clear_tasks_read_cache()
 
         if result.get("changed") and after_write:

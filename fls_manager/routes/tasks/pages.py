@@ -1,6 +1,6 @@
 import uuid
 from math import ceil
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from flask import request, redirect, abort
 
@@ -16,6 +16,7 @@ from .helpers import (
     tasks_page_links,
     filter_tasks_for_page,
     sort_tasks_for_display,
+    task_config_safe_path,
 )
 from ...models import (
     COLLECTION_MUTATION_LOCK,
@@ -25,7 +26,10 @@ from ...models import (
     mutate_tasks,
     load_collections,
     get_collection,
+    get_proxy,
+    normalize_task,
 )
+from ...notify import get_notify_item
 from ...utils import h, now_str
 from ...ui.layout import layout
 from ...ui.components import message_card, page_header, section, data_toolbar, empty_state
@@ -42,6 +46,55 @@ SORT_OPTIONS = [
 ]
 
 TASK_PAGE_COLLECTION_LIMIT = 3
+TASK_EDIT_FIELDS = (
+    "name", "remark", "command", "cron", "config_path", "collection_id", "enabled", "env",
+    "proxy_id", "notify", "random_delay", "retry",
+)
+
+
+class TaskCreationConflict(ValueError):
+    pass
+
+
+def _validate_task_form(task):
+    if not task.get("name"):
+        raise ValueError("任务名不能为空")
+    if not task.get("command"):
+        raise ValueError("命令不能为空")
+    if "\x00" in task["name"] or "\x00" in task["command"]:
+        raise ValueError("任务名称或命令包含 NUL 字符")
+    if task.get("cron"):
+        try:
+            cron_to_trigger(task["cron"])
+        except ValueError as exc:
+            raise ValueError(f"Cron 不合法：{exc}") from exc
+    if task.get("config_path"):
+        task_config_safe_path(task["config_path"])
+    for key, value in task.get("env", {}).items():
+        if "=" in key or "\x00" in key or "\x00" in value:
+            raise ValueError("任务变量无效：变量名不允许等号或 NUL，变量值不允许 NUL")
+    keys = [value.strip() for value in request.form.getlist("env_key")]
+    values = request.form.getlist("env_value")
+    nonempty_keys = [key for key in keys if key]
+    if len(nonempty_keys) != len(set(nonempty_keys)) or len(keys) != len(values):
+        raise ValueError("任务变量行重复或不完整，请修正后保存")
+    if any(not key and value for key, value in zip(keys, values)):
+        raise ValueError("任务变量名不能为空，请修正后保存")
+    if task.get("proxy_id") and not get_proxy(task["proxy_id"]):
+        raise ValueError("所选代理不存在或已禁用，请重新选择")
+    notify_mode = request.form.get("notify_mode", "default").strip()
+    if notify_mode not in ("none", "default", "custom"):
+        raise ValueError("通知模式无效，请重新选择")
+    if request.form.get("random_delay_mode", "none").strip() not in ("none", "default", "custom"):
+        raise ValueError("随机延迟模式无效，请重新选择")
+    if notify_mode == "custom":
+        ids = request.form.getlist("notify_ids")
+        if not ids or any(not item_id for item_id in ids):
+            raise ValueError("请选择至少一个通知渠道，或选择不通知")
+        for item_id in ids:
+            item = get_notify_item(item_id)
+            if not item or not item.get("enabled", True):
+                raise ValueError("所选通知渠道不存在或已禁用，请重新选择")
 
 
 def _clean_task_back_url(value, default="/tasks"):
@@ -140,12 +193,34 @@ def _task_from_post(base=None):
 
 
 def _task_form_error(title, back_url, message, task, status=400):
+    create_id = task.get("id", "") if title == "新建任务" else ""
+    if create_id:
+        task = {key: value for key, value in task.items() if key != "id"}
     body = message_card(message, "error", strong=True) + task_form(
         task,
         back_url=back_url,
+        create_id=create_id,
     )
+    if create_id and status == 409:
+        body = f'<a class="btn btn-blue" href="/task/edit/{h(create_id)}">编辑已保存任务</a>' + body
 
     return layout(title, "tasks", body), status
+
+
+def _task_saved_reload_error(task, back_url, error):
+    task_id = task["id"]
+    body = message_card(
+        f"任务已保存，但调度器重载失败：{error}。不要重复新建或保存，请仅重新加载调度器。",
+        "error", strong=True,
+    ) + f'''
+<div class="action-row">
+    <form class="inline-form" method="post" action="/scheduler/reload?back={h(quote(back_url, safe=''))}">
+        <button class="btn btn-primary" type="submit">重新加载调度器</button>
+    </form>
+    <a class="btn btn-blue" href="/task/edit/{h(task_id)}?back={h(quote(back_url, safe=''))}">查看已保存任务</a>
+    <a class="btn btn-gray" href="{h(back_url)}">返回任务</a>
+</div>'''
+    return layout("任务已保存，调度待恢复", "tasks", body), 503
 
 
 @bp.route("/tasks")
@@ -260,25 +335,20 @@ def task_new():
 
     if request.method == "POST":
         task = _task_from_post()
-        name = task.get("name", "")
-        command = task.get("command", "")
-        cron_expr = task.get("cron", "")
         collection_id = task.get("collection_id", "")
-
-        if not name:
-            return _task_form_error("新建任务", back_url, "任务名不能为空", task)
-
-        if not command:
-            return _task_form_error("新建任务", back_url, "命令不能为空", task)
-
-        if cron_expr:
-            try:
-                cron_to_trigger(cron_expr)
-            except Exception as e:
-                return _task_form_error("新建任务", back_url, f"Cron 不合法：{e}", task)
+        create_id = request.form.get("create_id", "") or uuid.uuid4().hex
+        try:
+            if len(create_id) != 32 or uuid.UUID(hex=create_id).hex != create_id:
+                raise ValueError("新建任务提交标识无效，请重新打开新建页面")
+            task["id"] = create_id
+            _validate_task_form(task)
+        except ValueError as e:
+            return _task_form_error("新建任务", back_url, str(e), task)
+        except Exception as e:
+            return _task_form_error("新建任务", back_url, f"任务校验失败，未保存：{e}", task, status=500)
 
         task.update({
-            "id": uuid.uuid4().hex,
+            "id": create_id,
             "run_count": 0,
             "pinned": False,
             "created_at": now_str(),
@@ -286,6 +356,13 @@ def task_new():
         })
 
         def add_task(tasks):
+            _validate_task_form(task)
+            existing = next((item for item in tasks if item.get("id") == create_id), None)
+            if existing:
+                expected = normalize_task(task)
+                if any(existing.get(key) != expected.get(key) for key in TASK_EDIT_FIELDS):
+                    raise TaskCreationConflict("该提交已保存，内容已变更。请返回任务列表编辑已有任务，不会重复新建。")
+                return False
             tasks.append(task)
             return True
 
@@ -293,15 +370,18 @@ def task_new():
             if collection_id and not get_collection(collection_id):
                 return _task_form_error("新建任务", back_url, "合集不存在", task)
             try:
-                mutate_tasks(add_task, reload_scheduler)
+                _tasks, changed = mutate_tasks(add_task, reload_scheduler)
+                if not changed:
+                    try:
+                        reload_scheduler()
+                    except Exception as e:
+                        raise TaskSchedulerReloadError(str(e)) from e
             except TaskSchedulerReloadError as e:
-                return _task_form_error(
-                    "新建任务",
-                    back_url,
-                    f"任务已保存，但调度器重载失败：{e}",
-                    task,
-                    status=500,
-                )
+                return _task_saved_reload_error(task, back_url, e)
+            except TaskCreationConflict as e:
+                return _task_form_error("新建任务", back_url, str(e), task, status=409)
+            except ValueError as e:
+                return _task_form_error("新建任务", back_url, str(e), task)
             except Exception as e:
                 return _task_form_error(
                     "新建任务",
@@ -318,7 +398,11 @@ def task_new():
 
 @bp.route("/task/edit/<task_id>", methods=["GET", "POST"])
 def task_edit(task_id):
-    tasks = load_tasks()
+    try:
+        tasks = load_tasks()
+    except Exception as e:
+        draft = _task_from_post({"id": task_id}) if request.method == "POST" else {"id": task_id}
+        return _task_form_error("编辑任务", _task_form_back_url(), f"任务文件读取失败，未保存：{e}。请修复文件或恢复备份后重试。", draft, status=500)
     task = None
 
     for t in tasks:
@@ -333,27 +417,19 @@ def task_edit(task_id):
 
     if request.method == "POST":
         draft = _task_from_post(task)
-        name = draft.get("name", "")
-        command = draft.get("command", "")
-        cron_expr = draft.get("cron", "")
         collection_id = draft.get("collection_id", "")
-
-        if not name:
-            return _task_form_error("编辑任务", back_url, "任务名不能为空", draft)
-
-        if not command:
-            return _task_form_error("编辑任务", back_url, "命令不能为空", draft)
-
-        if cron_expr:
-            try:
-                cron_to_trigger(cron_expr)
-            except Exception as e:
-                return _task_form_error("编辑任务", back_url, f"Cron 不合法：{e}", draft)
+        try:
+            _validate_task_form(draft)
+        except ValueError as e:
+            return _task_form_error("编辑任务", back_url, str(e), draft)
+        except Exception as e:
+            return _task_form_error("编辑任务", back_url, f"任务校验失败，未保存：{e}", draft, status=500)
 
         def update_task(tasks):
             target = next((item for item in tasks if item.get("id") == task_id), None)
             if target is None:
                 return False
+            _validate_task_form(draft)
 
             target.update({
                 "name": draft.get("name", ""),
@@ -380,13 +456,9 @@ def task_edit(task_id):
             try:
                 _tasks, changed = mutate_tasks(update_task, reload_scheduler)
             except TaskSchedulerReloadError as e:
-                return _task_form_error(
-                    "编辑任务",
-                    back_url,
-                    f"任务已保存，但调度器重载失败：{e}",
-                    draft,
-                    status=500,
-                )
+                return _task_saved_reload_error(draft, back_url, e)
+            except ValueError as e:
+                return _task_form_error("编辑任务", back_url, str(e), draft)
             except Exception as e:
                 return _task_form_error(
                     "编辑任务",

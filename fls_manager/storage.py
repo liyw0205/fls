@@ -17,7 +17,14 @@ def read_json(file_path, default):
         return _read_json_unlocked(file_path, default)
 
 
-def _read_json_unlocked(file_path, default):
+def _read_json_unlocked(file_path, default, strict=False):
+    if strict:
+        try:
+            return json.loads(file_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return default
+        except ValueError as exc:
+            raise RuntimeError(f"JSON 文件读取失败，未覆盖原文件：{exc}") from exc
     if not file_path.exists():
         return default
 
@@ -42,10 +49,10 @@ def _write_json_unlocked(file_path, data):
     tmp_file.replace(file_path)
 
 
-def mutate_json(file_path, default, update_fn):
+def mutate_json(file_path, default, update_fn, *, strict=False):
     """Apply one read-modify-write operation under the storage lock."""
     with _STORAGE_LOCK:
-        data = _read_json_unlocked(file_path, default)
+        data = _read_json_unlocked(file_path, default, strict=strict)
         updated = update_fn(data)
         if updated is None:
             return data

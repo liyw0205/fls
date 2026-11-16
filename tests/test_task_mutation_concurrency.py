@@ -184,7 +184,7 @@ class TaskMutationConcurrencyTests(unittest.TestCase):
                     headers={"X-Token": TOKEN},
                 )
 
-            self.assertEqual(created.status_code, 500)
+            self.assertEqual(created.status_code, 503)
             self.assertIn("任务已保存", created.get_data(as_text=True))
             self.assertIn("scheduler unavailable", created.get_data(as_text=True))
             task = models.load_tasks()[0]
@@ -207,7 +207,7 @@ class TaskMutationConcurrencyTests(unittest.TestCase):
                     headers={"X-Token": TOKEN},
                 )
 
-            self.assertEqual(edited.status_code, 500)
+            self.assertEqual(edited.status_code, 503)
             self.assertIn("任务已保存", edited.get_data(as_text=True))
             self.assertIn("scheduler unavailable", edited.get_data(as_text=True))
             persisted = models.load_tasks()[0]

@@ -3,6 +3,7 @@ import csv
 import io
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -729,9 +730,12 @@ class UiRouteComponentTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            response = app.test_client().post(
+            client = app.test_client()
+            page = client.get("/task/config/task-config", headers={"X-Token": TOKEN})
+            revision = re.search(r'name="config_revision" value="([^"]+)"', page.get_data(as_text=True)).group(1)
+            response = client.post(
                 "/task/config/task-config",
-                data={"content": "key: value\n"},
+                data={"content": "key: value\n", "config_revision": revision},
                 headers={"X-Token": TOKEN},
             )
 
@@ -771,24 +775,19 @@ class UiRouteComponentTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            real_write_text = Path.write_text
-
-            def fail_config_write(path, *args, **kwargs):
-                if path.name == "app.yml":
-                    raise RuntimeError('<bad & "x">')
-
-                return real_write_text(path, *args, **kwargs)
-
-            with patch("pathlib.Path.write_text", new=fail_config_write):
-                response = app.test_client().post(
+            client = app.test_client()
+            page = client.get("/task/config/task-config", headers={"X-Token": TOKEN})
+            revision = re.search(r'name="config_revision" value="([^"]+)"', page.get_data(as_text=True)).group(1)
+            with patch("fls_manager.routes.tasks.config_file.os.replace", side_effect=RuntimeError('<bad & "x">')):
+                response = client.post(
                     "/task/config/task-config",
-                    data={"content": "key: value\n"},
+                    data={"content": "key: value\n", "config_revision": revision},
                     headers={"X-Token": TOKEN},
                 )
 
             html = response.get_data(as_text=True)
 
-            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.status_code, 500)
             self.assertIn('style="color:#dc2626;font-weight:800;"', html)
             self.assertIn("保存失败：&lt;bad &amp; &quot;x&quot;&gt;", html)
             self.assertNotIn("<bad", html)
