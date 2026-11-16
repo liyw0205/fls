@@ -3,6 +3,7 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -131,6 +132,149 @@ class OnlineSourceRefreshTests(unittest.TestCase):
             self.assertEqual(result.status_code, 500)
             self.assertIn("thread quota exhausted", result.json["error"])
             self.assertEqual(app.test_client().get("/api/online-scripts/refresh-status", headers={"X-Token": TOKEN}).json["status"], "启动失败")
+
+    def test_form_and_api_start_failures_remain_retryable_even_when_state_write_fails(self):
+        for path, success_status in (("/online-scripts/refresh", 302), ("/api/online-scripts/refresh", 202)):
+            for failure in ("reserve", "thread", "thread-and-state"):
+                with self.subTest(path=path, failure=failure), isolated_app() as (app, base_dir):
+                    from fls_manager.online_scripts import constants, source
+                    import fls_manager.routes.online_scripts.refresh as refresh
+
+                    source.save_online_script_cache([{"id": "stable", "name": "Stable", "type": "raw", "link": "x"}])
+                    cache = base_dir / "data" / "online_scripts_cache.json"
+                    original = cache.read_bytes()
+                    real_persist = constants.persist_online_refresh
+                    writes = 0
+
+                    def persist(info):
+                        nonlocal writes
+                        writes += 1
+                        if failure == "reserve" or (failure == "thread-and-state" and writes == 2):
+                            raise OSError("state disk full")
+                        return real_persist(info)
+
+                    client = app.test_client()
+                    headers = {"X-Token": TOKEN, "X-Requested-With": "FLS-Ajax"}
+                    with patch.object(constants, "persist_online_refresh", side_effect=persist), patch.object(
+                        refresh, "start_refresh_thread", side_effect=RuntimeError("thread quota exhausted"),
+                    ) as start:
+                        response = client.post(path, data={"proxy_id": "chosen"}, headers=headers)
+                    self.assertEqual(response.status_code, 500)
+                    if failure == "reserve":
+                        start.assert_not_called()
+                    else:
+                        start.assert_called_once()
+                    detail = response.json["error"] if response.is_json else response.get_data(as_text=True)
+                    if failure != "thread":
+                        self.assertIn("state disk full", detail)
+                    if failure != "reserve":
+                        self.assertIn("thread quota exhausted", detail)
+                        self.assertEqual(constants.get_online_refresh_state()["status"], "启动失败")
+                    if not response.is_json:
+                        self.assertNotIn("Location", response.headers)
+                        self.assertIn('action="/online-scripts/refresh"', detail)
+                        self.assertIn('name="csrf_token"', detail)
+                    self.assertFalse(constants.get_online_refresh_state()["running"])
+                    self.assertEqual(cache.read_bytes(), original)
+                    with patch.object(refresh, "start_refresh_thread") as retry_start:
+                        retried = client.post(path, headers=headers)
+                    self.assertEqual(retried.status_code, success_status)
+                    retry_start.assert_called_once()
+                    self.assertTrue(constants.get_online_refresh_state()["running"])
+
+    def test_form_and_api_share_conflict_admission_without_starting_a_second_worker(self):
+        for first_path, next_path in (
+            ("/online-scripts/refresh", "/api/online-scripts/refresh"),
+            ("/api/online-scripts/refresh", "/online-scripts/refresh"),
+        ):
+            with self.subTest(first_path=first_path), isolated_app() as (app, _base_dir):
+                import fls_manager.routes.online_scripts.refresh as refresh
+
+                client = app.test_client()
+                with patch.object(refresh, "start_refresh_thread") as start:
+                    first = client.post(first_path, headers={"X-Token": TOKEN})
+                    response = client.post(next_path, headers={"X-Token": TOKEN, "X-Requested-With": "FLS-Ajax"})
+                self.assertIn(first.status_code, (202, 302))
+                self.assertEqual(response.status_code, 409)
+                self.assertNotIn("Location", response.headers)
+                detail = response.json["error"] if response.is_json else response.get_data(as_text=True)
+                self.assertIn("等待当前任务结束", detail)
+                if not response.is_json:
+                    self.assertIn('href="/online-scripts#online-status"', detail)
+                start.assert_called_once()
+
+    def test_refresh_error_form_retains_proxy_and_csrf_and_can_start_again(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.models import save_proxies
+            import fls_manager.routes.online_scripts.refresh as refresh
+
+            save_proxies([{"id": "chosen", "name": "Chosen", "type": "http", "enabled": True}])
+            client = app.test_client()
+            with client.session_transaction() as session:
+                session.update(token=TOKEN, token_expire_at=int(time.time()) + 3600,
+                               security_verified=True, csrf_token="refresh-csrf")
+            headers = {"X-Requested-With": "FLS-Ajax"}
+            with patch.object(refresh, "start_refresh_thread", side_effect=RuntimeError("thread quota exhausted")):
+                failed = client.post(
+                    "/online-scripts/refresh", data={"proxy_id": "chosen", "csrf_token": "refresh-csrf"}, headers=headers,
+                )
+            self.assertEqual(failed.status_code, 500)
+            html = failed.get_data(as_text=True)
+            self.assertIn('<option value="chosen" selected>', html)
+            csrf = re.search(r'name="csrf_token" value="([^"]+)"', html).group(1)
+            with patch.object(refresh, "start_refresh_thread") as start:
+                recovered = client.post(
+                    "/online-scripts/refresh", data={"proxy_id": "chosen", "csrf_token": csrf}, headers=headers,
+                )
+            self.assertEqual(recovered.status_code, 302)
+            self.assertEqual(start.call_args.args[1], "chosen")
+
+    def test_refresh_status_returns_json_diagnostic_when_restart_recovery_cannot_persist(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import constants
+
+            constants.ONLINE_REFRESH_STATE_FILE.write_text(json.dumps({
+                "id": "stale", "running": True, "status": "运行中", "message": "正在同步",
+                "error": "", "log_file": str(base_dir / "stale.log"),
+            }), encoding="utf-8")
+            client = app.test_client()
+            with patch.object(constants, "persist_online_refresh", side_effect=OSError("state read-only")):
+                failed = client.get("/api/online-scripts/refresh-status", headers={"X-Token": TOKEN})
+            self.assertEqual(failed.status_code, 500)
+            self.assertFalse(failed.json["ok"])
+            self.assertIn("state read-only", failed.json["error"])
+            recovered = client.get("/api/online-scripts/refresh-status", headers={"X-Token": TOKEN})
+            self.assertEqual(recovered.status_code, 200)
+            self.assertFalse(recovered.json["running"])
+            self.assertEqual(recovered.json["status"], "结果未知")
+
+    def test_refresh_form_and_api_reject_csrf_expired_and_forbidden_requests_before_reservation(self):
+        for path in ("/online-scripts/refresh", "/api/online-scripts/refresh"):
+            with self.subTest(path=path), isolated_app() as (app, _base_dir):
+                import fls_manager.routes.online_scripts.refresh as refresh
+
+                client = app.test_client()
+                headers = {"X-Requested-With": "FLS-Ajax"}
+                with client.session_transaction() as session:
+                    session.update(token=TOKEN, token_expire_at=int(time.time()) + 3600,
+                                   security_verified=True, csrf_token="refresh-csrf")
+                with patch.object(refresh, "reserve_online_refresh") as reserve, patch.object(refresh, "start_refresh_thread") as start:
+                    denied = client.post(path, headers=headers)
+                    self.assertEqual(denied.status_code, 400)
+                    with client.session_transaction() as session:
+                        session["token_expire_at"] = 1
+                    expired = client.post(path, data={"csrf_token": "refresh-csrf"}, headers=headers)
+                    self.assertEqual(expired.status_code, 401)
+                    with client.session_transaction() as session:
+                        session.update(token=TOKEN, token_expire_at=int(time.time()) + 3600,
+                                       security_verified=True, csrf_token="refresh-csrf")
+                    with patch("fls_manager.auth.query_token_enabled", return_value=False):
+                        forbidden = client.post(
+                            path, query_string={"token": TOKEN}, data={"csrf_token": "refresh-csrf"}, headers=headers,
+                        )
+                    self.assertEqual(forbidden.status_code, 403)
+                    reserve.assert_not_called()
+                    start.assert_not_called()
 
     def test_restart_running_refresh_becomes_unknown_and_page_shows_it(self):
         with isolated_app() as (app, base_dir):
