@@ -269,8 +269,10 @@ class SchedulerReloadTests(unittest.TestCase):
                     headers={"X-Token": TOKEN},
                 )
 
-            self.assertEqual(response.status_code, 302)
-            self.assertIn("err=", response.headers["Location"])
+            self.assertEqual(response.status_code, 500)
+            self.assertNotIn("Location", response.headers)
+            self.assertIn("scheduler down", response.get_data(as_text=True))
+            self.assertIn('action="/scheduler/reload?back=%2F"', response.get_data(as_text=True))
             self.assertEqual(json.loads(paths.TASK_FILE.read_text(encoding="utf-8"))[0]["id"], "t1")
             with patch("fls_manager.routes.dashboard.get_scheduler_state", return_value={
                 "status": "failed",
@@ -286,6 +288,17 @@ class SchedulerReloadTests(unittest.TestCase):
             self.assertEqual(page.status_code, 200)
             self.assertIn("调度器状态", page.get_data(as_text=True))
             self.assertIn("scheduler down", page.get_data(as_text=True))
+
+    def test_scheduler_reload_returns_to_local_workflow_and_rejects_external_back(self):
+        for back, expected in (("/tasks", "/tasks"), ("https://example.invalid/", "/?msg=")):
+            with self.subTest(back=back), isolated_app() as (app, _base_dir):
+                with patch("fls_manager.routes.dashboard.reload_scheduler") as reload_scheduler:
+                    response = app.test_client().post(
+                        "/scheduler/reload", query_string={"back": back}, headers={"X-Token": TOKEN},
+                    )
+                self.assertEqual(response.status_code, 302)
+                self.assertTrue(response.headers["Location"].startswith(expected))
+                reload_scheduler.assert_called_once()
 
 
 if __name__ == "__main__":

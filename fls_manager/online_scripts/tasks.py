@@ -140,7 +140,9 @@ def guess_task_command(item):
     return ""
 
 
-def import_task_if_needed(item, log_file=None, enable_task=False, selected_task_indexes=None):
+def import_task_if_needed(
+    item, log_file=None, enable_task=False, selected_task_indexes=None, raise_on_reload_error=False,
+):
     """
     导入在线脚本任务。
 
@@ -263,6 +265,8 @@ def import_task_if_needed(item, log_file=None, enable_task=False, selected_task_
         summary = f"任务已持久化，但调度器重载失败：{e}"
         if log_file:
             append_log(log_file, summary)
+        if raise_on_reload_error:
+            raise
         return True, summary
 
     if log_file:

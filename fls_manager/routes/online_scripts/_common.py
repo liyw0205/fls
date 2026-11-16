@@ -160,13 +160,21 @@ def selected_task_indexes_from_form(item):
 
     if select_mode == "all":
         all_count = len(online_script_task_crons(item))
-        excluded_set = parse_excluded_task_indexes(excluded_task_indexes)
+        excluded_values = [
+            value.strip() for value in excluded_task_indexes.replace("，", ",").split(",")
+            if value.strip()
+        ]
+        excluded_set = {
+            int(index) for index in validated_install_task_indexes(item, excluded_values)
+        } if excluded_values else set()
 
         selected_task_indexes = [
             str(i)
             for i in range(1, all_count + 1)
             if i not in excluded_set
         ]
+    elif select_mode:
+        raise ValueError("任务选择模式无效")
 
     return selected_task_indexes
 

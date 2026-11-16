@@ -21,7 +21,7 @@ from ..models import (
 from ..task_runner import running_task_snapshot
 from ..ui.layout import layout
 from ..ui.components import table_card, page_header, section, data_toolbar, empty_table_row, status_badge
-from ..utils import h
+from ..utils import h, get_back_url
 from ..paths import BASE_DIR, DATA_DIR, LOG_DIR, SCRIPT_DIR
 from ..config import get_host, get_port, fls_get_admin_token, panel_now, get_panel_timezone_text
 from ..state import PANEL_START_TIME, PANEL_START_STR
@@ -683,10 +683,22 @@ def api_dashboard_runtime():
 
 @bp.route("/scheduler/reload", methods=["POST"])
 def scheduler_reload_page():
+    back_url = get_back_url("/")
     try:
         reload_scheduler()
     except Exception as exc:
-        return redirect("/?err=" + quote(f"调度器重载失败：{exc}"))
+        body = page_header(
+            "调度器重载失败",
+            help_html=f"{h(exc)}。已保存的任务保持不变，请检查调度器状态后重新加载。",
+            actions_html=(
+                f'<form class="inline-form" method="post" action="/scheduler/reload?back={h(quote(back_url, safe=""))}">'
+                '<button class="btn btn-primary" type="submit">重新加载调度器</button></form>'
+                f'<a class="btn btn-gray" href="{h(back_url)}">返回</a>'
+            ),
+        )
+        return layout("调度器重载失败", "dashboard", body), 500
+    if back_url != "/":
+        return redirect(back_url)
     return redirect("/?msg=调度器已重新加载")
 
 

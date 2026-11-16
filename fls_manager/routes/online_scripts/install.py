@@ -148,7 +148,7 @@ def online_scripts_install(script_id):
     enable_task = request.form.get("enable_task") == "1"
     force = request.form.get("force") == "1"
 
-    selected_task_indexes = selected_task_indexes_from_form(item)
+    selected_task_indexes = []
     select_mode = request.form.get("select_mode", "").strip()
     excluded_task_indexes = request.form.get("excluded_task_indexes", "").strip()
 
@@ -157,6 +157,7 @@ def online_scripts_install(script_id):
         selected_task_indexes = []
     else:
         try:
+            selected_task_indexes = selected_task_indexes_from_form(item)
             selected_task_indexes = validated_install_task_indexes(item, selected_task_indexes)
         except ValueError as e:
             body = page_header_card(

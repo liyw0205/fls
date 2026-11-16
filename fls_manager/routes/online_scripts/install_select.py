@@ -1,4 +1,24 @@
 from ._common import *
+from ...models import TaskSchedulerReloadError
+
+
+def _task_import_error(script_id, message, status_code, persisted=False):
+    scheduler_action = ""
+    if persisted:
+        scheduler_action = '''
+<form class="inline-form" method="post" action="/scheduler/reload?back=/tasks">
+    <button class="btn btn-primary" type="submit">重新加载调度器</button>
+</form>'''
+    body = page_header_card(
+        "在线任务导入未完成",
+        help_html=h(message),
+        actions_html=(
+            f'<a class="btn btn-gray" href="/online-scripts/install-select/{h(script_id)}">重新选择任务</a>'
+            '<a class="btn btn-blue" href="/tasks">查看已保存任务</a>'
+            + scheduler_action
+        ),
+    )
+    return layout("在线任务导入", "online_scripts", body), status_code
 
 
 @bp.route("/online-scripts/import-tasks/<script_id>", methods=["POST"])
@@ -6,26 +26,20 @@ def online_scripts_import_tasks_only(script_id):
     item = get_online_script(script_id)
 
     if not item:
-        abort(404)
+        return _task_import_error(
+            script_id, "脚本已不在本地缓存中，请同步在线脚本源后重试。", 404,
+        )
 
     if not script_has_task(item):
-        return redirect(
-            url_for(
-                "online_scripts.online_scripts_page",
-                err="该脚本没有可导入的任务",
-            )
-        )
+        return _task_import_error(script_id, "该脚本没有可导入的任务，请检查在线脚本源。", 400)
 
     enable_task = request.form.get("enable_task") == "1"
-    selected_task_indexes = selected_task_indexes_from_form(item)
 
-    if not selected_task_indexes:
-        return redirect(
-            url_for(
-                "online_scripts.online_scripts_page",
-                err="没有选择任何任务，未导入。下一步：至少选择一个任务后重试",
-            )
-        )
+    try:
+        selected_task_indexes = selected_task_indexes_from_form(item)
+        selected_task_indexes = validated_install_task_indexes(item, selected_task_indexes)
+    except ValueError as e:
+        return _task_import_error(script_id, f"{e}。请重新选择任务后重试。", 400)
 
     try:
         ok, msg = import_task_if_needed(
@@ -33,22 +47,27 @@ def online_scripts_import_tasks_only(script_id):
             log_file=None,
             enable_task=enable_task,
             selected_task_indexes=selected_task_indexes,
+            raise_on_reload_error=True,
         )
+
+        if not ok:
+            return _task_import_error(script_id, msg, 409)
 
         return redirect(
             url_for(
                 "online_scripts.online_scripts_page",
-                msg=msg if ok else "",
-                err="" if ok else msg,
+                msg=msg,
             )
         )
 
+    except TaskSchedulerReloadError as e:
+        return _task_import_error(
+            script_id, f"任务已持久化，但调度器重载失败：{e}。请重新加载调度器，无需重复导入。",
+            503, persisted=True,
+        )
     except Exception as e:
-        return redirect(
-            url_for(
-                "online_scripts.online_scripts_page",
-                err=f"任务导入失败：{e}。下一步：检查任务选择和任务字段后重试",
-            )
+        return _task_import_error(
+            script_id, f"任务导入失败：{e}。请检查文件权限和磁盘空间后重试。", 500,
         )
 
 
