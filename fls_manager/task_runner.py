@@ -269,8 +269,13 @@ def schedule_task_retry(task_id, task_snapshot, retry_attempt, reason, log_file,
                 if PENDING_RETRIES.get(task_id) is pending:
                     PENDING_RETRIES.pop(task_id, None)
 
-    timer = threading.Timer(interval_seconds, retry_worker)
-    timer.daemon = True
+    try:
+        timer = threading.Timer(interval_seconds, retry_worker)
+        timer.daemon = True
+    except Exception as exc:
+        retry_error = f"重试计划失败：{exc}"
+        append_task_log(log_file, f"\n===== {retry_error} =====\n")
+        return False, retry_error
     pending["timer"] = timer
     # Task mutations cancel retries under this lock order: tasks before running state.
     with TASKS_MUTATION_LOCK:
@@ -302,7 +307,18 @@ def schedule_task_retry(task_id, task_snapshot, retry_attempt, reason, log_file,
                     f"时间: {now_str()}\n"
                 ),
             )
-            timer.start()
+            try:
+                timer.start()
+            except Exception as exc:
+                if PENDING_RETRIES.get(task_id) is pending:
+                    PENDING_RETRIES.pop(task_id, None)
+                try:
+                    timer.cancel()
+                except Exception:
+                    pass
+                retry_error = f"重试计划失败：{exc}"
+                append_task_log(log_file, f"\n===== {retry_error} =====\n")
+                return False, retry_error
 
     return True, f"{reason}，已计划第 {next_attempt}/{max_retries} 次重试"
 
@@ -507,6 +523,8 @@ def task_finish_watcher(task_id, task_snapshot, proc, log_file, log_fp, history_
 
             if retry_scheduled:
                 history_msg = retry_msg
+            elif retry_msg:
+                history_msg = f"{history_msg}；{retry_msg}"
 
         finish_task_history(
             history_id,
@@ -789,7 +807,7 @@ def _start_task_worker(task_id, task_snapshot, cmd_info, process_name, log_file,
             history_start_ts,
             "start_failed",
             log_file=log_file,
-            message=retry_msg if retry_scheduled else f"启动失败：{e}",
+            message=retry_msg if retry_scheduled else f"启动失败：{e}；{retry_msg}" if retry_msg else f"启动失败：{e}",
         )
 
         _pop_running(task_id, history_id=history_id)
@@ -929,9 +947,10 @@ def _submit_task_now(task_id, source="manual", retry_attempt=0, retry_token=None
             history_start_ts,
             "start_failed",
             log_file=str(log_file),
-            message=retry_msg if retry_scheduled else error_text,
+            message=retry_msg if retry_scheduled else f"{error_text}；{retry_msg}" if retry_msg else error_text,
         )
-        return False, f"任务启动失败：{retry_msg if retry_scheduled else error_text}"
+        failure_message = retry_msg if retry_scheduled else f"{error_text}；{retry_msg}" if retry_msg else error_text
+        return False, f"任务启动失败：{failure_message}"
 
     return True, "已提交启动"
 

@@ -168,6 +168,16 @@ class RecordingTimer:
         self.function()
 
 
+class FailingStartTimer(RecordingTimer):
+    def start(self):
+        raise RuntimeError("timer quota exhausted")
+
+
+class FailingConstructTimer:
+    def __init__(self, *_args, **_kwargs):
+        raise RuntimeError("timer construction failed")
+
+
 class FakeProc:
     def __init__(self, return_code=0):
         self.return_code = return_code
@@ -350,7 +360,7 @@ class TaskRuntimeTests(unittest.TestCase):
                 "id": "t1",
                 "name": "Thread failure",
                 "command": "echo ok",
-                "retry": {"attempts": 0, "interval_seconds": 5},
+                "retry": {"attempts": 1, "interval_seconds": 5},
             }
             log_dir = Path(os.environ["FLS_BASE_DIR"]) / "log"
             log_dir.mkdir(parents=True, exist_ok=True)
@@ -365,7 +375,8 @@ class TaskRuntimeTests(unittest.TestCase):
             with mock.patch.object(task_runner, "get_task", return_value=task), \
                     mock.patch.object(task_runner, "build_command", return_value=cmd_info), \
                     mock.patch.object(task_runner, "log_file_for_task", return_value=log_file), \
-                    mock.patch.object(task_runner.threading, "Thread", FailingStartThread):
+                    mock.patch.object(task_runner.threading, "Thread", FailingStartThread), \
+                    mock.patch.object(task_runner.threading, "Timer", FailingStartTimer):
                 ok, msg = task_runner.run_task_now("t1", source="manual")
 
             self.assertFalse(ok)
@@ -375,6 +386,9 @@ class TaskRuntimeTests(unittest.TestCase):
             self.assertEqual(history[0]["status"], "start_failed")
             self.assertTrue(history[0]["end_at"])
             self.assertIn("后台线程启动失败", history[0]["message"])
+            self.assertIn("重试计划失败：timer quota exhausted", history[0]["message"])
+            self.assertIn("重试计划失败：timer quota exhausted", msg)
+            self.assertNotIn("t1", task_runner.PENDING_RETRIES)
             self.assertIn("thread quota exhausted", log_file.read_text(encoding="utf-8"))
 
         cleanup_runtime_state()
@@ -630,6 +644,37 @@ class TaskRuntimeTests(unittest.TestCase):
             self.assertEqual(history[0]["source"], "retry")
             self.assertEqual(history[0]["retry_attempt"], 1)
             self.assertEqual(history[0]["max_retries"], 2)
+
+    def test_retry_timer_start_failure_releases_pending_reservation(self):
+        with isolated_fls_modules():
+            from fls_manager import task_runner
+
+            task = {"id": "t1", "command": "exit 1", "retry": {"attempts": 1, "interval_seconds": 5}}
+            log_file = Path(os.environ["FLS_BASE_DIR"]) / "log" / "retry-timer-start.log"
+            RecordingTimer.created = []
+            with mock.patch.object(task_runner.threading, "Timer", FailingStartTimer):
+                ok, message = task_runner.schedule_task_retry(task["id"], task, 0, "exit 1", log_file)
+            self.assertFalse(ok)
+            self.assertIn("重试计划失败：timer quota exhausted", message)
+            self.assertNotIn("t1", task_runner.PENDING_RETRIES)
+            self.assertTrue(RecordingTimer.created[0].cancelled)
+            RecordingTimer.created[0].fire()
+            self.assertNotIn("t1", task_runner.RUNNING)
+            self.assertIn("重试计划失败", log_file.read_text(encoding="utf-8"))
+
+    def test_retry_timer_construction_failure_is_reported_without_reserving(self):
+        with isolated_fls_modules():
+            from fls_manager import task_runner
+
+            task = {"id": "t1", "command": "exit 1", "retry": {"attempts": 1, "interval_seconds": 5}}
+            log_file = Path(os.environ["FLS_BASE_DIR"]) / "log" / "retry-timer-construction.log"
+            with mock.patch.object(task_runner.threading, "Timer", FailingConstructTimer):
+                ok, message = task_runner.schedule_task_retry(task["id"], task, 0, "exit 1", log_file)
+            self.assertFalse(ok)
+            self.assertIn("重试计划失败：timer construction failed", message)
+            self.assertNotIn("t1", task_runner.PENDING_RETRIES)
+            self.assertNotIn("t1", task_runner.RUNNING)
+            self.assertIn("重试计划失败", log_file.read_text(encoding="utf-8"))
 
     def test_replaced_retry_callback_preserves_new_timer(self):
         with isolated_fls_modules():

@@ -222,6 +222,65 @@ class TaskExecutionRecoveryTests(unittest.TestCase):
             self.authenticate(client)
             self.assertEqual(client.post(retry["action"], data=retry["fields"]).status_code, 302)
 
+    def test_retry_timer_start_failure_finishes_attempt_and_history_form_reruns(self):
+        with isolated_app() as (app, _):
+            from fls_manager import models, task_runner
+            task = sample_task("a", command="exit 1")
+            task["retry"] = {"attempts": 1, "interval_seconds": 5}
+            models.save_tasks([task])
+            client = app.test_client()
+            self.authenticate(client)
+            created_timers = []
+
+            class BrokenTimer:
+                def __init__(self, *_args, **_kwargs):
+                    self.cancelled = False
+                    created_timers.append(self)
+
+                def start(self):
+                    raise RuntimeError("timer quota exhausted")
+
+                def cancel(self):
+                    self.cancelled = True
+
+            request_id = "d" * 32
+            with patch.object(task_runner.threading, "Timer", BrokenTimer):
+                accepted = self.post(client, request_id=request_id)
+                self.assertEqual(accepted.status_code, 200)
+                first = self.wait_history("failed")[0]
+                self.assertIn("重试计划失败：timer quota exhausted", first["message"])
+                self.assertNotIn("a", task_runner.PENDING_RETRIES)
+                self.assertNotIn("a", task_runner.RUNNING)
+                self.assertTrue(created_timers[0].cancelled)
+
+                replay = self.post(client, request_id=request_id)
+                self.assertEqual(replay.get_json(), accepted.get_json())
+                self.assertEqual(len(models.load_task_history()), 1)
+
+                history_page = client.get("/history")
+                self.assertEqual(history_page.status_code, 200)
+                forms = TaskFormParser(history_page.get_data(as_text=True)).forms
+                recovery = next(form for form in forms if form["action"].startswith("/run/a"))
+                self.assertEqual(len(recovery["fields"]["request_id"]), 32)
+                retry = client.post(
+                    recovery["action"],
+                    data=dict(recovery["fields"], csrf_token="execution-csrf"),
+                    headers={"X-CSRF-Token": "execution-csrf"},
+                )
+                self.assertEqual(retry.status_code, 302)
+                self.assertEqual(retry.location, "/log/a?back=/history")
+                deadline = time.monotonic() + 6
+                rows = models.load_task_history()
+                while time.monotonic() < deadline and (
+                    len(rows) < 2 or rows[0].get("id") == first.get("id") or rows[0].get("status") != "failed"
+                ):
+                    time.sleep(0.02)
+                    rows = models.load_task_history()
+                self.assertEqual(len(rows), 2)
+                self.assertEqual(rows[0]["status"], "failed")
+                self.assertNotIn("a", task_runner.PENDING_RETRIES)
+                self.assertEqual(models.get_task("a")["run_count"], 2)
+
     def test_pending_rename_keeps_recovery_link_and_never_starts_process(self):
         with isolated_app() as (app, _):
             from fls_manager import models

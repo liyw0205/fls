@@ -230,7 +230,11 @@ def history_table_rows(items):
             log_btn = f'<a class="btn btn-orange" href="/logfile/{h(filename)}?back=/history">日志</a>'
 
         rerun_btn = ""
-        if item.get("status") == "unknown":
+        retry_plan_failed = (
+            item.get("status") in ("failed", "start_failed")
+            and "重试计划失败" in str(item.get("message") or "")
+        )
+        if item.get("status") == "unknown" or retry_plan_failed:
             if task_id in task_ids:
                 rerun_btn = (
                     f'<form class="inline-form" method="post" '
