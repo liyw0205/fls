@@ -77,6 +77,8 @@ class LogGroupDeleteRecoveryTests(unittest.TestCase):
             self.assertIn("group_versions", html)
             self.assertIn("fls-log-delete-recovery", html)
             self.assertIn("flsLogsRestorePendingGroups", html)
+            self.assertIn('sessionStorage.setItem("fls-log-delete-recovery", JSON.stringify({groups: groups}))', html)
+            self.assertIn('sessionStorage.removeItem("fls-log-delete-recovery")', html)
 
     def test_file_replaced_after_group_snapshot_is_not_deleted(self):
         with isolated_app() as (app, base_dir):

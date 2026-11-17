@@ -426,6 +426,7 @@ async function flsLogsDeleteGroups(groups, source){
             alert(json.msg);
         }
 
+        sessionStorage.removeItem("fls-log-delete-recovery");
         if(typeof flsClearPageCache === "function"){
             flsClearPageCache();
         }
@@ -433,7 +434,10 @@ async function flsLogsDeleteGroups(groups, source){
         location.reload();
 
     } catch(e) {
+        sessionStorage.setItem("fls-log-delete-recovery", JSON.stringify({groups: groups}));
+        if(typeof flsClearPageCache === "function") flsClearPageCache();
         alert(flsActionFailure("删除请求失败：" + e, "检查服务状态后重试"));
+        location.reload();
     } finally {
         flsRestoreButton(source);
     }
