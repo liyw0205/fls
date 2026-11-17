@@ -5,6 +5,72 @@ from . import _common as backup
 from ...storage import storage_transaction, write_json
 
 
+def submit_backup_cancellation(job_id):
+    def result(message, status, *, accepted=False, **extra):
+        return {"ok": status == 200, "msg": message, "job_id": job_id,
+                "accepted": accepted, **extra}, status
+
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", job_id):
+        return result("备份作业标识无效", 400)
+    with backup.BACKUP_JOB_LOCK, storage_transaction():
+        info = backup.BACKUP_JOBS.get(job_id)
+        live = isinstance(info, dict)
+        if not live:
+            try:
+                info = backup._load_persisted_backup_job(job_id)
+            except Exception:
+                return result("备份作业记录无法读取，请修复存储后查询", 500, accepted=None)
+        if not info:
+            return result("任务不存在", 404)
+        if not info.get("running") and info.get("status") == "已取消":
+            return result("备份已取消，未重复执行", 200, accepted=True, job=dict(info))
+        if info.get("status") == "结果未知" or info.get("running") and (
+            not live or backup.BACKUP_CANCEL_EVENTS.get(job_id) is None
+        ):
+            return result("备份任务状态未知，面板重启后无法取消", 409, accepted=None, job=dict(info))
+        if not info.get("running"):
+            if info.get("cancel_requested"):
+                return result("原取消请求已接受，实际结果：" + str(info.get("status")), 200, accepted=True, job=dict(info))
+            return result("备份任务已结束", 409, job=dict(info))
+        event = backup.BACKUP_CANCEL_EVENTS[job_id]
+        if info.get("cancel_requested") and event.is_set():
+            return result("已请求取消，请查询实际终态", 200, accepted=True, job=dict(info))
+        try:
+            previous = backup._load_persisted_backup_job(job_id)
+        except Exception:
+            return result("备份作业记录无法读取，未提交取消，请修复存储后重试", 500, retry_allowed=True)
+        if info.get("id") != job_id or previous and backup._backup_job_snapshot(previous) != backup._backup_job_snapshot(info):
+            return result("备份作业记录已变化，未提交取消，请检查原作业", 409, accepted=None, job=dict(info))
+
+        proposed = dict(info, status="正在取消", updated_at=backup.now_str(),
+                        cancel_requested=True, cancel_requested_at=backup.now_str())
+        status, message, saved = 200, "已请求取消", True
+        try:
+            backup.persist_backup_job(proposed)
+        except Exception as exc:
+            try:
+                actual = backup._load_persisted_backup_job(job_id)
+            except Exception:
+                # The user requested cancellation; signal the live worker even when
+                # durability cannot be verified, and report that uncertainty.
+                saved = None
+                message = f"已通知运行中的备份取消，但无法确认取消记录是否保存，请查询实际终态：{exc}"
+                proposed["cancel_error"] = message
+            else:
+                if actual == backup._backup_job_snapshot(proposed):
+                    message = f"取消请求已保存并接受，保存确认异常，请查询实际终态：{exc}"
+                elif actual == previous:
+                    return result(f"取消请求未保存，备份仍继续运行：{exc}", 500,
+                                  cancel_saved=False, retry_allowed=True, job=dict(info))
+                else:
+                    return result("取消记录保存结果与原作业不一致，请检查实际状态", 503,
+                                  accepted=None, job=dict(info))
+            status = 503
+        info.update(proposed)
+        event.set()
+        return result(message, status, accepted=True, cancel_saved=saved, job=dict(info))
+
+
 def submit_backup_creation(data):
     def result(message, status, **extra):
         return {"ok": status == 200, "msg": message, "resolved": True, **extra}, status

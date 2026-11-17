@@ -74,6 +74,10 @@ def main():
         def save(info):
             if fault.get("job") and info["status"] == "准备中":
                 raise OSError("fixture job storage failure")
+            if fault.get("cancel") and info["status"] == "正在取消":
+                if fault["cancel"] == "after":
+                    persist(info)
+                raise OSError("fixture cancel storage failure")
             return persist(info)
 
         def write(path, record):
@@ -118,7 +122,7 @@ def main():
         env = dict(os.environ, FLS_UI_BASE=f"http://127.0.0.1:{server.server_port}", FLS_UI_TOKEN=TOKEN,
                    FLS_PLAYWRIGHT_CORE=str(playwright), FLS_CHROMIUM=str(chromium), FLS_RESTORE_ARCHIVE=base64.b64encode(archive.getvalue()).decode())
         try:
-            script = IDENTITY_SCRIPT if os.environ.get("FLS_RESTORE_IDENTITY") else RESTORE_SCRIPT if os.environ.get("FLS_BACKUP_RESTORE") else SCRIPT
+            script = CANCEL_SCRIPT if os.environ.get("FLS_BACKUP_CANCEL") else IDENTITY_SCRIPT if os.environ.get("FLS_RESTORE_IDENTITY") else RESTORE_SCRIPT if os.environ.get("FLS_BACKUP_RESTORE") else SCRIPT
             result = subprocess.run(["node", "-e", script], env=env, timeout=180)
             if result.returncode:
                 raise SystemExit(result.returncode)
@@ -126,6 +130,78 @@ def main():
             release.set()
             server.shutdown()
             scheduler.scheduler.shutdown(wait=False)
+
+
+CANCEL_SCRIPT = r'''
+const assert=require('node:assert/strict');
+const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
+(async()=>{
+ const browser=await chromium.launch({executablePath:process.env.FLS_CHROMIUM,args:['--no-sandbox']});
+ try {
+  const base=process.env.FLS_UI_BASE,headers={'X-Token':process.env.FLS_UI_TOKEN};
+  for(const viewport of [{width:390,height:844},{width:1280,height:800}]){
+   const context=await browser.newContext({viewport});const page=await context.newPage();
+   page.on('dialog',d=>d.accept());const errors=[];page.on('pageerror',e=>errors.push(e.message));
+   const state=async()=>(await page.request.get(base+'/api/fixture/backup',{headers})).json();
+   const fixture=async data=>assert.equal((await page.request.post(base+'/api/fixture/backup',{headers,data})).status(),200);
+   const login=async()=>{await page.locator('input[name="token"]').fill(process.env.FLS_UI_TOKEN);await page.locator('button[type="submit"]').click();await page.waitForURL(u=>u.pathname!='/login');};
+   const query=()=>page.getByRole('button',{name:'查询原备份请求',exact:true});
+   const cancel=()=>page.getByRole('button',{name:'取消备份',exact:true});
+   const create=()=>page.locator('#backupCreateForm button[type="button"]');
+   const clickCancel=async button=>{const response=page.waitForResponse(r=>new URL(r.url()).pathname.startsWith('/api/backup/cancel/'));await button.click();return response;};
+   const settled=async()=>{await page.waitForFunction(()=>!sessionStorage.getItem('fls-backup-request'));};
+   await page.goto(base+'/login');await login();
+   await fixture({block:true});await page.goto(base+'/backup');
+   const created=page.waitForResponse(r=>new URL(r.url()).pathname==='/api/backup/create');await create().click();
+   const id=(await (await created).json()).job_id;await cancel().waitFor();
+   // Direct progress links have no sessionStorage request; their recovery must still work.
+   await page.evaluate(()=>sessionStorage.removeItem('fls-backup-request'));
+   await page.goto(base+'/backup?job_id='+id);await cancel().waitFor();
+   await fixture({block:true,cancel:'before'});
+   assert.equal((await clickCancel(cancel())).status(),500);
+   const retry=()=>page.getByRole('button',{name:'重试取消原备份',exact:true});await retry().waitFor();
+   assert.equal((await state()).jobs.find(j=>j.id===id).cancel_requested,undefined);
+   await fixture({block:true,cancel:'after'});
+   const accepted=await clickCancel(retry());assert.equal(accepted.status(),503);assert.equal((await accepted.json()).accepted,true);
+   await query().waitFor();
+   if(process.env.FLS_BULK_SCREENSHOTS) await page.screenshot({path:process.env.FLS_BULK_SCREENSHOTS+'/backup-cancel-'+viewport.width+'.png',fullPage:true});
+   await query().click();await page.getByText('正在取消',{exact:true}).waitFor();assert.equal(await cancel().count(),0);
+   assert.equal((await page.request.post(base+'/api/backup/cancel/'+id,{headers})).status(),200);
+   await fixture({});await page.waitForFunction(()=>document.querySelector('#backupJobText')?.textContent.includes('已取消'));
+   assert.equal((await page.request.post(base+'/api/backup/cancel/'+id,{headers})).status(),200);
+   // The next real job loses its cancel response; login and refresh query the same job.
+   await fixture({block:true});await create().click();await cancel().waitFor();
+   const original=(await state()).workers.length;
+   await page.route('**/api/backup/cancel/*',async route=>{await route.fetch();await route.abort();},{times:1});
+   await cancel().click();await query().waitFor();
+   await page.goto(base+'/logout');await login();await page.goto(base+'/backup');
+   await page.getByText('正在取消',{exact:true}).waitFor();assert.equal(await cancel().count(),0);
+   await fixture({});await settled();assert.equal((await state()).workers.length,original);
+   assert.match(await page.locator('#backupJobText').innerText(),/已取消/);
+   // GET export leaves jobs unchanged; selection still reaches the POST create form.
+   await page.goto(base+'/backup/export');assert.match(page.url(),/\/backup#backup-create$/);
+   assert.equal((await state()).workers.length,original);
+   assert.equal(await create().isEnabled(),true);
+   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
+   assert.deepEqual(errors,[]);
+   // Plain HTML requests use the same cancellation operation and retry the same job.
+   const plain=await browser.newContext({viewport,javaScriptEnabled:false});const html=await plain.newPage();
+   await html.goto(base+'/login');await html.locator('input[name="token"]').fill(process.env.FLS_UI_TOKEN);
+   await html.locator('button[type="submit"]').click();await html.waitForURL(u=>u.pathname!='/login');
+   await fixture({block:true});await html.goto(base+'/backup/export');
+   await html.getByRole('button',{name:'提交备份',exact:true}).click();
+   await html.getByRole('link',{name:'查看原备份进度',exact:true}).click();
+   await fixture({block:true,cancel:'before'});await html.getByRole('button',{name:'取消备份',exact:true}).click();
+   await html.getByText('取消请求未保存',{exact:false}).waitFor();
+   await fixture({block:true});await html.getByRole('button',{name:'重试取消原备份',exact:true}).click();
+   await fixture({});await html.getByRole('link',{name:'查询原备份进度',exact:true}).click();
+   await html.getByText('状态：已取消',{exact:true}).waitFor();
+   assert.equal(await html.getByRole('button',{name:'取消备份',exact:true}).count(),0);
+   await plain.close();await context.close();console.log('backup cancel API/form recovery passed '+viewport.width);
+  }
+ }finally{await browser.close();}
+})().catch(e=>{console.error(e);process.exit(1)});
+'''
 
 
 SCRIPT = r'''

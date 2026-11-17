@@ -1,5 +1,4 @@
 from ._common import *
-from ._common import _load_persisted_backup_job
 
 
 @bp.route("/api/backup/create", methods=["POST"])
@@ -59,49 +58,9 @@ def api_backup_job(job_id):
 
 @bp.route("/api/backup/cancel/<job_id>", methods=["POST"])
 def api_backup_cancel(job_id):
-    with BACKUP_JOB_LOCK:
-        info = BACKUP_JOBS.get(job_id)
-
-        if not isinstance(info, dict):
-            persisted = _load_persisted_backup_job(job_id)
-            if not persisted:
-                return jsonify({"ok": False, "msg": "任务不存在"}), 404
-            if persisted.get("status") == "结果未知":
-                return jsonify({
-                    "ok": False,
-                    "msg": "备份任务状态未知，面板重启后无法取消",
-                }), 409
-            if not persisted.get("running"):
-                return jsonify({"ok": False, "msg": "备份任务已结束"}), 409
-            return jsonify({
-                "ok": False,
-                "msg": "备份任务状态未知，面板重启后无法取消",
-            }), 409
-
-        cancel_event = BACKUP_CANCEL_EVENTS.get(job_id)
-        if info.get("status") == "结果未知":
-            return jsonify({
-                "ok": False,
-                "msg": "备份任务状态未知，面板重启后无法取消",
-            }), 409
-        if not info.get("running") or cancel_event is None:
-            return jsonify({"ok": False, "msg": "备份任务已结束"}), 409
-
-        previous_status = info.get("status")
-        previous_updated_at = info.get("updated_at")
-        info["status"] = "正在取消"
-        info["updated_at"] = now_str()
-        try:
-            persist_backup_job(info)
-        except Exception as e:
-            info["status"] = previous_status
-            info["updated_at"] = previous_updated_at
-            return jsonify({
-                "ok": False,
-                "msg": f"取消请求未保存，备份仍继续运行：{e}",
-            }), 500
-        cancel_event.set()
-        return jsonify({"ok": True, "msg": "已请求取消"})
+    from .actions import submit_backup_cancellation
+    payload, status = submit_backup_cancellation(job_id)
+    return jsonify(payload), status
 
 @bp.route("/api/backup/list")
 def api_backup_list():

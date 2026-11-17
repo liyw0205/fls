@@ -1,6 +1,17 @@
 from ._common import *
 
 
+@bp.route("/backup/cancel/<job_id>", methods=["POST"])
+def backup_cancel(job_id):
+    from .actions import submit_backup_cancellation
+    payload, status = submit_backup_cancellation(job_id)
+    body = f'<section class="section" role="alert"><p>{h(payload["msg"])}</p></section>'
+    if payload.get("retry_allowed"):
+        body += f'<form method="post" action="/backup/cancel/{h(job_id)}"><button class="btn btn-primary" type="submit">重试取消原备份</button></form>'
+    body += f'<a class="btn btn-primary" href="/backup?job_id={h(job_id)}">查询原备份进度</a> <a class="btn btn-gray" href="/backup">返回备份列表</a>'
+    return layout("备份取消结果", "backup", body), status
+
+
 @bp.route("/backup/create", methods=["POST"])
 def backup_create():
     from .actions import submit_backup_creation
@@ -25,6 +36,19 @@ def backup_page():
     from ...scheduler import get_scheduler_state
     from ...paths import SCHEDULER_STATE_FILE
     scheduler_recovery = ""
+    fallback_progress = ""
+    job_id = request.args.get("job_id", request.args.get("job", ""))
+    if job_id:
+        try:
+            info = get_backup_job(job_id)
+            message = ("状态：" + str(info.get("status", "-"))) if info else "任务不存在，请检查备份列表"
+        except Exception:
+            info = None
+            message = "备份状态无法读取，请修复存储后重新查询"
+        fallback_progress = f'<noscript><section class="section"><p>{h(message)}</p>'
+        if info and info.get("running") and not info.get("cancel_requested"):
+            fallback_progress += f'<form method="post" action="/backup/cancel/{h(job_id)}"><button class="btn btn-red" type="submit">取消备份</button></form>'
+        fallback_progress += f'<a class="btn btn-gray" href="/backup?job_id={h(job_id)}">查询原备份进度</a></section></noscript>'
     if SCHEDULER_STATE_FILE.exists():
         state = get_scheduler_state()
         if state["status"] in ("failed", "unknown"):
@@ -36,6 +60,7 @@ def backup_page():
     body = f"""
 {header}
 {scheduler_recovery}
+{fallback_progress}
 <nav class="fls-section-nav" aria-label="备份恢复区块导航">
     <span class="fls-section-nav-label">备份恢复</span>
     <a href="#backup-create">创建备份</a>
@@ -198,6 +223,14 @@ function flsBackupRecovery(message, confirmRequired){{
     flsShowBackupJob("<p role='alert'>" + flsEscapeHtml(message) + "</p><button class='btn btn-primary' type='button' onclick='flsResumeBackup(" + !!confirmRequired + ", this)'>" + (confirmRequired ? "确认后继续原备份" : "查询原备份请求") + "</button> <a class='btn btn-gray' href='/login?next=%2Fbackup'>重新登录</a>");
 }}
 
+function flsBackupJobRecovery(jobId, message, retryAllowed){{
+    const argument = flsEscapeHtml(JSON.stringify(jobId));
+    let html = "<p role='alert'>" + flsEscapeHtml(message) + "</p><button class='btn btn-primary' type='button' onclick='flsPollBackupJob(" + argument + ", this)'>查询原备份请求</button>";
+    if(retryAllowed) html += " <button class='btn btn-red' type='button' onclick='flsCancelBackup(" + argument + ", this)'>重试取消原备份</button>";
+    html += " <a class='btn btn-gray' href='/login?next=" + encodeURIComponent("/backup?job_id=" + jobId) + "'>重新登录</a>";
+    flsShowBackupJob(html);
+}}
+
 function flsResumeBackup(confirmRetry, source){{
     const pending = flsBackupRequest();
     if(!pending) return;
@@ -302,7 +335,9 @@ async function flsPollBackupJob(jobId, source){{
             html += "<span style='color:#dc2626;font-weight:800;'>" + flsEscapeHtml(flsActionFailure("错误：" + json.error, "查看备份日志并检查备份内容后重试")) + "</span><br>";
         }}
 
-        if(json.running){{
+        if(json.cancel_error) html += "<p role='alert'>" + flsEscapeHtml(json.cancel_error) + "</p>";
+
+        if(json.running && !json.cancel_requested){{
             html += "<br><button class='btn btn-red' type='button' onclick='flsCancelBackup(" + JSON.stringify(jobId) + ", this)'>取消备份</button>";
         }}
 
@@ -335,7 +370,7 @@ async function flsPollBackupJob(jobId, source){{
         if(e.status === 404){{
             flsShowBackupJob("<p role='alert'>原备份作业记录不存在，请先核对备份列表。</p><button class='btn btn-blue' type='button' onclick='flsRefreshBackupList(this)'>刷新备份列表</button> <button class='btn btn-orange' type='button' onclick='flsResetBackupRequest(this)'>核对后重新选择备份</button>");
         }}else{{
-            flsBackupRecovery("状态读取失败：" + String(e));
+            flsBackupJobRecovery(jobId, "状态读取失败：" + String(e));
         }}
         flsRestoreButton(source);
     }}
@@ -344,6 +379,7 @@ async function flsPollBackupJob(jobId, source){{
 async function flsCancelBackup(jobId, source){{
     if(!confirm("确认取消正在执行的备份吗？")) return;
     if(!flsMarkButtonBusy(source, "取消中...")) return;
+    clearTimeout(window.flsBackupPollTimer);
 
     try {{
         const res = await fetch("/api/backup/cancel/" + encodeURIComponent(jobId), {{
@@ -353,14 +389,15 @@ async function flsCancelBackup(jobId, source){{
         }});
         const json = await flsReadJsonResponse(res);
         if(!res.ok || !json.ok){{
-            flsShowBackupJob("<span style='color:#dc2626;font-weight:800;'>" + flsEscapeHtml(flsActionFailure(json.msg || "取消失败", "刷新状态后重试")) + "</span>");
+            flsBackupJobRecovery(jobId, json.msg || "取消失败，请查询原备份状态", json.retry_allowed);
             flsRestoreButton(source);
             return;
         }}
         flsShowBackupJob(flsEscapeHtml(json.msg || "已请求取消"));
         await flsPollBackupJob(jobId, source);
     }} catch(e) {{
-        flsBackupRecovery("取消结果未确认，请查询原备份状态：" + String(e));
+        const payload = e && e.payload;
+        flsBackupJobRecovery(jobId, payload && payload.msg || "取消结果未确认，请查询原备份状态：" + String(e), payload && payload.retry_allowed);
         flsRestoreButton(source);
     }}
 }}

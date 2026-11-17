@@ -200,6 +200,12 @@ class FrontendMethodContractTests(unittest.TestCase):
             headers = {"X-Token": TOKEN}
             self.assertNotEqual(client.get("/proxy/toggle/missing", headers=headers).status_code, 405)
             self.assertNotEqual(client.get("/notify/toggle/missing", headers=headers).status_code, 405)
+            from fls_manager.routes.backup import _common as backup
+            with patch.object(backup, "start_backup_job") as start:
+                response = client.get("/backup/export", headers=headers)
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(response.location, "/backup#backup-create")
+                start.assert_not_called()
 
 
 if __name__ == "__main__":

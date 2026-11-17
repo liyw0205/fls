@@ -253,12 +253,7 @@ def backup_download(filename):
 
 @bp.route("/backup/export")
 def backup_export():
-    """
-    兼容旧入口：
-    默认创建 data + scripts 备份并跳转回备份页。
-    """
-    job_id = start_backup_job(["data", "scripts"])
-    return redirect(url_for("backup.backup_page", job=job_id))
+    return redirect(url_for("backup.backup_page", _anchor="backup-create"))
 
 @bp.route("/api/backup/import", methods=["POST"])
 @bp.route("/backup/import", methods=["POST"])

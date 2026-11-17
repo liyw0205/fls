@@ -122,6 +122,9 @@ def _backup_job_snapshot(info):
         "error",
         "created_at",
         "updated_at",
+        "cancel_requested",
+        "cancel_requested_at",
+        "cancel_error",
     )
     return {field: info.get(field) for field in fields}
 
@@ -149,6 +152,11 @@ def persist_backup_job(info):
 def validate_backup_jobs(data):
     if not isinstance(data, dict) or any(not isinstance(value, dict) or value.get("id") != key for key, value in data.items()):
         raise RuntimeError("备份作业记录损坏，未覆盖原文件")
+    if any(value.get("cancel_requested") is not None and type(value["cancel_requested"]) is not bool
+           or value.get("cancel_requested_at") is not None and not isinstance(value["cancel_requested_at"], str)
+           or value.get("cancel_error") is not None and not isinstance(value["cancel_error"], str)
+           for value in data.values()):
+        raise RuntimeError("备份取消记录损坏，未覆盖原文件")
     return data
 
 
@@ -405,6 +413,8 @@ def _update_backup_job(job_id, **updates):
         info = BACKUP_JOBS.get(job_id)
         if not isinstance(info, dict):
             return None
+        if updates.get("running") and info.get("cancel_requested"):
+            updates["status"] = "正在取消"
         info.update(updates)
         persist_backup_job(info)
         return info
@@ -416,6 +426,7 @@ def _finish_backup_job(job_id, status, error="", **updates):
         "status": status,
         "error": error,
         "updated_at": now_str(),
+        "cancel_error": "",
     })
     try:
         return _update_backup_job(job_id, **updates)

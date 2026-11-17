@@ -715,11 +715,13 @@ class BackupIsolationTests(unittest.TestCase):
             from fls_manager.routes.backup._common import (
                 BACKUP_CANCEL_EVENTS,
                 BACKUP_JOBS,
+                persist_backup_job,
             )
 
             cancel_event = threading.Event()
-            BACKUP_JOBS["cancel-fixture"] = {"running": True}
+            BACKUP_JOBS["cancel-fixture"] = {"id": "cancel-fixture", "running": True}
             BACKUP_CANCEL_EVENTS["cancel-fixture"] = cancel_event
+            persist_backup_job(BACKUP_JOBS["cancel-fixture"])
 
             response = app.test_client().post(
                 "/api/backup/cancel/cancel-fixture",
@@ -785,7 +787,6 @@ class BackupIsolationTests(unittest.TestCase):
     def test_backup_cancel_persistence_failure_does_not_signal_worker(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.routes.backup import _common as backup_common
-            from fls_manager.routes.backup import api as backup_api
 
             job_id = "cancel-persist-failure"
             info = {
@@ -807,7 +808,7 @@ class BackupIsolationTests(unittest.TestCase):
             backup_common.persist_backup_job(info)
 
             with patch.object(
-                backup_api,
+                backup_common,
                 "persist_backup_job",
                 side_effect=OSError("backup state disk full"),
             ):
