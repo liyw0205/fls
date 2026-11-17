@@ -105,40 +105,40 @@ function flsActionFailure(message, nextStep){
     return text + "。下一步：" + next;
 }
 
+function flsResponseErrorDiagnostic(response, body){
+    let payload = null;
+    try { payload = JSON.parse(body); } catch(e) {}
+    const message = payload && (payload.msg || payload.error || payload.message);
+    if(message) return {payload:payload, message:String(message)};
+
+    let detail = String(body || "");
+    const contentType = response.headers && response.headers.get
+        ? String(response.headers.get("content-type") || "").toLowerCase() : "";
+    if(contentType.includes("text/html") || /^\s*<!doctype\s+html|^\s*<html\b/i.test(detail)){
+        if(typeof DOMParser !== "undefined"){
+            const doc = new DOMParser().parseFromString(detail, "text/html");
+            detail = doc.body ? (doc.body.innerText || doc.body.textContent || "") : "";
+        }else{
+            detail = detail.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ")
+                .replace(/<[^>]*>/g, " ");
+        }
+    }
+    detail = detail.replace(/\s+/g, " ").trim().slice(0, 500);
+    return {payload:payload, message:detail};
+}
+
 async function flsReadJsonResponse(response){
     if(!response || typeof response.ok !== "boolean"){
         throw new Error("响应对象不可用");
     }
 
     const status = response.status;
-    const readErrorPayload = async body => {
-        let payload = null;
-        try { payload = JSON.parse(body); } catch(e) {}
-        const message = payload && (payload.msg || payload.error || payload.message);
-        if(message) return {payload:payload, message:String(message)};
-
-        let detail = String(body || "");
-        const contentType = response.headers && response.headers.get
-            ? String(response.headers.get("content-type") || "").toLowerCase() : "";
-        if(contentType.includes("text/html") || /^\s*<!doctype\s+html|^\s*<html\b/i.test(detail)){
-            if(typeof DOMParser !== "undefined"){
-                const doc = new DOMParser().parseFromString(detail, "text/html");
-                detail = doc.body ? (doc.body.innerText || doc.body.textContent || "") : "";
-            }else{
-                detail = detail.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ")
-                    .replace(/<[^>]*>/g, " ");
-            }
-        }
-        detail = detail.replace(/\s+/g, " ").trim().slice(0, 500);
-        return {payload:payload, message:detail};
-    };
-
     // Check status before parsing and consume each native response body once.
     if(typeof response.text === "function"){
         if(!response.ok){
             let body = "";
             try { body = await response.text(); } catch(e) {}
-            const diagnostic = await readErrorPayload(body);
+            const diagnostic = flsResponseErrorDiagnostic(response, body);
             const error = new Error("HTTP " + status + (diagnostic.message ? ": " + diagnostic.message : ""));
             error.status = status;
             error.payload = diagnostic.payload;
@@ -183,7 +183,13 @@ async function flsReadTextResponse(response){
         throw new Error("响应对象不可用");
     }
     if(!response.ok){
-        throw new Error("HTTP " + response.status);
+        let body = "";
+        try { body = await response.text(); } catch(e) {}
+        const diagnostic = flsResponseErrorDiagnostic(response, body);
+        const error = new Error("HTTP " + response.status + (diagnostic.message ? ": " + diagnostic.message : ""));
+        error.status = response.status;
+        error.payload = diagnostic.payload;
+        throw error;
     }
     return response.text();
 }

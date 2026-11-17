@@ -15,7 +15,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="fls-bulk-browser-") as temp_dir:
         seed_browser_fixture(temp_dir)
         os.environ.update(FLS_BASE_DIR=temp_dir, FLS_TOKEN=TOKEN, FLS_SECRET_KEY="bulk-browser-secret")
-        from flask import jsonify, request
+        from flask import Response, jsonify, request
         from werkzeug.serving import make_server
         from fls_manager.app import create_app
         from fls_manager import models, scheduler
@@ -30,7 +30,7 @@ def main():
 
         save_config({"notify_items": [], "notify_default_ids": []})
         app = create_app()
-        fault = {"reload": False, "save": False, "save_after": False, "collection_save": False,
+        fault = {"reload": False, "log_error": False, "save": False, "save_after": False, "collection_save": False,
                  "collection_after": False, "collection_receipt": False, "env_save": False,
                  "env_after": False, "env_receipt": False, "unknown": False, "start_fail": False}
         reload_scheduler = api.reload_scheduler
@@ -116,7 +116,7 @@ def main():
             if request.method == "GET":
                 return jsonify(tasks=models.load_tasks(), history=models.load_task_history(), collections=models.load_collections(), env=models.load_global_env())
             data = request.get_json()
-            fault.update(reload=bool(data.get("reload")), save=bool(data.get("save")), save_after=bool(data.get("save_after")),
+            fault.update(reload=bool(data.get("reload")), log_error=bool(data.get("log_error")), save=bool(data.get("save")), save_after=bool(data.get("save_after")),
                          collection_save=bool(data.get("collection_save")), collection_after=bool(data.get("collection_after")),
                          collection_receipt=bool(data.get("collection_receipt")),
                          env_save=bool(data.get("env_save")), env_after=bool(data.get("env_after")), env_receipt=bool(data.get("env_receipt")),
@@ -140,6 +140,11 @@ def main():
                     return True
                 models.mutate_tasks(fix)
             return jsonify(ok=True)
+
+        @app.before_request
+        def fail_task_log_for_browser_recovery():
+            if fault["log_error"] and request.path == "/api/log/a":
+                return Response("fixture task log diagnostic", status=502, mimetype="text/plain")
 
         server = make_server("127.0.0.1", 0, app, threaded=True)
         threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -962,6 +967,14 @@ const {chromium} = require(process.env.FLS_PLAYWRIGHT_CORE);
      await settled();
      assert.equal((await state()).history[0].status,'running');
      await notice().getByRole('link',{name:'查看任务日志',exact:true}).scrollIntoViewIfNeeded();
+     if(path==='/tasks'){
+      await fixture({log_error:true});
+      await notice().getByRole('link',{name:'查看任务日志',exact:true}).click();
+      await page.waitForURL(url=>url.pathname==='/log/a');
+      await page.getByText(/日志读取失败：.*HTTP 502: fixture task log diagnostic/).waitFor();
+      await fixture({});
+      await page.goto(base+'/tasks');
+     }
      if(process.env.FLS_BULK_SCREENSHOTS) await page.screenshot({path:process.env.FLS_BULK_SCREENSHOTS+'/execution-'+path.slice(1)+'-'+viewport.width+'.png'});
      assert.equal((await page.request.post(base+'/api/task/action/stop/a',{headers,data:{request_id:requestId()}})).status(),200);
      await history('stopped');

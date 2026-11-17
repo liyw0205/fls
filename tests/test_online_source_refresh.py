@@ -343,9 +343,11 @@ await new Promise(resolve => setImmediate(resolve));
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise the response reader")
-    def test_json_reader_preserves_bounded_non_json_http_diagnostic(self):
+    def test_response_readers_preserve_bounded_non_json_http_diagnostic(self):
         source = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+        diagnostic = source[source.index("function flsResponseErrorDiagnostic("):source.index("async function flsReadJsonResponse(")]
         reader = source[source.index("async function flsReadJsonResponse("):source.index("async function flsReadTextResponse(")]
+        text_reader = source[source.index("async function flsReadTextResponse("):source.index('document.addEventListener("submit"')]
         result = subprocess.run(
             ["node", "-e", r"""
 const vm = require('node:vm');
@@ -353,7 +355,7 @@ const assert = require('node:assert/strict');
 const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
 const context = {};
 vm.createContext(context);
-vm.runInContext(input.reader, context);
+vm.runInContext(input.diagnostic+input.reader+input.textReader, context);
 (async () => {
   for(const status of [401, 403, 409, 500, 502, 503]){
     let reads = 0;
@@ -382,10 +384,17 @@ vm.runInContext(input.reader, context);
   const success = await context.flsReadJsonResponse({ok:true,status:200,headers:{get:()=> 'application/json'},
     text:async()=> '{"ok":true}'});
   assert.equal(JSON.stringify(success), '{"ok":true}');
+  let textError;
+  try {
+    await context.flsReadTextResponse({ok:false,status:503,headers:{get:()=> 'text/plain'},
+      text:async()=> 'task log temporarily unavailable'});
+  } catch(e) { textError = e; }
+  assert.equal(textError.status, 503);
+  assert.match(textError.message, /task log temporarily unavailable/);
   console.log('JSON response diagnostics passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """],
-            input=json.dumps({"reader": reader}),
+            input=json.dumps({"diagnostic": diagnostic, "reader": reader, "textReader": text_reader}),
             capture_output=True,
             text=True,
             timeout=5,
