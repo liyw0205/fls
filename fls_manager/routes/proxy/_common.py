@@ -40,7 +40,7 @@ def diagnostic_filters(args):
     return limit, status, proxy_id
 
 
-def proxy_form(proxy=None, mode="new", notice="", merge=False):
+def proxy_form(proxy=None, mode="new", notice="", merge=False, recovery_html=""):
     if proxy is None:
         proxy = {
             "id": "",
@@ -70,12 +70,16 @@ def proxy_form(proxy=None, mode="new", notice="", merge=False):
         )
     )
     header = page_header_card(title, help_html)
+    header += recovery_html
     if notice:
         header += f'<section class="section" role="alert"><p>{h(notice)}</p><a class="btn btn-gray" href="/proxy">查看当前代理</a></section>'
     version_field = ''
     if mode == "edit":
         version = proxy.get("_version", proxy_version({k: v for k, v in proxy.items() if k != "_version"}))
         version_field = f'<input type="hidden" name="version" value="{h(version)}">'
+    request_fields = f'<input type="hidden" name="request_id" value="{h(proxy.get("_request_id") or uuid.uuid4().hex)}">'
+    if proxy.get("_confirm_retry"):
+        request_fields += '<input type="hidden" name="confirm_retry" value="1">'
     merge_confirmation = 'onclick="return confirm(\'确认已核对当前代理，保存合并后的设置？\')"' if merge else ''
 
     body = f"""
@@ -85,6 +89,7 @@ def proxy_form(proxy=None, mode="new", notice="", merge=False):
     <h2 class="section-title">代理连接设置</h2>
     <input type="hidden" name="id" value="{h(proxy.get('id', ''))}">
     {version_field}
+    {request_fields}
 
     <div class="form-grid">
         <div class="form-item">
@@ -96,6 +101,8 @@ def proxy_form(proxy=None, mode="new", notice="", merge=False):
             <label>代理类型</label>
             <select name="type" id="proxyType" onchange="toggleGithubProxyBox()" aria-label="代理类型">
                 <option value="socks5" {selected("socks5")}>SOCKS5</option>
+                <option value="socks5h" {selected("socks5h")}>SOCKS5（远程 DNS）</option>
+                <option value="socks4" {selected("socks4")}>SOCKS4</option>
                 <option value="http" {selected("http")}>HTTP</option>
                 <option value="https" {selected("https")}>HTTPS</option>
                 <option value="github" {selected("github")}>GitHub 代理</option>

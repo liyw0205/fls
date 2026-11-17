@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import threading
 import uuid
+from urllib.parse import quote
 from .models import load_proxies
 from .paths import PROXY_DIAGNOSTICS_FILE
 from .storage import write_json
@@ -343,10 +344,10 @@ def build_proxy_url(proxy):
     auth = ""
 
     if username:
-        auth = username
+        auth = quote(username, safe="")
 
         if password:
-            auth += f":{password}"
+            auth += ":" + quote(password, safe="")
 
         auth += "@"
 

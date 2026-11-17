@@ -150,7 +150,8 @@ class ProxyActionRecoveryTests(unittest.TestCase):
             def create():
                 client = app.test_client()
                 self.authenticate(client)
-                return client.post("/proxy/new", data={"name": "Concurrent", "enabled": "1", "csrf_token": "proxy-csrf"})
+                form = self.form(client.get("/proxy/new"), "/proxy/new")
+                return client.post("/proxy/new", data=dict(form["fields"], name="Concurrent", type="http", host="127.0.0.1", port="8080", enabled="1"))
             with patch.object(models, "save_proxies", side_effect=delayed) as write, ThreadPoolExecutor(3) as pool:
                 first = pool.submit(self.post, app.test_client(), data)
                 self.assertTrue(entered.wait(5))
@@ -214,6 +215,7 @@ class ProxyActionRecoveryTests(unittest.TestCase):
             models.save_tasks([sample_task("t", proxy_id="p")])
             self.assertEqual(self.post(client, data).status_code, 409)
             form["fields"].pop("enabled", None)
+            form["fields"]["type"] = "http"
             response = client.post(form["action"], data=form["fields"])
             self.assertEqual(response.status_code, 409)
             self.assertIn("任务引用", response.get_data(as_text=True))
@@ -257,7 +259,7 @@ class ProxyActionRecoveryTests(unittest.TestCase):
                 response = client.post("/api/task/action/run/run", json={"request_id": "c" * 32}, headers={"X-Token": TOKEN})
                 self.assertEqual(response.status_code, 200)
                 deadline = time.monotonic() + 5
-                while time.monotonic() < deadline and (not marker.exists() or task_runner.is_running("run")):
+                while time.monotonic() < deadline and (not marker.exists() or not models.load_task_history() or models.load_task_history()[0]["status"] != "success"):
                     time.sleep(0.02)
                 self.assertEqual(marker.read_text(), "http://127.0.0.1:8080")
                 self.assertEqual(models.load_task_history()[0]["status"], "success")

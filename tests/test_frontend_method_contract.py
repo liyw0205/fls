@@ -99,11 +99,15 @@ class FrontendMethodContractTests(unittest.TestCase):
             headers = {"X-Token": TOKEN}
 
             # Seed the pages whose action controls only appear with an item.
-            client.post(
+            proxy_form_html = client.get("/proxy/new", headers=headers).get_data(as_text=True)
+            from tests.test_collection_save_recovery import CollectionFormParser
+            proxy_request = next(form for form in CollectionFormParser(proxy_form_html).forms if form["action"] == "/proxy/new")["fields"]["request_id"]
+            created_proxy = client.post(
                 "/proxy/new",
-                data={"name": "fixture-proxy", "type": "http", "host": "127.0.0.1", "port": "9"},
+                data={"name": "fixture-proxy", "type": "http", "host": "127.0.0.1", "port": "9", "enabled": "1", "request_id": proxy_request},
                 headers=headers,
             )
+            self.assertEqual(created_proxy.status_code, 302)
             client.post(
                 "/notify/new",
                 data={"name": "fixture-notify", "channel": "bark"},
@@ -144,11 +148,15 @@ class FrontendMethodContractTests(unittest.TestCase):
         with isolated_app() as app:
             client = app.test_client()
             headers = {"X-Token": TOKEN}
-            client.post(
+            from tests.test_collection_save_recovery import CollectionFormParser
+            proxy_html = client.get("/proxy/new", headers=headers).get_data(as_text=True)
+            request_id = next(form for form in CollectionFormParser(proxy_html).forms if form["action"] == "/proxy/new")["fields"]["request_id"]
+            created = client.post(
                 "/proxy/new",
-                data={"name": "fixture-proxy", "type": "http", "host": "127.0.0.1", "port": "9"},
+                data={"name": "fixture-proxy", "type": "http", "host": "127.0.0.1", "port": "9", "request_id": request_id, "enabled": "1"},
                 headers=headers,
             )
+            self.assertEqual(created.status_code, 302)
             client.post(
                 "/notify/new",
                 data={"name": "fixture-notify", "channel": "bark"},

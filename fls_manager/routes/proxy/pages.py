@@ -1,9 +1,6 @@
 from ._common import *
 from urllib.parse import urlencode
 from ...ui.components import empty_state, empty_table_row, page_header_card, table_card
-from ...models import TASKS_MUTATION_LOCK, load_tasks
-from ...storage import storage_transaction
-from ...proxy_actions import proxy_references
 
 
 def _diagnostic_status_badge(status):
@@ -247,7 +244,7 @@ def proxy_page():
         "代理管理",
         """
                 代理可用于任务运行、脚本导入和 GitHub 加速。<br>
-                禁用代理后，任务编辑页不再显示，已选择该代理的任务运行时会自动跳过。
+                停用或删除前需先更换引用任务的代理；所选代理不可用时任务不会启动。
             """,
         '<a class="btn btn-primary" href="/proxy/new">新增代理</a><a class="btn btn-gray" href="/proxy/diagnostics">诊断记录</a>',
     )
@@ -365,26 +362,17 @@ async function flsProxyQuality(proxyId, source){{
 @bp.route("/proxy/new", methods=["GET", "POST"])
 def proxy_new():
     if request.method == "POST":
-        with TASKS_MUTATION_LOCK, storage_transaction():
-            proxies = load_proxies()
-            p = proxy_from_form(request.form)
-            p["id"] = uuid.uuid4().hex
-            p["created_at"] = now_str()
-            p["updated_at"] = now_str()
-            proxies.append(p)
-            save_proxies(proxies)
-        return redirect(url_for("proxy.proxy_page"))
+        from .actions import proxy_submit
+        return proxy_submit("new", "")
 
     return proxy_form(mode="new")
 
 
 @bp.route("/proxy/edit/<proxy_id>", methods=["GET", "POST"])
 def proxy_edit(proxy_id):
-    with TASKS_MUTATION_LOCK, storage_transaction():
-        return _proxy_edit_locked(proxy_id)
-
-
-def _proxy_edit_locked(proxy_id):
+    if request.method == "POST":
+        from .actions import proxy_submit
+        return proxy_submit("edit", proxy_id)
     proxies = load_proxies()
     proxy = None
 
@@ -395,19 +383,5 @@ def _proxy_edit_locked(proxy_id):
 
     if not proxy:
         abort(404)
-
-    if request.method == "POST":
-        new_p = proxy_from_form(request.form)
-        new_p["id"] = proxy_id
-        draft = dict(proxy, **new_p, _version=request.form.get("version", ""))
-        if request.form.get("version") != proxy_version(proxy):
-            draft["_version"] = proxy_version(proxy)
-            return proxy_form(draft, mode="edit", notice="代理设置已变化，草稿未保存，请查看当前代理后核对合并。", merge=True), 409
-        if not new_p["enabled"] and proxy_references(load_tasks(), proxy_id):
-            return proxy_form(draft, mode="edit", notice="代理仍被任务引用，请先在任务设置中更换或明确取消代理。"), 409
-        proxy.update(new_p)
-        proxy["updated_at"] = now_str()
-        save_proxies(proxies)
-        return redirect(url_for("proxy.proxy_page"))
 
     return proxy_form(proxy, mode="edit")

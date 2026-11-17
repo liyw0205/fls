@@ -202,6 +202,87 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    await submit(await form('toggle'));await notice(/保存失败/);
    if(process.env.FLS_BULK_SCREENSHOTS) await page.screenshot({path:process.env.FLS_BULK_SCREENSHOTS+'/proxy-recovery-'+viewport.width+'.png',fullPage:true});
    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
+   if(process.env.FLS_PROXY_SAVE){
+    await fixture({reset:true});await page.goto(base+'/proxy/new');
+    const fill=async(name,port='8080')=>{
+     await page.locator('#proxyForm [name="name"]').fill(name);
+     await page.locator('#proxyForm [name="type"]').selectOption('http');
+     await page.locator('#proxyForm [name="host"]').fill('127.0.0.1');
+     await page.locator('#proxyForm [name="port"]').fill(port);
+     await page.locator('#proxyForm [name="password"]').fill('browser-private');
+    };
+    const saveForm=()=>page.locator('#proxyForm');
+    const saveAction=async status=>assert.equal((await submit(saveForm())).status(),status);
+    const proxyNamed=async name=>(await state()).proxies.filter(p=>p.name===name);
+    await fill('Invalid draft','bad');await saveAction(400);
+    await notice(/端口/);assert.equal(await page.locator('[name="password"]').inputValue(),'browser-private');
+    assert.equal((await state()).proxies.length,1);
+    await page.locator('[name="port"]').fill('8080');
+    await fixture({save:true});await saveAction(500);await notice(/保存失败/);
+    assert.equal(await page.locator('[name="name"]').inputValue(),'Invalid draft');
+    await fixture({after:true});await saveAction(503);await notice(/已保存/);
+    assert.equal((await proxyNamed('Invalid draft')).length,1);
+    await page.getByRole('link',{name:'查看已保存代理',exact:true}).click();
+    await page.waitForURL(u=>u.pathname.startsWith('/proxy/edit/'));
+    const target=new URL(page.url()).pathname.split('/').pop();
+    await fixture({});
+    // A concurrent edit changes the version, while the draft stays editable.
+    await page.locator('[name="name"]').fill('Merged browser');
+    const current=(await state()).proxies.find(p=>p.id===target);
+    const version=await page.locator('[name="version"]').inputValue();
+    const update=await page.request.post(base+'/api/proxy/action',{headers,data:{...current,action:'edit',proxy_id:target,version,request_id:require('node:crypto').randomBytes(16).toString('hex'),name:'Concurrent browser'}});
+    assert.equal(update.status(),200);
+    await saveAction(409);await notice(/已变化/);
+    assert.equal(await page.locator('[name="name"]').inputValue(),'Merged browser');
+    await saveAction(302);await page.waitForURL(u=>u.pathname==='/proxy');
+    assert.equal((await proxyNamed('Merged browser')).length,1);
+
+    // Publish a creation, drop its response and ensure a new form cannot duplicate it.
+    await page.goto(base+'/proxy/new');await fill('Lost creation');
+    await page.route('**/proxy/new',async route=>{await route.fetch();await route.abort();},{times:1});
+    await saveForm().locator('button[type="submit"]').click();
+    await page.locator('[data-collection-save-pending]').waitFor();
+    await page.reload();await fill('Must not duplicate');
+    await saveForm().locator('button[type="submit"]').click();
+    assert.equal((await proxyNamed('Must not duplicate')).length,0);
+    await page.getByRole('button',{name:'查询本次保存结果',exact:true}).click();
+    await page.waitForFunction(()=>!document.querySelector('[data-collection-save-pending]'));
+    assert.equal((await proxyNamed('Lost creation')).length,1);
+
+    // Interrupted creation requires explicit confirmation without changing its identity.
+    await page.goto(base+'/proxy/new');await fill('Interrupted creation');
+    await fixture({save:true,receipt:true});await saveAction(500);await notice(/确认后重试/);
+    const requestId=await page.locator('[name="request_id"]').inputValue();
+    await fixture({});await saveAction(302);await page.waitForURL(u=>u.pathname==='/proxy');
+    assert.equal((await proxyNamed('Interrupted creation')).length,1);
+    assert.equal(requestId.length,32);
+
+    // A missing edit target can explicitly become a new proxy.
+    const lost=(await proxyNamed('Lost creation'))[0];
+    await page.goto(base+'/proxy/edit/'+lost.id);await page.locator('[name="name"]').fill('Saved as new');
+    const deleteVersion=await page.locator('[name="version"]').inputValue();
+    assert.equal((await page.request.post(base+'/api/proxy/action',{headers,data:{action:'delete',proxy_id:lost.id,version:deleteVersion,request_id:require('node:crypto').randomBytes(16).toString('hex')}})).status(),200);
+    await saveAction(404);await notice(/不存在/);
+    assert.equal(await saveForm().getAttribute('action'),'/proxy/new');
+    await saveAction(302);await page.waitForURL(u=>u.pathname==='/proxy');
+    assert.equal((await proxyNamed('Saved as new')).length,1);
+
+    await page.goto(base+'/proxy/new');await fill('After login');
+    await page.route('**/proxy/new',r=>r.fulfill({status:502,contentType:'text/plain',body:'fixture gateway'}),{times:1});
+    await saveForm().locator('button[type="submit"]').click();
+    await page.locator('[data-collection-save-pending]').waitFor();
+    await page.goto(base+'/logout');await login();
+    await page.getByRole('button',{name:'查询本次保存结果',exact:true}).click();
+    await page.waitForFunction(()=>!document.querySelector('[data-collection-save-pending]'));
+    assert.equal((await proxyNamed('After login')).length,1);
+    await page.goto(base+'/proxy/new');await fill('Screenshot draft','bad');await saveAction(400);await notice(/端口/);
+    await page.evaluate(()=>{document.documentElement.style.scrollBehavior='auto';document.activeElement?.blur();window.scrollTo(0,0);});
+    await page.waitForTimeout(250);
+    if(process.env.FLS_BULK_SCREENSHOTS) await page.screenshot({path:process.env.FLS_BULK_SCREENSHOTS+'/proxy-save-'+viewport.width+'.png',fullPage:true});
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
+    assert.deepEqual(errors,[]);
+    console.log('proxy save passed '+viewport.width);
+   }
    await context.close();
   }
  } finally {await browser.close();}
