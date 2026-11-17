@@ -1007,7 +1007,7 @@ class BackupIsolationTests(unittest.TestCase):
             persisted = read_json(base_dir / "data" / "backup_jobs.json")[job_id]
             self.assertEqual(persisted["status"], "正在压缩")
 
-    def test_backup_success_snapshot_failure_removes_archive_and_records_failure(self):
+    def test_backup_success_snapshot_failure_preserves_archive_as_unknown(self):
         with isolated_app() as (_app, base_dir):
             from fls_manager.routes.backup import _common as backup_common
 
@@ -1052,12 +1052,13 @@ class BackupIsolationTests(unittest.TestCase):
 
             result = backup_common.BACKUP_JOBS[job_id]
             self.assertFalse(result["running"])
-            self.assertEqual(result["status"], "失败")
+            self.assertEqual(result["status"], "结果未知")
             self.assertIn("success snapshot disk full", result["error"])
-            self.assertFalse(list((base_dir / "data" / "backups").glob("*.tar.gz")))
+            archives = list((base_dir / "data" / "backups").glob("*.tar.gz"))
+            self.assertEqual(len(archives), 1)
             self.assertEqual(
                 read_json(base_dir / "data" / "backup_jobs.json")[job_id]["status"],
-                "失败",
+                "结果未知",
             )
 
     def test_backup_worker_reports_partial_archive_cleanup_failure(self):
@@ -1065,7 +1066,7 @@ class BackupIsolationTests(unittest.TestCase):
             from fls_manager.routes.backup import _common as backup_common
 
             job_id = "partial-cleanup-failure"
-            target = base_dir / "data" / "backups" / "partial.tar.gz"
+            target = base_dir / "data" / "backups" / ".partial.part"
             cancel_event = threading.Event()
             backup_common.BACKUP_JOBS[job_id] = {
                 "id": job_id,
@@ -1096,6 +1097,11 @@ class BackupIsolationTests(unittest.TestCase):
             def write_dependencies(path, _event):
                 Path(path).write_text("fixture==1\n", encoding="utf-8")
 
+            def open_partial(path, *_args, **_kwargs):
+                nonlocal target
+                target = Path(path)
+                return PartialArchive()
+
             real_unlink = Path.unlink
 
             def fail_archive_unlink(path, *args, **kwargs):
@@ -1104,13 +1110,9 @@ class BackupIsolationTests(unittest.TestCase):
                 return real_unlink(path, *args, **kwargs)
 
             with patch.object(
-                backup_common,
-                "backup_safe_file",
-                return_value=target,
-            ), patch.object(
                 backup_common.tarfile,
                 "open",
-                return_value=PartialArchive(),
+                side_effect=open_partial,
             ), patch.object(
                 backup_common,
                 "write_dependencies_file",

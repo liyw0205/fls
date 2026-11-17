@@ -73,6 +73,10 @@ class BackupLimitExceeded(ValueError):
     pass
 
 
+class BackupArchivePublishUnknown(RuntimeError):
+    pass
+
+
 def begin_backup_activity():
     global ACTIVE_BACKUP_WORKERS
     with BACKUP_ACTIVITY_CONDITION:
@@ -518,6 +522,37 @@ def _remove_backup_target(target):
         return f"未能清理备份文件 {Path(target).name}：{e}"
 
 
+def _publish_backup_archive(staged, target):
+    identity = staged.stat()
+    if target.exists() or target.is_symlink():
+        raise RuntimeError("备份目标已存在，未覆盖原归档")
+    try:
+        if os.name == "nt":
+            os.rename(staged, target)
+        else:
+            os.link(staged, target, follow_symlinks=False)
+    except OSError as exc:
+        try:
+            actual = target.lstat()
+        except FileNotFoundError:
+            raise exc
+        except OSError as check_error:
+            raise BackupArchivePublishUnknown(
+                f"备份归档发布结果无法确认，请检查备份列表和日志：{exc}；{check_error}"
+            ) from exc
+        if not stat.S_ISREG(actual.st_mode) or not os.path.samestat(identity, actual):
+            raise RuntimeError("备份目标已存在，未覆盖原归档") from exc
+        warning = f"归档已发布，发布确认异常：{exc}"
+    else:
+        warning = ""
+
+    try:
+        staged.unlink(missing_ok=True)
+    except OSError as exc:
+        warning = "；".join(filter(None, (warning, f"归档已发布，但暂存文件清理失败：{exc}")))
+    return warning
+
+
 def _create_backup_worker(job_id, items, cancel_event):
     with BACKUP_JOB_LOCK:
         info = BACKUP_JOBS.get(job_id)
@@ -527,7 +562,8 @@ def _create_backup_worker(job_id, items, cancel_event):
 
     items = list(items or [])
 
-    target = None
+    target = staged = None
+    published = False
     try:
         _update_backup_job(
             job_id,
@@ -551,8 +587,11 @@ def _create_backup_worker(job_id, items, cancel_event):
         elif set(items) == {"data", "scripts"}:
             type_name = "all"
 
-        filename = f"fls-backup-{type_name}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{job_id[:8]}.tar.gz"
+        filename = f"fls-backup-{type_name}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{job_id}.tar.gz"
         target = backup_safe_file(filename)
+        archive_tmp = tempfile.NamedTemporaryFile(prefix=".fls-backup-", suffix=".part", dir=backup_dir(), delete=False)
+        staged = Path(archive_tmp.name)
+        archive_tmp.close()
 
         deps_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".txt")
         deps_tmp.close()
@@ -560,7 +599,7 @@ def _create_backup_worker(job_id, items, cancel_event):
         try:
             write_dependencies_file(deps_tmp.name, cancel_event)
 
-            with tarfile.open(target, "w:gz") as tar:
+            with tarfile.open(staged, "w:gz") as tar:
                 if "data" in items and DATA_DIR.exists():
                     tar.add(
                         DATA_DIR,
@@ -586,28 +625,44 @@ def _create_backup_worker(job_id, items, cancel_event):
                 pass
 
         _check_backup_cancelled(cancel_event)
-        stat = target.stat()
+        archive_stat = staged.stat()
 
         with BACKUP_JOB_LOCK:
             if cancel_event.is_set():
                 cancelled_after_finish = True
             else:
                 cancelled_after_finish = False
+                publication_warning = _publish_backup_archive(staged, target)
+                published = True
                 info.update({
                     "running": False,
                     "status": "已完成",
                     "filename": target.name,
-                    "size": stat.st_size,
-                    "size_text": fmt_size(stat.st_size),
+                    "size": archive_stat.st_size,
+                    "size_text": fmt_size(archive_stat.st_size),
+                    "error": publication_warning,
                     "updated_at": now_str(),
                 })
-                persist_backup_job(info)
+                try:
+                    persist_backup_job(info)
+                except Exception as exc:
+                    try:
+                        actual = _load_persisted_backup_job(job_id)
+                    except Exception as check_error:
+                        raise BackupArchivePublishUnknown(
+                            f"完整归档已发布，但作业状态保存无法确认，请核对备份列表：{exc}；{check_error}"
+                        ) from exc
+                    if actual != _backup_job_snapshot(info):
+                        raise BackupArchivePublishUnknown(
+                            f"完整归档已发布，但作业状态与完成回执不一致，请核对备份列表：{exc}"
+                        ) from exc
+                    info["error"] = "；".join(filter(None, (publication_warning, f"备份已完成，状态保存确认异常：{exc}")))
 
         if cancelled_after_finish:
             raise BackupCancelled("备份任务已取消")
 
     except BackupCancelled:
-        cleanup_error = _remove_backup_target(target)
+        cleanup_error = _remove_backup_target(staged)
         _finish_backup_job(
             job_id,
             "已取消",
@@ -617,7 +672,7 @@ def _create_backup_worker(job_id, items, cancel_event):
             size_text="-",
         )
     except BackupTimeout as e:
-        cleanup_error = _remove_backup_target(target)
+        cleanup_error = _remove_backup_target(staged)
         error = str(e)
         if cleanup_error:
             error += "；" + cleanup_error
@@ -630,13 +685,15 @@ def _create_backup_worker(job_id, items, cancel_event):
             size_text="-",
         )
     except Exception as e:
-        cleanup_error = _remove_backup_target(target)
+        cleanup_error = _remove_backup_target(staged)
+        if published and not isinstance(e, BackupArchivePublishUnknown):
+            cleanup_error = "；".join(filter(None, (cleanup_error, _remove_backup_target(target))))
         error = str(e)
         if cleanup_error:
             error += "；" + cleanup_error
         _finish_backup_job(
             job_id,
-            "失败",
+            "结果未知" if isinstance(e, BackupArchivePublishUnknown) else "失败",
             error=error,
             filename="",
             size=0,

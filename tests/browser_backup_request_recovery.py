@@ -41,6 +41,48 @@ def main():
         reload, commit = scheduler._reload_scheduler_locked, restore._commit_restore_directories
         restore_receipt = restore._save_restore_request
         restores = []
+        archive_paused, archive_release = threading.Event(), threading.Event()
+        archive_release.set()
+        add_archive, publish_archive = tarfile.TarFile.add, backup._publish_backup_archive
+
+        def add_to_archive(archive, path, *args, **kwargs):
+            result = add_archive(archive, path, *args, **kwargs)
+            if fault.get("atomic_block") and str(path).endswith(".py"):
+                archive_paused.set()
+                if not archive_release.wait(20):
+                    raise RuntimeError("fixture archive release timed out")
+            if fault.get("atomic_write"):
+                raise OSError("fixture archive compression fault")
+            return result
+
+        def publish_atomic(staged, target):
+            mode = fault.get("atomic_publish")
+            if not mode:
+                return publish_archive(staged, target)
+            link, lstat = backup.os.link, Path.lstat
+            attempted = False
+
+            def replace_with_fault(source, destination, *args, **kwargs):
+                nonlocal attempted
+                if Path(source) == staged:
+                    if mode != "before":
+                        link(source, destination, *args, **kwargs)
+                    attempted = True
+                    raise OSError("fixture archive publication fault")
+                return link(source, destination, *args, **kwargs)
+
+            def verify(path, *args, **kwargs):
+                if mode == "unknown" and attempted and path == target:
+                    raise PermissionError("fixture archive confirmation unavailable")
+                return lstat(path, *args, **kwargs)
+
+            backup.os.link, Path.lstat = replace_with_fault, verify
+            try:
+                return publish_archive(staged, target)
+            finally:
+                backup.os.link, Path.lstat = link, lstat
+
+        tarfile.TarFile.add, backup._publish_backup_archive = add_to_archive, publish_atomic
 
         def apply_scheduler():
             if fault.get("reload"):
@@ -118,6 +160,11 @@ def main():
             if request.method == "POST":
                 fault.clear()
                 fault.update(request.get_json())
+                if fault.get("atomic_block"):
+                    archive_paused.clear()
+                    archive_release.clear()
+                else:
+                    archive_release.set()
                 backup.MAX_BACKUP_EXTRACTED_BYTES = (
                     1 if fault.get("archive_limit") else extracted_limit
                 )
@@ -140,6 +187,7 @@ def main():
                     record["state"] = "committing"
                     restore_receipt(record)
             return jsonify(workers=workers, jobs=list(backup.BACKUP_JOBS.values()), active=backup.ACTIVE_BACKUP_WORKERS,
+                           archive_paused=archive_paused.is_set(), partials=[item.name for item in backup.BACKUP_DIR.glob("*.part")],
                            restores=len(restores), tasks=models.load_tasks(), scheduled=[job.id for job in scheduler.scheduler.get_jobs()],
                            script=(SCRIPT_DIR / "demo.py").read_text() if (SCRIPT_DIR / "demo.py").exists() else "")
 
@@ -148,14 +196,89 @@ def main():
         env = dict(os.environ, FLS_UI_BASE=f"http://127.0.0.1:{server.server_port}", FLS_UI_TOKEN=TOKEN,
                    FLS_PLAYWRIGHT_CORE=str(playwright), FLS_CHROMIUM=str(chromium), FLS_RESTORE_ARCHIVE=base64.b64encode(archive.getvalue()).decode())
         try:
-            script = ROLLBACK_SCRIPT if os.environ.get("FLS_BACKUP_ROLLBACK_RECOVERY") else LIMIT_SCRIPT if os.environ.get("FLS_BACKUP_LIMIT_RECOVERY") else CANCEL_SCRIPT if os.environ.get("FLS_BACKUP_CANCEL") else IDENTITY_SCRIPT if os.environ.get("FLS_RESTORE_IDENTITY") else RESTORE_SCRIPT if os.environ.get("FLS_BACKUP_RESTORE") else SCRIPT
+            script = ATOMIC_SCRIPT if os.environ.get("FLS_BACKUP_ATOMIC") else ROLLBACK_SCRIPT if os.environ.get("FLS_BACKUP_ROLLBACK_RECOVERY") else LIMIT_SCRIPT if os.environ.get("FLS_BACKUP_LIMIT_RECOVERY") else CANCEL_SCRIPT if os.environ.get("FLS_BACKUP_CANCEL") else IDENTITY_SCRIPT if os.environ.get("FLS_RESTORE_IDENTITY") else RESTORE_SCRIPT if os.environ.get("FLS_BACKUP_RESTORE") else SCRIPT
             result = subprocess.run(["node", "-e", script], env=env, timeout=180)
             if result.returncode:
                 raise SystemExit(result.returncode)
         finally:
             release.set()
+            archive_release.set()
+            tarfile.TarFile.add = add_archive
             server.shutdown()
             scheduler.scheduler.shutdown(wait=False)
+
+
+ATOMIC_SCRIPT = r'''
+const assert=require('node:assert/strict');
+const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
+(async()=>{
+ const browser=await chromium.launch({executablePath:process.env.FLS_CHROMIUM,args:['--no-sandbox']});
+ try{
+  for(const viewport of [{width:390,height:844},{width:1280,height:800}]){
+   const context=await browser.newContext({viewport}),page=await context.newPage();
+   const errors=[];page.on('pageerror',e=>errors.push(e.message));page.on('dialog',d=>d.accept());
+   const base=process.env.FLS_UI_BASE,headers={'X-Token':process.env.FLS_UI_TOKEN};
+   const fixture=async data=>assert.equal((await page.request.post(base+'/api/fixture/backup',{headers,data})).status(),200);
+   const state=async()=>(await page.request.get(base+'/api/fixture/backup',{headers})).json();
+   const list=async()=>(await page.request.get(base+'/api/backup/list',{headers})).json();
+   await fixture({});await page.goto(base+'/login');await page.locator('[name="token"]').fill(process.env.FLS_UI_TOKEN);
+   await page.locator('button[type="submit"]').click();await page.waitForURL(u=>u.pathname!='/login');await page.goto(base+'/backup');
+   const form=page.locator('#backupCreateForm'),progress=page.locator('#backupJobText');
+   await form.locator('[name="items"][value="data"]').uncheck();
+   const waitJob=async(id,status)=>{await page.waitForFunction(async({id,status})=>{
+    const r=await fetch('/api/backup/job/'+id);return r.ok&&(await r.json()).status===status;
+   },{id,status});await page.evaluate(id=>flsPollBackupJob(id),id);};
+   const start=async fault=>{await fixture(fault);const id=await form.locator('[name="request_id"]').inputValue();
+    await form.getByRole('button',{name:'创建备份',exact:true}).click();return id;};
+   for(const cancel of [false,true]){
+    const count=(await list()).items.length,id=await start({atomic_block:true});
+    await page.waitForFunction(async()=>{const r=await fetch('/api/fixture/backup');return (await r.json()).archive_paused;});
+    const staged=await state();assert.equal(staged.partials.length,1);assert.equal((await list()).items.length,count);
+    assert.equal((await page.request.get(base+'/backup/download/'+staged.partials[0],{headers})).status(),404);
+    const job=await page.request.get(base+'/api/backup/job/'+id,{headers});assert.equal((await job.json()).running,true);
+    if(cancel){await page.evaluate(id=>flsPollBackupJob(id),id);await progress.getByRole('button',{name:'取消备份',exact:true}).click();}
+    await fixture({});await waitJob(id,cancel?'已取消':'已完成');
+    await progress.getByText(cancel?'已取消':'已完成',{exact:true}).waitFor();
+    assert.equal((await list()).items.length,count+Number(!cancel));assert.equal((await state()).partials.length,0);
+    assert.equal((await state()).active,0);
+   }
+   for(const mode of ['before','after','unknown']){
+    const count=(await list()).items.length,id=await start({atomic_publish:mode});
+    const status={before:'失败',after:'已完成',unknown:'结果未知'}[mode];await waitJob(id,status);
+    await progress.getByText(status,{exact:true}).waitFor();
+    const details=await progress.innerText();
+    if(!details.includes('fixture archive publication fault'))throw new Error('publication diagnostic missing for '+mode+': '+details);
+    assert.equal((await list()).items.length,count+Number(mode!=='before'));
+    assert.equal((await state()).partials.length,0);
+    if(mode==='unknown'){
+     const before=(await state()).workers.length;
+     assert.equal(await progress.getByRole('button',{name:'重新创建备份',exact:true}).count(),0);
+     assert.equal(await form.getByRole('button',{name:'创建备份',exact:true}).isDisabled(),true);
+     await progress.getByRole('button',{name:'查询已发布归档',exact:true}).click();
+     const filename=(await list()).items[0].name;
+     const download=await page.request.get(base+'/backup/download/'+filename,{headers});
+     assert.equal(download.status(),200);assert.equal((await download.body()).subarray(0,2).toString('hex'),'1f8b');
+     await progress.getByRole('button',{name:'确认后重新创建备份',exact:true}).waitFor();
+     assert.equal((await state()).workers.length,before);
+     await fixture({atomic_block:true});
+     await progress.getByRole('button',{name:'确认后重新创建备份',exact:true}).click();
+     const retryId=await form.locator('[name="request_id"]').inputValue();
+     await page.waitForFunction(async()=>{const r=await fetch('/api/fixture/backup');return (await r.json()).archive_paused;});
+     assert.equal((await state()).workers.length,before+1);
+     await page.evaluate(id=>flsPollBackupJob(id),retryId);
+     await progress.getByRole('button',{name:'取消备份',exact:true}).click();
+     await waitJob(retryId,'已取消');
+     await page.reload();await page.evaluate(id=>flsPollBackupJob(id),id);
+     await progress.getByText('结果未知',{exact:true}).waitFor();
+     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
+     await page.screenshot({path:'/tmp/fls-backup-atomic-'+viewport.width+'.png',fullPage:true});
+    }
+   }
+   await fixture({});assert.deepEqual(errors,[]);await context.close();console.log('backup atomic publication passed '+viewport.width);
+  }
+ }finally{await browser.close();}
+})().catch(e=>{console.error(e);process.exit(1)});
+'''
 
 
 CANCEL_SCRIPT = r'''
