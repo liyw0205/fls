@@ -122,6 +122,40 @@ class BackupRestoreRecoveryTests(unittest.TestCase):
             self.assertTrue(response.json["dependencies_failed"])
             self.assertTrue((base / "scripts/demo.py").exists())
 
+    def test_failed_restore_query_retains_bounded_diagnostic(self):
+        with isolated_app() as (app, base):
+            from fls_manager.routes.backup import restore
+
+            request_id = "e" * 32
+            marker = base / "data/restore-marker.txt"
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text("preserve", encoding="utf-8")
+            diagnostic = "<disk> quota unavailable</disk>\x00" + "x" * 1200
+
+            with patch.object(
+                restore,
+                "_stage_restore_directory",
+                side_effect=OSError(diagnostic),
+            ):
+                response = self.post(
+                    app.test_client(),
+                    fields={"restore_request_id": request_id},
+                )
+
+            self.assertEqual(response.status_code, 500)
+            self.assertTrue(response.json["live_state_unchanged"])
+            status = app.test_client().get(
+                "/api/backup/restore/" + request_id,
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(status.status_code, 500)
+            payload = status.get_json()
+            self.assertEqual(payload["state"], "failed")
+            self.assertIn("<disk> quota unavailable</disk>", payload["error"])
+            self.assertLessEqual(len(payload["error"]), 1000)
+            self.assertNotIn("\x00", payload["error"])
+            self.assertEqual(marker.read_text(encoding="utf-8"), "preserve")
+
     def test_dependency_failure_or_missing_list_is_partial_completion(self):
         for api in (False, True):
             for missing in (False, True):

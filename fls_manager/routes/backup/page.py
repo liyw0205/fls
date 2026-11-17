@@ -505,6 +505,8 @@ function flsRestoreRecovery(message, payload){{
     const box=document.getElementById("backupRestoreRecovery");
     if(!box) return;
     let html="<p>"+flsEscapeHtml(message)+"</p><button class='btn btn-primary' type='button' onclick='flsQueryRestoreRequest(this)'>查询原恢复请求</button> ";
+    if(payload && payload.error) html+="<pre class='section backup-restore-diagnostic' style='white-space:pre-wrap;overflow-wrap:anywhere;'>"+flsEscapeHtml(payload.error)+"</pre> ";
+    if(payload && payload.scheduler_error) html+="<pre class='section backup-restore-diagnostic' style='white-space:pre-wrap;overflow-wrap:anywhere;'>"+flsEscapeHtml(payload.scheduler_error)+"</pre> ";
     if(payload && payload.scheduler_reload_required){{
         html+="<button class='btn btn-blue' type='button' onclick='flsReloadRestoredTasks(this)'>仅重新加载调度器</button> ";
     }}

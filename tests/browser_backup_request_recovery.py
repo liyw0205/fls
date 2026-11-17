@@ -406,6 +406,7 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    const query=recovery.getByRole('button',{name:'查询原恢复请求',exact:true});
    await query.waitFor();await query.click();
    await recovery.getByRole('button',{name:'选择原文件继续恢复',exact:true}).waitFor();
+   await recovery.getByText('备份文件解压后超过允许大小',{exact:false}).waitFor();
    assert.equal(JSON.parse(await page.evaluate(()=>sessionStorage.getItem('fls-backup-restore'))).restore_request_id,requestId);
    const after=await state();assert.equal(after.restores,initial.restores);
    assert.equal((await page.request.get(base+'/api/backup/restore/'+requestId,{headers})).status(),500);

@@ -47,6 +47,15 @@ def _save_restore_request(record):
     write_json(_restore_request_path(record["request_id"]), record)
 
 
+def _bounded_restore_diagnostic(value):
+    if not isinstance(value, str):
+        return ""
+    return "".join(
+        char for char in value
+        if ord(char) >= 32 and not 127 <= ord(char) <= 159
+    )[:1000]
+
+
 def _restore_request_response(record):
     restored = record.get("state") == "restored"
     unknown = record.get("state") == "unknown"
@@ -78,6 +87,10 @@ def _restore_request_response(record):
         "dependencies_failed": dependencies_failed,
         "dependencies": record.get("dependencies", ""),
         "dependency_log": record.get("dependency_log", ""),
+        "error": _bounded_restore_diagnostic(record.get("error"))
+        if record.get("state") in ("failed", "unknown") else "",
+        "scheduler_error": _bounded_restore_diagnostic(record.get("scheduler_error"))
+        if reload_required else "",
     }, status
 
 
@@ -341,6 +354,8 @@ def backup_import():
                         "dependencies_failed": False,
                         "created_at": now_str(),
                     }
+                if restore_record.get("state") == "failed":
+                    restore_record.update(state="received", error="")
                 _save_restore_request(restore_record)
                 request_owned = True
 
@@ -412,7 +427,7 @@ def backup_import():
                                 current = _read_restore_request(request_id)
                                 if current is None or current["state"] not in ("received", "failed"):
                                     return restore_error("恢复请求状态已变化，目录未提交。请查询原请求后再继续。", 409, request_id=request_id)
-                                restore_record.update(state="committing", started_at=now_str())
+                                restore_record.update(state="committing", started_at=now_str(), error="")
                                 _save_restore_request(restore_record)
                         commit_attempted = True
                         _commit_restore_directories(staged)
