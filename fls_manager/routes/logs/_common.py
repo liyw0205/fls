@@ -1,4 +1,6 @@
 from .bp import bp
+import hashlib
+import stat
 from datetime import datetime
 from math import ceil
 from urllib.parse import quote
@@ -27,6 +29,15 @@ def safe_log_file(filename):
         abort(404)
 
     return resolved
+
+
+def log_file_version(file_path):
+    """Return an identity bound to one regular log file, not just its name."""
+    info = file_path.lstat()
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError("日志文件不是常规文件")
+    identity = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    return hashlib.sha256(repr(identity).encode("ascii")).hexdigest()
 
 
 def page_links(base, q, page, pages):

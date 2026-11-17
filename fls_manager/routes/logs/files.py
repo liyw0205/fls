@@ -4,8 +4,14 @@ from ._common import *
 @bp.route("/logfile/<filename>")
 def logfile_view(filename):
     back_url = get_back_url("/logs")
-    filename = filename.split("/")[-1]
-    safe_log_file(filename)
+    if (not isinstance(filename, str) or filename != filename.strip()
+        or "/" in filename or "\\" in filename or filename in ("", ".", "..")):
+        abort(404)
+    file_path = safe_log_file(filename)
+    try:
+        version = log_file_version(file_path)
+    except (OSError, ValueError):
+        abort(404)
 
     body = f"""
 <div class="card">
@@ -16,6 +22,7 @@ def logfile_view(filename):
         </div>
         <div class="row-actions-danger">
             <form class="inline-form" method="post" action="/logfile/delete/{h(filename)}?back={h(back_url)}">
+                <input type="hidden" name="version" value="{h(version)}">
                 <button class="btn btn-red" type="submit" onclick="return confirm('确定删除日志吗？')">删除日志</button>
             </form>
         </div>
@@ -105,12 +112,50 @@ def api_logfile(filename):
 @bp.route("/logfile/delete/<filename>", methods=["POST"])
 def logfile_delete(filename):
     back_url = get_back_url("/logs")
-    filename = filename.split("/")[-1]
+    version = request.form.get("version", "")
+
+    def failure(message, status):
+        body = f'''<section class="section" role="alert"><p>{h(message)}</p>
+<form method="post" action="/logfile/delete/{h(filename)}?back={h(back_url)}">
+<input type="hidden" name="version" value="{h(version)}">
+<button class="btn btn-primary" type="submit">查询或重试删除</button></form>
+<a class="btn btn-gray" href="/logfile/{h(filename)}?back={h(back_url)}">返回日志文件</a>
+<a class="btn btn-gray" href="{h(back_url)}">返回日志列表</a></section>'''
+        return layout("日志删除恢复", "logs", body), status
+
+    if (not isinstance(filename, str) or filename != filename.strip()
+        or "/" in filename or "\\" in filename or filename in ("", ".", "..")):
+        return failure("日志文件选择无效，未删除任何文件。请从日志列表重新选择。", 400)
+    if not isinstance(version, str) or len(version) != 64 or any(c not in "0123456789abcdef" for c in version):
+        return failure("日志文件版本无效，未删除任何文件。请刷新日志页面后重试。", 400)
+
     file_path = LOG_DIR / filename
+    try:
+        actual = log_file_version(file_path)
+    except FileNotFoundError:
+        return redirect(back_url)
+    except (OSError, ValueError):
+        return failure("日志文件不是可安全删除的常规文件，未删除任何文件。", 409)
+    if actual != version:
+        return failure("日志文件已变化，未删除同名新文件。请刷新列表后重新选择。", 409)
 
-    if file_path.exists():
+    try:
         file_path.unlink()
+    except FileNotFoundError:
+        return redirect(back_url)
+    except Exception as exc:
+        try:
+            if not file_path.exists():
+                return redirect(back_url)
+        except Exception:
+            return failure(f"删除结果无法确认：{exc}", 503)
+        return failure(f"日志删除失败：{exc}。文件仍在，请检查后重试。", 500)
 
+    try:
+        if file_path.exists():
+            return failure("删除结果无法确认，日志文件仍存在。请查询后重试。", 503)
+    except Exception as exc:
+        return failure(f"删除结果无法确认：{exc}", 503)
     return redirect(back_url)
 
 
