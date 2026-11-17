@@ -12,6 +12,23 @@ from ...utils import h
 from ...paths import BASE_DIR
 
 
+def _control_start_failure(title, action, exc):
+    body = page_header_card(
+        title,
+        help_html=(
+            '<span style="color:#dc2626;font-weight:800;">'
+            f"控制线程启动失败：{h(exc)}。未执行面板操作，请修复运行环境后重试。"
+            "</span>"
+        ),
+        actions_html=(
+            f'<form method="post" action="{h(action)}">'
+            '<button class="btn btn-primary" type="submit">重试</button></form>'
+            '<a class="btn btn-gray" href="/">返回仪表盘</a>'
+        ),
+    )
+    return layout(title, "dashboard", body), 503
+
+
 @bp.route("/about/restart-panel", methods=["GET", "POST"])
 def about_restart_panel():
     if request.method == "GET":
@@ -32,12 +49,15 @@ def about_restart_panel():
         )
         return layout("重启失败", "about", body), 400
 
-    th = threading.Thread(
-        target=delayed_restart_panel,
-        daemon=True,
-        name="fls-panel-restart",
-    )
-    th.start()
+    try:
+        th = threading.Thread(
+            target=delayed_restart_panel,
+            daemon=True,
+            name="fls-panel-restart",
+        )
+        th.start()
+    except Exception as exc:
+        return _control_start_failure("重启失败", "/about/restart-panel", exc)
 
     body = page_header_card(
         "正在重启面板",
@@ -82,12 +102,15 @@ def about_stop_panel():
         )
         return layout("停止失败", "about", body), 400
 
-    th = threading.Thread(
-        target=delayed_stop_panel,
-        daemon=True,
-        name="fls-panel-stop",
-    )
-    th.start()
+    try:
+        th = threading.Thread(
+            target=delayed_stop_panel,
+            daemon=True,
+            name="fls-panel-stop",
+        )
+        th.start()
+    except Exception as exc:
+        return _control_start_failure("停止失败", "/about/stop-panel", exc)
 
     body = page_header_card(
         "正在停止面板",

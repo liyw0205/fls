@@ -1874,6 +1874,34 @@ class PanelControlIsolationTests(unittest.TestCase):
             thread.start.assert_called_once_with()
             popen.assert_not_called()
 
+    def test_panel_control_thread_start_failure_returns_retryable_error(self):
+        for path, title in (
+            ("/about/restart-panel", "重启失败"),
+            ("/about/stop-panel", "停止失败"),
+        ):
+            with self.subTest(path=path), isolated_app() as (app, base_dir):
+                script = base_dir / "fls.sh"
+                script.write_text("#!/bin/sh\n", encoding="utf-8")
+
+                with patch(
+                    "fls_manager.routes.about.panel_control.threading.Thread",
+                    side_effect=RuntimeError("thread start denied"),
+                ), patch(
+                    "fls_manager.routes.about.helpers.subprocess.Popen"
+                ) as popen:
+                    response = app.test_client().post(
+                        path,
+                        headers={"X-Token": TOKEN},
+                    )
+
+                self.assertEqual(response.status_code, 503)
+                html = response.get_data(as_text=True)
+                self.assertIn(title, html)
+                self.assertIn("控制线程启动失败：thread start denied", html)
+                self.assertIn(f'action="{path}"', html)
+                self.assertIn('name="csrf_token"', html)
+                popen.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
