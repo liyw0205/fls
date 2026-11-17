@@ -185,10 +185,17 @@ def online_install_log(install_id):
     body = f"""
 {header_card}
 <div class="notice red" id="installPollError" role="status" hidden></div>
+<a id="installPollLogin" class="btn btn-primary" hidden>重新登录</a>
+<button id="installPollRetry" class="btn btn-primary" type="button" hidden>重新读取安装状态</button>
 <pre class="log" id="log">加载中...</pre>
 {log_controls()}
 
 <script>
+(function(){{
+const pollError = document.getElementById("installPollError");
+const loginAction = document.getElementById("installPollLogin");
+const retryAction = document.getElementById("installPollRetry");
+let pending = false;
 window.__FLS_LOG_LAST_TEXT__ = "";
 window.__FLS_LOG_NEAR_BOTTOM__ = true;
 
@@ -207,6 +214,9 @@ window.addEventListener("scroll", function(){{
 }}, {{passive:true}});
 
 async function loadLog(){{
+    if(pending || document.getElementById("installPollError") !== pollError) return;
+    pending = true;
+    if(retryAction) retryAction.disabled = true;
     try {{
         const beforeScroll = window.scrollY;
         const beforeHeight = document.documentElement.scrollHeight;
@@ -214,8 +224,16 @@ async function loadLog(){{
 
         const res = await fetch("/api/online-scripts/log/{h(install_id)}?lines=1600", {{cache:"no-store"}});
         const json = await flsReadJsonResponse(res);
-        const pollError = document.getElementById("installPollError");
-        if(pollError) pollError.hidden = true;
+        if(document.getElementById("installPollError") !== pollError) return;
+        if(!json || typeof json.running !== "boolean" || typeof json.log !== "string"){{
+            throw new Error("安装状态响应无效，请重新读取安装状态");
+        }}
+        if(pollError){{
+            pollError.hidden = true;
+            pollError.textContent = "";
+        }}
+        if(loginAction) loginAction.hidden = true;
+        if(retryAction) retryAction.hidden = true;
 
         document.getElementById("installStatus").textContent = json.status || "-";
         const errorEl = document.getElementById("installError");
@@ -249,12 +267,17 @@ async function loadLog(){{
             }}
         }}
 
-        if(!json.running){{
-            const stopAction = document.getElementById("installStopAction");
-            if(stopAction) stopAction.hidden = true;
+        const stopAction = document.getElementById("installStopAction");
+        const recoveryEl = document.getElementById("installRecoveryAction");
+        if(stopAction) stopAction.hidden = !json.running;
+        if(recoveryEl) recoveryEl.hidden = json.running;
+        if(json.running){{
+            if(!window.__FLS_ACTIVE_LOG_INTERVAL__){{
+                window.__FLS_ACTIVE_LOG_INTERVAL__ = setInterval(loadLog, 2000);
+            }}
+        }}else{{
             const recovery = json.recovery || {{}};
-            const recoveryEl = document.getElementById("installRecoveryAction");
-            if(recoveryEl && recovery.available && !recoveryEl.dataset.ready){{
+            if(recoveryEl && recovery.available){{
                 const csrf = typeof flsGetCsrfToken === "function" ? flsGetCsrfToken() : "";
                 const csrfInput = csrf ?
                     "<" + "input type=\\"hidden\\" name=\\"csrf_token\\" value=\\"" + escapeHtml(csrf) + "\\">" : "";
@@ -277,16 +300,23 @@ async function loadLog(){{
             window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
         }}
     }} catch(e) {{
-        const pollError = document.getElementById("installPollError");
+        if(document.getElementById("installPollError") !== pollError) return;
         const message = e && e.message ? e.message : String(e);
         const denied = e && (e.status === 401 || e.status === 403);
         const missing = e && e.status === 404;
-        const next = denied ? "重新登录后刷新页面" :
+        const next = denied ? "重新登录后继续读取" :
             (missing ? "到日志管理检查已保留的安装日志" : "检查安装日志文件和服务状态，稍后会重新读取");
         if(pollError){{
             pollError.textContent = "日志读取失败：" + message + "。下一步：" + next;
             pollError.hidden = false;
         }}
+        if(loginAction){{
+            loginAction.hidden = !denied;
+            if(denied){{
+                loginAction.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
+            }}
+        }}
+        if(retryAction) retryAction.hidden = missing;
         if(denied || missing){{
             const stopAction = document.getElementById("installStopAction");
             const recoveryEl = document.getElementById("installRecoveryAction");
@@ -294,13 +324,21 @@ async function loadLog(){{
             if(recoveryEl) recoveryEl.hidden = true;
             clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
             window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
+        }}else{{
+            clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
+            window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
         }}
+    }}finally{{
+        pending = false;
+        if(retryAction) retryAction.disabled = false;
     }}
 }}
 
+if(retryAction) retryAction.onclick = loadLog;
 if(window.__FLS_ACTIVE_LOG_INTERVAL__) clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
+window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
 loadLog();
-window.__FLS_ACTIVE_LOG_INTERVAL__ = setInterval(loadLog, 2000);
+}})();
 </script>
 """
 

@@ -351,6 +351,7 @@ def execute_bulk(action, task_ids, request_id, *, load_tasks, mutate_tasks, run_
         # A failed claim must not start tasks or modify the task file.
         checkpoint()
         stopped_ids = []
+        stopped_execution_ids = set()
         count = 0
         skipped = 0
         payload = {"ok": True, "action": action, "count": len(task_ids)}
@@ -374,6 +375,8 @@ def execute_bulk(action, task_ids, request_id, *, load_tasks, mutate_tasks, run_
                     if row["status"] in ("succeeded", "skipped"):
                         if action == "delete":
                             stopped_ids.append(task_id)
+                            if row["status"] == "succeeded":
+                                stopped_execution_ids.add(task_id)
                             row.update(status="not_attempted", msg="任务已停止，尚未删除")
                         elif ok:
                             count += 1
@@ -401,8 +404,22 @@ def execute_bulk(action, task_ids, request_id, *, load_tasks, mutate_tasks, run_
                     ):
                         raise TaskBulkSelectionChanged("任务合集归属已变化，未加入，请刷新后重新选择")
                     if action == "delete":
-                        from .task_runner import is_running
-                        if any(is_running(task_id) for task_id in selected):
+                        from .task_runner import running_task_snapshot
+                        running = running_task_snapshot()
+                        live_again = False
+                        for task_id in stopped_execution_ids:
+                            info = running.get(task_id)
+                            if not isinstance(info, dict):
+                                continue
+                            process = info.get("process")
+                            try:
+                                process_live = process is None or process.poll() is None
+                            except Exception:
+                                process_live = True
+                            if process_live:
+                                live_again = True
+                                break
+                        if live_again:
                             raise TaskBulkSelectionChanged("任务在删除前重新启动，未删除，请停止后重试")
                         tasks[:] = [task for task in tasks if task["id"] not in selected]
                         state["changed"] = len(selected)

@@ -533,6 +533,10 @@ body.page-tasks #tasksTable th {
     white-space:nowrap;
 }
 
+.btn[hidden] {
+    display:none!important;
+}
+
 .btn:disabled,
 button[aria-busy="true"] {
     cursor:wait;

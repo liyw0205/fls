@@ -283,7 +283,11 @@ class OnlineInstallRecoveryTests(unittest.TestCase):
     def test_polling_preserves_logs_and_stops_on_permission_or_missing_errors(self):
         with isolated_app() as (app, base_dir):
             self.prepare(base_dir)
+            unauthorized = app.test_client().get("/api/online-scripts/log/previous")
+            self.assertEqual(unauthorized.status_code, 401)
+            self.assertEqual(unauthorized.get_json()["msg"], "登录已过期")
             html = app.test_client().get("/online-scripts/log/previous", headers={"X-Token": TOKEN}).get_data(as_text=True)
+            self.assertIn('id="installPollLogin" class="btn btn-primary" hidden>重新登录</a>', html)
             script = next(script for script in re.findall(r"<script>(.*?)</script>", html, re.S)
                           if "async function loadLog()" in script)
             source = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
@@ -295,12 +299,13 @@ const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
 (async () => {
   for(const status of [401, 403, 404, 409, 500, 200]) {
     const elements = Object.fromEntries(['installStatus', 'installError', 'installReturncode',
-      'installStopAction', 'installRecoveryAction', 'installPollError', 'log', 'flsLogNewTip']
+      'installStopAction', 'installRecoveryAction', 'installPollError', 'installPollLogin', 'installPollRetry', 'log', 'flsLogNewTip']
       .map(id => [id, {textContent: '', hidden: false, dataset: {}, style: {}}]));
     elements.log.textContent = 'preserved output';
     const context = {
       window: {innerHeight: 800, scrollY: 0, addEventListener() {}, scrollTo() {}},
       document: {documentElement: {scrollHeight: 800}, getElementById: id => elements[id]},
+      location: {pathname: '/online-scripts/log/previous', search: '?back=%2Fpull'},
       fetch: async () => ({ok: status === 200, status,
         json: async () => {
           if(status === 200) throw new Error('not JSON');
@@ -314,20 +319,60 @@ const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
     assert.equal(elements.log.textContent, 'preserved output');
     assert.equal(elements.installPollError.hidden, false);
     const permanent = [401, 403, 404].includes(status);
-    assert.equal(context.window.__FLS_ACTIVE_LOG_INTERVAL__, permanent ? null : 1);
+    assert.equal(context.window.__FLS_ACTIVE_LOG_INTERVAL__, null);
+    const denied = [401, 403].includes(status);
+    assert.equal(elements.installPollLogin.hidden, !denied);
+    assert.equal(elements.installPollRetry.hidden, status === 404);
+    assert.equal(elements.installPollRetry.disabled, false);
+    if(denied) assert.equal(elements.installPollLogin.href,
+      '/login?next=%2Fonline-scripts%2Flog%2Fprevious%3Fback%3D%252Fpull');
     if(permanent) assert.equal(elements.installRecoveryAction.hidden, true);
     assert.match(elements.installPollError.textContent, status === 200 ? /响应解析失败/ : /backend diagnostic/);
-    if(!permanent) {
+    if(status !== 404) {
+      context.fetch = async () => ({ok: true, status: 200, json: async () => ({
+        running: true, status: '安装中', log: 'running output',
+      })});
+      await elements.installPollRetry.onclick();
+      assert.equal(elements.installStopAction.hidden, false);
+      assert.equal(elements.installRecoveryAction.hidden, true);
+      assert.equal(elements.installPollError.hidden, true);
+      assert.equal(elements.installPollLogin.hidden, true);
+      assert.equal(context.window.__FLS_ACTIVE_LOG_INTERVAL__, 1);
       context.fetch = async () => ({ok: true, status: 200, json: async () => ({
         running: false, status: '结果未知', log: 'recovered output',
         recovery: {available: false, reason: 'already retried', href: '/online-scripts/log/child', label: 'child'},
       })});
-      await context.loadLog();
+      await elements.installPollRetry.onclick();
       assert.equal(elements.installPollError.hidden, true);
+      assert.equal(elements.installPollLogin.hidden, true);
       assert.equal(elements.log.textContent, 'recovered output');
       assert.match(elements.installRecoveryAction.innerHTML, /online-scripts\/log\/child/);
+      assert.equal(elements.installRecoveryAction.hidden, false);
       assert.equal(context.window.__FLS_ACTIVE_LOG_INTERVAL__, null);
     }
+  }
+  {
+    const elements = Object.fromEntries(['installStatus', 'installError', 'installReturncode',
+      'installStopAction', 'installRecoveryAction', 'installPollError', 'installPollLogin', 'installPollRetry', 'log']
+      .map(id => [id, {textContent: 'preserved', hidden: false, dataset: {}, style: {}}]));
+    let resolve;
+    let requests = 0;
+    let intervals = 0;
+    const context = {
+      window: {innerHeight: 800, scrollY: 0, addEventListener() {}, scrollTo() {}},
+      document: {documentElement: {scrollHeight: 800}, getElementById: id => elements[id]},
+      fetch: () => { requests++; return new Promise(done => { resolve = done; }); },
+      setInterval: () => { intervals++; return 1; }, clearInterval() {},
+    };
+    vm.createContext(context);
+    vm.runInContext(input.reader + input.script, context);
+    await elements.installPollRetry.onclick();
+    assert.equal(requests, 1, 'manual recovery must not overlap an active request');
+    elements.installPollError = {};
+    resolve({ok: true, status: 200, json: async () => ({running: true, log: 'old page output'})});
+    await new Promise(done => setImmediate(done));
+    assert.equal(elements.log.textContent, 'preserved');
+    assert.equal(intervals, 0, 'detached page must not start polling again');
   }
   console.log('log polling error paths passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

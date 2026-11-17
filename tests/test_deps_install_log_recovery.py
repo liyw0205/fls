@@ -139,6 +139,37 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
       '/login?next=%2Fdeps%2Finstall-log%2Fdemo-id%3Fback%3D%252Fdeps');
     assert.equal(auth.timers.size, 0);
   }
+  for(const body of ['null', '{}', '{"running":"false","log":"bad"}']) {
+    const invalid = makeContext([
+      response(200, JSON.stringify({running: true, status_label: '安装中', log: 'preserved'}), 'application/json'),
+      response(200, body, 'application/json')
+    ]);
+    await tick();
+    await [...invalid.timers.values()][0].callback();
+    assert.equal(invalid.elements.log.textContent, 'preserved');
+    assert.equal(invalid.elements.installStatus.textContent, '安装中');
+    assert.equal(invalid.elements.installPollRetry.hidden, false);
+    assert.equal(invalid.timers.size, 0);
+  }
+  {
+    const stale = makeContext([
+      response(200, JSON.stringify({running: true, status_label: '安装中', log: 'current'}), 'application/json')
+    ]);
+    await tick();
+    let resolve;
+    let requests = 0;
+    stale.context.fetch = () => { requests++; return new Promise(done => { resolve = done; }); };
+    const pending = [...stale.timers.values()][0].callback();
+    await stale.elements.installPollRetry.listeners.click();
+    assert.equal(requests, 1);
+    stale.elements.installPollError = {};
+    stale.context.window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
+    stale.timers.clear();
+    resolve(response(200, JSON.stringify({running: true, log: 'old page result'}), 'application/json'));
+    await pending;
+    assert.equal(stale.elements.log.textContent, 'current');
+    assert.equal(stale.timers.size, 0);
+  }
   console.log('dependency install log recovery passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """],
