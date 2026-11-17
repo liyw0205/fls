@@ -168,6 +168,7 @@ def _task_card(task, back_url, collection_id=""):
         <div class="fls-card-actions row-actions collection-task-actions" aria-label="任务 {h(name)} 行操作">
             <div class="row-actions-primary">
                 <form class="inline-form" method="post" action="{run_action}">
+                    <input type="hidden" name="request_id" value="{uuid.uuid4().hex}">
                     <button class="btn {run_class}" type="submit"{run_confirm}>{run_label}</button>
                 </form>
                 <a class="btn btn-orange" href="/log/{h(task_id)}?back={_back_param(back_url)}">查看任务日志</a>

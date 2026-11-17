@@ -59,6 +59,8 @@ def _record_path(request_id):
 def execute_single(action, task_id, data, **operations):
     if not isinstance(data, dict):
         return {"ok": False, "msg": "请求必须是对象"}, 400
+    if action in ("run", "stop") and "request_id" in data and not data["request_id"]:
+        return {"ok": False, "msg": "提交标识不能为空，请刷新页面后重试"}, 400
     try:
         action, ids, request_id = parse_bulk_request({
             "action": action, "task_ids": [task_id], "request_id": data.get("request_id", ""),
@@ -66,6 +68,23 @@ def execute_single(action, task_id, data, **operations):
     except ValueError as exc:
         return {"ok": False, "msg": str(exc)}, 400
     payload, status = execute_bulk(action, ids, request_id, **operations)
+    if action in ("run", "stop") and payload.get("results"):
+        row = payload["results"][0]
+        if action == "stop" and row["status"] == "skipped" and status == 409:
+            payload.update(ok=True, msg=row["msg"])
+            status = 200
+        elif status in (200, 400, 409) and row["status"] != "unknown":
+            payload["msg"] = row["msg"]
+        if action == "run" and "脚本重命名待恢复" in row["msg"]:
+            from .script_rename import pending_script_rename
+            try:
+                pending = pending_script_rename(task_id=task_id)
+            except Exception as exc:
+                payload["msg"] += f"；恢复入口读取失败：{exc}"
+                status = 500
+            else:
+                if pending:
+                    payload["recovery_url"] = f"/scripts/rename-recovery/{pending['id']}"
     if status == 404:
         payload["msg"] = "任务不存在"
     elif action == "delete":

@@ -6,6 +6,7 @@ import threading
 import time
 import shutil
 import platform
+import uuid
 from datetime import datetime
 from math import ceil
 from urllib.parse import quote
@@ -234,6 +235,7 @@ def history_table_rows(items):
                 rerun_btn = (
                     f'<form class="inline-form" method="post" '
                     f'action="/run/{h(task_id)}?back=/history">'
+                    f'<input type="hidden" name="request_id" value="{uuid.uuid4().hex}">'
                     '<button class="btn btn-orange" type="submit">重新运行</button>'
                     '</form>'
                 )

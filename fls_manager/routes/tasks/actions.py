@@ -1,3 +1,4 @@
+import json
 import uuid
 from urllib.parse import quote
 
@@ -146,8 +147,45 @@ def task_collection_clear(task_id):
     return redirect(get_back_url("/collections"))
 
 
+def _task_execution_response(action, task_id):
+    from ...task_bulk import execute_single
+    back_url = get_back_url("/tasks")
+    data = request.form.to_dict()
+    try:
+        payload, status = execute_single(
+            action, task_id, data, load_tasks=load_tasks, mutate_tasks=mutate_tasks,
+            run_task=run_task_now, stop_task=stop_task_now,
+            cancel_retry=cancel_task_retry, reload_scheduler=reload_scheduler,
+        )
+    except Exception as exc:
+        payload, status = {"ok": False, "msg": str(exc)}, 500
+    if status == 200:
+        return redirect(url_for("tasks.log_view", task_id=task_id, back=back_url) if action == "run" else back_url)
+    retry_allowed = bool(payload.get("retry_ids") or payload.get("unknown_ids"))
+    request_id = uuid.uuid4().hex if retry_allowed else data.get("request_id", "")
+    recovery = ""
+    if status != 404 and isinstance(request_id, str) and len(request_id) == 32:
+        label = ("重试运行" if action == "run" else "重试停止") if retry_allowed else "查询本次操作结果"
+        recovery = f'''<form class="inline-form" method="post" action="/{action}/{h(task_id)}?back={h(quote(back_url, safe=''))}">
+<input type="hidden" name="request_id" value="{h(request_id)}">
+<button class="btn btn-primary" type="submit" onclick="return confirm('确认任务状态后继续？')">{label}</button></form>'''
+    recovery_url = payload.get("recovery_url", "")
+    if recovery_url.startswith("/scripts/rename-recovery/"):
+        recovery += f'<a class="btn btn-orange" href="{h(recovery_url)}">恢复重命名</a>'
+    title = "运行失败" if action == "run" else "停止失败"
+    body = message_card(payload["msg"], "error", strong=True, title=title) + f'''
+<section class="section" role="alert" data-task-execution-result="{h(json.dumps(payload, ensure_ascii=False))}">
+<p>{h(payload['msg'])}</p>{recovery}
+<a class="btn btn-gray" href="/log/{h(task_id)}">查看任务日志</a>
+<a class="btn btn-gray" href="/history">查看任务历史</a>
+<a class="btn btn-gray" href="{h(back_url)}">返回任务列表</a></section>'''
+    return layout("任务执行恢复", "tasks", body), status
+
+
 @bp.route("/run/<task_id>", methods=["POST"])
 def run_task_route(task_id):
+    if "request_id" in request.form:
+        return _task_execution_response("run", task_id)
     ok, msg = run_task_now(task_id, source="manual")
     back_url = get_back_url("/tasks")
 
@@ -181,6 +219,8 @@ def run_task_route(task_id):
 
 @bp.route("/stop/<task_id>", methods=["POST"])
 def stop_task_route(task_id):
+    if "request_id" in request.form:
+        return _task_execution_response("stop", task_id)
     if not any(task.get("id") == task_id for task in load_tasks()):
         abort(404)
 

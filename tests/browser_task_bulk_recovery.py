@@ -26,13 +26,15 @@ def main():
 
         save_config({"notify_items": [], "notify_default_ids": []})
         app = create_app()
-        fault = {"reload": False, "save": False, "unknown": False}
+        fault = {"reload": False, "save": False, "unknown": False, "start_fail": False}
         reload_scheduler = api.reload_scheduler
         mutate_tasks = api.mutate_tasks
         run_task = api.run_task_now
         stop_task = api.stop_task_now
 
         def run(*args, **kwargs):
+            if fault["start_fail"]:
+                return False, "任务启动失败：fixture thread rejected"
             result = run_task(*args, **kwargs)
             if fault["unknown"] and args[0] == "a":
                 raise RuntimeError("fixture after submission")
@@ -60,6 +62,8 @@ def main():
         api.stop_task_now = stop
         actions.reload_scheduler = reload
         actions.mutate_tasks = mutate
+        actions.run_task_now = run
+        actions.stop_task_now = stop
         dashboard.reload_scheduler = reload
 
         @app.route("/api/fixture/bulk", methods=["POST", "GET"])
@@ -67,11 +71,12 @@ def main():
             if request.method == "GET":
                 return jsonify(tasks=models.load_tasks(), history=models.load_task_history())
             data = request.get_json()
-            fault.update(reload=bool(data.get("reload")), save=bool(data.get("save")), unknown=bool(data.get("unknown")))
+            fault.update(reload=bool(data.get("reload")), save=bool(data.get("save")), unknown=bool(data.get("unknown")), start_fail=bool(data.get("start_fail")))
             if data.get("reset"):
                 models.save_tasks([{
-                    "id": task_id, "name": "Bulk " + task_id, "command": "echo bulk" if task_id == "a" else "task missing.py",
+                    "id": task_id, "name": "Bulk " + task_id, "command": ("sleep 30" if data.get("long") else "echo bulk") if task_id == "a" else "task missing.py",
                     "enabled": True, "collection_id": "browser-collection" if data.get("collection") else "", "cron": "0 8 * * *",
+                    "config_path": "browser-config.yml" if data.get("config") else "",
                 } for task_id in ("a", "b")])
                 scheduler.reload_scheduler()
             if data.get("fix"):
@@ -92,6 +97,9 @@ def main():
                 raise SystemExit(result.returncode)
         finally:
             server.shutdown()
+            from fls_manager.task_runner import running_task_snapshot, stop_task_now
+            for task_id in running_task_snapshot():
+                stop_task_now(task_id)
             scheduler.scheduler.shutdown(wait=False)
 
 
@@ -103,6 +111,7 @@ const {chromium} = require(process.env.FLS_PLAYWRIGHT_CORE);
  try {
   for(const viewport of [{width:390,height:844},{width:1280,height:800}]){
    for(const path of ['/tasks','/collections']){
+    if(process.env.FLS_BULK_CASES && !process.env.FLS_BULK_CASES.split(',').includes(path.slice(1)+':'+viewport.width)) continue;
     const context = await browser.newContext({viewport});
     const page = await context.newPage();
     page.on('dialog', dialog => dialog.accept());
@@ -136,6 +145,192 @@ const {chromium} = require(process.env.FLS_PLAYWRIGHT_CORE);
     await page.goto(base+'/login');
     await login();
     await page.goto(base+path);
+    if(process.env.FLS_EXECUTION_FORM_ERRORS_ONLY){
+     await fixture({reset:true,config:true});
+     await page.goto(base+'/task/config/a');
+     const before=(await state()).history.length;
+     const match=url=>url.pathname==='/run/a';
+     await page.route(match,route=>route.fulfill({status:502,contentType:'text/plain',body:'fixture form unavailable'}));
+     let response=page.waitForResponse(r=>r.request().method()==='POST' && new URL(r.url()).pathname==='/run/a');
+     await page.locator('button[formaction^="/run/a"]').click();
+     assert.equal((await response).status(),502);
+     const notice=()=>page.locator('[data-bulk-recovery="task:a"]');
+     await notice().getByRole('button',{name:'查询本次操作结果',exact:true}).waitFor();
+     assert.equal((await state()).history.length,before);
+     const pending=await page.evaluate(()=>flsBulkState('task:a').pending.request_id);
+     await page.unroute(match);
+     await page.reload();
+     await page.locator('button[formaction^="/run/a"]').click();
+     await notice().getByText('上次请求尚未确认，请先查询本次操作结果',{exact:true}).waitFor();
+     assert.equal((await state()).history.length,before);
+     assert.equal(await page.evaluate(()=>flsBulkState('task:a').pending.request_id),pending);
+     await page.goto(base+'/logout');
+     await login();
+     await page.goto(base+'/task/config/a');
+     await notice().getByRole('button',{name:'查询本次操作结果',exact:true}).click();
+     await settled();
+     for(let i=0;i<100 && (await state()).history[0]?.status!=='success';i++) await page.waitForTimeout(30);
+     assert.equal((await state()).history.length,before+1);
+     assert.equal((await state()).history[0].status,'success');
+     assert.deepEqual(errors,[]);
+     console.log(JSON.stringify({path,viewport,executionFormErrors:true,status:'passed'}));
+     await context.close();
+     continue;
+    }
+    if(process.env.FLS_EXECUTION_EXTRA_ONLY){
+     await fixture({reset:true,config:true});
+     await page.goto(base+'/task/config/a');
+     const original=await page.locator('textarea[name="content"]').inputValue();
+     await page.locator('textarea[name="content"]').fill('unsaved draft');
+     let response=page.waitForResponse(r=>r.request().method()==='POST' && new URL(r.url()).pathname==='/run/a');
+     await page.locator('button[formaction^="/run/a"]').click();
+     const submitted=await response;
+     assert.equal(submitted.status(),302);
+     assert.ok(submitted.request().postData().includes('name="request_id"'));
+     await page.waitForURL(url=>url.pathname==='/log/a');
+     await page.goto(base+'/task/config/a');
+     assert.equal(await page.locator('textarea[name="content"]').inputValue(),original);
+     let dropped=false;
+     const routeFor=url=>url.pathname==='/run/a';
+     await page.route(routeFor,async route=>{
+      if(!dropped){dropped=true;await route.fetch();return route.abort();}
+      return route.continue();
+     });
+     await page.locator('button[formaction^="/run/a"]').click();
+     const notice=()=>page.locator('[data-bulk-recovery="task:a"]');
+     await notice().getByRole('button',{name:'查询本次操作结果',exact:true}).waitFor();
+     const before=(await state()).history.length;
+     await page.reload();
+     await notice().getByRole('button',{name:'查询本次操作结果',exact:true}).click();
+     await settled();
+     assert.equal((await state()).history.length,before);
+     assert.equal(await page.locator('textarea[name="content"]').inputValue(),original);
+     await page.unroute(routeFor);
+     await page.goto(base+'/tasks');
+     const single=()=>page.locator('[onclick*="taskAjaxAction(\'run\',\'a\'"]:visible').first();
+     let rejected=false;
+     await page.route('**/api/task/action/run/a',route=>{
+      if(!rejected){rejected=true;return route.fulfill({status:502,contentType:'text/plain',body:'fixture unavailable'});}
+      return route.continue();
+     });
+     await single().click();
+     await notice().getByRole('button',{name:'查询本次操作结果',exact:true}).waitFor();
+     await settled();
+     assert.equal((await state()).history.length,before);
+     await notice().getByRole('button',{name:'查询本次操作结果',exact:true}).click();
+     await settled();
+     for(let i=0;i<100 && (await state()).history[0].status!=='success';i++) await page.waitForTimeout(30);
+     assert.equal((await state()).history.length,before+1);
+     await page.unroute('**/api/task/action/run/a');
+     await fixture({unknown:true});
+     await single().click();
+     await notice().getByRole('button',{name:'确认后重试本项',exact:true}).waitFor();
+     await settled();
+     for(let i=0;i<100 && (await state()).history[0].status!=='success';i++) await page.waitForTimeout(30);
+     assert.equal((await state()).history.length,before+2);
+     await fixture({});
+     await notice().getByRole('button',{name:'确认后重试本项',exact:true}).click();
+     await settled();
+     for(let i=0;i<100 && (await state()).history[0].status!=='success';i++) await page.waitForTimeout(30);
+     assert.equal((await state()).history.length,before+3);
+     assert.deepEqual(errors,[]);
+     console.log(JSON.stringify({path,viewport,executionExtra:true,status:'passed'}));
+     await context.close();
+     continue;
+    }
+    if(process.env.FLS_EXECUTION_ONLY){
+     const requestId=()=>require('node:crypto').randomBytes(16).toString('hex');
+     const history=async status=>{
+      for(let i=0;i<100;i++){
+       const current=await state();
+       if(current.history[0] && current.history[0].status===status) return current;
+       await page.waitForTimeout(30);
+      }
+      throw new Error('history did not become '+status);
+     };
+     const count=async ()=>(await state()).history.length;
+     const single=action=>page.locator('[onclick*="taskAjaxAction(\''+action+'\',\'a\'"]:visible').first();
+     const submit=action=>path==='/tasks'?single(action):page.locator('form[action^="/'+action+'/a"] button:visible').first();
+     const endpoint=action=>path==='/tasks'?'/api/task/action/'+action+'/a':'/'+action+'/a';
+     const responseFor=action=>page.waitForResponse(r=>r.request().method()==='POST' && new URL(r.url()).pathname===endpoint(action));
+     const notice=()=>page.locator('[data-bulk-recovery="task:a"]');
+     const initialCount=await count();
+     await fixture({start_fail:true});
+     let response=responseFor('run');
+     await submit('run').click();
+     assert.equal((await response).status(),500);
+     await notice().waitFor();
+     assert.equal(await count(),initialCount);
+     await fixture({});
+     if(path==='/tasks'){
+      const csrf=await page.locator('meta[name="csrf-token"]').getAttribute('content');
+      await page.locator('meta[name="csrf-token"]').evaluate(el=>el.content='invalid');
+      response=responseFor('run');
+      await notice().getByRole('button',{name:'重试未完成项',exact:true}).click();
+      assert.equal((await response).status(),400);
+      await settled();
+      assert.equal(await count(),initialCount);
+      await page.locator('meta[name="csrf-token"]').evaluate((el,token)=>el.content=token,csrf);
+      response=responseFor('run');
+      await notice().getByRole('button',{name:'查询本次操作结果',exact:true}).click();
+      assert.equal((await response).status(),200);
+      await settled();
+     }else{
+      await page.getByRole('button',{name:'重试运行',exact:true}).click();
+      await page.waitForURL(url=>url.pathname==='/log/a');
+     }
+     await history('success');
+     const before=await count();
+     if(path==='/tasks') await page.goto(base+path);
+     else await page.reload();
+     const runRoute=url=>url.pathname===endpoint('run');
+     let dropped=false;
+     await page.route(runRoute,async route=>{
+      if(!dropped){dropped=true;await route.fetch();return route.abort();}
+      return route.continue();
+     });
+     await submit('run').click();
+     await notice().getByRole('button',{name:'查询本次操作结果',exact:true}).waitFor();
+     await history('success');
+     assert.equal(await count(),before+1);
+     if(path==='/tasks') await settled();
+     await page.reload();
+     await notice().getByRole('button',{name:'查询本次操作结果',exact:true}).click();
+     await settled();
+     assert.equal(await count(),before+1);
+     assert.equal(await notice().getByRole('link',{name:'查看任务日志',exact:true}).getAttribute('href'),'/log/a');
+     await page.unroute(runRoute);
+     await fixture({reset:true,long:true,collection:path==='/collections'});
+     assert.equal((await page.request.post(base+'/api/task/action/run/a',{headers,data:{request_id:requestId()}})).status(),200);
+     await history('running');
+     await page.goto(base+path);
+     const stopRoute=url=>url.pathname===endpoint('stop');
+     dropped=false;
+     await page.route(stopRoute,async route=>{
+      if(!dropped){dropped=true;await route.fetch();return route.abort();}
+      return route.continue();
+     });
+     await submit('stop').click();
+     await notice().getByRole('button',{name:'查询本次操作结果',exact:true}).waitFor();
+     await history('stopped');
+     if(path==='/tasks') await settled();
+     assert.equal((await page.request.post(base+'/api/task/action/run/a',{headers,data:{request_id:requestId()}})).status(),200);
+     await history('running');
+     await page.reload();
+     await notice().getByRole('button',{name:'查询本次操作结果',exact:true}).click();
+     await settled();
+     assert.equal((await state()).history[0].status,'running');
+     await notice().getByRole('link',{name:'查看任务日志',exact:true}).scrollIntoViewIfNeeded();
+     if(process.env.FLS_BULK_SCREENSHOTS) await page.screenshot({path:process.env.FLS_BULK_SCREENSHOTS+'/execution-'+path.slice(1)+'-'+viewport.width+'.png'});
+     assert.equal((await page.request.post(base+'/api/task/action/stop/a',{headers,data:{request_id:requestId()}})).status(),200);
+     await history('stopped');
+     await page.unroute(stopRoute);
+     assert.deepEqual(errors,[]);
+     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+     console.log(JSON.stringify({path,viewport,execution:true,status:'passed'}));
+     await context.close();
+     continue;
+    }
     if(process.env.FLS_COPY_DELETE_ONLY){
      const single=action=>page.locator('[onclick*="taskAjaxAction(\''+action+'\',\'a\'"]:visible').first();
      const responseFor=action=>page.waitForResponse(r=>r.request().method()==='POST' && new URL(r.url()).pathname==='/api/task/action/'+action+'/a');

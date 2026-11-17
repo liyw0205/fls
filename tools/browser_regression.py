@@ -570,6 +570,8 @@ async function runActionAudit(page, audit) {
     stop.textContent = "停止任务";
     document.body.append(one, bulk, stop);
     await taskAjaxAction("run", "browser-task", one);
+    const runPending = !!flsBulkState("task:browser-task").pending;
+    sessionStorage.removeItem(flsBulkStorageKey("task:browser-task"));
     await taskAjaxAction("stop", "browser-task", stop);
     await taskBulkAction("run", bulk);
     return {
@@ -579,11 +581,15 @@ async function runActionAudit(page, audit) {
       oneBusy: one.getAttribute("aria-busy"),
       stopBusy: stop.getAttribute("aria-busy"),
       bulkBusy: bulk.getAttribute("aria-busy"),
-      feedback: Array.from(document.querySelectorAll("#flsToastBox .fls-toast")).map(item => item.textContent).join(" | ")
+      runPending,
+      feedback: Array.from(document.querySelectorAll("#tasksBlock [data-bulk-recovery]")).map(item => item.textContent).join(" | "),
+      retry: Array.from(document.querySelectorAll("#tasksBlock [data-bulk-recovery] button")).some(item => item.textContent === "查询本次操作结果")
     };
   }));
   auditPostCalls(task, "task run stop and bulk", audit);
-  auditFeedback(task, "task run stop and bulk", audit);
+  if(!task.state?.runPending || !task.state?.feedback.includes("fixture task failure") || !task.state?.feedback.includes("fixture bulk failure") || !task.state?.retry){
+    issue(audit, "action-feedback", "task run stop and bulk recovery missing");
+  }
   if (task.state && (task.state.oneDisabled || task.state.stopDisabled || task.state.bulkDisabled || task.state.oneBusy || task.state.stopBusy || task.state.bulkBusy)) {
     issue(audit, "button-state", "task action not restored");
   }
@@ -612,7 +618,7 @@ async function runActionAudit(page, audit) {
     return {
       disabled: button.disabled,
       busy: button.getAttribute("aria-busy"),
-      feedback: document.querySelector('[data-bulk-recovery]')?.textContent || "",
+      feedback: document.querySelector('[data-bulk-recovery="collection:browser-collection"]')?.textContent || "",
       retry: Array.from(document.querySelectorAll('[data-bulk-recovery] button')).some(item => item.textContent === "查询本次操作结果")
     };
   }));

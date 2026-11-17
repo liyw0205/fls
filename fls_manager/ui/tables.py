@@ -937,7 +937,7 @@ function taskToggleOptions(taskId){{
     options.single = true;
     options.ids = () => [taskId];
     options.select = () => {{}};
-    options.endpoint = data => (data.action === "copy" || data.action === "delete")
+    options.endpoint = data => (["copy", "delete", "run", "stop"].includes(data.action))
         ? "/api/task/action/" + data.action + "/" + encodeURIComponent(taskId) : "/api/task/bulk-action";
     return options;
 }}
@@ -950,14 +950,11 @@ async function taskAjaxAction(action, taskId, source){{
     if(action === "delete"){{
         if(!confirm("确定删除该任务吗？")) return;
     }}
-    if(action === "copy" || action === "delete"){{
+    if(action === "stop" && !confirm("确定停止该任务吗？")) return;
+    if(["copy", "delete", "run", "stop"].includes(action)){{
         const options = taskToggleOptions(taskId);
         await flsSubmitTaskBulk(options, action, source);
         return;
-    }}
-
-    if(action === "stop"){{
-        if(!confirm("确定停止该任务吗？")) return;
     }}
 
     if(source && !flsMarkButtonBusy(source, "处理中...")) return;

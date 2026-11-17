@@ -279,6 +279,18 @@ def api_scheduler_reload():
 @bp.route("/api/task/action/<action>/<task_id>", methods=["POST"])
 def api_task_action(action, task_id):
     try:
+        if action in ("run", "stop"):
+            data = request.get_json(silent=True) if request.is_json else request.form.to_dict()
+            if not isinstance(data, dict):
+                return jsonify(ok=False, msg="请求必须是对象"), 400
+            if "request_id" in data:
+                from ..task_bulk import execute_single
+                payload, status = execute_single(
+                    action, task_id, data, load_tasks=load_tasks, mutate_tasks=mutate_tasks,
+                    run_task=run_task_now, stop_task=stop_task_now,
+                    cancel_retry=cancel_task_retry, reload_scheduler=reload_scheduler,
+                )
+                return jsonify(payload), status
         if action == "run":
             ok, msg = run_task_now(task_id, source="manual")
             if not ok and msg.startswith("脚本重命名待恢复"):

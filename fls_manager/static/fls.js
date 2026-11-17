@@ -633,6 +633,13 @@ function flsBulkNotice(options, state, error){
     const message = document.createElement("p");
     message.textContent = error || payload.msg || flsBulkActionMessage(payload, "操作结果尚未确认");
     notice.append(message);
+    if(options.single && ["run", "stop"].includes(payload.action)){
+        const log = document.createElement("a");
+        log.className = "btn btn-gray";
+        log.href = "/log/" + encodeURIComponent(options.ids()[0]);
+        log.textContent = "查看任务日志";
+        notice.append(log);
+    }
     (payload.created_ids || []).forEach(id => {
         if(!/^[a-f0-9]{32}$/.test(id)) return;
         const link = document.createElement("a");
@@ -1775,7 +1782,7 @@ if (document.readyState === "loading") {
 
         if (!newContent || !oldContent) {
             location.href = finalUrl || location.href;
-            return;
+            return false;
         }
 
         flsCloseDisclosureModal();
@@ -1823,11 +1830,13 @@ if (document.readyState === "loading") {
 
         window.scrollTo(0, 0);
         toggleMenu(false);
+        restoreTaskExecutions();
+        return true;
     }
 
     async function replaceHtml(res, push){
         const text = await res.text();
-        await replaceHtmlText(text, res.url || location.href, push);
+        return await replaceHtmlText(text, res.url || location.href, push);
     }
 
     function restoreFormSubmission(form, submitter){
@@ -1837,7 +1846,43 @@ if (document.readyState === "loading") {
         if(button) flsRestoreButton(button);
     }
 
-    async function handleFormErrorResponse(res, fetchUrl, form, submitter){
+    function taskExecutionOptions(taskId){
+        return {
+            scope:"task:" + taskId, block:document.querySelector("#tasksBlock") ? "#tasksBlock" : ".content",
+            single:true, ids:() => [taskId], select:() => {},
+            endpoint:data => "/api/task/action/" + data.action + "/" + encodeURIComponent(taskId),
+            refresh:() => ajaxLoad(/^\/(run|stop)\//.test(location.pathname) ? "/tasks" : location.href, false, {force:true})
+        };
+    }
+
+    function restoreTaskExecutions(){
+        if(!document.querySelector(".content") || /^\/(login|logout)$/.test(location.pathname)) return;
+        try {
+            Object.keys(sessionStorage).filter(key => key.startsWith(flsBulkStorageKey("task:"))).forEach(key => {
+                const state = JSON.parse(sessionStorage.getItem(key));
+                const action = (state.pending || state.payload || {}).action;
+                if(!["run", "stop"].includes(action)) return;
+                const taskId = key.slice(flsBulkStorageKey("task:").length);
+                flsRestoreTaskBulk(taskExecutionOptions(taskId));
+            });
+        } catch(e) {}
+    }
+
+    function trackTaskExecution(url, data){
+        const match = url.pathname.match(/^\/(run|stop)\/([^/]+)$/);
+        if(!match || !data.has("request_id")) return null;
+        const taskId = decodeURIComponent(match[2]);
+        const options = taskExecutionOptions(taskId);
+        const state = flsBulkState(options.scope);
+        if(state.pending && state.pending.request_id !== data.get("request_id")){
+            flsBulkNotice(options, state, "上次请求尚未确认，请先查询本次操作结果");
+            return false;
+        }
+        flsBulkSave(options.scope, {selection:[taskId], pending:{action:match[1], task_ids:[taskId], request_id:data.get("request_id")}});
+        return options;
+    }
+
+    async function handleFormErrorResponse(res, fetchUrl, form, submitter, execution){
         const contentType = String(res.headers.get("content-type") || "").toLowerCase();
         let body = "";
 
@@ -1848,6 +1893,13 @@ if (document.readyState === "loading") {
         if(contentType.indexOf("text/html") >= 0 && body.trim()){
             try {
                 const errorDoc = new DOMParser().parseFromString(body, "text/html");
+                const result = errorDoc.querySelector("[data-task-execution-result]");
+                if(execution && result){
+                    const payload = JSON.parse(result.dataset.taskExecutionResult);
+                    if(Array.isArray(payload.results)){
+                        flsBulkSave(execution.scope, {payload:payload, selection:payload.retry_ids || []});
+                    }
+                }
                 if(errorDoc.querySelector(".content") && document.querySelector(".content")){
                     await replaceHtmlText(body, res.url || fetchUrl, false);
                     return;
@@ -1992,6 +2044,7 @@ if (document.readyState === "loading") {
 
         setLoading(true);
 
+        let execution = null;
         try {
             let fetchUrl = url.href;
 
@@ -2019,21 +2072,33 @@ if (document.readyState === "loading") {
                 }
 
                 opts.body = fd;
+                execution = trackTaskExecution(url, fd);
+                if(execution === false){
+                    restoreFormSubmission(form, submitter);
+                    setLoading(false);
+                    return;
+                }
             }
 
             const res = await fetch(fetchUrl, opts);
 
             if (!res.ok) {
-                await handleFormErrorResponse(res, fetchUrl, form, submitter);
+                await handleFormErrorResponse(res, fetchUrl, form, submitter, execution);
+                if(execution) flsRestoreTaskBulk(taskExecutionOptions(execution.ids()[0]));
                 setLoading(false);
                 return;
             }
 
-            await replaceHtml(res, true);
+            const replaced = await replaceHtml(res, true);
+            if(execution && replaced && new URL(res.url || fetchUrl).pathname !== "/login"){
+                sessionStorage.removeItem(flsBulkStorageKey(execution.scope));
+                Array.from(document.querySelectorAll("[data-bulk-recovery]")).filter(el => el.dataset.bulkRecovery === execution.scope).forEach(el => el.remove());
+            }
             setLoading(false);
         } catch(err) {
             setLoading(false);
             restoreFormSubmission(form, submitter);
+            if(execution) flsRestoreTaskBulk(execution);
             flsToast(flsActionFailure("请求失败：" + String(err), "检查网络或登录状态后重试"), "error", 6000);
         }
     }, true);
@@ -2045,9 +2110,11 @@ if (document.readyState === "loading") {
     if (document.readyState === "loading") {
         document.addEventListener("DOMContentLoaded", function(){
             flsSeedCurrentPageCache();
+            restoreTaskExecutions();
         });
     } else {
         flsSeedCurrentPageCache();
+        restoreTaskExecutions();
     }
 })();
 

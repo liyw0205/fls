@@ -284,7 +284,7 @@ def task_config_edit(task_id):
     </div>
     <br>
     <!-- Legacy action marker: formaction="/run/{h(task_id)}?back={back_param}" -->
-    <button class="btn {run_class}" type="submit" formaction="{run_action}" formmethod="post"{run_confirm}>{run_label}</button>
+    <button class="btn {run_class}" type="submit" name="request_id" value="{uuid.uuid4().hex}" formaction="{run_action}" formmethod="post"{run_confirm}>{run_label}</button>
     <a class="btn btn-orange" href="/task/edit/{h(task_id)}?back={back_param}">编辑任务</a>
     <a class="btn btn-gray" href="{h(back_url)}">返回</a>
 </section>

@@ -1,3 +1,5 @@
+import uuid
+
 from flask import request, abort, Response
 
 from . import bp
@@ -45,6 +47,7 @@ def render_task_history_rows(task_id):
             rerun_btn = (
                 f'<form class="inline-form" method="post" '
                 f'action="/run/{h(task_id)}?back=/log/{h(task_id)}">'
+                f'<input type="hidden" name="request_id" value="{uuid.uuid4().hex}">'
                 '<button class="btn btn-orange" type="submit">重新运行</button>'
                 '</form>'
             )
@@ -115,6 +118,7 @@ def log_view(task_id):
     <div class="row-actions" aria-label="任务日志操作">
         <div class="row-actions-primary">
             <form class="inline-form" method="post" action="{run_action}">
+                <input type="hidden" name="request_id" value="{uuid.uuid4().hex}">
                 <button class="btn {run_class}" type="submit"{run_confirm}>{run_label}</button>
             </form>
         </div>
