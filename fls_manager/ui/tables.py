@@ -934,8 +934,11 @@ function taskShowRecovery(payload){{
 function taskToggleOptions(taskId){{
     const options = taskBulkOptions();
     options.scope = "task:" + taskId;
+    options.single = true;
     options.ids = () => [taskId];
     options.select = () => {{}};
+    options.endpoint = data => (data.action === "copy" || data.action === "delete")
+        ? "/api/task/action/" + data.action + "/" + encodeURIComponent(taskId) : "/api/task/bulk-action";
     return options;
 }}
 
@@ -946,6 +949,11 @@ async function taskAjaxAction(action, taskId, source){{
     }}
     if(action === "delete"){{
         if(!confirm("确定删除该任务吗？")) return;
+    }}
+    if(action === "copy" || action === "delete"){{
+        const options = taskToggleOptions(taskId);
+        await flsSubmitTaskBulk(options, action, source);
+        return;
     }}
 
     if(action === "stop"){{
@@ -1042,7 +1050,13 @@ async function refreshTasksBlockPartial(keepSelection){{
 
 taskUpdateBulkState();
 flsRestoreTaskBulk(taskBulkOptions());
-taskUniqueIds().forEach(taskId => flsRestoreTaskBulk(taskToggleOptions(taskId)));
+try{{
+    Object.keys(sessionStorage).filter(key => key.startsWith(flsBulkStorageKey("task:"))).forEach(key => {{
+        const taskId = key.slice(flsBulkStorageKey("task:").length);
+        const options = taskToggleOptions(taskId);
+        flsRestoreTaskBulk(options);
+    }});
+}}catch(e){{}}
 </script>
 """
 

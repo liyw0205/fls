@@ -1,7 +1,5 @@
-import copy
 import os
 import threading
-import uuid
 
 from flask import Blueprint, Response, jsonify, request
 
@@ -74,30 +72,6 @@ def api_notify_retry(delivery_id):
     return jsonify(payload), 500
 
 
-def _copy_task(tasks, task_id):
-    for task in tasks:
-        if task.get("id") != task_id:
-            continue
-
-        now = now_str()
-        base_name = str(task.get("name") or "未命名任务").strip() or "未命名任务"
-        new_task = copy.deepcopy(task)
-
-        new_task["id"] = uuid.uuid4().hex
-        new_task["name"] = f"{base_name}-copy"
-        new_task["run_count"] = 0
-        new_task["pinned"] = False
-        new_task["created_at"] = now
-        new_task["updated_at"] = now
-        new_task.pop("last_run_at", None)
-
-        tasks.append(new_task)
-
-        return new_task
-
-    return None
-
-
 def _task_exists(task_id):
     return any(str(task.get("id") or "") == task_id for task in load_tasks())
 
@@ -122,10 +96,6 @@ def _task_action_result(ok, msg):
         return jsonify(payload), 400
 
     return jsonify(payload)
-
-
-def _delete_stop_failed(ok, msg):
-    return not ok and msg != "任务未运行"
 
 
 def _status_task_signature(tasks):
@@ -336,22 +306,15 @@ def api_task_action(action, task_id):
             )
             return jsonify(payload), status
 
-        if action == "copy":
-            result = {}
-
-            def copy_task(tasks):
-                result["task"] = _copy_task(tasks, task_id)
-                return result["task"] is not None
-
-            _tasks, changed = mutate_tasks(copy_task, reload_scheduler)
-            new_task = result.get("task")
-            if not changed or not new_task:
-                return jsonify({"ok": False, "msg": "任务不存在"}), 404
-
-            return jsonify({
-                "ok": True,
-                "msg": f"已复制为 {new_task.get('name')}",
-            })
+        if action in ("copy", "delete"):
+            from ..task_bulk import execute_single
+            data = request.get_json(silent=True) if request.is_json else request.form.to_dict()
+            payload, status = execute_single(
+                action, task_id, data, load_tasks=load_tasks, mutate_tasks=mutate_tasks,
+                run_task=run_task_now, stop_task=stop_task_now,
+                cancel_retry=cancel_task_retry, reload_scheduler=reload_scheduler,
+            )
+            return jsonify(payload), status
 
         if action == "pin":
             result = {}
@@ -384,34 +347,6 @@ def api_task_action(action, task_id):
                 "msg": "已置顶" if result["pinned"] else "已取消置顶",
                 "pinned": bool(result["pinned"]),
             })
-
-        if action == "delete":
-            tasks = load_tasks()
-            found = any(t.get("id") == task_id for t in tasks)
-
-            if not found:
-                return jsonify({"ok": False, "msg": "任务不存在"}), 404
-
-            ok, msg = stop_task_now(task_id)
-
-            if _delete_stop_failed(ok, msg):
-                return jsonify({
-                    "ok": False,
-                    "msg": f"删除失败：{msg}",
-                }), 409
-
-            def remove_task(current_tasks):
-                remaining = [task for task in current_tasks if task.get("id") != task_id]
-                if len(remaining) == len(current_tasks):
-                    return False
-                current_tasks[:] = remaining
-                return True
-
-            _tasks, changed = mutate_tasks(remove_task, reload_scheduler)
-            if not changed:
-                return jsonify({"ok": False, "msg": "任务不存在"}), 404
-
-            return jsonify({"ok": True, "msg": "已删除"})
 
         return jsonify({"ok": False, "msg": "未知操作"}), 400
 

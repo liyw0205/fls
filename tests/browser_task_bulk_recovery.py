@@ -30,6 +30,7 @@ def main():
         reload_scheduler = api.reload_scheduler
         mutate_tasks = api.mutate_tasks
         run_task = api.run_task_now
+        stop_task = api.stop_task_now
 
         def run(*args, **kwargs):
             result = run_task(*args, **kwargs)
@@ -42,6 +43,12 @@ def main():
                 raise RuntimeError("fixture reload rejected")
             return reload_scheduler()
 
+        def stop(*args, **kwargs):
+            result = stop_task(*args, **kwargs)
+            if fault["unknown"] and args[0] == "a":
+                raise RuntimeError("fixture after stop")
+            return result
+
         def mutate(*args, **kwargs):
             if fault["save"]:
                 raise OSError("fixture save rejected")
@@ -50,6 +57,7 @@ def main():
         api.reload_scheduler = reload
         api.mutate_tasks = mutate
         api.run_task_now = run
+        api.stop_task_now = stop
         actions.reload_scheduler = reload
         actions.mutate_tasks = mutate
         dashboard.reload_scheduler = reload
@@ -128,6 +136,112 @@ const {chromium} = require(process.env.FLS_PLAYWRIGHT_CORE);
     await page.goto(base+'/login');
     await login();
     await page.goto(base+path);
+    if(process.env.FLS_COPY_DELETE_ONLY){
+     const single=action=>page.locator('[onclick*="taskAjaxAction(\''+action+'\',\'a\'"]:visible').first();
+     const responseFor=action=>page.waitForResponse(r=>r.request().method()==='POST' && new URL(r.url()).pathname==='/api/task/action/'+action+'/a');
+     if(path==='/tasks'){
+      const copy=async status=>{
+       await page.locator('[data-task-id="a"] .task-action-menu-toggle:visible').first().click();
+       const response=responseFor('copy');
+       await single('copy').click();
+       const result=await response;
+       assert.equal(result.status(),status);
+       await settled();
+       return result.json();
+      };
+      await fixture({save:true});
+      await copy(500);
+      assert.equal((await state()).tasks.length,2);
+      await fixture({reload:true});
+      let response=responseFor('copy');
+      await page.getByRole('button',{name:'重试未完成项',exact:true}).click();
+      const saved=await (await response).json();
+      await settled();
+      assert.equal(saved.saved,true);
+      assert.equal((await state()).tasks.length,3);
+      assert.equal(await page.getByRole('link',{name:'查看已保存副本',exact:true}).getAttribute('href'),'/task/edit/'+saved.created_ids[0]+'?back=%2Ftasks');
+      await page.getByRole('link',{name:'查看已保存副本',exact:true}).click();
+      await page.locator('input[name="name"]').waitFor();
+      assert.equal(await page.locator('input[name="name"]').inputValue(),'Bulk a-copy');
+      await page.goto(base+path);
+      await page.getByRole('button',{name:'重新加载调度器',exact:true}).click();
+      await page.getByText(/调度器重载失败/).waitFor();
+      await fixture({});
+      await page.getByRole('button',{name:'重新加载调度器',exact:true}).click();
+      await page.getByText('已重新加载调度器',{exact:true}).waitFor();
+      assert.equal((await state()).tasks.length,3);
+      let dropped=false;
+      await page.route('**/api/task/action/copy/a',async route=>{
+       if(!dropped){dropped=true;await route.fetch();return route.abort();}
+       return route.continue();
+      });
+      await page.locator('[data-task-id="a"] .task-action-menu-toggle:visible').first().click();
+      await single('copy').click();
+      await page.getByRole('button',{name:'查询本次操作结果',exact:true}).waitFor();
+      await settled();
+      await page.reload();
+      await page.getByRole('button',{name:'查询本次操作结果',exact:true}).click();
+      await settled();
+      assert.equal((await state()).tasks.length,4);
+      await page.unroute('**/api/task/action/copy/a');
+      await fixture({reload:true});
+      dropped=false;
+      await page.route('**/api/task/action/delete/a',async route=>{
+       if(!dropped){dropped=true;await route.fetch();return route.abort();}
+       return route.continue();
+      });
+      await single('delete').click();
+      await page.getByRole('button',{name:'查询本次操作结果',exact:true}).waitFor();
+      await settled();
+      await page.reload();
+      assert.equal(await page.locator('.task-select-checkbox[data-task-id="a"]').count(),0);
+      await page.getByRole('button',{name:'查询本次操作结果',exact:true}).click();
+      await settled();
+      await page.getByRole('button',{name:'重新加载调度器',exact:true}).waitFor();
+      assert.equal((await state()).tasks.find(t=>t.id==='a'),undefined);
+      if(process.env.FLS_BULK_SCREENSHOTS) await page.screenshot({path:process.env.FLS_BULK_SCREENSHOTS+'/delete-recovery-'+viewport.width+'.png',fullPage:true});
+      await fixture({});
+      await page.getByRole('button',{name:'重新加载调度器',exact:true}).click();
+      await page.getByText('已重新加载调度器',{exact:true}).waitFor();
+      await page.unroute('**/api/task/action/delete/a');
+      await fixture({reset:true,unknown:true});
+      await page.goto(base+path);
+      await single('delete').click();
+      const unknownRetry=page.getByRole('button',{name:'确认后重试本项',exact:true});
+      await unknownRetry.waitFor();
+      await settled();
+      assert.ok((await state()).tasks.find(t=>t.id==='a'));
+      await fixture({});
+      response=responseFor('delete');
+      await unknownRetry.click();
+      assert.equal((await response).status(),200);
+      await settled();
+      assert.equal((await state()).tasks.find(t=>t.id==='a'),undefined);
+     }else{
+      const form=page.locator('form[action^="/task/delete/a"]');
+      await fixture({save:true});
+      let response=page.waitForResponse(r=>r.request().method()==='POST' && new URL(r.url()).pathname==='/task/delete/a');
+      await form.getByRole('button',{name:'删除任务',exact:true}).click();
+      assert.equal((await response).status(),500);
+      await page.locator('[data-task-delete-recovery]').waitFor();
+      assert.ok((await state()).tasks.find(t=>t.id==='a'));
+      await fixture({reload:true});
+      response=page.waitForResponse(r=>r.request().method()==='POST' && new URL(r.url()).pathname==='/task/delete/a');
+      await page.getByRole('button',{name:'重试删除',exact:true}).click();
+      assert.equal((await response).status(),503);
+      await page.getByRole('button',{name:'重新加载调度器',exact:true}).waitFor();
+      assert.equal((await state()).tasks.find(t=>t.id==='a'),undefined);
+      await fixture({});
+      await page.getByRole('button',{name:'重新加载调度器',exact:true}).click();
+      await page.waitForURL(url=>url.pathname==='/collections');
+      assert.equal(await page.locator('form[action^="/task/delete/a"]').count(),0);
+     }
+     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+     assert.deepEqual(errors,[]);
+     console.log(JSON.stringify({path,viewport,copyDelete:true,status:'passed'}));
+     await context.close();
+     continue;
+    }
     if(process.env.FLS_TOGGLE_ONLY){
      const toggle=()=>path==='/tasks'
       ? page.locator('[onclick*="taskAjaxAction(\'toggle\',\'a\'"]:visible').first()

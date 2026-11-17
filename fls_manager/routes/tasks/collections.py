@@ -189,6 +189,10 @@ def _task_card(task, back_url, collection_id=""):
                 <form class="inline-form" method="post" action="/task/collection/clear/{h(task_id)}?back={_back_param(back_url)}">
                     <button class="btn btn-gray" type="submit">移出合集</button>
                 </form>
+                <form class="inline-form" method="post" action="/task/delete/{h(task_id)}?back={_back_param(back_url)}">
+                    <input type="hidden" name="request_id" value="{uuid.uuid4().hex}">
+                    <button class="btn btn-red" type="submit" onclick="return confirm('确定删除该任务吗？')">删除任务</button>
+                </form>
             </div>
         </div>
     </div>

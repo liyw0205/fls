@@ -633,6 +633,14 @@ function flsBulkNotice(options, state, error){
     const message = document.createElement("p");
     message.textContent = error || payload.msg || flsBulkActionMessage(payload, "操作结果尚未确认");
     notice.append(message);
+    (payload.created_ids || []).forEach(id => {
+        if(!/^[a-f0-9]{32}$/.test(id)) return;
+        const link = document.createElement("a");
+        link.className = "btn btn-blue";
+        link.href = "/task/edit/" + id + "?back=" + encodeURIComponent(location.pathname + location.search);
+        link.textContent = "查看已保存副本";
+        notice.append(link);
+    });
     function button(label, callback){
         const control = document.createElement("button");
         control.type = "button";
@@ -692,11 +700,12 @@ function flsBulkNotice(options, state, error){
         link.className = "btn btn-gray";
         link.textContent = "查看任务历史";
         notice.append(link);
-        button("重新选择结果未知项", () => {
+        button(options.single ? "确认后重试本项" : "重新选择结果未知项", control => {
             if(!confirm("结果未知的任务可能已执行。确认查看任务历史后重新选择？")) return;
             state.selection = Array.from(new Set([...(state.selection || []), ...payload.unknown_ids]));
             flsBulkSave(options.scope, state);
             options.select(state.selection);
+            if(options.single) return flsSubmitTaskBulk(options, payload.action, control);
         });
     }
     button("刷新列表", async control => {
@@ -747,7 +756,7 @@ async function flsSubmitTaskBulk(options, action, source, replay){
     try {
         let payload;
         try {
-            const res = await fetch("/api/task/bulk-action", {
+            const res = await fetch(options.endpoint ? options.endpoint(state.pending) : "/api/task/bulk-action", {
                 method:"POST", credentials:"same-origin",
                 headers:{"Content-Type":"application/json", "X-Requested-With":"XMLHttpRequest", "X-CSRF-Token":flsGetCsrfToken()},
                 body:JSON.stringify(state.pending)

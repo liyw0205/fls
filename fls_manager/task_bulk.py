@@ -2,6 +2,7 @@ import copy
 import json
 import re
 import threading
+import uuid
 
 from .models import TaskSchedulerReloadError
 from .paths import DATA_DIR
@@ -10,7 +11,7 @@ from .utils import now_str
 
 
 BULK_LOCK = threading.RLock()
-BULK_ACTIONS = ("enable", "disable", "run", "stop", "delete", "clear_collection")
+BULK_ACTIONS = ("enable", "disable", "run", "stop", "delete", "clear_collection", "copy")
 
 
 class TaskBulkSelectionChanged(ValueError):
@@ -31,6 +32,8 @@ def parse_bulk_request(data):
     task_ids = list(dict.fromkeys(value.strip() for value in values if value.strip()))
     if not task_ids:
         raise ValueError("请选择任务")
+    if action.strip() == "copy" and len(task_ids) != 1:
+        raise ValueError("一次只能复制一个任务")
     request_id = data.get("request_id", "")
     if not isinstance(request_id, str) or (request_id and not re.fullmatch(r"[a-f0-9]{32}", request_id)):
         raise ValueError("提交标识无效，请刷新页面后重试")
@@ -51,6 +54,26 @@ def _with_results(payload, rows):
 
 def _record_path(request_id):
     return DATA_DIR / "task_bulk_requests" / (request_id + ".json")
+
+
+def execute_single(action, task_id, data, **operations):
+    if not isinstance(data, dict):
+        return {"ok": False, "msg": "请求必须是对象"}, 400
+    try:
+        action, ids, request_id = parse_bulk_request({
+            "action": action, "task_ids": [task_id], "request_id": data.get("request_id", ""),
+        })
+    except ValueError as exc:
+        return {"ok": False, "msg": str(exc)}, 400
+    payload, status = execute_bulk(action, ids, request_id, **operations)
+    if status == 404:
+        payload["msg"] = "任务不存在"
+    elif action == "delete":
+        if status == 200:
+            payload["msg"] = "已删除"
+        elif status == 409 and payload.get("results"):
+            payload["msg"] = "删除失败：" + payload["results"][0]["msg"]
+    return payload, status
 
 
 def execute_toggle(task_id, data, **operations):
@@ -93,6 +116,24 @@ def _read_record(request_id):
         return None
     if not isinstance(record, dict) or record.get("request_id") != request_id or not isinstance(record.get("results"), list):
         raise RuntimeError("批量操作记录损坏，未重复执行，请修复记录后重试")
+    ids = record.get("task_ids")
+    rows = record["results"]
+    if (not isinstance(ids, list) or not ids or any(not isinstance(item, str) for item in ids)
+            or len(set(ids)) != len(ids) or len(rows) != len(ids)
+            or any(not isinstance(row, dict) or row.get("task_id") != task_id
+                   or row.get("status") not in ("not_attempted", "unknown", "succeeded", "skipped", "failed")
+                   or not isinstance(row.get("msg"), str) for task_id, row in zip(ids, rows))):
+        raise RuntimeError("批量操作记录损坏，未重复执行，请修复记录后重试")
+    if record.get("action") == "copy":
+        copy_ids = record.get("copy_ids")
+        if (not isinstance(copy_ids, dict) or set(copy_ids) != set(ids)
+                or any(not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{32}", value)
+                       for value in copy_ids.values())):
+            raise RuntimeError("副本标识记录损坏，未重复复制，请修复记录后重试")
+    if "payload" in record and (not isinstance(record["payload"], dict)
+                               or type(record.get("http_status")) is not int
+                               or not 200 <= record["http_status"] <= 599):
+        raise RuntimeError("批量操作结果记录损坏，未重复执行，请修复记录后重试")
     return record
 
 
@@ -106,11 +147,24 @@ def execute_bulk(action, task_ids, request_id, *, load_tasks, mutate_tasks, run_
                 return {"ok": False, "msg": "提交标识已用于其他选择，未执行操作"}, 409
             if "payload" in record:
                 return record["payload"], record["http_status"]
+            created_ids = []
+            if action in ("copy", "delete"):
+                actual = {task["id"] for task in load_tasks()}
+                for row in record["results"]:
+                    if action == "copy" and record.get("copy_ids", {}).get(row["task_id"]) in actual:
+                        created_ids.append(record["copy_ids"][row["task_id"]])
+                        row.update(status="succeeded", msg="副本已保存，请重新加载调度器")
+                    elif action == "delete" and row["task_id"] not in actual:
+                        row.update(status="succeeded", msg="任务已删除，请重新加载调度器")
             payload = _with_results({
                 "ok": False, "action": action, "count": len(task_ids), "request_id": request_id,
                 "msg": "上次请求中断；已完成项不会重复执行，结果未知项请先查看任务历史。",
             }, record["results"])
-            if action in ("enable", "disable", "delete") and payload["unknown_ids"]:
+            if action in ("copy", "delete"):
+                payload["saved"] = bool(payload["completed_ids"]) or None
+                payload["created_ids"] = created_ids
+                payload["msg"] = "上次请求中断，已核对任务文件；未重复复制或删除。已完成项只需重载调度器，未知项请确认状态后重试。"
+            if action in ("enable", "disable", "delete", "copy") and (payload["unknown_ids"] or payload["completed_ids"]):
                 payload["reload_required"] = True
             return payload, 409
 
@@ -124,6 +178,8 @@ def execute_bulk(action, task_ids, request_id, *, load_tasks, mutate_tasks, run_
         rows = [_result(task_id, "not_attempted", "尚未执行") for task_id in task_ids]
         record = {"request_id": request_id, "action": action, "task_ids": task_ids,
                   "results": rows, "created_at": now_str()}
+        if action == "copy":
+            record["copy_ids"] = {task_id: uuid.uuid4().hex for task_id in task_ids}
 
         def checkpoint():
             if request_id:
@@ -142,6 +198,9 @@ def execute_bulk(action, task_ids, request_id, *, load_tasks, mutate_tasks, run_
                 payload.setdefault("skipped_count", sum(row["status"] == "skipped" for row in rows))
             if action == "delete":
                 payload["stopped_ids"] = stopped_ids
+            if action == "copy":
+                payload["created_ids"] = [record["copy_ids"][row["task_id"]] for row in rows if row["status"] == "succeeded"]
+                payload["copied_count"] = len(payload["created_ids"])
             if request_id:
                 payload["request_id"] = request_id
                 record.update(payload=payload, http_status=status)
@@ -183,7 +242,7 @@ def execute_bulk(action, task_ids, request_id, *, load_tasks, mutate_tasks, run_
                             count += 1
                     checkpoint()
 
-            if action in ("enable", "disable", "clear_collection", "delete"):
+            if action in ("enable", "disable", "clear_collection", "delete", "copy"):
                 selected = set(stopped_ids if action == "delete" else task_ids)
                 selected_rows = [row for row in rows if row["task_id"] in selected]
                 state = {"saved": False, "changed": 0}
@@ -193,8 +252,28 @@ def execute_bulk(action, task_ids, request_id, *, load_tasks, mutate_tasks, run_
                     if not selected.issubset(existing):
                         raise TaskBulkSelectionChanged("任务选择已变化，未保存，请刷新后重试")
                     if action == "delete":
+                        from .task_runner import is_running
+                        if any(is_running(task_id) for task_id in selected):
+                            raise TaskBulkSelectionChanged("任务在删除前重新启动，未删除，请停止后重试")
                         tasks[:] = [task for task in tasks if task["id"] not in selected]
                         state["changed"] = len(selected)
+                    elif action == "copy":
+                        from .script_rename import pending_script_rename
+                        source = next(task for task in tasks if task["id"] in selected)
+                        if record["copy_ids"][source["id"]] in existing:
+                            raise TaskBulkSelectionChanged("副本 ID 已存在，未复制任务")
+                        pending = pending_script_rename(task_id=source["id"], task=source)
+                        if pending:
+                            payload["recovery_url"] = f"/scripts/rename-recovery/{pending['id']}"
+                            raise TaskBulkSelectionChanged("脚本重命名待恢复，未复制任务")
+                        new_task = copy.deepcopy(source)
+                        base_name = str(source.get("name") or "未命名任务").strip() or "未命名任务"
+                        new_task.update(id=record["copy_ids"][source["id"]],
+                                        name=base_name + "-copy",
+                                        run_count=0, pinned=False, created_at=now_str(), updated_at=now_str())
+                        new_task.pop("last_run_at", None)
+                        tasks.append(new_task)
+                        state.update(changed=1, copy_name=new_task["name"])
                     else:
                         for task in tasks:
                             if task["id"] not in selected:
@@ -221,10 +300,11 @@ def execute_bulk(action, task_ids, request_id, *, load_tasks, mutate_tasks, run_
                         mutate_tasks(update, reload_scheduler if action != "clear_collection" else None, after_write)
                     except Exception as exc:
                         # Atomic publication may succeed before a subsequent confirmation fails.
-                        if not state["saved"]:
+                        if not state["saved"] and not isinstance(exc, TaskBulkSelectionChanged):
                             try:
                                 actual = {task["id"]: task for task in load_tasks()}
                                 state["saved"] = all(
+                                    record["copy_ids"][task_id] in actual if action == "copy" else
                                     task_id not in actual if action == "delete" else
                                     task_id in actual and actual[task_id].get(
                                         "collection_id" if action == "clear_collection" else "enabled"
@@ -258,7 +338,9 @@ def execute_bulk(action, task_ids, request_id, *, load_tasks, mutate_tasks, run_
             if action == "delete":
                 payload["stopped_ids"] = stopped_ids
 
-            if action in ("enable", "disable", "clear_collection"):
+            if action == "copy":
+                parts = [f"已复制为 {state.get('copy_name', '')}" if count else "任务未复制"]
+            elif action in ("enable", "disable", "clear_collection"):
                 verb = {"enable": "启用", "disable": "禁用", "clear_collection": "取出"}[action]
                 payload.update(updated_count=count)
                 parts = [f"已{verb} {count} 个任务"]

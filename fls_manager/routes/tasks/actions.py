@@ -15,36 +15,35 @@ from ...ui.layout import layout
 
 @bp.route("/task/delete/<task_id>", methods=["POST"])
 def task_delete(task_id):
-    tasks = load_tasks()
-    found = any(t.get("id") == task_id for t in tasks)
-
-    if not found:
-        abort(404)
-
-    ok, msg = stop_task_now(task_id)
-
-    if not ok and msg != "任务未运行":
-        back_url = get_back_url("/tasks")
-        body = f"""
-{message_card(f"删除失败：{msg}", "error", strong=True, title="删除失败")}
-<div class="card">
-    <a class="btn btn-gray" href="{h(back_url)}">返回</a>
-</div>
-"""
-        return layout("删除任务", "tasks", body), 409
-
-    def remove_task(current_tasks):
-        remaining = [task for task in current_tasks if task.get("id") != task_id]
-        if len(remaining) == len(current_tasks):
-            return False
-        current_tasks[:] = remaining
-        return True
-
-    _tasks, changed = mutate_tasks(remove_task, reload_scheduler)
-    if not changed:
-        abort(404)
-
-    return redirect(get_back_url("/tasks"))
+    from ...task_bulk import execute_single
+    back_url = get_back_url("/tasks")
+    data = request.form.to_dict()
+    data.setdefault("request_id", uuid.uuid4().hex)
+    try:
+        payload, status = execute_single(
+            "delete", task_id, data, load_tasks=load_tasks, mutate_tasks=mutate_tasks,
+            run_task=run_task_now, stop_task=stop_task_now,
+            cancel_retry=cancel_task_retry, reload_scheduler=reload_scheduler,
+        )
+    except Exception as exc:
+        payload, status = {"msg": str(exc)}, 500
+    if status == 200:
+        return redirect(back_url)
+    recovery = ""
+    if payload.get("reload_required"):
+        recovery = f'''<form method="post" action="/scheduler/reload?back={h(quote(back_url, safe=''))}">
+<button class="btn btn-primary" type="submit">重新加载调度器</button></form>'''
+    if status != 404 and (not payload.get("reload_required") or payload.get("retry_ids") or payload.get("unknown_ids")):
+        retry_allowed = payload.get("retry_ids") or payload.get("unknown_ids")
+        request_id = uuid.uuid4().hex if retry_allowed else data["request_id"]
+        if isinstance(request_id, str) and len(request_id) == 32:
+            recovery += f'''<form method="post" action="/task/delete/{h(task_id)}?back={h(quote(back_url, safe=''))}">
+<input type="hidden" name="request_id" value="{h(request_id)}">
+<button class="btn btn-primary" type="submit" onclick="return confirm('确认任务状态后继续删除？')">{'重试删除' if retry_allowed else '查询本次操作结果'}</button></form>'''
+    body = message_card(payload["msg"], "error", strong=True, title="删除失败") + f'''
+<section class="section" role="alert" data-task-delete-recovery><p>{h(payload['msg'])}</p>
+{recovery}<a class="btn btn-gray" href="{h(back_url)}">返回任务列表</a></section>'''
+    return layout("删除任务", "tasks", body), status
 
 
 @bp.route("/task/toggle/<task_id>", methods=["POST"])
