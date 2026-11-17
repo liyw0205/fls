@@ -87,6 +87,8 @@ def execute_single(action, task_id, data, **operations):
             else:
                 if pending:
                     payload["recovery_url"] = f"/scripts/rename-recovery/{pending['id']}"
+        if action == "run" and "所选代理" in row["msg"]:
+            payload["recovery_url"] = "/proxy"
     if status == 404:
         payload["msg"] = "任务不存在"
     elif action == "delete":

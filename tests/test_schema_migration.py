@@ -473,7 +473,6 @@ class SchemaMigrationTests(unittest.TestCase):
                         "enabled": "false",
                         "created_at": None,
                     },
-                    "bad row",
                 ],
             )
 

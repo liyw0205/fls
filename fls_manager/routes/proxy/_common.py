@@ -2,6 +2,7 @@ from .bp import bp
 import uuid
 from flask import request, redirect, url_for, abort, jsonify
 from ...models import load_proxies, save_proxies
+from ...proxy_actions import proxy_version
 from ...utils import h, now_str
 from ...ui.layout import layout
 from ...ui.components import page_header_card
@@ -39,7 +40,7 @@ def diagnostic_filters(args):
     return limit, status, proxy_id
 
 
-def proxy_form(proxy=None, mode="new"):
+def proxy_form(proxy=None, mode="new", notice="", merge=False):
     if proxy is None:
         proxy = {
             "id": "",
@@ -69,6 +70,13 @@ def proxy_form(proxy=None, mode="new"):
         )
     )
     header = page_header_card(title, help_html)
+    if notice:
+        header += f'<section class="section" role="alert"><p>{h(notice)}</p><a class="btn btn-gray" href="/proxy">查看当前代理</a></section>'
+    version_field = ''
+    if mode == "edit":
+        version = proxy.get("_version", proxy_version({k: v for k, v in proxy.items() if k != "_version"}))
+        version_field = f'<input type="hidden" name="version" value="{h(version)}">'
+    merge_confirmation = 'onclick="return confirm(\'确认已核对当前代理，保存合并后的设置？\')"' if merge else ''
 
     body = f"""
 <form method="post" id="proxyForm" action="{h(action)}">
@@ -76,6 +84,7 @@ def proxy_form(proxy=None, mode="new"):
 <section class="section fls-form-section">
     <h2 class="section-title">代理连接设置</h2>
     <input type="hidden" name="id" value="{h(proxy.get('id', ''))}">
+    {version_field}
 
     <div class="form-grid">
         <div class="form-item">
@@ -148,7 +157,7 @@ https://raw.githubusercontent.com" aria-label="自定义质量检测地址"></te
 
     <div class="row-actions" aria-label="代理设置操作">
         <div class="row-actions-primary">
-            <button class="btn btn-primary" type="submit">保存代理设置</button>
+            <button class="btn btn-primary" type="submit" {merge_confirmation}>{'确认合并后保存' if merge else '保存代理设置'}</button>
         </div>
         <div class="row-actions-secondary">
             <button class="btn btn-blue" type="button" onclick="testProxyRealtime(this)">测试代理连接</button>

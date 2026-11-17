@@ -610,7 +610,7 @@ def _start_task_worker(task_id, task_snapshot, cmd_info, process_name, log_file,
         env = os.environ.copy()
         env.update(load_global_env())
         env.update(task_snapshot.get("env", {}) or {})
-        env = apply_proxy_env(env, task_snapshot.get("proxy_id", ""))
+        apply_proxy_env(dict(env), task_snapshot.get("proxy_id", ""))
 
         env["PYTHONUNBUFFERED"] = "1"
         env["FLS_TASK_ID"] = task_id
@@ -694,10 +694,13 @@ def _start_task_worker(task_id, task_snapshot, cmd_info, process_name, log_file,
         if os.name != "nt":
             popen_kwargs["preexec_fn"] = os.setsid
 
-        proc = subprocess.Popen(
-            cmd_info["cmd"],
-            **popen_kwargs
-        )
+        with TASKS_MUTATION_LOCK:
+            if task_snapshot.get("proxy_id"):
+                popen_kwargs["env"] = apply_proxy_env(env, task_snapshot["proxy_id"])
+            proc = subprocess.Popen(
+                cmd_info["cmd"],
+                **popen_kwargs
+            )
 
         if not _update_running_attempt(
             task_id,
@@ -810,6 +813,12 @@ def _submit_task_now(task_id, source="manual", retry_attempt=0, retry_token=None
 
     if not task:
         return False, "任务不存在"
+
+    if task.get("proxy_id"):
+        try:
+            apply_proxy_env({}, task["proxy_id"])
+        except Exception as exc:
+            return False, f"任务启动失败：{exc}"
 
     if source != "retry":
         source_label = {"manual": "手动运行", "cron": "定时运行"}.get(source, "新运行请求")

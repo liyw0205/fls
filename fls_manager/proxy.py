@@ -375,13 +375,15 @@ def requests_proxy_dict(proxy_id):
 def apply_proxy_env(env, proxy_id):
     proxy = get_proxy(proxy_id)
 
+    if proxy_id and not proxy:
+        raise ValueError("所选代理不存在或已停用，请在代理管理中恢复，或在任务设置中明确更换代理")
     if not proxy or proxy.get("type") == "github":
         return env
 
     proxy_url = build_proxy_url(proxy)
 
     if not proxy_url:
-        return env
+        raise ValueError("所选代理缺少有效连接地址，请修复代理设置后重试")
 
     env["HTTP_PROXY"] = proxy_url
     env["HTTPS_PROXY"] = proxy_url
@@ -583,7 +585,7 @@ def proxy_from_form(form):
         "username": form.get("username", "").strip(),
         "password": form.get("password", "").strip(),
         "url": form.get("url", "").strip(),
-        "enabled": form.get("enabled", "1") == "1",
+        "enabled": form.get("enabled") == "1",
     }
 
 
@@ -596,10 +598,9 @@ def proxy_select_options(selected_id=""):
         if p.get("enabled", True)
     }
 
-    if selected_id not in enabled_ids:
-        selected_id = ""
-
     options = '<option value="">不使用代理</option>'
+    if selected_id and selected_id not in enabled_ids:
+        options += f'<option value="{h(selected_id)}" selected>原代理已停用或删除，请恢复或明确更换</option>'
 
     for proxy in proxies:
         if not proxy.get("enabled", True):

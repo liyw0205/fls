@@ -170,6 +170,8 @@ def _task_execution_response(action, task_id):
     recovery_url = payload.get("recovery_url", "")
     if recovery_url.startswith("/scripts/rename-recovery/"):
         recovery += f'<a class="btn btn-orange" href="{h(recovery_url)}">恢复重命名</a>'
+    elif recovery_url == "/proxy":
+        recovery += f'<a class="btn btn-orange" href="/proxy">修复所选代理</a><a class="btn btn-blue" href="/task/edit/{h(task_id)}">更换任务代理</a>'
     title = "运行失败" if action == "run" else "停止失败"
     body = message_card(payload["msg"], "error", strong=True, title=title) + f'''
 <section class="section" role="alert" data-task-execution-result="{h(json.dumps(payload, ensure_ascii=False))}">
@@ -188,6 +190,10 @@ def run_task_route(task_id):
     back_url = get_back_url("/tasks")
 
     if not ok:
+        if "所选代理" in msg:
+            body = message_card(msg, "error", strong=True, title="运行失败")
+            body += f'<section class="section"><a class="btn btn-orange" href="/proxy">修复所选代理</a><a class="btn btn-blue" href="/task/edit/{h(task_id)}">更换任务代理</a><a class="btn btn-gray" href="{h(back_url)}">返回任务列表</a></section>'
+            return layout("运行任务", "tasks", body), 500
         if msg.startswith("脚本重命名待恢复"):
             from ...script_rename import pending_script_rename
             from ...ui.components import page_header

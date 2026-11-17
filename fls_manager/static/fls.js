@@ -717,6 +717,13 @@ function flsBulkNotice(options, state, error){
         link.textContent = "恢复重命名";
         notice.append(link);
     }
+    if(payload.recovery_url === "/proxy"){
+        const link = document.createElement("a");
+        link.className = "btn btn-orange";
+        link.href = "/proxy";
+        link.textContent = "修复所选代理";
+        notice.append(link);
+    }
     if((payload.unknown_ids || []).length && payload.action !== "delete_collection"){
         const link = document.createElement("a");
         link.href = "/history";
@@ -1912,7 +1919,7 @@ if (document.readyState === "loading") {
     }
 
     function restoreCollectionSaves(){
-        Object.keys(sessionStorage).filter(key => key.startsWith(flsBulkStorageKey("collection-save:")) || key.startsWith(flsBulkStorageKey("env-save:"))).forEach(key => {
+        Object.keys(sessionStorage).filter(key => ["collection-save:", "env-save:", "proxy-save:"].some(prefix=>key.startsWith(flsBulkStorageKey(prefix)))).forEach(key => {
             const state = JSON.parse(sessionStorage.getItem(key));
             if(!state || !state.fields || !state.url) return;
             const scope = key.slice(flsBulkStorageKey("").length);
@@ -1925,7 +1932,7 @@ if (document.readyState === "loading") {
             }
             notice.replaceChildren();
             const message = document.createElement("p");
-            message.textContent = scope.startsWith("env-save:") ? "变量操作结果尚未确认，请先查询原提交。" : "合集保存结果尚未确认，请先查询原提交。";
+            message.textContent = scope.startsWith("proxy-save:") ? "代理操作结果尚未确认，请先查询原提交。" : scope.startsWith("env-save:") ? "变量操作结果尚未确认，请先查询原提交。" : "合集保存结果尚未确认，请先查询原提交。";
             const form = document.createElement("form");
             form.method = "post";
             form.action = state.url;
@@ -1971,8 +1978,8 @@ if (document.readyState === "loading") {
     }
 
     function trackTaskExecution(url, data){
-        if(/^\/env\/(new|view|import|edit\/[^/]+|delete\/[^/]+)$/.test(url.pathname) && data.has("request_id")){
-            const scope = "env-save:" + url.pathname;
+        if((/^\/env\/(new|view|import|edit\/[^/]+|delete\/[^/]+)$/.test(url.pathname) || /^\/proxy\/(toggle|delete)\/[^/]+$/.test(url.pathname)) && data.has("request_id")){
+            const scope = (url.pathname.startsWith("/proxy/") ? "proxy-save:" : "env-save:") + url.pathname;
             const fields = Object.fromEntries(data);
             delete fields.csrf_token;
             if(data.has("items")) fields.items = data.getAll("items");
@@ -2053,8 +2060,8 @@ if (document.readyState === "loading") {
             try {
                 const errorDoc = new DOMParser().parseFromString(body, "text/html");
                 if(execution && execution.kind === "collection-save"){
-                    const saved = errorDoc.querySelector("[data-collection-save-result], [data-env-result]");
-                    if(saved && JSON.parse(saved.dataset.collectionSaveResult || saved.dataset.envResult).resolved) clearCollectionSave(execution.scope);
+                    const saved = errorDoc.querySelector("[data-collection-save-result], [data-env-result], [data-proxy-result]");
+                    if(saved && JSON.parse(saved.dataset.collectionSaveResult || saved.dataset.envResult || saved.dataset.proxyResult).resolved) clearCollectionSave(execution.scope);
                 }
                 const result = errorDoc.querySelector("[data-task-execution-result]");
                 if(execution && result){
@@ -2187,7 +2194,7 @@ if (document.readyState === "loading") {
     document.addEventListener("submit", async function(e){
         const form = e.target;
 
-        if (!form || !form.closest(".content")) return;
+        if (!form || !form.closest(".content, .fls-disclosure-modal")) return;
 
         const method = (form.getAttribute("method") || "GET").toUpperCase();
         const submitter = e.submitter || null;
@@ -2245,6 +2252,7 @@ if (document.readyState === "loading") {
                 }
             }
 
+            if(form.closest(".fls-disclosure-modal")) flsCloseDisclosureModal();
             const res = await fetch(fetchUrl, opts);
 
             if (!res.ok) {

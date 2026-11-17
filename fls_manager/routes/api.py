@@ -459,3 +459,13 @@ def api_env_action():
     payload, status = mutate_global_env(data, load_global_env=load_global_env,
         save_global_env=save_global_env, load_tasks=load_tasks)
     return jsonify(payload), status
+
+
+@bp.route("/api/proxy/action", methods=["POST"])
+def api_proxy_action():
+    from ..proxy_actions import mutate_proxy
+    from ..models import load_proxies, save_proxies
+    data = request.get_json(silent=True) if request.is_json else request.form.to_dict()
+    payload, status = mutate_proxy(data, load_proxies=load_proxies,
+        save_proxies=save_proxies, load_tasks=load_tasks)
+    return jsonify(payload), status

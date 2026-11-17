@@ -1,6 +1,9 @@
 from ._common import *
 from urllib.parse import urlencode
 from ...ui.components import empty_state, empty_table_row, page_header_card, table_card
+from ...models import TASKS_MUTATION_LOCK, load_tasks
+from ...storage import storage_transaction
+from ...proxy_actions import proxy_references
 
 
 def _diagnostic_status_badge(status):
@@ -152,22 +155,28 @@ def proxy_page():
             )
             toggle_text = "停用代理" if p.get("enabled", True) else "启用代理"
             toggle_class = "btn-gray" if p.get("enabled", True) else "btn-primary"
+            operation_fields = f'<input type="hidden" name="request_id" value="{uuid.uuid4().hex}"><input type="hidden" name="version" value="{proxy_version(p)}">'
+            toggle_fields = operation_fields + f'<input type="hidden" name="enabled" value="{0 if enabled else 1}">'
+            delete_fields = f'<input type="hidden" name="request_id" value="{uuid.uuid4().hex}"><input type="hidden" name="version" value="{proxy_version(p)}">'
 
             primary_action = f'''<button class="btn btn-primary" type="button" onclick="flsProxyTest('{h(proxy_id)}', this)">测试代理连接</button>'''
             secondary_actions = f'''
         <a class="btn btn-blue" href="/proxy/edit/{h(proxy_id)}">编辑代理设置</a>
         <button class="btn btn-blue" type="button" onclick="flsProxyQuality('{h(proxy_id)}', this)">检测代理质量</button>
         <form class="inline-form" method="post" action="/proxy/toggle/{h(proxy_id)}">
+            {toggle_fields}
             <button class="btn {toggle_class}" type="submit">{toggle_text}</button>
         </form>
 '''
             danger_actions = f'''
         <form class="inline-form" method="post" action="/proxy/delete/{h(proxy_id)}">
+            {delete_fields}
             <button class="btn btn-red" type="submit" onclick="return confirm('确定删除代理吗？')">删除代理</button>
         </form>
 '''
             mobile_toggle_action = f'''
         <form class="inline-form" method="post" action="/proxy/toggle/{h(proxy_id)}">
+            {toggle_fields}
             <button class="btn {toggle_class}" type="submit">{toggle_text}</button>
         </form>
 '''
@@ -356,13 +365,14 @@ async function flsProxyQuality(proxyId, source){{
 @bp.route("/proxy/new", methods=["GET", "POST"])
 def proxy_new():
     if request.method == "POST":
-        proxies = load_proxies()
-        p = proxy_from_form(request.form)
-        p["id"] = uuid.uuid4().hex
-        p["created_at"] = now_str()
-        p["updated_at"] = now_str()
-        proxies.append(p)
-        save_proxies(proxies)
+        with TASKS_MUTATION_LOCK, storage_transaction():
+            proxies = load_proxies()
+            p = proxy_from_form(request.form)
+            p["id"] = uuid.uuid4().hex
+            p["created_at"] = now_str()
+            p["updated_at"] = now_str()
+            proxies.append(p)
+            save_proxies(proxies)
         return redirect(url_for("proxy.proxy_page"))
 
     return proxy_form(mode="new")
@@ -370,6 +380,11 @@ def proxy_new():
 
 @bp.route("/proxy/edit/<proxy_id>", methods=["GET", "POST"])
 def proxy_edit(proxy_id):
+    with TASKS_MUTATION_LOCK, storage_transaction():
+        return _proxy_edit_locked(proxy_id)
+
+
+def _proxy_edit_locked(proxy_id):
     proxies = load_proxies()
     proxy = None
 
@@ -383,6 +398,13 @@ def proxy_edit(proxy_id):
 
     if request.method == "POST":
         new_p = proxy_from_form(request.form)
+        new_p["id"] = proxy_id
+        draft = dict(proxy, **new_p, _version=request.form.get("version", ""))
+        if request.form.get("version") != proxy_version(proxy):
+            draft["_version"] = proxy_version(proxy)
+            return proxy_form(draft, mode="edit", notice="代理设置已变化，草稿未保存，请查看当前代理后核对合并。", merge=True), 409
+        if not new_p["enabled"] and proxy_references(load_tasks(), proxy_id):
+            return proxy_form(draft, mode="edit", notice="代理仍被任务引用，请先在任务设置中更换或明确取消代理。"), 409
         proxy.update(new_p)
         proxy["updated_at"] = now_str()
         save_proxies(proxies)
