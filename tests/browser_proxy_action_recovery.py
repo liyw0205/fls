@@ -373,6 +373,8 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
     assert.equal((await submit(tform())).status(),500);await tnotice(/无法确认/);assert.equal(await count(),0);
     await fixture({});assert.equal((await submit(tform())).status(),409);await tnotice(/确认后继续/);
     assert.equal((await submit(page.locator('form[action="/notify/test/n"]:has(input[name="confirm_retry"][value="1"])'))).status(),200);await tnotice(/已发送/);assert.equal(await count(),1);
+    await page.getByRole('link',{name:'查看投递记录'}).click();await page.waitForFunction(()=>location.pathname==='/notify/history');
+    const sentRow=page.locator('tr').filter({hasText:'FLS 通知测试'}).first();await sentRow.getByRole('status').filter({hasText:'成功'}).waitFor();
     // A lost completed response survives refresh and does not repeat the webhook.
     await page.goto(base+'/notify');
     await page.route('**/notify/test/n',async route=>{await route.fetch();await route.abort();},{times:1});
