@@ -88,20 +88,21 @@ class BackupAtomicPublicationTests(unittest.TestCase):
         for cleanup_denied in (False, True):
             with self.subTest(cleanup_denied=cleanup_denied), isolated_app() as (app, base):
                 backup, _ = self.seed(base)
-                unlink = Path.unlink
+                unlink = backup.os.unlink
 
                 def deny(path, *args, **kwargs):
-                    if cleanup_denied and path.suffix == ".part":
+                    if cleanup_denied and Path(path).suffix == ".part":
                         raise PermissionError("fixture partial cleanup denied")
                     return unlink(path, *args, **kwargs)
 
-                with patch.object(backup, "write_dependencies_file"), patch.object(tarfile.TarFile, "add", side_effect=OSError("fixture compression fault")), patch.object(Path, "unlink", deny), patch.object(threading.Thread, "start", autospec=True, side_effect=lambda thread: thread.run()) as start:
+                with patch.object(backup, "write_dependencies_file"), patch.object(tarfile.TarFile, "add", side_effect=OSError("fixture compression fault")), patch.object(backup.os, "unlink", side_effect=deny), patch.object(threading.Thread, "start", autospec=True, side_effect=lambda thread: thread.run()) as start:
                     self.assertEqual(self.create(app).status_code, 200)
                     job = self.job(app)
                     self.assertEqual(job["status"], "失败")
                     self.assertIn("fixture compression fault", job["error"])
                     if cleanup_denied:
                         self.assertIn("fixture partial cleanup denied", job["error"])
+                        self.assertTrue(job["staged_cleanup_pending"])
                     self.assertEqual(self.create(app).status_code, 200)
                     start.assert_called_once()
                 self.assertEqual(self.listed(app), [])
@@ -213,7 +214,7 @@ class BackupAtomicPublicationTests(unittest.TestCase):
     def test_cancel_cleanup_failure_is_visible_but_partial_cannot_be_downloaded(self):
         with isolated_app() as (app, base):
             backup, _ = self.seed(base)
-            add, unlink = tarfile.TarFile.add, Path.unlink
+            add, unlink = tarfile.TarFile.add, backup.os.unlink
 
             def cancel_after_add(archive, path, *args, **kwargs):
                 result = add(archive, path, *args, **kwargs)
@@ -221,17 +222,23 @@ class BackupAtomicPublicationTests(unittest.TestCase):
                 return result
 
             def deny(path, *args, **kwargs):
-                if path.suffix == ".part":
+                if Path(path).suffix == ".part":
                     raise PermissionError("fixture cancel cleanup denied")
                 return unlink(path, *args, **kwargs)
 
-            with patch.object(backup, "write_dependencies_file"), patch.object(tarfile.TarFile, "add", cancel_after_add), patch.object(Path, "unlink", deny), patch.object(threading.Thread, "start", autospec=True, side_effect=lambda thread: thread.run()):
+            with patch.object(backup, "write_dependencies_file"), patch.object(tarfile.TarFile, "add", cancel_after_add), patch.object(backup.os, "unlink", side_effect=deny), patch.object(threading.Thread, "start", autospec=True, side_effect=lambda thread: thread.run()):
                 self.assertEqual(self.create(app).status_code, 200)
-            job = self.job(app)
-            self.assertEqual(job["status"], "已取消")
-            self.assertIn("fixture cancel cleanup denied", job["error"])
+                job = self.job(app)
+                self.assertEqual(job["status"], "已取消")
+                self.assertTrue(job["staged_cleanup_pending"])
+                self.assertIn("fixture cancel cleanup denied", job["error"])
+                partials = list(backup.BACKUP_DIR.glob("*.part"))
+                self.assertEqual(len(partials), 1)
+                self.assertEqual(app.test_client().get("/backup/download/" + partials[0].name, headers={"X-Token": TOKEN}).status_code, 404)
+            recovered = self.job(app)
+            self.assertFalse(recovered["staged_cleanup_pending"])
+            self.assertIn("暂存归档清理重试成功", recovered["error"])
             self.assertEqual(self.listed(app), [])
             partials = list(backup.BACKUP_DIR.glob("*.part"))
-            self.assertEqual(len(partials), 1)
-            self.assertEqual(app.test_client().get("/backup/download/" + partials[0].name, headers={"X-Token": TOKEN}).status_code, 404)
+            self.assertEqual(len(partials), 0)
             self.assertEqual(backup.ACTIVE_BACKUP_WORKERS, 0)

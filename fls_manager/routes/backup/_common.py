@@ -158,6 +158,36 @@ def backup_entry_unlink(directory, filename):
         os.unlink(filename, dir_fd=directory)
 
 
+def _backup_staging_name(job_id):
+    identity = hashlib.sha256(str(job_id or "").encode("utf-8")).hexdigest()
+    return f".fls-backup-{identity}.part"
+
+
+def _remove_orphaned_backup_staging(job_id):
+    name = _backup_staging_name(job_id)
+    try:
+        with backup_directory_fd() as directory:
+            try:
+                expected = backup_entry_stat(directory, name)
+            except FileNotFoundError:
+                return ""
+            if not stat.S_ISREG(expected.st_mode):
+                return "遗留暂存归档不是常规文件，未删除"
+            try:
+                current = backup_entry_stat(directory, name)
+            except FileNotFoundError:
+                return ""
+            if not os.path.samestat(expected, current):
+                return "遗留暂存归档身份已变化，未删除"
+            if isinstance(directory, int):
+                os.unlink(name, dir_fd=directory)
+            else:
+                (directory / name).unlink()
+        return ""
+    except Exception as exc:
+        return f"未能回收遗留暂存归档：{exc}"
+
+
 def open_backup_entry(directory, filename):
     expected = backup_entry_stat(directory, filename)
     if not stat.S_ISREG(expected.st_mode):
@@ -196,6 +226,8 @@ def _backup_job_snapshot(info):
         "cancel_requested",
         "cancel_requested_at",
         "cancel_error",
+        "staged_cleanup_pending",
+        "staged_cleanup_error",
     )
     return {field: info.get(field) for field in fields}
 
@@ -226,8 +258,10 @@ def validate_backup_jobs(data):
     if any(value.get("cancel_requested") is not None and type(value["cancel_requested"]) is not bool
            or value.get("cancel_requested_at") is not None and not isinstance(value["cancel_requested_at"], str)
            or value.get("cancel_error") is not None and not isinstance(value["cancel_error"], str)
+           or value.get("staged_cleanup_pending") is not None and type(value["staged_cleanup_pending"]) is not bool
+           or value.get("staged_cleanup_error") is not None and not isinstance(value["staged_cleanup_error"], str)
            for value in data.values()):
-        raise RuntimeError("备份取消记录损坏，未覆盖原文件")
+        raise RuntimeError("备份取消或暂存清理记录损坏，未覆盖原文件")
     return data
 
 
@@ -245,13 +279,16 @@ def get_backup_job(job_id):
     """Return a live or persisted job, converting lost running handles to unknown."""
     with BACKUP_JOB_LOCK:
         info = BACKUP_JOBS.get(job_id)
-        if isinstance(info, dict):
+        if not isinstance(info, dict):
+            info = _load_persisted_backup_job(job_id)
+            if not info:
+                return None
+
+        if info.get("running") and job_id in BACKUP_CANCEL_EVENTS:
+            BACKUP_JOBS[job_id] = info
             return dict(info)
 
-        info = _load_persisted_backup_job(job_id)
-        if not info:
-            return None
-
+        changed = False
         if info.get("running"):
             info["running"] = False
             info["status"] = "结果未知"
@@ -260,13 +297,41 @@ def get_backup_job(job_id):
                 "如未生成可用归档，请重新创建备份。"
             )
             info["updated_at"] = now_str()
+            info["staged_cleanup_pending"] = True
+            info["staged_cleanup_error"] = ""
+            changed = True
+
+        if info.get("staged_cleanup_pending") is True and job_id not in BACKUP_CANCEL_EVENTS:
+            cleanup_error = _remove_orphaned_backup_staging(job_id)
+            previous_cleanup_error = str(info.get("staged_cleanup_error") or "")
+            current_error = str(info.get("error") or "")
+            if cleanup_error:
+                info["staged_cleanup_error"] = cleanup_error
+                if previous_cleanup_error and previous_cleanup_error in current_error:
+                    info["error"] = current_error.replace(previous_cleanup_error, cleanup_error)
+                elif cleanup_error not in current_error:
+                    info["error"] = "；".join(filter(None, (current_error, cleanup_error)))
+            else:
+                info["staged_cleanup_pending"] = False
+                info["staged_cleanup_error"] = ""
+                if previous_cleanup_error:
+                    recovered_error = current_error.replace(previous_cleanup_error, "暂存归档清理重试成功")
+                    if recovered_error == current_error:
+                        recovered_error = "；".join(filter(None, (current_error, "暂存归档清理重试成功")))
+                    info["error"] = recovered_error
+            info["updated_at"] = now_str()
+            changed = True
+
+        if changed:
+            BACKUP_JOBS[job_id] = info
             try:
                 persist_backup_job(info)
-            except Exception as e:
-                info["error"] += f"；未知状态未能持久化：{e}"
-            BACKUP_JOBS[job_id] = info
+            except Exception as exc:
+                info["error"] = "；".join(filter(None, (
+                    str(info.get("error") or ""), f"未知状态或暂存清理结果未能持久化：{exc}"
+                )))
 
-        return info
+        return dict(info)
 
 
 def backup_safe_file(filename):
@@ -562,7 +627,7 @@ def _create_backup_worker(job_id, items, cancel_event):
 
     items = list(items or [])
 
-    target = staged = None
+    target = staged = staging_path = None
     published = False
     try:
         _update_backup_job(
@@ -570,6 +635,8 @@ def _create_backup_worker(job_id, items, cancel_event):
             running=True,
             status="正在压缩",
             error="",
+            staged_cleanup_pending=True,
+            staged_cleanup_error="",
             updated_at=now_str(),
         )
         _check_backup_cancelled(cancel_event)
@@ -589,9 +656,10 @@ def _create_backup_worker(job_id, items, cancel_event):
 
         filename = f"fls-backup-{type_name}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{job_id}.tar.gz"
         target = backup_safe_file(filename)
-        archive_tmp = tempfile.NamedTemporaryFile(prefix=".fls-backup-", suffix=".part", dir=backup_dir(), delete=False)
-        staged = Path(archive_tmp.name)
-        archive_tmp.close()
+        staging_path = backup_dir() / _backup_staging_name(job_id)
+        staging_fd = os.open(staging_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(staging_fd)
+        staged = staging_path
 
         deps_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".txt")
         deps_tmp.close()
@@ -634,6 +702,14 @@ def _create_backup_worker(job_id, items, cancel_event):
                 cancelled_after_finish = False
                 publication_warning = _publish_backup_archive(staged, target)
                 published = True
+                try:
+                    staged_cleanup_pending = staged.exists()
+                except OSError:
+                    staged_cleanup_pending = True
+                staged_cleanup_error = (
+                    f"暂存归档仍存在，待查询时重试清理：{staged.name}"
+                    if staged_cleanup_pending else ""
+                )
                 info.update({
                     "running": False,
                     "status": "已完成",
@@ -641,6 +717,8 @@ def _create_backup_worker(job_id, items, cancel_event):
                     "size": archive_stat.st_size,
                     "size_text": fmt_size(archive_stat.st_size),
                     "error": publication_warning,
+                    "staged_cleanup_pending": staged_cleanup_pending,
+                    "staged_cleanup_error": staged_cleanup_error,
                     "updated_at": now_str(),
                 })
                 try:
@@ -670,6 +748,8 @@ def _create_backup_worker(job_id, items, cancel_event):
             filename="",
             size=0,
             size_text="-",
+            staged_cleanup_pending=bool(cleanup_error),
+            staged_cleanup_error=cleanup_error,
         )
     except BackupTimeout as e:
         cleanup_error = _remove_backup_target(staged)
@@ -683,9 +763,20 @@ def _create_backup_worker(job_id, items, cancel_event):
             filename="",
             size=0,
             size_text="-",
+            staged_cleanup_pending=bool(cleanup_error),
+            staged_cleanup_error=cleanup_error,
         )
     except Exception as e:
-        cleanup_error = _remove_backup_target(staged)
+        staged_cleanup_error = _remove_backup_target(staged)
+        staged_cleanup_pending = bool(staged_cleanup_error)
+        if staged is None and staging_path is not None:
+            try:
+                staged_cleanup_pending = staging_path.exists()
+            except OSError:
+                staged_cleanup_pending = True
+            if staged_cleanup_pending:
+                staged_cleanup_error = "同一请求的遗留暂存归档尚待安全回收"
+        cleanup_error = staged_cleanup_error
         if published and not isinstance(e, BackupArchivePublishUnknown):
             cleanup_error = "；".join(filter(None, (cleanup_error, _remove_backup_target(target))))
         error = str(e)
@@ -698,6 +789,8 @@ def _create_backup_worker(job_id, items, cancel_event):
             filename="",
             size=0,
             size_text="-",
+            staged_cleanup_pending=staged_cleanup_pending,
+            staged_cleanup_error=staged_cleanup_error,
         )
     finally:
         with BACKUP_JOB_LOCK:
@@ -738,6 +831,8 @@ def start_backup_job(items, *, job_id=None):
             "size": 0,
             "size_text": "-",
             "error": "",
+            "staged_cleanup_pending": False,
+            "staged_cleanup_error": "",
             "created_at": now,
             "updated_at": now,
         }
@@ -767,6 +862,8 @@ def start_backup_job(items, *, job_id=None):
                 "running": False,
                 "status": "启动失败",
                 "error": str(e),
+                "staged_cleanup_pending": False,
+                "staged_cleanup_error": "",
                 "updated_at": now_str(),
             })
             BACKUP_CANCEL_EVENTS.pop(job_id, None)

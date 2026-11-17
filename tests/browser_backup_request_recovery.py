@@ -186,8 +186,31 @@ def main():
                     record = restore._read_restore_request(fault["unknown"])
                     record["state"] = "committing"
                     restore_receipt(record)
+                if fault.get("orphan_stage"):
+                    orphan_id = "c" * 32
+                    orphan = {
+                        "id": orphan_id,
+                        "items": ["scripts"],
+                        "type_text": "仅脚本",
+                        "running": True,
+                        "status": "正在压缩",
+                        "filename": "",
+                        "size": 0,
+                        "size_text": "-",
+                        "error": "",
+                        "created_at": "2026-11-18 00:00:00",
+                        "updated_at": "2026-11-18 00:00:00",
+                        "staged_cleanup_pending": True,
+                        "staged_cleanup_error": "",
+                    }
+                    backup.BACKUP_JOBS[orphan_id] = orphan
+                    backup.persist_backup_job(orphan)
+                    (backup.backup_dir() / backup._backup_staging_name(orphan_id)).write_bytes(b"partial archive")
+                    backup.BACKUP_JOBS.pop(orphan_id, None)
+                    fault["orphan_job_id"] = orphan_id
             return jsonify(workers=workers, jobs=list(backup.BACKUP_JOBS.values()), active=backup.ACTIVE_BACKUP_WORKERS,
                            archive_paused=archive_paused.is_set(), partials=[item.name for item in backup.BACKUP_DIR.glob("*.part")],
+                           orphan_job_id=fault.get("orphan_job_id", ""),
                            restores=len(restores), tasks=models.load_tasks(), scheduled=[job.id for job in scheduler.scheduler.get_jobs()],
                            script=(SCRIPT_DIR / "demo.py").read_text() if (SCRIPT_DIR / "demo.py").exists() else "")
 
@@ -271,9 +294,35 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
      await page.reload();await page.evaluate(id=>flsPollBackupJob(id),id);
      await progress.getByText('结果未知',{exact:true}).waitFor();
      assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
-     await page.screenshot({path:'/tmp/fls-backup-atomic-'+viewport.width+'.png',fullPage:true});
+    await page.screenshot({path:'/tmp/fls-backup-atomic-'+viewport.width+'.png',fullPage:true});
     }
    }
+   await fixture({orphan_stage:true});
+   const orphanId=(await state()).orphan_job_id;
+   const orphanStatus=await page.request.get(base+'/api/backup/job/'+orphanId,{headers});
+   assert.equal(orphanStatus.status(),200);assert.equal((await orphanStatus.json()).status,'结果未知');
+   assert.equal((await orphanStatus.json()).staged_cleanup_pending,false);
+   assert.equal((await state()).partials.length,0);
+   await page.evaluate(()=>sessionStorage.removeItem('fls-backup-request'));
+   await page.goto(base+'/backup?job_id='+orphanId);
+   await progress.getByText('结果未知',{exact:true}).waitFor();
+   assert.equal(await form.getByRole('button',{name:'创建备份',exact:true}).isDisabled(),true);
+   assert.equal(await form.locator('[name="items"][value="data"]').isChecked(),false);
+   assert.equal(await form.locator('[name="items"][value="scripts"]').isChecked(),true);
+   const orphanWorkers=(await state()).workers.length;
+   await progress.getByRole('button',{name:'查询已发布归档',exact:true}).click();
+   await progress.getByRole('button',{name:'确认后重新创建备份',exact:true}).waitFor();
+   assert.equal((await state()).workers.length,orphanWorkers);
+   await fixture({atomic_block:true});
+   await progress.getByRole('button',{name:'确认后重新创建备份',exact:true}).click();
+   const recoveryRetryId=await form.locator('[name="request_id"]').inputValue();
+   await page.waitForFunction(async()=>{const r=await fetch('/api/fixture/backup');return (await r.json()).archive_paused;});
+   assert.equal((await state()).workers.length,orphanWorkers+1);
+   await page.evaluate(id=>flsPollBackupJob(id),recoveryRetryId);
+   await progress.getByRole('button',{name:'取消备份',exact:true}).click();
+   await fixture({});
+   await waitJob(recoveryRetryId,'已取消');
+   assert.equal((await state()).partials.length,0);
    await fixture({});assert.deepEqual(errors,[]);await context.close();console.log('backup atomic publication passed '+viewport.width);
   }
  }finally{await browser.close();}

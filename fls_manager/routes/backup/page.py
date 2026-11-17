@@ -348,6 +348,12 @@ async function flsPollBackupJob(jobId, source){{
         }});
 
         const json = await flsReadJsonResponse(res);
+        const pending = flsBackupRequest();
+        if(pending && pending.job_id === jobId && !Array.isArray(pending.items)){{
+            pending.items = Array.isArray(json.items) ? json.items : [];
+            if(json.status === "结果未知") pending.result_unknown = true;
+            sessionStorage.setItem("fls-backup-request", JSON.stringify(pending));
+        }}
 
         if(!json.ok){{
             flsShowBackupJob("<span style='color:#dc2626;font-weight:800;'>" + flsEscapeHtml(flsActionFailure("任务不存在", "刷新页面后重试")) + "</span>");
