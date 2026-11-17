@@ -4,6 +4,7 @@ import tempfile
 import zipfile
 import tarfile
 import subprocess
+import stat
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -29,6 +30,126 @@ from ...proxy import proxy_select_options, apply_proxy_env
 
 def pull_result_card(msg, kind="info", strong=False):
     return message_card(msg, kind, strong=strong, title="结果") if msg else ""
+
+
+def _archive_tree_entries(root):
+    """Return regular staged entries while rejecting links and special files."""
+    entries = []
+    root = Path(root)
+    for item in root.rglob("*"):
+        mode = item.lstat().st_mode
+        if stat.S_ISLNK(mode) or not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
+            raise RuntimeError("压缩包包含链接或特殊文件")
+        entries.append(item)
+    return entries
+
+
+def _publish_archive_tree(staged, target):
+    """Publish an extracted tree without overwriting existing live files."""
+    staged = Path(staged)
+    target = Path(target)
+    entries = _archive_tree_entries(staged)
+
+    def reject_live_links(destination):
+        cursor = destination.parent
+        while True:
+            if os.path.lexists(cursor) and cursor.is_symlink():
+                raise RuntimeError("目标目录包含链接，未导入压缩包")
+            if cursor == target:
+                break
+            cursor = cursor.parent
+
+    for item in entries:
+        relative = item.relative_to(staged)
+        destination = target / relative
+        reject_live_links(destination)
+        if os.path.lexists(destination):
+            if item.is_dir() and destination.is_dir() and not destination.is_symlink():
+                continue
+            raise FileExistsError(f"目标已存在：{destination}")
+
+    if not os.path.lexists(target):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(staged, target)
+        return
+
+    if not target.is_dir() or target.is_symlink():
+        raise FileExistsError(f"目标不是目录：{target}")
+
+    moved = []
+    created_dirs = []
+
+    def ensure_parent(path):
+        missing = []
+        parent = path.parent
+        while not os.path.lexists(parent) and parent != target:
+            missing.append(parent)
+            parent = parent.parent
+        for directory in reversed(missing):
+            directory.mkdir()
+            created_dirs.append(directory)
+
+    try:
+        for item in sorted(entries, key=lambda path: (len(path.relative_to(staged).parts), str(path))):
+            relative = item.relative_to(staged)
+            destination = target / relative
+            if item.is_dir():
+                if destination.is_dir() and not destination.is_symlink():
+                    continue
+                ensure_parent(destination)
+                os.replace(item, destination)
+                created_dirs.append(destination)
+            else:
+                ensure_parent(destination)
+                os.replace(item, destination)
+                moved.append(destination)
+    except Exception:
+        for destination in reversed(moved):
+            try:
+                destination.unlink()
+            except OSError:
+                pass
+        for destination in sorted(created_dirs, key=lambda path: len(path.parts), reverse=True):
+            try:
+                if destination.is_dir() and not destination.is_symlink():
+                    shutil.rmtree(destination)
+                else:
+                    destination.unlink()
+            except OSError:
+                pass
+        raise
+
+
+def _import_archive_atomic(source, target, mode):
+    target = Path(target)
+    missing_parents = []
+    parent = target.parent
+    while not os.path.lexists(parent):
+        missing_parents.append(parent)
+        parent = parent.parent
+    for directory in reversed(missing_parents):
+        directory.mkdir()
+    staging_parent = Path(tempfile.mkdtemp(prefix=".fls-import-", dir=str(target.parent)))
+    staged = staging_parent / "payload"
+    staged.mkdir()
+    published = False
+    try:
+        if mode == "zip":
+            with zipfile.ZipFile(source, "r") as archive:
+                safe_extract_zip(archive, staged)
+        else:
+            with tarfile.open(source, mode="r:gz" if mode == "tar.gz" else "r:") as archive:
+                safe_extract_tar(archive, staged)
+        _publish_archive_tree(staged, target)
+        published = True
+    finally:
+        shutil.rmtree(staging_parent, ignore_errors=True)
+        if not published:
+            for directory in missing_parents:
+                try:
+                    directory.rmdir()
+                except OSError:
+                    pass
 
 
 @bp.route("/pull/fetch", methods=["GET", "POST"])
@@ -179,12 +300,8 @@ def pull_import():
                 if lower.endswith((".tar.gz", ".tgz", ".tar")):
                     target_rel = f"{current_rel}/{save_as}" if current_rel and save_as else (save_as or current_rel)
                     target_dir = script_safe_path(target_rel) if target_rel else SCRIPT_DIR
-                    target_dir.mkdir(parents=True, exist_ok=True)
-
-                    mode = "r:gz" if lower.endswith((".tar.gz", ".tgz")) else "r:"
-
-                    with tarfile.open(tmp_file, mode) as tar:
-                        safe_extract_tar(tar, target_dir)
+                    mode = "tar.gz" if lower.endswith((".tar.gz", ".tgz")) else "tar"
+                    _import_archive_atomic(tmp_file, target_dir, mode)
 
                     msg = f"压缩包导入成功：{target_dir}"
                     msg_kind = "success"
@@ -193,10 +310,7 @@ def pull_import():
                 elif lower.endswith(".zip"):
                     target_rel = f"{current_rel}/{save_as}" if current_rel and save_as else (save_as or current_rel)
                     target_dir = script_safe_path(target_rel) if target_rel else SCRIPT_DIR
-                    target_dir.mkdir(parents=True, exist_ok=True)
-
-                    with zipfile.ZipFile(tmp_file, "r") as z:
-                        safe_extract_zip(z, target_dir)
+                    _import_archive_atomic(tmp_file, target_dir, "zip")
 
                     msg = f"ZIP 导入成功：{target_dir}"
                     msg_kind = "success"
