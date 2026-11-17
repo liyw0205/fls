@@ -42,6 +42,38 @@ class OnlineSourceRefreshTests(unittest.TestCase):
             failed.close.assert_called_once()
             self.assertEqual(json.loads(cache.read_text())[0]["id"], "demo")
 
+    def test_invalid_or_duplicate_remote_entries_fail_before_cache_publish(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import source
+            from fls_manager.online_scripts.constants import get_online_refresh_state
+
+            source.save_online_script_cache([{"id": "stable", "name": "Stable", "type": "raw", "link": "x"}])
+            cache = base_dir / "data" / "online_scripts_cache.json"
+            original = cache.read_bytes()
+            payloads = (
+                '[{"id":"good","name":"Good","type":"raw","link":"x"}, {"id":"bad","name":""}]',
+                '[{"id":"same","name":"One","type":"raw","link":"x"}, {"id":"same","name":"Two","type":"raw","link":"y"}]',
+            )
+            for payload in payloads:
+                with self.subTest(payload=payload):
+                    response = self.response(payload)
+                    with patch.object(source, "requests", SimpleNamespace(get=Mock(return_value=response))), patch.object(
+                        source, "github_proxy_url", side_effect=lambda url, *_args: url,
+                    ):
+                        with self.assertRaisesRegex(RuntimeError, "未发布"):
+                            source.fetch_online_scripts()
+                    response.close.assert_called_once()
+                    self.assertEqual(cache.read_bytes(), original)
+
+            response = self.response(payloads[0])
+            with patch.object(source, "requests", SimpleNamespace(get=Mock(return_value=response))), patch.object(
+                source, "github_proxy_url", side_effect=lambda url, *_args: url,
+            ):
+                source.refresh_worker("invalid-source", log_file=str(base_dir / "invalid.log"))
+            self.assertEqual(get_online_refresh_state()["status"], "失败")
+            self.assertIn("未发布", get_online_refresh_state()["error"])
+            self.assertEqual(cache.read_bytes(), original)
+
     def test_task_link_response_is_closed_and_error_does_not_discard_main_source(self):
         with isolated_app() as (_app, base_dir):
             from fls_manager.online_scripts import source

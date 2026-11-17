@@ -74,6 +74,22 @@ def normalize_online_scripts(data):
     return result
 
 
+def validate_online_script_source_items(data):
+    """Validate a remote source before allowing it to replace the cache."""
+    if not isinstance(data, list):
+        raise RuntimeError("脚本源格式错误：根节点必须是数组")
+
+    items = normalize_online_scripts(data)
+    if len(items) != len(data):
+        raise RuntimeError("脚本源包含无效条目，未发布不完整缓存")
+
+    ids = [item["id"] for item in items]
+    if len(set(ids)) != len(ids):
+        raise RuntimeError("脚本源包含重复 ID，未发布不确定缓存")
+
+    return items
+
+
 def load_online_script_cache():
     if not ONLINE_SCRIPT_CACHE_FILE.exists():
         return []
@@ -231,7 +247,7 @@ def fetch_online_scripts(proxy_id="", timeout=12, publish_cache=True):
             f"返回内容预览：{preview}"
         )
 
-    items = normalize_online_scripts(data)
+    items = validate_online_script_source_items(data)
 
     for item in items:
         task_link = str(item.get("task_link") or "").strip()
