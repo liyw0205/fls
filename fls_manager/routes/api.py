@@ -444,3 +444,18 @@ def api_collection_save():
     payload, status = save_collection(data, load_collections=load_collections,
         save_collections=save_collections, unique_collection_name=unique_collection_name)
     return jsonify(payload), status
+
+
+@bp.route("/api/env/action", methods=["POST"])
+def api_env_action():
+    from ..global_env import mutate_global_env
+    from ..models import load_global_env, save_global_env
+    data = request.get_json(silent=True) if request.is_json else dict(
+        request.form.to_dict(), items=request.form.getlist("items"))
+    if not request.is_json:
+        for key in ("value", "env_text"):
+            if key in data:
+                data[key] = data[key].replace("\r\n", "\n")
+    payload, status = mutate_global_env(data, load_global_env=load_global_env,
+        save_global_env=save_global_env, load_tasks=load_tasks)
+    return jsonify(payload), status

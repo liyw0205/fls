@@ -1,5 +1,6 @@
 import html
 import importlib
+import json
 import re
 from datetime import datetime
 from urllib.parse import urlparse
@@ -83,22 +84,37 @@ def safe_name(name):
     name = re.sub(r"\s+", " ", name)
     return name[:80] or "未命名任务"
 
-def parse_env_text(text):
+def parse_env_text(text, *, strict=False):
     env = {}
-    for raw in str(text or "").splitlines():
+    for number, raw in enumerate(str(text or "").splitlines(), 1):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
         if line.startswith("export "):
             line = line[len("export "):].strip()
         if "=" not in line:
+            if strict:
+                raise ValueError(f"第 {number} 行缺少等号，未保存变量")
             continue
         key, value = line.split("=", 1)
         key = key.strip()
         value = value.strip()
         if not key:
+            if strict:
+                raise ValueError(f"第 {number} 行变量名为空，未保存变量")
             continue
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        if strict and key in env:
+            raise ValueError(f"第 {number} 行变量名重复，未保存变量")
+        if strict and value.startswith('"'):
+            try:
+                value = json.loads(value)
+            except ValueError:
+                raise ValueError(f"第 {number} 行引号或转义无效，未保存变量") from None
+            if not isinstance(value, str):
+                raise ValueError(f"第 {number} 行变量值无效，未保存变量")
+        elif strict and value.startswith("'") and not (len(value) >= 2 and value.endswith("'")):
+            raise ValueError(f"第 {number} 行引号未闭合，未保存变量")
+        elif len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
             value = value[1:-1]
         env[key] = value
     return env
@@ -106,7 +122,7 @@ def parse_env_text(text):
 def env_to_text(env):
     if not env:
         return ""
-    return "\n".join([f'{k}="{str(v)}"' for k, v in env.items()])
+    return "\n".join(f'{k}={json.dumps(str(v), ensure_ascii=False)}' for k, v in env.items())
 
 
 class LazyModule:

@@ -934,13 +934,15 @@ def task_history_for_task(task_id, limit=20):
 
 
 def load_global_env():
-    data = read_json(GLOBAL_ENV_FILE, {})
-    env = normalize_env_map(data)
-
-    if env != data:
-        save_global_env(env)
-
-    return env
+    result = {}
+    def normalize(data):
+        if not isinstance(data, dict):
+            raise RuntimeError("全局变量文件不是 JSON 对象，未覆盖原文件，请修复文件或从备份恢复")
+        env = normalize_env_map(data)
+        result["env"] = env
+        return env if env != data else None
+    mutate_json(GLOBAL_ENV_FILE, {}, normalize, strict=True)
+    return result["env"]
 
 
 def save_global_env(env):

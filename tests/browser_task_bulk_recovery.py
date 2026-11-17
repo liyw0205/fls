@@ -20,6 +20,8 @@ def main():
         from fls_manager.app import create_app
         from fls_manager import models, scheduler
         from fls_manager import collection_save
+        from fls_manager import global_env
+        from fls_manager.routes.env import _common as env_routes
         from fls_manager.routes import api
         from fls_manager.routes.tasks import actions
         from fls_manager.routes.tasks import collections as collection_routes
@@ -29,13 +31,16 @@ def main():
         save_config({"notify_items": [], "notify_default_ids": []})
         app = create_app()
         fault = {"reload": False, "save": False, "save_after": False, "collection_save": False,
-                 "collection_after": False, "collection_receipt": False, "unknown": False, "start_fail": False}
+                 "collection_after": False, "collection_receipt": False, "env_save": False,
+                 "env_after": False, "env_receipt": False, "unknown": False, "start_fail": False}
         reload_scheduler = api.reload_scheduler
         mutate_tasks = api.mutate_tasks
         run_task = api.run_task_now
         stop_task = api.stop_task_now
         save_collections = models.save_collections
         write_collection_request = collection_save.write_json
+        save_global_env = models.save_global_env
+        write_env_request = global_env.write_json
 
         def run(*args, **kwargs):
             if fault["start_fail"]:
@@ -77,6 +82,18 @@ def main():
                 raise OSError("fixture collection receipt rejected")
             return write_collection_request(path, record)
 
+        def save_env(values):
+            if fault["env_save"]:
+                raise OSError("fixture env save rejected")
+            save_global_env(values)
+            if fault["env_after"]:
+                raise OSError("fixture after env publication")
+
+        def write_env_receipt(path, record):
+            if fault["env_receipt"] and record.get("state") != "prepared":
+                raise OSError("fixture env receipt rejected")
+            return write_env_request(path, record)
+
         api.reload_scheduler = reload
         api.mutate_tasks = mutate
         api.run_task_now = run
@@ -89,16 +106,20 @@ def main():
         collection_routes.save_collections = save_collection_records
         models.save_collections = save_collection_records
         collection_save.write_json = write_collection_receipt
+        env_routes.save_global_env = save_env
+        models.save_global_env = save_env
+        global_env.write_json = write_env_receipt
         dashboard.reload_scheduler = reload
 
         @app.route("/api/fixture/bulk", methods=["POST", "GET"])
         def fixture():
             if request.method == "GET":
-                return jsonify(tasks=models.load_tasks(), history=models.load_task_history(), collections=models.load_collections())
+                return jsonify(tasks=models.load_tasks(), history=models.load_task_history(), collections=models.load_collections(), env=models.load_global_env())
             data = request.get_json()
             fault.update(reload=bool(data.get("reload")), save=bool(data.get("save")), save_after=bool(data.get("save_after")),
                          collection_save=bool(data.get("collection_save")), collection_after=bool(data.get("collection_after")),
                          collection_receipt=bool(data.get("collection_receipt")),
+                         env_save=bool(data.get("env_save")), env_after=bool(data.get("env_after")), env_receipt=bool(data.get("env_receipt")),
                          unknown=bool(data.get("unknown")), start_fail=bool(data.get("start_fail")))
             if data.get("reset"):
                 if not models.get_collection("browser-collection"):
@@ -107,8 +128,11 @@ def main():
                     "id": task_id, "name": "Bulk " + task_id, "command": ("sleep 30" if data.get("long") else "echo bulk") if task_id == "a" else "task missing.py",
                     "enabled": True, "collection_id": "browser-collection" if data.get("collection") else "", "cron": "0 8 * * *",
                     "config_path": "browser-config.yml" if data.get("config") else "",
+                    "env": {"IMPORTED_A" if task_id == "a" else "IMPORTED_B": "source " + task_id},
                 } for task_id in ("a", "b")])
                 scheduler.reload_scheduler()
+            if data.get("env_reset"):
+                save_global_env({"ORIGINAL": "old", "OTHER": "untouched"})
             if data.get("fix"):
                 def fix(tasks):
                     for task in tasks:
@@ -175,6 +199,159 @@ const {chromium} = require(process.env.FLS_PLAYWRIGHT_CORE);
     await page.goto(base+'/login');
     await login();
     await page.goto(base+path);
+    if(process.env.FLS_ENV_ONLY){
+     const id=()=>require('node:crypto').randomBytes(16).toString('hex');
+     const env=async ()=>(await state()).env;
+     const form=()=>page.locator('form').filter({has:page.locator('button[type="submit"]')}).filter({hasNot:page.locator('button').filter({hasText:'查询本次保存结果'})}).first();
+     const pending=()=>page.locator('[data-collection-save-pending]');
+     const submit=async (label,status)=>{
+      const response=page.waitForResponse(r=>r.request().method()==='POST' && new URL(r.url()).pathname.startsWith('/env/'));
+      await page.getByRole('button',{name:label,exact:true}).click();
+      assert.equal((await response).status(),status);
+     };
+     const api=async data=>page.request.post(base+'/api/env/action',{headers,data:{request_id:id(),...data}});
+     await fixture({env_reset:true});
+     if(process.env.FLS_ENV_EXTRA_ONLY){
+      await page.goto(base+'/env/edit/ORIGINAL');
+      await page.getByRole('textbox',{name:'全局变量名',exact:true}).fill('RECOVERED');
+      await page.getByRole('textbox',{name:'全局变量值',exact:true}).fill('draft');
+      assert.equal((await api({action:'delete',original_key:'ORIGINAL'})).status(),200);
+      await submit('保存变量',404);
+      await page.getByText('原变量已删除，可将草稿保存为新变量。',{exact:true}).waitFor();
+      assert.equal(await form().getAttribute('action'),'/env/new');
+      await submit('保存全局变量',302);
+      await page.waitForURL(url=>url.pathname==='/env');
+      assert.equal((await env()).RECOVERED,'draft');
+      await page.goto(base+'/env/edit/RECOVERED');
+      await form().locator('[name="version"]').evaluate(input=>input.value='invalid');
+      await page.getByRole('textbox',{name:'全局变量值',exact:true}).fill('fixed version');
+      await submit('保存变量',400);
+      await page.getByRole('button',{name:'合并后保存变量',exact:true}).waitFor();
+      assert.equal((await env()).RECOVERED,'draft');
+      await submit('合并后保存变量',302);
+      await page.waitForURL(url=>url.pathname==='/env');
+      assert.equal((await env()).RECOVERED,'fixed version');
+      await page.goto(base+'/env/edit/RECOVERED');
+      await page.getByRole('textbox',{name:'全局变量值',exact:true}).fill('interrupted draft');
+      await fixture({env_save:true,env_receipt:true});
+      await submit('保存变量',500);
+      await page.getByRole('button',{name:'确认后重试',exact:true}).waitFor();
+      await fixture({});
+      assert.equal((await api({action:'edit',original_key:'RECOVERED',key:'RECOVERED',value:'later value'})).status(),200);
+      await submit('确认后重试',409);
+      await page.getByText(/原提交结果无法确认/).waitFor();
+      assert.equal((await env()).RECOVERED,'later value');
+      await page.getByRole('button',{name:'确认后重试',exact:true}).waitFor();
+      await submit('确认后重试',302);
+      await page.waitForURL(url=>url.pathname==='/env');
+      assert.equal((await env()).RECOVERED,'interrupted draft');
+      assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+      assert.deepEqual(errors,[]);
+      console.log(JSON.stringify({path,viewport,globalEnvExtra:true,status:'passed'}));
+      await context.close();
+      continue;
+     }
+     await page.goto(base+'/env/edit/ORIGINAL');
+     await page.getByRole('textbox',{name:'全局变量名',exact:true}).fill('RENAMED');
+     await page.getByRole('textbox',{name:'全局变量值',exact:true}).fill('draft\nsecond line');
+     await fixture({env_save:true});
+     await submit('保存变量',500);
+     await page.getByText('变量保存失败，原有内容未更改；草稿已保留',{exact:true}).waitFor();
+     assert.deepEqual(await env(),{ORIGINAL:'old',OTHER:'untouched'});
+     assert.equal(await page.getByRole('textbox',{name:'全局变量值',exact:true}).inputValue(),'draft\nsecond line');
+     await fixture({env_after:true});
+     await submit('保存变量',503);
+     await page.getByRole('link',{name:'查看已保存变量',exact:true}).waitFor();
+     assert.deepEqual(await env(),{RENAMED:'draft\nsecond line',OTHER:'untouched'});
+     await fixture({});
+     await page.goto(base+'/env/edit/RENAMED');
+     await page.getByRole('textbox',{name:'全局变量值',exact:true}).fill('my merge');
+     assert.equal((await api({action:'edit',original_key:'RENAMED',key:'RENAMED',value:'Other editor'})).status(),200);
+     await submit('保存变量',409);
+     await page.getByText('当前全局变量',{exact:true}).waitFor();
+     assert.equal((await env()).RENAMED,'Other editor');
+     assert.equal(await page.getByRole('textbox',{name:'全局变量值',exact:true}).inputValue(),'my merge');
+     await submit('合并后保存变量',302);
+     await page.waitForURL(url=>url.pathname==='/env');
+     assert.equal((await env()).RENAMED,'my merge');
+     await page.goto(base+'/env/edit/RENAMED');
+     await page.getByRole('textbox',{name:'全局变量名',exact:true}).fill('OTHER');
+     await submit('保存变量',409);
+     await page.getByText('目标变量名已存在，未覆盖，也未删除原变量',{exact:true}).waitFor();
+     assert.deepEqual(await env(),{RENAMED:'my merge',OTHER:'untouched'});
+     await page.getByRole('textbox',{name:'全局变量名',exact:true}).fill('FINAL');
+     await submit('合并后保存变量',302);
+     await page.waitForURL(url=>url.pathname==='/env');
+     await page.goto(base+'/env/import');
+     const before=await env();
+     await form().evaluate(form=>{const input=document.createElement('input');input.type='hidden';input.name='items';input.value='missing::X';form.append(input);});
+     await submit('导入所选变量',400);
+     await page.getByRole('link',{name:'重新选择任务变量',exact:true}).waitFor();
+     assert.deepEqual(await env(),before);
+     await page.getByRole('link',{name:'重新选择任务变量',exact:true}).click();
+     await page.getByRole('button',{name:'导入所选变量',exact:true}).waitFor();
+     await fixture({env_save:true});
+     await submit('导入所选变量',500);
+     await page.getByText('变量保存失败，原有内容未更改；草稿已保留',{exact:true}).waitFor();
+     assert.equal(await page.locator('input[type="hidden"][name="items"]').count(),2);
+     await fixture({});
+     await submit('导入所选变量',302);
+     await page.waitForURL(url=>url.pathname==='/env');
+     assert.equal((await env()).IMPORTED_A,'source a');
+     assert.equal((await env()).IMPORTED_B,'source b');
+     await page.goto(base+'/env/view');
+     const initial=await page.getByRole('textbox',{name:'全部全局变量文本',exact:true}).inputValue();
+     await page.getByRole('textbox',{name:'全部全局变量文本',exact:true}).fill(initial+'\nINVALID');
+     await submit('保存全部全局变量',400);
+     await page.getByText(/缺少等号/).waitFor();
+     assert.equal(await page.getByRole('textbox',{name:'全部全局变量文本',exact:true}).inputValue(),initial+'\nINVALID');
+     await page.getByRole('textbox',{name:'全部全局变量文本',exact:true}).fill(initial);
+     await submit('保存全部全局变量',302);
+     await page.waitForURL(url=>url.pathname==='/env');
+     const deletion=()=>page.locator('form[action="/env/delete/FINAL"]');
+     let dropped=false;
+     const match=url=>url.pathname==='/env/delete/FINAL';
+     await page.route(match,async route=>{if(!dropped){dropped=true;await route.fetch();return route.abort();}return route.continue();});
+     await deletion().getByRole('button',{name:'删除变量',exact:true}).click();
+     await pending().getByRole('button',{name:'查询本次保存结果',exact:true}).waitFor();
+     assert.equal((await env()).FINAL,undefined);
+     assert.equal((await api({action:'new',key:'FINAL',value:'later'})).status(),200);
+     await page.reload();
+     await pending().getByRole('button',{name:'查询本次保存结果',exact:true}).click();
+     await pending().waitFor({state:'detached'});
+     assert.equal((await env()).FINAL,'later');
+     await page.unroute(match);
+     await page.goto(base+'/env/new');
+     await page.getByRole('textbox',{name:'全局变量名',exact:true}).fill('LOGIN_RETRY');
+     await page.getByRole('textbox',{name:'全局变量值',exact:true}).fill('retained');
+     let rejected=false;
+     const newMatch=url=>url.pathname==='/env/new';
+     await page.route(newMatch,route=>{if(route.request().method()==='POST'&&!rejected){rejected=true;return route.fulfill({status:502,contentType:'text/plain',body:'fixture env unavailable'});}return route.continue();});
+     await submit('保存全局变量',502);
+     await pending().getByRole('button',{name:'查询本次保存结果',exact:true}).waitFor();
+     await page.goto(base+'/logout');
+     await login();
+     await page.goto(base+'/env');
+     await pending().getByRole('button',{name:'查询本次保存结果',exact:true}).click();
+     await pending().waitFor({state:'detached'});
+     assert.equal((await env()).LOGIN_RETRY,'retained');
+     await page.unroute(newMatch);
+     await page.goto(base+'/env/edit/FINAL');
+     await page.getByRole('textbox',{name:'全局变量值',exact:true}).fill('Interrupted draft');
+     await fixture({env_save:true,env_receipt:true});
+     await submit('保存变量',500);
+     await page.getByRole('button',{name:'确认后重试',exact:true}).waitFor();
+     if(process.env.FLS_BULK_SCREENSHOTS) await page.screenshot({path:process.env.FLS_BULK_SCREENSHOTS+'/global-env-'+viewport.width+'.png'});
+     await fixture({});
+     await submit('确认后重试',302);
+     await page.waitForURL(url=>url.pathname==='/env');
+     assert.equal((await env()).FINAL,'Interrupted draft');
+     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+     assert.deepEqual(errors,[]);
+     console.log(JSON.stringify({path,viewport,globalEnv:true,status:'passed'}));
+     await context.close();
+     continue;
+    }
     if(process.env.FLS_SAVE_COLLECTION_ONLY){
      const id=()=>require('node:crypto').randomBytes(16).toString('hex');
      const form=()=>page.locator('form').filter({has:page.locator('input[name="name"]:not([type="hidden"])')});

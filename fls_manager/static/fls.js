@@ -1912,7 +1912,7 @@ if (document.readyState === "loading") {
     }
 
     function restoreCollectionSaves(){
-        Object.keys(sessionStorage).filter(key => key.startsWith(flsBulkStorageKey("collection-save:"))).forEach(key => {
+        Object.keys(sessionStorage).filter(key => key.startsWith(flsBulkStorageKey("collection-save:")) || key.startsWith(flsBulkStorageKey("env-save:"))).forEach(key => {
             const state = JSON.parse(sessionStorage.getItem(key));
             if(!state || !state.fields || !state.url) return;
             const scope = key.slice(flsBulkStorageKey("").length);
@@ -1925,16 +1925,18 @@ if (document.readyState === "loading") {
             }
             notice.replaceChildren();
             const message = document.createElement("p");
-            message.textContent = "合集保存结果尚未确认，请先查询原提交。";
+            message.textContent = scope.startsWith("env-save:") ? "变量操作结果尚未确认，请先查询原提交。" : "合集保存结果尚未确认，请先查询原提交。";
             const form = document.createElement("form");
             form.method = "post";
             form.action = state.url;
             Object.entries({...state.fields, csrf_token:flsGetCsrfToken()}).forEach(([name,value])=>{
-                const input = document.createElement("input");
-                input.type = "hidden";
-                input.name = name;
-                input.value = value;
-                form.append(input);
+                (Array.isArray(value) ? value : [value]).forEach(value=>{
+                    const input = document.createElement("input");
+                    input.type = "hidden";
+                    input.name = name;
+                    input.value = value;
+                    form.append(input);
+                });
             });
             const button = document.createElement("button");
             button.type = "submit";
@@ -1969,6 +1971,19 @@ if (document.readyState === "loading") {
     }
 
     function trackTaskExecution(url, data){
+        if(/^\/env\/(new|view|import|edit\/[^/]+|delete\/[^/]+)$/.test(url.pathname) && data.has("request_id")){
+            const scope = "env-save:" + url.pathname;
+            const fields = Object.fromEntries(data);
+            delete fields.csrf_token;
+            if(data.has("items")) fields.items = data.getAll("items");
+            const previous = flsBulkState(scope);
+            if(previous.fields && Object.keys({...previous.fields,...fields}).some(name=>name!=="confirm_retry" && JSON.stringify(previous.fields[name])!==JSON.stringify(fields[name]))){
+                restoreCollectionSaves();
+                return false;
+            }
+            flsBulkSave(scope, {url:url.pathname, fields:fields});
+            return {kind:"collection-save", scope:scope};
+        }
         const save = url.pathname.match(/^\/collection\/(new|edit\/[^/]+)$/);
         if(save && data.has("request_id")){
             const scope = "collection-save:" + save[1];
@@ -2038,8 +2053,8 @@ if (document.readyState === "loading") {
             try {
                 const errorDoc = new DOMParser().parseFromString(body, "text/html");
                 if(execution && execution.kind === "collection-save"){
-                    const saved = errorDoc.querySelector("[data-collection-save-result]");
-                    if(saved && JSON.parse(saved.dataset.collectionSaveResult).resolved) clearCollectionSave(execution.scope);
+                    const saved = errorDoc.querySelector("[data-collection-save-result], [data-env-result]");
+                    if(saved && JSON.parse(saved.dataset.collectionSaveResult || saved.dataset.envResult).resolved) clearCollectionSave(execution.scope);
                 }
                 const result = errorDoc.querySelector("[data-task-execution-result]");
                 if(execution && result){
