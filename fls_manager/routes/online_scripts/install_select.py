@@ -24,7 +24,10 @@ def _task_import_error(script_id, message, status_code, persisted=False):
 
 @bp.route("/online-scripts/import-tasks/<script_id>", methods=["POST"])
 def online_scripts_import_tasks_only(script_id):
-    item = get_online_script(script_id)
+    try:
+        item = get_online_script(script_id)
+    except Exception as exc:
+        return online_script_cache_error("在线任务导入未完成", exc)
 
     if not item:
         return _task_import_error(
@@ -79,7 +82,10 @@ def online_scripts_import_tasks_only(script_id):
 
 @bp.route("/online-scripts/install-select/<script_id>")
 def online_scripts_install_select(script_id):
-    item = get_online_script(script_id)
+    try:
+        item = get_online_script(script_id)
+    except Exception as exc:
+        return online_script_cache_error("在线任务选择无法打开", exc)
 
     if not item:
         abort(404)

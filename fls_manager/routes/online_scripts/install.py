@@ -139,7 +139,10 @@ def _start_install_job(
 
 @bp.route("/online-scripts/install/<script_id>", methods=["POST"])
 def online_scripts_install(script_id):
-    item = get_online_script(script_id)
+    try:
+        item = get_online_script(script_id)
+    except Exception as exc:
+        return online_script_cache_error("在线脚本安装未完成", exc)
 
     if not item:
         abort(404)
@@ -461,7 +464,15 @@ def online_scripts_install_retry(install_id):
 
     try:
         script_id = str(info.get("script_id") or "").strip()
-        item = get_online_script(script_id)
+        try:
+            item = get_online_script(script_id)
+        except Exception as exc:
+            return _install_retry_error(
+                install_id,
+                "无法重试在线安装",
+                f"在线脚本源缓存无法读取，未覆盖原文件：{exc}。请检查源数据后重试。",
+                500,
+            )
         if not item:
             return _install_retry_error(
                 install_id,

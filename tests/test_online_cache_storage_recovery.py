@@ -59,6 +59,32 @@ class OnlineCacheStorageRecoveryTests(unittest.TestCase):
             fetch.assert_not_called()
             self.assertEqual(ONLINE_SCRIPT_CACHE_FILE.read_bytes(), raw)
 
+    def test_corrupt_cache_blocks_install_import_selection_and_docs_with_recovery_links(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_SCRIPT_CACHE_FILE
+
+            self.seed_cache()
+            raw = b"not-json"
+            ONLINE_SCRIPT_CACHE_FILE.write_bytes(raw)
+            client = app.test_client()
+            with patch("fls_manager.routes.online_scripts.install.start_install_thread") as start, \
+                 patch("fls_manager.routes.online_scripts.install_select.import_task_if_needed") as importer:
+                responses = [
+                    client.post("/online-scripts/install/demo", headers={"X-Token": TOKEN}),
+                    client.post("/online-scripts/import-tasks/demo", headers={"X-Token": TOKEN}),
+                    client.get("/online-scripts/install-select/demo", headers={"X-Token": TOKEN}),
+                    client.get("/online-scripts/doc/demo", headers={"X-Token": TOKEN}),
+                ]
+
+            self.assertTrue(all(response.status_code == 500 for response in responses))
+            for response in responses:
+                html = response.get_data(as_text=True)
+                self.assertIn("缓存无法读取", html)
+                self.assertIn('href="/online-scripts/source"', html)
+            start.assert_not_called()
+            importer.assert_not_called()
+            self.assertEqual(ONLINE_SCRIPT_CACHE_FILE.read_bytes(), raw)
+
     @unittest.skipUnless(hasattr(os, "symlink"), "symlink is needed for cache boundary")
     def test_cache_symlink_is_rejected_and_repair_restores_list(self):
         with isolated_app() as (app, base_dir):

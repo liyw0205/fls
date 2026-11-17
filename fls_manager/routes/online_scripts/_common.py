@@ -67,6 +67,18 @@ from ...online_scripts.render import render_online_script_rows
 requests = LazyModule("requests")
 
 
+def online_script_cache_error(title, error, *, back_url="/online-scripts"):
+    body = page_header_card(
+        title,
+        help_html=f"在线脚本源缓存无法读取，未覆盖原文件：{h(error)}。请检查源数据后重试。",
+        actions_html=(
+            f'<a class="btn btn-gray" href="{h(back_url)}">返回在线脚本</a>'
+            '<a class="btn btn-orange" href="/online-scripts/source">检查在线脚本源数据</a>'
+        ),
+    )
+    return layout(title, "online_scripts", body), 500
+
+
 def online_scripts_page_links(q, page, pages):
     if pages <= 1:
         return ""

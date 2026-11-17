@@ -3,7 +3,10 @@ from ._common import *
 
 @bp.route("/online-scripts/doc/<script_id>")
 def online_script_doc(script_id):
-    item = get_online_script(script_id)
+    try:
+        item = get_online_script(script_id)
+    except Exception as exc:
+        return online_script_cache_error("脚本文档无法打开", exc)
 
     if not item:
         abort(404)
