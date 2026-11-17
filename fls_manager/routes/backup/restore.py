@@ -11,6 +11,23 @@ class BackupRestoreWriteError(RuntimeError):
         self.live_state_unchanged = live_state_unchanged
 
 
+def restore_error(message, status, *, restored=False, restored_items=None, **details):
+    payload = {"ok": False, "msg": message, "restored": restored,
+               "restored_items": restored_items or [], "scheduler_reload_required": restored, **details}
+    if payload["scheduler_reload_required"]:
+        payload["reload_url"] = "/api/scheduler/reload"
+    if request.path.startswith("/api/"):
+        return jsonify(payload), status
+    body = f'<section class="section" role="alert"><p>{h(message)}</p></section>'
+    if payload["scheduler_reload_required"]:
+        body += '<form method="post" action="/scheduler/reload?back=/backup"><section class="section"><button class="btn btn-primary" type="submit">仅重新加载调度器</button></section></form><a class="btn btn-blue" href="/tasks">查看已恢复任务</a>'
+    if payload.get("dependencies_failed"):
+        body += f'<section class="section"><p>{h(payload.get("dependencies", ""))}</p><pre>{h(payload.get("dependency_log", ""))}</pre></section>'
+        body += '<a class="btn btn-blue" href="/deps">查看并修复依赖</a>'
+    body += '<a class="btn btn-gray" href="/backup">返回备份恢复</a>'
+    return layout("备份恢复结果", "backup", body), status
+
+
 def _remove_restore_path(path):
     path = Path(path)
     if path.is_dir() and not path.is_symlink():
@@ -129,27 +146,35 @@ def backup_export():
     job_id = start_backup_job(["data", "scripts"])
     return redirect(url_for("backup.backup_page", job=job_id))
 
+@bp.route("/api/backup/import", methods=["POST"])
 @bp.route("/backup/import", methods=["POST"])
 def backup_import():
     if (
         request.content_length is not None
         and request.content_length > MAX_BACKUP_UPLOAD_BYTES + MIB
     ):
-        return "备份导入失败：请求超过上传上限。请调低文件大小或调整服务端备份限制。", 413
+        return restore_error("备份导入失败：请求超过上传上限。请调低文件大小或调整服务端备份限制。", 413)
 
     f = request.files.get("file")
 
     if not f:
-        return "未上传备份文件。下一步：选择 .tar.gz、.tgz、.tar 或 .zip 文件后重试", 400
+        return restore_error("未上传备份文件。下一步：选择 .tar.gz、.tgz、.tar 或 .zip 文件后重试", 400)
 
+    selected = request.form.getlist("restore_items")
+    deps = request.form.getlist("restore_deps")
+    if (any(item not in ("data", "scripts") for item in selected) or len(selected) != len(set(selected))
+        or len(deps) > 1 or deps and deps[0] not in ("0", "1")):
+        return restore_error("恢复内容或依赖选择无效，未写入任何目录。请重新选择后提交。", 400)
     restore_items = parse_items_from_form("restore_items")
 
     if not restore_items:
-        return "请至少选择一个恢复内容。下一步：勾选配置或脚本后重试", 400
+        return restore_error("请至少选择一个恢复内容。下一步：勾选配置或脚本后重试", 400)
 
     restore_deps = request.form.get("restore_deps") == "1"
     tmp_dir = tempfile.mkdtemp()
     restore_reserved = False
+    directories_restored = False
+    scheduler_reloaded = False
 
     try:
         original = os.path.basename(f.filename or "backup")
@@ -184,7 +209,7 @@ def backup_import():
             restore_sources.append((scripts_src, SCRIPT_DIR, False, "脚本 scripts"))
 
         if not try_begin_restore_activity():
-            return "备份正在创建或恢复，请等待当前操作完成后重试。", 409
+            return restore_error("备份正在创建或恢复，请等待当前操作完成后重试。", 409)
         restore_reserved = True
 
         staged = []
@@ -220,8 +245,10 @@ def backup_import():
                 with task_lock:
                     with storage_guard:
                         _commit_restore_directories(staged)
+                        directories_restored = True
                         try:
                             reload_scheduler()
+                            scheduler_reloaded = True
                         except Exception as e:
                             scheduler_error = str(e)
         finally:
@@ -236,21 +263,32 @@ def backup_import():
 
         deps_msg = ""
         deps_log = ""
+        dependencies_failed = False
 
         if restore_deps:
             if dep_file:
                 ok, deps_log = install_dependencies(dep_file)
+                dependencies_failed = not ok
                 deps_msg = "依赖恢复成功" if ok else "依赖恢复失败，请查看日志"
             else:
                 deps_msg = "已勾选恢复依赖，但备份中没有 dependencies.txt / requirements.txt"
+                dependencies_failed = True
 
         if scheduler_error:
-            return (
-                "备份已恢复，但调度器重载失败：{}。请检查任务列表和运行状态后再操作。".format(
-                    h(scheduler_error)
-                ),
-                500,
+            return restore_error(
+                f"备份已恢复，但调度器重载失败：{scheduler_error}。请查看已恢复任务并仅重新加载调度器。",
+                503, restored=True, restored_items=restore_items,
+                dependencies=deps_msg or "未恢复依赖", dependency_log=deps_log, dependencies_failed=dependencies_failed,
             )
+
+        if dependencies_failed:
+            return restore_error("目录已恢复，依赖恢复未完成，请检查依赖日志并修复依赖，不要重复导入目录。", 503,
+                                 restored=True, restored_items=restore_items, scheduler_reload_required=False,
+                                 dependencies_failed=True, dependencies=deps_msg, dependency_log=deps_log)
+
+        if request.path.startswith("/api/"):
+            return jsonify(ok=True, msg="备份导入完成", restored=True, restored_items=restore_items,
+                           scheduler_reload_required=False, dependencies=deps_msg or "未恢复依赖", dependency_log=deps_log)
 
         body = page_header_card(
             "备份导入完成",
@@ -267,16 +305,22 @@ def backup_import():
         return layout("备份导入完成", "backup", body)
 
     except BackupLimitExceeded as e:
-        return f"备份导入失败：{h(e)}。请调低文件大小或调整服务端备份限制。", 413
+        return restore_error(f"备份导入失败：{e}。请调低文件大小或调整服务端备份限制。", 413)
     except BackupRestoreWriteError as e:
         state = (
             "现有目录已恢复到原状态"
             if e.live_state_unchanged
             else "现有目录状态可能不完整"
         )
-        return f"备份恢复失败，{state}：{h(e)}。请检查磁盘空间和目录权限后再操作。", 500
+        return restore_error(f"备份恢复失败，{state}：{e}。请检查磁盘空间和目录权限后再操作。", 500,
+                             live_state_unchanged=e.live_state_unchanged)
     except Exception as e:
-        return f"备份导入失败：{h(e)}。下一步：检查备份内容和恢复范围后重试", 400
+        if directories_restored:
+            return restore_error(f"所选目录已恢复，但后续处理失败：{e}。请检查已恢复数据，不要重复导入。", 503,
+                                 restored=True, restored_items=restore_items,
+                                 scheduler_reload_required=not scheduler_reloaded,
+                                 dependencies_failed=bool(restore_deps), dependency_log=str(e))
+        return restore_error(f"备份导入失败：{e}。下一步：检查备份内容和恢复范围后重试", 400)
 
     finally:
         if restore_reserved:

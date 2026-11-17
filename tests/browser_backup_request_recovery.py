@@ -1,5 +1,9 @@
-"""Real HTTP/Chromium checks for recoverable backup creation."""
+"""Real HTTP/Chromium checks for recoverable backup creation and restore."""
 import os
+import base64
+import io
+import json
+import tarfile
 import subprocess
 import tempfile
 import threading
@@ -19,7 +23,12 @@ def main():
         from fls_manager.app import create_app
         import fls_manager.app as app_module
         from fls_manager import scheduler
+        from fls_manager import models
+        from fls_manager.config import load_config
+        from fls_manager.paths import SCRIPT_DIR
         from fls_manager.routes.backup import _common as backup, actions
+        from fls_manager.routes.backup import restore
+        from tests.test_bulk_workflows import sample_task
 
         app = create_app()
         app_module.dispatch_frontend_open_event = lambda: None
@@ -27,6 +36,31 @@ def main():
         release = threading.Event()
         release.set()
         persist, receipt, worker = backup.persist_backup_job, actions.write_json, backup._create_backup_worker
+        reload, commit = scheduler._reload_scheduler_locked, restore._commit_restore_directories
+        restores = []
+
+        def apply_scheduler():
+            if fault.get("reload"):
+                scheduler._record_scheduler_state("failed", error="fixture reload unavailable")
+                raise RuntimeError("fixture reload unavailable")
+            return reload()
+
+        def restore_directories(entries):
+            restores.append(True)
+            return commit(entries)
+
+        scheduler._reload_scheduler_locked = apply_scheduler
+        restore._commit_restore_directories = restore_directories
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode="w:gz") as tar:
+            for name, data in {
+                "data/config.json": json.dumps(load_config()).encode(),
+                "data/tasks.json": json.dumps([sample_task("restored", command="echo restored", cron="0 0 1 1 *")]).encode(),
+                "scripts/demo.py": b"print('restored')",
+            }.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
 
         def save(info):
             if fault.get("job") and info["status"] == "准备中":
@@ -57,14 +91,21 @@ def main():
                     release.clear()
                 else:
                     release.set()
-            return jsonify(workers=workers, jobs=list(backup.BACKUP_JOBS.values()), active=backup.ACTIVE_BACKUP_WORKERS)
+                if fault.get("edit"):
+                    tasks = models.load_tasks()
+                    tasks[0]["name"] = "Later edit"
+                    models.save_tasks(tasks)
+                    (SCRIPT_DIR / "demo.py").write_text("print('later edit')")
+            return jsonify(workers=workers, jobs=list(backup.BACKUP_JOBS.values()), active=backup.ACTIVE_BACKUP_WORKERS,
+                           restores=len(restores), tasks=models.load_tasks(), scheduled=[job.id for job in scheduler.scheduler.get_jobs()],
+                           script=(SCRIPT_DIR / "demo.py").read_text() if (SCRIPT_DIR / "demo.py").exists() else "")
 
         server = make_server("127.0.0.1", 0, app, threaded=True)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         env = dict(os.environ, FLS_UI_BASE=f"http://127.0.0.1:{server.server_port}", FLS_UI_TOKEN=TOKEN,
-                   FLS_PLAYWRIGHT_CORE=str(playwright), FLS_CHROMIUM=str(chromium))
+                   FLS_PLAYWRIGHT_CORE=str(playwright), FLS_CHROMIUM=str(chromium), FLS_RESTORE_ARCHIVE=base64.b64encode(archive.getvalue()).decode())
         try:
-            result = subprocess.run(["node", "-e", SCRIPT], env=env, timeout=180)
+            result = subprocess.run(["node", "-e", RESTORE_SCRIPT if os.environ.get("FLS_BACKUP_RESTORE") else SCRIPT], env=env, timeout=180)
             if result.returncode:
                 raise SystemExit(result.returncode)
         finally:
@@ -161,6 +202,79 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
    assert.deepEqual(errors,[]);console.log('backup request recovery passed '+viewport.width);
    await context.close();
+  }
+ }finally{await browser.close();}
+})().catch(e=>{console.error(e);process.exit(1)});
+'''
+
+
+RESTORE_SCRIPT = r'''
+const assert=require('node:assert/strict');
+const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
+(async()=>{
+ const browser=await chromium.launch({executablePath:process.env.FLS_CHROMIUM,args:['--no-sandbox']});
+ try{
+  for(const viewport of [{width:390,height:844},{width:1280,height:800}]){
+   const context=await browser.newContext({viewport}),page=await context.newPage();
+   page.on('dialog',d=>d.accept());const errors=[];page.on('pageerror',e=>errors.push(e.message));
+   const base=process.env.FLS_UI_BASE,headers={'X-Token':process.env.FLS_UI_TOKEN};
+   const fixture=async data=>assert.equal((await page.request.post(base+'/api/fixture/backup',{headers,data})).status(),200);
+   const state=async()=>(await page.request.get(base+'/api/fixture/backup',{headers})).json();
+   const upload=()=>page.locator('form[action="/backup/import"]');
+   const archive={name:'restore.tar.gz',mimeType:'application/gzip',buffer:Buffer.from(process.env.FLS_RESTORE_ARCHIVE,'base64')};
+   const submit=async(form,path)=>{
+    const response=page.waitForResponse(r=>new URL(r.url()).pathname===path && r.request().method()==='POST');
+    await form.locator('button[type="submit"]').click();const res=await response;
+    await page.waitForFunction(()=>!document.querySelector('.fls-loading-overlay.active'));return res;
+   };
+   await page.goto(base+'/login');await page.locator('[name="token"]').fill(process.env.FLS_UI_TOKEN);
+   await page.locator('button[type="submit"]').click();await page.waitForURL(u=>u.pathname!='/login');
+   await page.goto(base+'/backup');const initial=(await state()).restores;
+   await upload().locator('[name="file"]').setInputFiles(archive);
+   await upload().evaluate(form=>{const input=document.createElement('input');input.type='hidden';input.name='restore_items';input.value='bad';form.append(input);});
+   assert.equal((await submit(upload(),'/backup/import')).status(),400);
+   assert.equal((await state()).restores,initial);
+   await page.goto(base+'/backup');await upload().locator('[name="file"]').setInputFiles(archive);
+   await fixture({reload:true});assert.equal((await submit(upload(),'/backup/import')).status(),503);
+   assert.equal((await state()).restores,initial+1);assert.equal((await state()).script,"print('restored')");
+   assert.equal(await page.locator('form[action="/backup/import"]').count(),0);
+   let recovery=page.locator('form[action^="/scheduler/reload"]');await recovery.waitFor();
+   if(process.env.FLS_BULK_SCREENSHOTS) await page.screenshot({path:process.env.FLS_BULK_SCREENSHOTS+'/backup-restore-failure-'+viewport.width+'.png',fullPage:true});
+   const fields=await recovery.evaluate(f=>Object.fromEntries(new FormData(f)));
+   assert.equal((await page.request.post(base+'/scheduler/reload?back=/backup',{form:{...fields,csrf_token:'bad'}})).status(),400);
+   assert.equal((await submit(recovery,'/scheduler/reload')).status(),500);
+   // Persisted scheduler failure retains a recovery action after a fresh navigation.
+   await page.goto(base+'/backup');await page.getByRole('button',{name:'仅重新加载已保存任务',exact:true}).waitFor();
+   await fixture({edit:true,reload:true});
+   const api=await page.request.post(base+'/api/scheduler/reload',{headers});assert.equal(api.status(),500);
+   await fixture({});
+   recovery=page.locator('form[action^="/scheduler/reload"]');
+   await page.route(url=>url.pathname==='/scheduler/reload',async route=>{await route.fetch();await route.abort();},{times:1});
+   const lost=page.waitForEvent('requestfailed',{predicate:r=>new URL(r.url()).pathname==='/scheduler/reload'});
+   await recovery.locator('button').click();
+   await lost;
+   await page.locator('.fls-toast').filter({hasText:'请求失败'}).waitFor();
+   await page.waitForFunction(()=>!document.querySelector('form[action^="/scheduler/reload"][data-submitting="true"]'));
+   await submit(recovery,'/scheduler/reload');await page.waitForURL(u=>u.pathname==='/backup');
+   assert.equal((await state()).restores,initial+1);assert.equal((await state()).script,"print('later edit')");
+   assert.equal((await state()).tasks[0].name,'Later edit');assert.ok((await state()).scheduled.includes('task_restored'));
+   assert.equal((await page.request.post(base+'/api/scheduler/reload',{headers})).status(),200);
+   assert.equal((await state()).restores,initial+1);
+   // Actual multipart API uses the same partial-state contract and recovery endpoint.
+   await fixture({reload:true});
+   const response=await page.request.post(base+'/api/backup/import',{headers,multipart:{file:archive,restore_items:'scripts'}});
+   assert.equal(response.status(),503);const result=await response.json();assert.equal(result.restored,true);
+   assert.deepEqual(result.restored_items,['scripts']);assert.equal(result.reload_url,'/api/scheduler/reload');
+   await fixture({});assert.equal((await page.request.post(base+result.reload_url,{headers})).status(),200);
+   await page.goto(base+'/backup');
+   await upload().locator('[name="file"]').setInputFiles(archive);
+   await upload().locator('[name="restore_deps"]').check();
+   assert.equal((await submit(upload(),'/backup/import')).status(),503);
+   await page.getByRole('link',{name:'查看并修复依赖',exact:true}).waitFor();
+   assert.equal(await page.locator('form[action="/backup/import"]').count(),0);
+   if(process.env.FLS_BULK_SCREENSHOTS) await page.screenshot({path:process.env.FLS_BULK_SCREENSHOTS+'/backup-restore-'+viewport.width+'.png',fullPage:true});
+   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);assert.deepEqual(errors,[]);
+   console.log('backup restore recovery passed '+viewport.width);await context.close();
   }
  }finally{await browser.close();}
 })().catch(e=>{console.error(e);process.exit(1)});

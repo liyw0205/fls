@@ -22,12 +22,20 @@ def backup_create():
 
 @bp.route("/backup")
 def backup_page():
+    from ...scheduler import get_scheduler_state
+    from ...paths import SCHEDULER_STATE_FILE
+    scheduler_recovery = ""
+    if SCHEDULER_STATE_FILE.exists():
+        state = get_scheduler_state()
+        if state["status"] in ("failed", "unknown"):
+            scheduler_recovery = f'<section class="section" role="alert"><p>调度器状态：{h(state["status_label"])}。{h(state["error"])}</p><form method="post" action="/scheduler/reload?back=/backup"><button class="btn btn-primary" type="submit">仅重新加载已保存任务</button></form></section>'
     header = page_header(
         "备份恢复",
         help_html="创建配置或脚本备份，查看进度，并在确认后恢复已有备份。",
     )
     body = f"""
 {header}
+{scheduler_recovery}
 <nav class="fls-section-nav" aria-label="备份恢复区块导航">
     <span class="fls-section-nav-label">备份恢复</span>
     <a href="#backup-create">创建备份</a>

@@ -1734,7 +1734,7 @@ class BackupIsolationTests(unittest.TestCase):
                 response = post_restore(app, restore_test_archive())
 
             body = response.get_data(as_text=True)
-            self.assertEqual(response.status_code, 500)
+            self.assertEqual(response.status_code, 503)
             self.assertIn("备份已恢复", body)
             self.assertIn("scheduler unavailable", body)
             self.assertTrue((paths.DATA_DIR / "config.json").is_file())
