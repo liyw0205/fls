@@ -1,4 +1,8 @@
 from ._common import *
+from . import _common as backup_state
+import hashlib
+import json
+import re
 from contextlib import nullcontext
 from ... import models
 from ...storage import storage_transaction
@@ -9,6 +13,116 @@ class BackupRestoreWriteError(RuntimeError):
     def __init__(self, message, live_state_unchanged=True):
         super().__init__(message)
         self.live_state_unchanged = live_state_unchanged
+
+
+def _restore_request_path(request_id):
+    if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
+        raise ValueError("恢复请求标识无效")
+    if BACKUP_RESTORE_REQUESTS_DIR.is_symlink():
+        raise RuntimeError("恢复回执目录不能是符号链接")
+    path = BACKUP_RESTORE_REQUESTS_DIR / (request_id + ".json")
+    if path.is_symlink() or path.exists() and not path.is_file():
+        raise RuntimeError("恢复请求回执必须是普通文件")
+    return path
+
+
+def _read_restore_request(request_id):
+    path = _restore_request_path(request_id)
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    if (not isinstance(record, dict) or record.get("request_id") != request_id
+        or record.get("state") not in ("received", "committing", "restored", "failed", "unknown")
+        or not isinstance(record.get("archive_sha256"), str)
+        or not re.fullmatch(r"[a-f0-9]{64}", record["archive_sha256"])
+        or record.get("restore_items") not in (["data"], ["scripts"], ["data", "scripts"])
+        or any(type(record.get(key, False)) is not bool for key in ("restore_deps", "scheduler_reload_required", "dependencies_failed"))):
+        raise RuntimeError("备份恢复回执损坏，未覆盖原文件")
+    return record
+
+
+def _save_restore_request(record):
+    record["updated_at"] = now_str()
+    write_json(_restore_request_path(record["request_id"]), record)
+
+
+def _restore_request_response(record):
+    restored = record.get("state") == "restored"
+    unknown = record.get("state") == "unknown"
+    reload_required = bool(record.get("scheduler_reload_required")) or unknown and not record.get("scheduler_reloaded", False)
+    dependencies_failed = bool(record.get("dependencies_failed"))
+    resolved = restored and not reload_required and not dependencies_failed
+    status = 200 if resolved or record.get("state") == "received" else 503 if restored or unknown else 409 if record.get("state") == "committing" else 500
+    if unknown:
+        message = "恢复期间连接中断，无法确认目录是否已替换。请检查任务和脚本；不要重新导入。"
+    elif reload_required:
+        message = "目录已恢复，调度器尚未确认加载。请仅重新加载调度器，不要重新导入。"
+    elif dependencies_failed:
+        message = "目录已恢复，依赖恢复未完成。请修复依赖，不要重新导入目录。"
+    elif restored:
+        message = "该恢复请求已完成，未重复导入目录。"
+    elif record.get("state") == "committing":
+        message = "原恢复请求正在提交目录，请稍后查询。"
+    elif record.get("state") == "received":
+        message = "原恢复请求尚未提交目录。请选择完全相同的备份文件后，可继续原请求。"
+    else:
+        message = "恢复未完成且目录未提交。检查错误后可使用相同文件继续原请求。"
+    return {
+        "ok": resolved, "resolved": resolved, "msg": message,
+        "request_id": record["request_id"], "state": record["state"],
+        "restored": restored, "restore_outcome_unknown": unknown,
+        "restored_items": record.get("restore_items", []),
+        "scheduler_reload_required": reload_required,
+        "reload_url": "/api/scheduler/reload" if reload_required else "",
+        "dependencies_failed": dependencies_failed,
+        "dependencies": record.get("dependencies", ""),
+        "dependency_log": record.get("dependency_log", ""),
+    }, status
+
+
+@bp.route("/api/backup/restore/<request_id>")
+def api_backup_restore_request(request_id):
+    if not re.fullmatch(r"[a-f0-9]{32}", request_id):
+        return jsonify(ok=False, msg="恢复请求标识无效"), 400
+    try:
+        with storage_transaction(), BACKUP_RESTORE_REQUEST_LOCK:
+            record = _read_restore_request(request_id)
+            if record and record["state"] == "committing" and not backup_state.RESTORE_ACTIVE:
+                record["state"] = "unknown"
+                record["restore_outcome_unknown"] = True
+                try:
+                    _save_restore_request(record)
+                except Exception:
+                    pass
+    except Exception:
+        return jsonify(ok=False, msg="备份恢复回执无法读取，请修复文件后重试"), 500
+    if record is None:
+        return jsonify(ok=False, msg="未找到原恢复请求。请重新选择文件后提交新请求。", request_received=False), 404
+    payload, status = _restore_request_response(record)
+    return jsonify(payload), status
+
+
+@bp.route("/api/backup/restore/<request_id>/reload", methods=["POST"])
+def api_backup_restore_reload(request_id):
+    if not re.fullmatch(r"[a-f0-9]{32}", request_id):
+        return jsonify(ok=False, msg="恢复请求标识无效"), 400
+    try:
+        with models.TASKS_MUTATION_LOCK, storage_transaction(), BACKUP_RESTORE_REQUEST_LOCK:
+            record = _read_restore_request(request_id)
+            if not record:
+                return jsonify(ok=False, msg="恢复请求不存在"), 404
+            if record["state"] not in ("restored", "unknown"):
+                return jsonify(ok=False, msg="恢复请求尚未结束，请稍后查询"), 409
+            if backup_state.RESTORE_ACTIVE:
+                return jsonify(ok=False, msg="正在恢复目录，请恢复结束后重试"), 409
+            if record.get("scheduler_reload_required", False) or record["state"] == "unknown" and not record.get("scheduler_reloaded", False):
+                reload_scheduler()
+                record.update(scheduler_reload_required=False, scheduler_reloaded=True)
+                _save_restore_request(record)
+            return jsonify(ok=True, msg="已重新加载当前任务，目录保持不变", request_id=request_id)
+    except Exception as exc:
+        return jsonify(ok=False, msg=f"调度器重载未确认：{exc}。请查询原恢复请求后重试。"), 503
 
 
 def restore_error(message, status, *, restored=False, restored_items=None, **details):
@@ -171,15 +285,69 @@ def backup_import():
         return restore_error("请至少选择一个恢复内容。下一步：勾选配置或脚本后重试", 400)
 
     restore_deps = request.form.get("restore_deps") == "1"
+    request_id = request.form.get("restore_request_id", "").strip()
+    if request_id and not re.fullmatch(r"[a-f0-9]{32}", request_id):
+        return restore_error("恢复请求标识无效，未写入任何目录。", 400)
     tmp_dir = tempfile.mkdtemp()
     restore_reserved = False
     directories_restored = False
     scheduler_reloaded = False
+    restore_record = None
+    request_owned = False
+    commit_attempted = False
+    staged = []
 
     try:
         original = os.path.basename(f.filename or "backup")
         backup_file = Path(tmp_dir) / original
         save_backup_upload(f, backup_file)
+        digest = hashlib.sha256()
+        with backup_file.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+
+        if request_id:
+            with storage_transaction(), BACKUP_RESTORE_REQUEST_LOCK:
+                restore_record = _read_restore_request(request_id)
+                if restore_record:
+                    if (restore_record["archive_sha256"] != digest.hexdigest()
+                        or restore_record["restore_items"] != restore_items
+                        or restore_record.get("restore_deps", False) != restore_deps):
+                        return restore_error("该恢复请求标识已绑定其他文件或恢复范围，未覆盖任何目录。请明确开始新的恢复请求。", 409,
+                                             request_id=request_id, request_conflict=True)
+                    if restore_record["state"] in ("restored", "unknown", "committing"):
+                        if restore_record["state"] == "committing" and not backup_state.RESTORE_ACTIVE:
+                            restore_record["state"] = "unknown"
+                            restore_record["restore_outcome_unknown"] = True
+                            try:
+                                _save_restore_request(restore_record)
+                            except Exception:
+                                pass
+                        payload, status = _restore_request_response(restore_record)
+                        if request.path.startswith("/api/"):
+                            return jsonify(payload), status
+                        return restore_error(payload["msg"], status, restored=payload["restored"],
+                                             restored_items=payload["restored_items"],
+                                             scheduler_reload_required=payload["scheduler_reload_required"],
+                                             dependencies_failed=payload["dependencies_failed"],
+                                             dependencies=payload["dependencies"],
+                                             dependency_log=payload["dependency_log"],
+                                             restore_outcome_unknown=payload["restore_outcome_unknown"],
+                                             request_id=request_id)
+                else:
+                    restore_record = {
+                        "request_id": request_id,
+                        "archive_sha256": digest.hexdigest(),
+                        "filename": original,
+                        "restore_items": restore_items,
+                        "restore_deps": restore_deps,
+                        "state": "received",
+                        "scheduler_reload_required": False,
+                        "dependencies_failed": False,
+                        "created_at": now_str(),
+                    }
+                _save_restore_request(restore_record)
+                request_owned = True
 
         extract_dir = Path(tmp_dir) / "extract"
         extract_dir.mkdir(parents=True, exist_ok=True)
@@ -244,13 +412,33 @@ def backup_import():
             with collection_lock:
                 with task_lock:
                     with storage_guard:
+                        if restore_record:
+                            with BACKUP_RESTORE_REQUEST_LOCK:
+                                current = _read_restore_request(request_id)
+                                if current is None or current["state"] not in ("received", "failed"):
+                                    return restore_error("恢复请求状态已变化，目录未提交。请查询原请求后再继续。", 409, request_id=request_id)
+                                restore_record.update(state="committing", started_at=now_str())
+                                _save_restore_request(restore_record)
+                        commit_attempted = True
                         _commit_restore_directories(staged)
                         directories_restored = True
+                        if restore_record:
+                            restore_record.update(state="restored", restored_at=now_str(),
+                                                  scheduler_reload_required=True,
+                                                  dependencies_failed=restore_deps,
+                                                  scheduler_reloaded=False)
+                            _save_restore_request(restore_record)
                         try:
                             reload_scheduler()
                             scheduler_reloaded = True
+                            if restore_record:
+                                restore_record.update(scheduler_reload_required=False, scheduler_reloaded=True)
+                                _save_restore_request(restore_record)
                         except Exception as e:
                             scheduler_error = str(e)
+                            if restore_record:
+                                restore_record.update(scheduler_reload_required=True, scheduler_error=str(e))
+                                _save_restore_request(restore_record)
         finally:
             for entry in staged:
                 if not entry["preserve_workspace"]:
@@ -273,6 +461,10 @@ def backup_import():
             else:
                 deps_msg = "已勾选恢复依赖，但备份中没有 dependencies.txt / requirements.txt"
                 dependencies_failed = True
+            if restore_record:
+                restore_record.update(dependencies_failed=dependencies_failed, dependencies=deps_msg,
+                                      dependency_log=deps_log)
+                _save_restore_request(restore_record)
 
         if scheduler_error:
             return restore_error(
@@ -288,7 +480,8 @@ def backup_import():
 
         if request.path.startswith("/api/"):
             return jsonify(ok=True, msg="备份导入完成", restored=True, restored_items=restore_items,
-                           scheduler_reload_required=False, dependencies=deps_msg or "未恢复依赖", dependency_log=deps_log)
+                           scheduler_reload_required=False, dependencies=deps_msg or "未恢复依赖", dependency_log=deps_log,
+                           request_id=request_id, state="restored")
 
         body = page_header_card(
             "备份导入完成",
@@ -312,17 +505,43 @@ def backup_import():
             if e.live_state_unchanged
             else "现有目录状态可能不完整"
         )
+        if request_owned:
+            restore_record.update(state="failed" if e.live_state_unchanged else "unknown", error=str(e))
+            try:
+                _save_restore_request(restore_record)
+            except Exception:
+                pass
         return restore_error(f"备份恢复失败，{state}：{e}。请检查磁盘空间和目录权限后再操作。", 500,
                              live_state_unchanged=e.live_state_unchanged)
     except Exception as e:
+        if request_owned and not directories_restored:
+            restore_record.update(state="unknown" if commit_attempted else "failed", error=str(e))
+            try:
+                with storage_transaction(), BACKUP_RESTORE_REQUEST_LOCK:
+                    _save_restore_request(restore_record)
+            except Exception:
+                pass
         if directories_restored:
+            if restore_record:
+                restore_record.update(state="restored", scheduler_reload_required=not scheduler_reloaded,
+                                      scheduler_reloaded=scheduler_reloaded, dependencies_failed=bool(restore_deps), error=str(e))
+                try:
+                    _save_restore_request(restore_record)
+                except Exception:
+                    pass
             return restore_error(f"所选目录已恢复，但后续处理失败：{e}。请检查已恢复数据，不要重复导入。", 503,
                                  restored=True, restored_items=restore_items,
                                  scheduler_reload_required=not scheduler_reloaded,
-                                 dependencies_failed=bool(restore_deps), dependency_log=str(e))
-        return restore_error(f"备份导入失败：{e}。下一步：检查备份内容和恢复范围后重试", 400)
+                                 dependencies_failed=bool(restore_deps), dependency_log=str(e), request_id=request_id)
+        if commit_attempted:
+            return restore_error(f"恢复提交结果未知：{e}。请检查目录和调度器状态，不要重复导入。", 503,
+                                 restore_outcome_unknown=True, scheduler_reload_required=True, request_id=request_id)
+        return restore_error(f"备份导入失败：{e}。下一步：检查备份内容和恢复范围后重试", 500 if isinstance(e, OSError) or request_id and not request_owned else 400)
 
     finally:
+        for entry in staged:
+            if not entry["preserve_workspace"]:
+                shutil.rmtree(entry["workspace"], ignore_errors=True)
         if restore_reserved:
             end_restore_activity()
         shutil.rmtree(tmp_dir, ignore_errors=True)

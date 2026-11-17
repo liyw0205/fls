@@ -17,7 +17,7 @@ from datetime import datetime
 from flask import request, Response, redirect, url_for, jsonify, abort
 
 from ...paths import BASE_DIR, DATA_DIR, SCRIPT_DIR, LOG_DIR
-from ...storage import mutate_json, storage_transaction
+from ...storage import mutate_json, storage_transaction, write_json
 from ...ui.layout import layout
 from ...ui.components import page_header, empty_table_row
 from ...utils import h, now_str, safe_name, prune_completed_records
@@ -25,9 +25,11 @@ from ...scheduler import reload_scheduler
 
 BACKUP_DIR = DATA_DIR / "backups"
 BACKUP_JOBS_FILE = DATA_DIR / "backup_jobs.json"
+BACKUP_RESTORE_REQUESTS_DIR = BASE_DIR / ".backup_restore_requests"
 BACKUP_JOBS = {}
 BACKUP_CANCEL_EVENTS = {}
 BACKUP_JOB_LOCK = threading.RLock()
+BACKUP_RESTORE_REQUEST_LOCK = threading.RLock()
 BACKUP_ACTIVITY_CONDITION = threading.Condition(threading.RLock())
 ACTIVE_BACKUP_WORKERS = 0
 RESTORE_ACTIVE = False

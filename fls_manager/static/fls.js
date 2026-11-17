@@ -2240,6 +2240,22 @@ if (document.readyState === "loading") {
             } else {
                 const fd = new FormData(form);
 
+                if(url.pathname === "/backup/import" && typeof flsRestorePending === "function"){
+                    const previous=flsRestorePending();
+                    if(previous && !previous.continue_upload){
+                        flsRestoreRecovery("原恢复请求结果未确认，请先查询原请求。");
+                        restoreFormSubmission(form,submitter);setLoading(false);return;
+                    }
+                    if(previous && (JSON.stringify(fd.getAll("restore_items"))!==JSON.stringify(previous.restore_items)
+                        || (fd.get("restore_deps")==="1") !== previous.restore_deps)){
+                        flsRestoreRecovery("原恢复范围已变化，请查询原请求或明确开始新请求。");
+                        restoreFormSubmission(form,submitter);setLoading(false);return;
+                    }
+                    if(previous) fd.set("restore_request_id",previous.restore_request_id);
+                    sessionStorage.setItem("fls-backup-restore",JSON.stringify({restore_request_id:fd.get("restore_request_id"),
+                        restore_items:fd.getAll("restore_items"),restore_deps:fd.get("restore_deps")==="1"}));
+                }
+
                 if (submitter && submitter.name && !fd.has(submitter.name)) {
                     fd.append(submitter.name, submitter.value || "");
                 }

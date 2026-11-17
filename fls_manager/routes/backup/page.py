@@ -113,7 +113,9 @@ def backup_page():
 <section class="section" id="backup-restore">
 <div class="card">
     <h2 class="section-title">导入恢复</h2>
+    <div id="backupRestoreRecovery" role="alert"></div>
     <form method="post" action="/backup/import" enctype="multipart/form-data">
+        <input type="hidden" name="restore_request_id" value="{uuid.uuid4().hex}">
         <div class="form-item">
             <label>选择备份文件</label>
             <input type="file" name="file" accept=".tar.gz,.tgz,.tar,.zip" aria-label="选择备份文件">
@@ -455,6 +457,87 @@ setTimeout(function(){{
         flsPollBackupJob(jobId);
     }}
 }}, 0);
+</script>
+<script>
+function flsRestorePending(){{
+    const raw=sessionStorage.getItem("fls-backup-restore");
+    return raw ? JSON.parse(raw) : null;
+}}
+
+function flsRestoreRecovery(message, payload){{
+    const box=document.getElementById("backupRestoreRecovery");
+    if(!box) return;
+    let html="<p>"+flsEscapeHtml(message)+"</p><button class='btn btn-primary' type='button' onclick='flsQueryRestoreRequest(this)'>查询原恢复请求</button> ";
+    if(payload && payload.scheduler_reload_required){{
+        html+="<button class='btn btn-blue' type='button' onclick='flsReloadRestoredTasks(this)'>仅重新加载调度器</button> ";
+    }}
+    if(payload && payload.dependencies_failed) html+="<a class='btn btn-blue' href='/deps'>查看并修复依赖</a> ";
+    if(payload && (payload.state==='received' || payload.state==='failed')){{
+        html+="<button class='btn btn-orange' type='button' onclick='flsContinueRestoreRequest(this)'>选择原文件继续恢复</button> ";
+    }}
+    html+="<button class='btn btn-gray' type='button' onclick='flsResetRestoreRequest()'>核对后开始新的恢复</button> <a class='btn btn-gray' href='/login?next=%2Fbackup'>重新登录</a>";
+    box.innerHTML=html;
+}}
+
+async function flsQueryRestoreRequest(source){{
+    const pending=flsRestorePending();
+    if(!pending) return;
+    if(!flsMarkButtonBusy(source, "查询中...")) return;
+    try{{
+        const res=await fetch("/api/backup/restore/"+encodeURIComponent(pending.restore_request_id),{{cache:"no-store",credentials:"same-origin"}});
+        let payload;
+        try{{payload=await flsReadJsonResponse(res);}}catch(e){{
+            payload=e.payload;
+            if(!payload || !payload.state && e.status!==404) throw e;
+            if(e.status===404) payload.state="received";
+        }}
+        if(payload.resolved){{
+            sessionStorage.removeItem("fls-backup-restore");
+            document.querySelector('form[action="/backup/import"] [name="restore_request_id"]').value=flsNewBackupRequest();
+            document.getElementById("backupRestoreRecovery").textContent=payload.msg;
+        }}else{{
+            flsRestoreRecovery(payload.msg,payload);
+        }}
+    }}catch(e){{
+        flsRestoreRecovery("原恢复状态读取失败："+String(e));
+    }}finally{{flsRestoreButton(source);}}
+}}
+
+function flsContinueRestoreRequest(source){{
+    const pending=flsRestorePending();
+    if(!pending) return;
+    pending.continue_upload=true;
+    sessionStorage.setItem("fls-backup-restore",JSON.stringify(pending));
+    const form=document.querySelector('form[action="/backup/import"]');
+    form.elements.restore_request_id.value=pending.restore_request_id;
+    Array.from(form.querySelectorAll('[name="restore_items"]')).forEach(input=>input.checked=pending.restore_items.includes(input.value));
+    form.elements.restore_deps.checked=pending.restore_deps;
+    document.getElementById("backupRestoreRecovery").textContent="请选择原备份文件，再提交原恢复请求。";
+    form.elements.file.focus();
+}}
+
+function flsResetRestoreRequest(){{
+    if(!confirm("已检查任务、脚本和调度器状态，确认开始新的恢复请求吗？")) return;
+    sessionStorage.removeItem("fls-backup-restore");
+    const form=document.querySelector('form[action="/backup/import"]');
+    form.elements.restore_request_id.value=flsNewBackupRequest();
+    document.getElementById("backupRestoreRecovery").textContent="";
+}}
+
+async function flsReloadRestoredTasks(source){{
+    if(!flsMarkButtonBusy(source,"重载中...")) return;
+    try{{
+        const pending=flsRestorePending();
+        await flsReadJsonResponse(await fetch("/api/backup/restore/"+encodeURIComponent(pending.restore_request_id)+"/reload",{{method:"POST",credentials:"same-origin"}}));
+        flsRestoreRecovery("已重新加载当前任务，目录保持不变。可查询原恢复记录或确认开始新请求。");
+    }}catch(e){{
+        flsRestoreRecovery("调度器重载未确认："+String(e),{{scheduler_reload_required:true}});
+    }}finally{{flsRestoreButton(source);}}
+}}
+
+setTimeout(function(){{
+    if(flsRestorePending()) flsRestoreRecovery("原恢复请求结果未确认，请先查询，避免再次覆盖目录。");
+}},0);
 </script>
 """
     return layout("备份恢复", "backup", body)
