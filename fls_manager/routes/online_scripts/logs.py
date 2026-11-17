@@ -105,12 +105,14 @@ def api_online_install_log(install_id):
 
     if not info:
         return jsonify({
+            "ok": False,
             "running": False,
             "status": "记录不存在",
             "returncode": None,
             "error": "安装记录不存在。请确认安装 ID 后重试。",
             "log_file": "",
             "log": "安装记录不存在。请到日志管理中查找 online-script-install-*.log。",
+            "recovery_url": "/logs",
         }), 404
 
     log_file = info.get("log_file", "")
@@ -186,6 +188,7 @@ def online_install_log(install_id):
 {header_card}
 <div class="notice red" id="installPollError" role="status" hidden></div>
 <a id="installPollLogin" class="btn btn-primary" hidden>重新登录</a>
+<a id="installPollLogs" class="btn btn-orange" href="/logs" hidden>查看日志管理</a>
 <button id="installPollRetry" class="btn btn-primary" type="button" hidden>重新读取安装状态</button>
 <pre class="log" id="log">加载中...</pre>
 {log_controls()}
@@ -194,6 +197,7 @@ def online_install_log(install_id):
 (function(){{
 const pollError = document.getElementById("installPollError");
 const loginAction = document.getElementById("installPollLogin");
+const logsAction = document.getElementById("installPollLogs");
 const retryAction = document.getElementById("installPollRetry");
 let pending = false;
 window.__FLS_LOG_LAST_TEXT__ = "";
@@ -233,6 +237,7 @@ async function loadLog(){{
             pollError.textContent = "";
         }}
         if(loginAction) loginAction.hidden = true;
+        if(logsAction) logsAction.hidden = true;
         if(retryAction) retryAction.hidden = true;
 
         document.getElementById("installStatus").textContent = json.status || "-";
@@ -304,6 +309,7 @@ async function loadLog(){{
         const message = e && e.message ? e.message : String(e);
         const denied = e && (e.status === 401 || e.status === 403);
         const missing = e && e.status === 404;
+        const payload = e && e.payload || {{}};
         const next = denied ? "重新登录后继续读取" :
             (missing ? "到日志管理检查已保留的安装日志" : "检查安装日志文件和服务状态，稍后会重新读取");
         if(pollError){{
@@ -315,6 +321,10 @@ async function loadLog(){{
             if(denied){{
                 loginAction.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
             }}
+        }}
+        if(logsAction){{
+            logsAction.hidden = !missing;
+            if(missing) logsAction.href = payload.recovery_url || "/logs";
         }}
         if(retryAction) retryAction.hidden = missing;
         if(denied || missing){{

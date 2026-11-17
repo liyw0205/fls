@@ -288,6 +288,7 @@ class OnlineInstallRecoveryTests(unittest.TestCase):
             self.assertEqual(unauthorized.get_json()["msg"], "登录已过期")
             html = app.test_client().get("/online-scripts/log/previous", headers={"X-Token": TOKEN}).get_data(as_text=True)
             self.assertIn('id="installPollLogin" class="btn btn-primary" hidden>重新登录</a>', html)
+            self.assertIn('id="installPollLogs" class="btn btn-orange" href="/logs" hidden>查看日志管理</a>', html)
             script = next(script for script in re.findall(r"<script>(.*?)</script>", html, re.S)
                           if "async function loadLog()" in script)
             source = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
@@ -299,7 +300,7 @@ const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
 (async () => {
   for(const status of [401, 403, 404, 409, 500, 200]) {
     const elements = Object.fromEntries(['installStatus', 'installError', 'installReturncode',
-      'installStopAction', 'installRecoveryAction', 'installPollError', 'installPollLogin', 'installPollRetry', 'log', 'flsLogNewTip']
+      'installStopAction', 'installRecoveryAction', 'installPollError', 'installPollLogin', 'installPollLogs', 'installPollRetry', 'log', 'flsLogNewTip']
       .map(id => [id, {textContent: '', hidden: false, dataset: {}, style: {}}]));
     elements.log.textContent = 'preserved output';
     const context = {
@@ -322,10 +323,12 @@ const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
     assert.equal(context.window.__FLS_ACTIVE_LOG_INTERVAL__, null);
     const denied = [401, 403].includes(status);
     assert.equal(elements.installPollLogin.hidden, !denied);
+    assert.equal(elements.installPollLogs.hidden, status !== 404);
     assert.equal(elements.installPollRetry.hidden, status === 404);
     assert.equal(elements.installPollRetry.disabled, false);
     if(denied) assert.equal(elements.installPollLogin.href,
       '/login?next=%2Fonline-scripts%2Flog%2Fprevious%3Fback%3D%252Fpull');
+    if(status === 404) assert.equal(elements.installPollLogs.href, '/logs');
     if(permanent) assert.equal(elements.installRecoveryAction.hidden, true);
     assert.match(elements.installPollError.textContent, status === 200 ? /响应解析失败/ : /backend diagnostic/);
     if(status !== 404) {
@@ -353,7 +356,7 @@ const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
   }
   {
     const elements = Object.fromEntries(['installStatus', 'installError', 'installReturncode',
-      'installStopAction', 'installRecoveryAction', 'installPollError', 'installPollLogin', 'installPollRetry', 'log']
+      'installStopAction', 'installRecoveryAction', 'installPollError', 'installPollLogin', 'installPollLogs', 'installPollRetry', 'log']
       .map(id => [id, {textContent: 'preserved', hidden: false, dataset: {}, style: {}}]));
     let resolve;
     let requests = 0;
