@@ -350,6 +350,41 @@ class OnlineInstallLifecycleTests(unittest.TestCase):
             self.assertFalse(info["running"])
             self.assertIn("disk full", info["error"])
 
+    def test_terminal_persistence_failure_is_unknown_and_keeps_install_recovery(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import install
+            from fls_manager.online_scripts.constants import persist_online_install
+            from fls_manager.online_scripts.source import save_online_script_cache
+
+            info = self.register(base_dir)
+            save_online_script_cache([self.item()])
+            target = base_dir / "scripts" / "demo.sh"
+            real_persist = persist_online_install
+            calls = 0
+
+            def persist(value):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("state disk full")
+                return real_persist(value)
+
+            with patch.object(install, "persist_online_install", side_effect=persist), patch.object(
+                install, "download_online_script_logged", return_value=target,
+            ):
+                install.install_worker("install", self.item())
+
+            self.assertEqual(info["status"], "结果未知")
+            self.assertIsNone(info["returncode"])
+            self.assertIn("终态尚未可靠保存", info["error"])
+            snapshot = self.snapshot()
+            self.assertEqual(snapshot["status"], "结果未知")
+            payload = app.test_client().get(
+                "/api/online-scripts/log/install", headers={"X-Token": TOKEN},
+            ).get_json()
+            self.assertEqual(payload["status"], "结果未知")
+            self.assertTrue(payload["recovery"]["available"])
+
     def test_unknown_is_idempotent_preserves_error_and_differs_from_missing(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING, persist_online_install

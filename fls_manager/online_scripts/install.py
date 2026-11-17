@@ -49,11 +49,13 @@ class InstallStopped(InstallCommandError):
 def _persist_install_state(info):
     try:
         persist_online_install(info)
+        return True
     except Exception as e:
         detail = f"保存安装状态失败：{e}"
         info["persistence_error"] = detail
         info["error"] = "；".join(filter(None, (info.get("error"), detail)))
         print(detail, flush=True)
+        return False
 
 
 def get_running_install_by_script_id(script_id):
@@ -509,10 +511,26 @@ def install_worker(
                 "process": None,
                 "updated_at": now_str(),
             })
-            _persist_install_state(info)
+            persisted = _persist_install_state(info)
+            if not persisted:
+                info.update(
+                    status="结果未知",
+                    returncode=None,
+                    error="；".join(filter(None, (
+                        info.get("error"),
+                        "安装副作用已执行，但终态尚未可靠保存，请查看日志后重试",
+                    ))),
+                )
+                _persist_install_state(info)
 
         append_log(log_file, "")
-        result = "安装完成，调度器待重载" if info.get("scheduler_reload_pending") else "全部完成"
+        result = (
+            "结果未知"
+            if info.get("status") == "结果未知"
+            else "安装完成，调度器待重载"
+            if info.get("scheduler_reload_pending")
+            else "全部完成"
+        )
         append_log(log_file, f"===== {result}: {now_str()} =====")
 
     except Exception as e:
@@ -535,7 +553,17 @@ def install_worker(
                 "process": None,
                 "updated_at": now_str(),
             })
-            _persist_install_state(info)
+            persisted = _persist_install_state(info)
+            if not persisted:
+                info.update(
+                    status="结果未知",
+                    returncode=None,
+                    error="；".join(filter(None, (
+                        info.get("error"),
+                        "安装结果已执行，但终态尚未可靠保存，请查看日志后重试",
+                    ))),
+                )
+                _persist_install_state(info)
 
         try:
             append_log(log_file, f"===== {info['status']}: {now_str()} =====")
