@@ -33,9 +33,7 @@ def notify_history_page(notice="", notice_kind="info"):
         if item.get("content_truncated"):
             message = f"{message}；正文已截断，重试使用保存的副本"
         if item.get("status") in ("failed", "unknown"):
-            action = f'''<form class="inline-form" method="post" action="/notify/retry/{h(item_id)}">
-                <button class="btn btn-orange" type="submit">重试发送</button>
-            </form>'''
+            action = notify_retry_form(item)
         else:
             action = '<span class="muted">-</span>'
 
@@ -94,11 +92,37 @@ def notify_history_page(notice="", notice_kind="info"):
 
 @bp.route("/notify/history")
 def notify_history():
-    return notify_history_page()
+    try:
+        return notify_history_page()
+    except Exception:
+        return layout("通知投递记录恢复", "notify", '<section class="section" role="alert"><p>通知投递记录无法读取，请修复文件后重新读取。</p><a class="btn btn-blue" href="/notify/history">重新读取投递记录</a><a class="btn btn-gray" href="/notify">返回通知管理</a></section>'), 500
 
 
 @bp.route("/notify/retry/<delivery_id>", methods=["POST"])
 def notify_retry(delivery_id):
+    if "request_id" in request.form:
+        import json
+        from ...notify_retry_actions import submit_notification_retry
+        data = request.form.to_dict()
+        payload, status = submit_notification_retry(delivery_id, data)
+        body = f'<section class="section" role="alert" data-notify-result="{h(json.dumps(payload, ensure_ascii=False))}"><p>{h(payload["msg"])}</p><p>{h(payload.get("delivery", {}).get("message", ""))}</p></section>'
+        if not payload.get("resolved"):
+            if payload.get("confirm_required"):
+                data["confirm_retry"] = "1"
+            fields = "".join(f'<input type="hidden" name="{key}" value="{h(data[key])}">'
+                             for key in ("request_id", "version", "expected_attempt", "confirm_retry", "item_id") if key in data)
+            body += f'<form method="post" action="{h(request.path)}">{fields}<section class="section"><button class="btn btn-primary" type="submit">{"确认后继续原重试" if payload.get("confirm_required") else "查询原重试结果"}</button></section></form>'
+        elif payload.get("delivery", {}).get("status") in ("failed", "unknown"):
+            body += '<section class="section">' + notify_retry_form(payload["delivery"], "核对后发起下一次重试") + '</section>'
+        if payload.get("item_id"):
+            body += f'<a class="btn btn-blue" href="/notify/edit/{h(payload["item_id"])}">修复通知渠道</a>'
+        if payload.get("channels"):
+            fields = f'<input type="hidden" name="request_id" value="{uuid.uuid4().hex}">'
+            fields += "".join(f'<input type="hidden" name="{key}" value="{h(data.get(key, ""))}">' for key in ("version", "expected_attempt"))
+            options = "".join(f'<option value="{h(item["id"])}">{h(item["name"])}</option>' for item in payload["channels"])
+            body += f'<form method="post" action="{h(request.path)}">{fields}<section class="section"><label>选择重试通知渠道<select name="item_id" aria-label="选择重试通知渠道">{options}</select></label><button class="btn btn-primary" type="submit">确认渠道后重试原正文</button></section></form>'
+        body += '<a class="btn btn-gray" href="/notify/history">查看当前投递记录</a><a class="btn btn-gray" href="/notify">返回通知管理</a>'
+        return layout("通知重试结果", "notify", body), status
     try:
         ok, msg, _row = retry_notify_delivery(delivery_id)
     except Exception as exc:

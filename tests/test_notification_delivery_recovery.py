@@ -147,7 +147,7 @@ class NotificationDeliveryRecoveryTests(unittest.TestCase):
             }
             write_json(paths.NOTIFY_HISTORY_FILE, [row])
 
-            with patch.object(notify, "read_json", wraps=notify.read_json) as read:
+            with patch.object(notify, "read_notify_history_rows", wraps=notify.read_notify_history_rows) as read:
                 first = notify.load_notify_history()
                 second = notify.load_notify_history()
 

@@ -20,7 +20,12 @@ def notify_test_result(data, payload, status, prefix=""):
     delivery_id = payload.get("delivery_id")
     if delivery_id:
         if payload.get("delivery_status") in ("failed", "unknown") and payload.get("history_available", True):
-            body += f'<form method="post" action="/notify/retry/{h(delivery_id)}"><section class="section"><button class="btn btn-primary" type="submit">确认后重试此投递</button></section></form>'
+            try:
+                row = next((row for row in load_notify_history() if row["id"] == delivery_id), None)
+                if row and row["status"] in ("failed", "unknown"):
+                    body += '<section class="section">' + notify_retry_form(row, "确认后重试此投递") + '</section>'
+            except Exception:
+                body += '<p>投递记录暂不可读取，请修复后查看记录再重试。</p>'
         body += '<a class="btn btn-blue" href="/notify/history">查看投递记录</a>'
     if not payload.get("resolved"):
         if payload.get("confirm_required"):

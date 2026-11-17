@@ -4,21 +4,14 @@ import uuid
 
 from . import notify
 from .notify_actions import notification_config, notification_version
-from .paths import DATA_DIR, NOTIFY_HISTORY_FILE
+from .paths import DATA_DIR
 from .proxy_actions import proxy_version
 from .storage import storage_transaction, write_json
 from .utils import now_str
 
 
 def _strict_history():
-    try:
-        rows = json.loads(NOTIFY_HISTORY_FILE.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return []
-    if (not isinstance(rows, list) or any(not isinstance(row, dict) or not isinstance(row.get("id"), str)
-        or not row["id"] for row in rows) or len({row["id"] for row in rows}) != len(rows)):
-        raise ValueError("通知投递记录损坏")
-    return rows
+    return notify.read_notify_history_rows()
 
 
 def submit_notification_test(data, *, sender=None):

@@ -16,7 +16,7 @@ from email.utils import formataddr
 
 from .config import load_config, save_config
 from .paths import NOTIFY_HISTORY_FILE
-from .storage import read_json, write_json, storage_transaction
+from .storage import write_json, storage_transaction
 from .utils import now_str, LazyModule
 
 requests = LazyModule("requests")
@@ -103,6 +103,8 @@ def _notify_history_rows(raw):
             "updated_at": _notify_text(item.get("updated_at")),
             "retry_of": _notify_text(item.get("retry_of")),
         }
+        if "retry_request_id" in item:
+            normalized_row["retry_request_id"] = _notify_text(item["retry_request_id"])
 
         if normalized_row != row:
             changed = True
@@ -118,9 +120,21 @@ def _notify_history_rows(raw):
 def _notify_history_file_signature():
     try:
         stat = NOTIFY_HISTORY_FILE.stat()
-    except OSError:
+    except FileNotFoundError:
         return (False, 0, 0, 0)
     return (True, stat.st_ino, stat.st_mtime_ns, stat.st_size)
+
+
+def read_notify_history_rows():
+    try:
+        rows = json.loads(NOTIFY_HISTORY_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    if (not isinstance(rows, list) or any(not isinstance(row, dict) or not isinstance(row.get("id"), str)
+        or not row["id"] or row["id"] != row["id"].strip() or any(ord(c) < 32 for c in row["id"])
+        for row in rows) or len({row["id"] for row in rows}) != len(rows)):
+        raise RuntimeError("通知投递记录损坏，未覆盖原文件")
+    return rows
 
 
 def _invalidate_notify_history_cache():
@@ -140,7 +154,7 @@ def _load_notify_history_rows():
     ):
         return _NOTIFY_HISTORY_CACHE[2]
 
-    raw = read_json(NOTIFY_HISTORY_FILE, [])
+    raw = read_notify_history_rows()
     rows, changed = _notify_history_rows(raw)
     if changed:
         write_json(NOTIFY_HISTORY_FILE, rows)
@@ -205,7 +219,7 @@ def create_notify_delivery(item, title, content, source="manual", retry_of="", *
     }
 
     with NOTIFY_HISTORY_LOCK:
-        raw = read_json(NOTIFY_HISTORY_FILE, [])
+        raw = read_notify_history_rows()
         rows, _changed = _notify_history_rows(raw)
         if any(existing["id"] == row["id"] for existing in rows):
             raise ValueError("通知投递标识已存在")
@@ -222,39 +236,23 @@ def finish_notify_delivery(delivery_id, ok, message):
     delivery_id = _notify_text(delivery_id).strip()
 
     with NOTIFY_HISTORY_LOCK:
-        raw = read_json(NOTIFY_HISTORY_FILE, [])
-        rows, _changed = _notify_history_rows(raw)
-        found = False
-        for row in rows:
-            if row.get("id") == delivery_id:
-                row["status"] = status
-                row["message"] = _notify_text(message)
-                row["updated_at"] = now_str()
-                found = True
-                break
-
-        if not found:
-            NOTIFY_ACTIVE_DELIVERIES.discard(delivery_id)
-            _invalidate_notify_history_cache()
-            return False
-
         try:
+            rows, _changed = _notify_history_rows(read_notify_history_rows())
+            target = next((row for row in rows if row["id"] == delivery_id), None)
+            if target is None:
+                return False
+            target.update(status=status, message=_notify_text(message), updated_at=now_str())
             write_json(NOTIFY_HISTORY_FILE, rows[:NOTIFY_HISTORY_LIMIT])
-        except Exception:
-            # Let the next read expose the row as unknown so it can be retried.
+            return True
+        finally:
             NOTIFY_ACTIVE_DELIVERIES.discard(delivery_id)
             _invalidate_notify_history_cache()
-            raise
-
-        NOTIFY_ACTIVE_DELIVERIES.discard(delivery_id)
-        _invalidate_notify_history_cache()
-        return True
 
 
 def _claim_notify_delivery(delivery_id):
     delivery_id = _notify_text(delivery_id).strip()
     with NOTIFY_HISTORY_LOCK:
-        raw = read_json(NOTIFY_HISTORY_FILE, [])
+        raw = read_notify_history_rows()
         rows, _changed = _notify_history_rows(raw)
         target = None
         for row in rows:
@@ -290,17 +288,20 @@ def retry_notify_delivery(delivery_id):
     if row is None:
         return False, error, None
 
-    item = get_notify_item(row.get("item_id"))
-    if item is None:
-        message = "通知渠道已删除"
-        finish_notify_delivery(row.get("id"), False, message)
-        return False, message, get_notify_delivery(row.get("id"))
-
     try:
-        ok, message = send_one(item, row.get("title", ""), row.get("content", ""))
+        from .notify_actions import notification_config
+        cfg = notification_config()
+        item = next((item for item in cfg.get("notify_items", []) if item["id"] == row.get("item_id")), None)
+        if item is None:
+            ok, message = False, "通知渠道已删除"
+        elif not item.get("enabled", True):
+            ok, message = False, "通知渠道已停用"
+        else:
+            ok, message = send_one(item, row.get("title", ""), row.get("content", ""))
     except Exception as exc:
         ok, message = False, str(exc)
-    finish_notify_delivery(row.get("id"), ok, message)
+    if not finish_notify_delivery(row.get("id"), ok, message):
+        return False, "发送已执行，但投递记录不存在，请核对接收端", None
     return ok, message, get_notify_delivery(row.get("id"))
 
 

@@ -44,9 +44,17 @@ def api_notify_history():
     if status and status not in NOTIFY_HISTORY_STATUSES:
         return jsonify({"ok": False, "msg": "未知通知状态", "items": []}), 400
 
+    try:
+        items = load_notify_history(limit=limit, status=status)
+    except Exception:
+        return jsonify({"ok": False, "msg": "通知投递记录无法读取，请修复文件后重试", "items": []}), 500
+    from ..notify_retry_actions import retry_request
+    for item in items:
+        if item["status"] in ("failed", "unknown"):
+            item["retry_request"] = retry_request(item)
     return jsonify({
         "ok": True,
-        "items": load_notify_history(limit=limit, status=status),
+        "items": items,
         "limit": limit,
         "status": status,
     })
@@ -54,6 +62,11 @@ def api_notify_history():
 
 @bp.route("/api/notify/retry/<delivery_id>", methods=["POST"])
 def api_notify_retry(delivery_id):
+    data = request.get_json(silent=True) if request.is_json else request.form.to_dict()
+    if request.is_json or "request_id" in data:
+        from ..notify_retry_actions import submit_notification_retry
+        payload, status = submit_notification_retry(delivery_id, data)
+        return jsonify(payload), status
     try:
         ok, msg, row = retry_notify_delivery(delivery_id)
     except Exception as exc:

@@ -18,7 +18,7 @@ def main():
         from werkzeug.serving import make_server
         from fls_manager.app import create_app
         from fls_manager import models, proxy_actions, scheduler
-        from fls_manager import notify_actions, notify_test_actions, notify
+        from fls_manager import notify_actions, notify_test_actions, notify_retry_actions, notify
         from fls_manager.notify import send_by_ids
         from fls_manager.config import load_config
         from fls_manager.config import save_config
@@ -27,13 +27,14 @@ def main():
 
         save_config({"notify_items": [], "notify_default_ids": []})
         app = create_app()
-        if os.environ.get("FLS_NOTIFY_TESTS") or os.environ.get("FLS_NOTIFY_SAVES"):
+        if any(os.environ.get(key) for key in ("FLS_NOTIFY_TESTS", "FLS_NOTIFY_SAVES", "FLS_NOTIFY_RETRIES")):
             import fls_manager.app as app_module
             app_module.dispatch_frontend_open_event = lambda: None
         fault = {}
         save, receipt = models.save_proxies, proxy_actions.write_json
         notify_receipt = notify_actions.write_json
         test_receipt, delivery_write = notify_test_actions.write_json, notify.write_json
+        retry_receipt = notify_retry_actions.write_json
         deliveries = []
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
         class Webhook(BaseHTTPRequestHandler):
@@ -84,7 +85,16 @@ def main():
                 if fault.get("test_result_after"):
                     delivery_write(path, rows)
                 raise OSError("fixture delivery confirmation rejected")
+            if fault.get("retry_history") and status == "running":
+                raise OSError("fixture retry claim rejected")
+            if fault.get("retry_result") and status == "succeeded":
+                raise OSError("fixture retry result rejected")
             return delivery_write(path, rows)
+
+        def write_retry(path, row):
+            if fault.get("retry_receipt") and row["state"] != "prepared":
+                raise OSError("fixture retry receipt rejected")
+            return retry_receipt(path, row)
 
         models.save_proxies = actions.save_proxies = persist
         proxy_actions.write_json = write
@@ -92,6 +102,7 @@ def main():
         notify_actions.write_json = write_notify
         notify_test_actions.write_json = write_test
         notify.write_json = write_delivery
+        notify_retry_actions.write_json = write_retry
 
         @app.route("/api/fixture/proxy", methods=["GET", "POST"])
         def fixture():
@@ -129,6 +140,15 @@ def main():
                 cfg = load_config()
                 cfg["notify_items"] = [row for row in cfg["notify_items"] if row["id"] != data["notify_remove"]]
                 save_config(cfg)
+            if data.get("retry_seed"):
+                item = load_config()["notify_items"][0]
+                delivery_id = notify.create_notify_delivery(item, "Retry browser title", "Retry browser content")
+                notify.finish_notify_delivery(delivery_id, False, "Initial browser rejection")
+            if data.get("retry_changed"):
+                rows = notify.read_notify_history_rows()
+                rows[0]["attempt"] += 1
+                rows[0]["message"] = "Changed externally"
+                delivery_write(notify.NOTIFY_HISTORY_FILE, rows)
             if data.get("notify_send"):
                 results = send_by_ids("Saved defaults", "Actual payload", ["__default__"])
                 return jsonify(ok=all(row["ok"] for row in results), ids=[row["id"] for row in results])
@@ -186,6 +206,68 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
     return res;
    };
    const notice=async text=>{await page.locator('[data-proxy-result]').waitFor();assert.match(await page.locator('[data-proxy-result]').innerText(),text);};
+   if(process.env.FLS_NOTIFY_RETRIES){
+    await fixture({notify_reset:true,retry_seed:true});
+    await page.goto(base+'/login');await login();await page.goto(base+'/notify/history');
+    const rform=()=>page.locator('form[action^="/notify/retry/"]').first();
+    const rnotice=async text=>{await page.locator('[data-notify-result]').waitFor();assert.match(await page.locator('[data-notify-result]').innerText(),text);};
+    const count=async()=>(await state()).deliveries.length;
+    const stale=await rform().evaluate(f=>Object.fromEntries(new FormData(f)));
+    const oldUrl=await rform().getAttribute('action');
+    assert.equal((await page.request.post(base+oldUrl,{form:{...stale,csrf_token:'bad'}})).status(),400);
+    await fixture({retry_changed:true});
+    assert.equal((await submit(rform())).status(),409);await rnotice(/已变化/);assert.equal(await count(),0);
+    await page.goto(base+'/notify/history');
+    const originalFields=await rform().evaluate(f=>Object.fromEntries(new FormData(f)));
+    await fixture({test_network:true});
+    await page.route('**/notify/retry/*',async route=>{await route.fetch();await route.abort();},{times:1});
+    await rform().locator('button').click();await page.locator('[data-collection-save-pending]').waitFor();
+    assert.equal(await count(),1);await page.reload();
+    await page.getByRole('button',{name:'查询本次保存结果',exact:true}).click();await rnotice(/重试发送失败/);
+    await page.waitForFunction(()=>!document.querySelector('[data-collection-save-pending]'));
+    assert.equal(await count(),1);assert.equal((await state()).delivery_history[0].attempt,3);
+    assert.equal((await submit(rform())).status(),502);await rnotice(/重试发送失败/);assert.equal(await count(),2);
+    const replay=await page.request.post(base+oldUrl,{form:originalFields});
+    assert.equal(replay.status(),502);assert.equal(await count(),2);assert.equal((await state()).delivery_history[0].attempt,4);
+    await fixture({});assert.equal((await submit(rform())).status(),200);await rnotice(/发送成功/);assert.equal(await count(),3);
+    // Claim publication failure keeps the old selection and only increments once on retry.
+    await fixture({retry_seed:true});await page.goto(base+'/notify/history');await fixture({retry_history:true});
+    assert.equal((await submit(rform())).status(),500);await rnotice(/无法确认/);assert.equal(await count(),3);
+    await fixture({});assert.equal((await submit(rform())).status(),200);assert.equal(await count(),4);
+    // A claimed-but-unsent interruption is unknown and resumes through an explicit new attempt.
+    await fixture({retry_seed:true});await page.goto(base+'/notify/history');await fixture({retry_receipt:true});
+    assert.equal((await submit(rform())).status(),503);await rnotice(/结果未知/);assert.equal(await count(),4);
+    await fixture({});assert.equal((await submit(rform())).status(),200);assert.equal(await count(),5);
+    // Result publication failure after real delivery offers an executable recovery.
+    await fixture({retry_seed:true});await page.goto(base+'/notify/history');await fixture({retry_result:true});
+    assert.equal((await submit(rform())).status(),503);await rnotice(/结果未知/);assert.equal(await count(),6);
+    await page.evaluate(()=>{document.documentElement.style.scrollBehavior='auto';window.scrollTo(0,0);});await page.waitForTimeout(100);
+    if(process.env.FLS_BULK_SCREENSHOTS) await page.screenshot({path:process.env.FLS_BULK_SCREENSHOTS+'/notify-retry-'+viewport.width+'.png',fullPage:true});
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
+    await fixture({});assert.equal((await submit(rform())).status(),200);assert.equal(await count(),7);
+    // Non-JSON 502 and fresh login query the original attempt after navigation.
+    await fixture({retry_seed:true});await page.goto(base+'/notify/history');
+    await page.route('**/notify/retry/*',r=>r.fulfill({status:502,contentType:'text/plain',body:'fixture gateway'}),{times:1});
+    await rform().locator('button').click();await page.locator('[data-collection-save-pending]').waitFor();
+    await page.goto(base+'/logout');await login();await page.getByRole('button',{name:'查询本次保存结果',exact:true}).click();
+    await rnotice(/发送成功/);assert.equal(await count(),8);
+    await fixture({retry_seed:true});await page.goto(base+'/notify/history');
+    const fields=await rform().evaluate(f=>Object.fromEntries(new FormData(f)));
+    const apiUrl=(await rform().getAttribute('action')).replace('/notify/retry/','/api/notify/retry/');
+    await fixture({test_network:true});
+    assert.equal((await page.request.post(base+apiUrl,{headers,data:fields})).status(),502);
+    assert.equal((await page.request.post(base+apiUrl,{headers,data:fields})).status(),502);assert.equal(await count(),9);
+    // Deleted channels can explicitly move the original title/body to a valid replacement.
+    await fixture({retry_seed:true});await page.goto(base+'/notify/history');await fixture({notify_remove:'n'});
+    assert.equal((await submit(rform())).status(),409);await rnotice(/删除或停用/);assert.equal(await count(),9);
+    await page.getByLabel('选择重试通知渠道',{exact:true}).selectOption('other');
+    const replaceForm=page.locator('form:has(select[name="item_id"])');
+    await fixture({});assert.equal((await submit(replaceForm)).status(),200);await rnotice(/发送成功/);assert.equal(await count(),10);
+    assert.ok((await state()).deliveries.at(-1).includes('Retry browser content'));
+    assert.equal((await state()).delivery_history[0].item_id,'other');
+    assert.deepEqual(errors,[]);console.log('notification retry recovery passed '+viewport.width);
+    await context.close();continue;
+   }
    if(process.env.FLS_NOTIFY_SAVES){
     await fixture({notify_reset:true});
     await page.goto(base+'/login');await login();await page.goto(base+'/notify/new');

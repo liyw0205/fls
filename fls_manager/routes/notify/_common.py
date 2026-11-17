@@ -56,6 +56,15 @@ def channel_options(selected):
     return options
 
 
+def notify_retry_form(row, label="重试发送"):
+    from ...notify_retry_actions import retry_request
+    fields = "".join(f'<input type="hidden" name="{key}" value="{h(value)}">' for key, value in retry_request(row).items())
+    return f'''<form class="inline-form" method="post" action="/notify/retry/{h(row["id"])}">
+        {fields}
+        <button class="btn btn-orange" type="submit">{h(label)}</button>
+    </form>'''
+
+
 def default_options(selected_ids, items=None):
     selected_ids = set(selected_ids or [])
     options = ""
