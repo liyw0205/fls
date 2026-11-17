@@ -281,6 +281,66 @@ class TaskExecutionRecoveryTests(unittest.TestCase):
                 self.assertNotIn("a", task_runner.PENDING_RETRIES)
                 self.assertEqual(models.get_task("a")["run_count"], 2)
 
+    def test_timeout_unknown_process_slot_stops_and_history_form_recovers(self):
+        with isolated_app() as (app, base):
+            from fls_manager import models, paths, task_runner
+            task = sample_task("a", command="exit 0")
+            models.save_tasks([task])
+            log_file = paths.LOG_DIR / "late-timeout-exit.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_file.write_text("timeout termination was not confirmed\n", encoding="utf-8")
+
+            class ExitedProcess:
+                pid = 4321
+
+                def poll(self):
+                    return 9
+
+            task_runner.RUNNING["a"] = {
+                "status": "running", "process": ExitedProcess(), "pid": 4321,
+                "history_id": "timeout-history", "history_start_ts": time.time() - 4,
+                "log_file": str(log_file), "log_fp": None, "watcher_done": True,
+                "stop_error": "超时后停止失败：无法确认任务进程已退出",
+                "terminal_status": "timeout",
+                "terminal_message": "任务超时，超过 5 秒；超时后停止失败：无法确认任务进程已退出",
+            }
+            models.save_task_history([{
+                "id": "timeout-history", "task_id": "a", "task_name": "a",
+                "command": "exit 0", "status": "running", "start_at": "2026-11-17 10:00:00",
+                "end_at": "", "duration_seconds": 0, "return_code": None,
+                "pid": 4321, "log_file": str(log_file), "message": "超时后停止失败",
+            }])
+            client = app.test_client()
+            self.authenticate(client)
+
+            rejected = self.post(client, action="run", request_id="a" * 32)
+            self.assertEqual(rejected.status_code, 409)
+            self.assertIn("任务已在运行中", rejected.json["msg"])
+            self.assertTrue(task_runner.is_running("a"))
+
+            stop_id = "b" * 32
+            stopped = self.post(client, action="stop", request_id=stop_id)
+            self.assertEqual(stopped.status_code, 200)
+            self.assertEqual(stopped.json["stopped_count"], 1)
+            self.assertEqual(models.load_task_history()[0]["status"], "timeout")
+            self.assertIn("此前未确认退出，当前已确认进程退出", models.load_task_history()[0]["message"])
+            with patch("fls_manager.routes.api.stop_task_now") as stop:
+                replay = self.post(client, action="stop", request_id=stop_id)
+                self.assertEqual(replay.json, stopped.json)
+                stop.assert_not_called()
+
+            forms = TaskFormParser(client.get("/history").get_data(as_text=True)).forms
+            recovery = next(form for form in forms if form["action"].startswith("/run/a"))
+            rerun = client.post(
+                recovery["action"],
+                data=dict(recovery["fields"], csrf_token="execution-csrf"),
+                headers={"X-CSRF-Token": "execution-csrf"},
+            )
+            self.assertEqual(rerun.status_code, 302)
+            self.assertEqual(rerun.location, "/log/a?back=/history")
+            self.wait_history("success")
+            self.assertEqual(models.get_task("a")["run_count"], 1)
+
     def test_pending_rename_keeps_recovery_link_and_never_starts_process(self):
         with isolated_app() as (app, _):
             from fls_manager import models

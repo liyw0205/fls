@@ -103,6 +103,8 @@ def is_running(task_id):
         status = info.get("status")
         if status in ("starting", "delaying"):
             return True
+        if info.get("watcher_done") and info.get("stop_error"):
+            return True
 
         proc = info.get("process")
 
@@ -137,6 +139,9 @@ def running_task_snapshot(task_ids=None):
 
             status = info.get("status")
             if status in ("starting", "delaying"):
+                snapshot[task_id] = dict(info)
+                continue
+            if info.get("watcher_done") and info.get("stop_error"):
                 snapshot[task_id] = dict(info)
                 continue
 
@@ -482,6 +487,11 @@ def task_finish_watcher(task_id, task_snapshot, proc, log_file, log_fp, history_
                         "status": "running",
                         "stop_error": "超时后停止失败：无法确认任务进程已退出",
                         "watcher_done": True,
+                        "terminal_status": "timeout",
+                        "terminal_message": (
+                            f"任务超时，超过 {timeout_seconds} 秒；"
+                            "超时后停止失败：无法确认任务进程已退出"
+                        ),
                     },
                 )
                 update_task_history(
@@ -979,6 +989,31 @@ def stop_task_now(task_id):
             return False, f"停止失败：读取任务进程状态失败：{e}"
 
         if return_code is not None:
+            if info.get("watcher_done") and info.get("stop_error"):
+                terminal_status = info.get("terminal_status") or "stopped"
+                terminal_message = info.get("terminal_message") or f"任务已结束，退出码 {return_code}"
+                if terminal_status == "timeout":
+                    terminal_message += "；此前未确认退出，当前已确认进程退出"
+                log_file = info.get("log_file") or ""
+                log_fp = info.get("log_fp")
+                if log_file:
+                    append_task_log(log_file, f"\n===== 已确认任务进程退出，退出码 {return_code} =====\n")
+                try:
+                    if log_fp:
+                        log_fp.close()
+                except Exception:
+                    pass
+                finish_task_history(
+                    info.get("history_id"),
+                    info.get("history_start_ts"),
+                    terminal_status,
+                    return_code=return_code,
+                    log_file=log_file,
+                    message=terminal_message,
+                )
+                _pop_running(task_id, history_id=info.get("history_id"))
+                STOPPED_MANUALLY.discard((task_id, info.get("history_id")))
+                return True, "已确认任务进程退出"
             _pop_running(task_id, history_id=info.get("history_id"))
             STOPPED_MANUALLY.discard((task_id, info.get("history_id")))
             return False, f"任务已结束，退出码 {return_code}"

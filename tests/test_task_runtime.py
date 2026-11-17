@@ -1667,6 +1667,19 @@ class TaskRuntimeTests(unittest.TestCase):
             self.assertEqual(history[0]["status"], "running")
             self.assertIn("无法确认任务进程已退出", history[0]["message"])
             self.assertIn("超时后停止失败", log_file.read_text(encoding="utf-8"))
+            self.assertEqual(task_runner.RUNNING["t1"]["terminal_status"], "timeout")
+
+            proc.return_code = 9
+            self.assertTrue(task_runner.is_running("t1"))
+            self.assertIn("t1", task_runner.running_task_snapshot(["t1"]))
+            ok, message = task_runner.stop_task_now("t1")
+            self.assertTrue(ok)
+            self.assertIn("已确认任务进程退出", message)
+            self.assertNotIn("t1", task_runner.RUNNING)
+            history = read_json(paths.TASK_HISTORY_FILE)
+            self.assertEqual(history[0]["status"], "timeout")
+            self.assertTrue(history[0]["end_at"])
+            self.assertIn("此前未确认退出，当前已确认进程退出", history[0]["message"])
 
     def test_stop_after_timeout_failure_finalizes_history_and_clears_marker(self):
         with isolated_fls_modules():
