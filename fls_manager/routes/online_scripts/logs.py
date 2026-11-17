@@ -101,7 +101,19 @@ def api_online_install_log(install_id):
             "log": "",
         }), 400
 
-    info = get_online_install_job(install_id)
+    try:
+        info = get_online_install_job(install_id)
+    except Exception as exc:
+        return jsonify({
+            "ok": False,
+            "running": False,
+            "status": "记录不可读",
+            "returncode": None,
+            "error": f"在线脚本安装记录无法读取，未覆盖原文件：{exc}",
+            "log_file": "",
+            "log": "安装记录无法读取。请修复记录文件后重新读取。",
+            "recovery_url": "/logs",
+        }), 500
 
     if not info:
         return jsonify({
@@ -137,7 +149,18 @@ def api_online_install_log(install_id):
 @bp.route("/online-scripts/log/<install_id>")
 def online_install_log(install_id):
     back_url = get_back_url("/online-scripts")
-    info = get_online_install_job(install_id)
+    try:
+        info = get_online_install_job(install_id)
+    except Exception as exc:
+        body = page_header_card(
+            "在线脚本安装记录无法读取",
+            help_html=f"{h(exc)}。原记录未覆盖，请修复记录文件后重新读取。",
+            actions_html=(
+                f'<a class="btn btn-primary" href="/online-scripts/log/{h(install_id)}">重新读取安装记录</a>'
+                '<a class="btn btn-blue" href="/logs">查看日志管理</a>'
+            ),
+        )
+        return layout("在线脚本日志", "online_scripts", body), 500
 
     if not info:
         body = page_header_card(

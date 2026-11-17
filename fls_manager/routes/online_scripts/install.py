@@ -41,7 +41,15 @@ def _start_install_job(
 
     with ONLINE_INSTALL_LOCK:
         if retry_of:
-            previous = get_online_install_job(retry_of)
+            try:
+                previous = get_online_install_job(retry_of)
+            except Exception as exc:
+                return _install_retry_error(
+                    retry_of,
+                    "无法重试在线安装",
+                    f"安装记录无法读取，未覆盖原文件：{exc}。修复记录文件后重试。",
+                    500,
+                )
             if previous and previous.get("retried_by"):
                 return _install_retry_consumed(retry_of, previous["retried_by"])
         active_id, _ = active_online_install_for_script(script_id)
@@ -333,7 +341,15 @@ def _install_scheduler_reload_form(install_id):
 @bp.route("/online-scripts/install-reload/<install_id>", methods=["POST"])
 def online_scripts_install_reload(install_id):
     with ONLINE_INSTALL_LOCK:
-        info = get_online_install_job(install_id)
+        try:
+            info = get_online_install_job(install_id)
+        except Exception as exc:
+            return _install_retry_error(
+                install_id,
+                "无法恢复任务调度",
+                f"安装记录无法读取，未覆盖原文件：{exc}。修复记录文件后重试。",
+                500,
+            )
         if not info:
             return _install_retry_error(install_id, "无法恢复任务调度", "安装记录不存在。", 404)
         if info.get("running") or install_id in ONLINE_INSTALL_RETRYING:
@@ -375,7 +391,15 @@ def online_scripts_install_reload(install_id):
 
 @bp.route("/online-scripts/install-retry/<install_id>", methods=["POST"])
 def online_scripts_install_retry(install_id):
-    info = get_online_install_job(install_id)
+    try:
+        info = get_online_install_job(install_id)
+    except Exception as exc:
+        return _install_retry_error(
+            install_id,
+            "无法重试在线安装",
+            f"安装记录无法读取，未覆盖原文件：{exc}。修复记录文件后重试。",
+            500,
+        )
     if not info:
         return _install_retry_error(
             install_id,
@@ -407,7 +431,15 @@ def online_scripts_install_retry(install_id):
         )
 
     with ONLINE_INSTALL_LOCK:
-        info = get_online_install_job(install_id)
+        try:
+            info = get_online_install_job(install_id)
+        except Exception as exc:
+            return _install_retry_error(
+                install_id,
+                "无法重试在线安装",
+                f"安装记录无法读取，未覆盖原文件：{exc}。修复记录文件后重试。",
+                500,
+            )
         if not info:
             return _install_retry_error(install_id, "无法重试在线安装", "安装记录不存在。", 404)
         if info.get("retried_by"):

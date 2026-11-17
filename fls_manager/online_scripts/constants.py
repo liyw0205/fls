@@ -3,7 +3,7 @@ import threading
 import os
 
 from ..paths import DATA_DIR
-from ..storage import read_json, mutate_json
+from ..storage import read_json, mutate_json, storage_transaction
 from ..utils import now_str
 
 DEFAULT_ONLINE_SCRIPT_SOURCE = "https://cdn.jsdelivr.net/gh/liyw0205/fls-scripts@main/index.json"
@@ -136,6 +136,25 @@ def _install_snapshot(info):
     return {field: info.get(field) for field in fields}
 
 
+def _read_install_jobs():
+    """Read install history without treating corruption as an empty history."""
+    with storage_transaction():
+        try:
+            raw = ONLINE_INSTALL_JOBS_FILE.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return {}
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"在线脚本安装记录损坏，未覆盖原文件：{exc}") from exc
+        if not isinstance(data, dict):
+            raise RuntimeError("在线脚本安装记录损坏，未覆盖原文件：根节点必须是对象")
+        for key, value in data.items():
+            if not isinstance(key, str) or not isinstance(value, dict) or value.get("id") != key:
+                raise RuntimeError("在线脚本安装记录损坏，未覆盖原文件：记录标识不一致")
+        return data
+
+
 def persist_online_install(info):
     with ONLINE_INSTALL_LOCK:
         snapshot = _install_snapshot(info)
@@ -144,12 +163,13 @@ def persist_online_install(info):
             return
 
         def update(data):
-            jobs = data if isinstance(data, dict) else {}
-            jobs = {
-                str(key): value
-                for key, value in jobs.items()
-                if isinstance(value, dict)
-            }
+            if not isinstance(data, dict):
+                raise RuntimeError("在线脚本安装记录损坏，未覆盖原文件：根节点必须是对象")
+            jobs = {}
+            for key, value in data.items():
+                if not isinstance(key, str) or not isinstance(value, dict) or value.get("id") != key:
+                    raise RuntimeError("在线脚本安装记录损坏，未覆盖原文件：记录标识不一致")
+                jobs[key] = value
             retry_of = str(snapshot.get("retry_of") or "")
             previous = jobs.get(retry_of)
             if retry_of and isinstance(previous, dict):
@@ -165,22 +185,20 @@ def persist_online_install(info):
             )
             return dict(ordered[:ONLINE_INSTALL_LIMIT])
 
-        mutate_json(ONLINE_INSTALL_JOBS_FILE, {}, update)
+        mutate_json(ONLINE_INSTALL_JOBS_FILE, {}, update, strict=True)
         previous = ONLINE_INSTALL_RUNNING.get(str(snapshot.get("retry_of") or ""))
         if isinstance(previous, dict):
             previous["retried_by"] = install_id
 
 
 def _load_persisted_online_install(install_id):
-    data = read_json(ONLINE_INSTALL_JOBS_FILE, {})
-    jobs = data if isinstance(data, dict) else {}
+    jobs = _read_install_jobs()
     info = jobs.get(str(install_id or ""))
     return dict(info) if isinstance(info, dict) else None
 
 
 def _load_persisted_online_installs():
-    data = read_json(ONLINE_INSTALL_JOBS_FILE, {})
-    jobs = data if isinstance(data, dict) else {}
+    jobs = _read_install_jobs()
     return {
         str(install_id): dict(info)
         for install_id, info in jobs.items()

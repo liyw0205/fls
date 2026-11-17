@@ -168,7 +168,18 @@ def render_online_script_rows(items):
 """
         else:
             recovery_html = ""
-            latest_install_id, latest_install_info = latest_online_install_for_script(item_id)
+            try:
+                latest_install_id, latest_install_info = latest_online_install_for_script(item_id)
+            except Exception as exc:
+                latest_install_id, latest_install_info = "", None
+                recovery_html = f'''
+<div class="help" style="margin:0 0 10px;color:#dc2626;font-weight:800;">
+    在线脚本安装记录无法读取，未覆盖原记录：{h(exc)}
+</div>
+<div class="fls-btn-line">
+    <a class="btn btn-orange" href="/logs">修复后查看日志管理</a>
+</div>
+'''
             recovery_statuses = {"结果未知", "失败", "超时", "已停止", "启动失败", "部分完成"}
             if latest_install_id and (latest_install_info or {}).get("status") in recovery_statuses:
                 recovery_status = (latest_install_info or {}).get("status") or "结果未知"
