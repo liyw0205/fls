@@ -27,11 +27,13 @@ def main():
 
         save_config({"notify_items": [], "notify_default_ids": []})
         app = create_app()
-        fault = {"reload": False, "save": False, "save_after": False, "unknown": False, "start_fail": False}
+        fault = {"reload": False, "save": False, "save_after": False, "collection_save": False,
+                 "collection_after": False, "unknown": False, "start_fail": False}
         reload_scheduler = api.reload_scheduler
         mutate_tasks = api.mutate_tasks
         run_task = api.run_task_now
         stop_task = api.stop_task_now
+        save_collections = models.save_collections
 
         def run(*args, **kwargs):
             if fault["start_fail"]:
@@ -60,6 +62,14 @@ def main():
                 raise OSError("fixture after publication")
             return result
 
+        def save_collection_records(*args, **kwargs):
+            if fault["collection_save"]:
+                raise OSError("fixture collection save rejected")
+            result = save_collections(*args, **kwargs)
+            if fault["collection_after"]:
+                raise OSError("fixture after collection publication")
+            return result
+
         api.reload_scheduler = reload
         api.mutate_tasks = mutate
         api.run_task_now = run
@@ -69,6 +79,8 @@ def main():
         actions.run_task_now = run
         actions.stop_task_now = stop
         collection_routes.mutate_tasks = mutate
+        collection_routes.save_collections = save_collection_records
+        models.save_collections = save_collection_records
         dashboard.reload_scheduler = reload
 
         @app.route("/api/fixture/bulk", methods=["POST", "GET"])
@@ -76,10 +88,12 @@ def main():
             if request.method == "GET":
                 return jsonify(tasks=models.load_tasks(), history=models.load_task_history(), collections=models.load_collections())
             data = request.get_json()
-            fault.update(reload=bool(data.get("reload")), save=bool(data.get("save")), save_after=bool(data.get("save_after")), unknown=bool(data.get("unknown")), start_fail=bool(data.get("start_fail")))
+            fault.update(reload=bool(data.get("reload")), save=bool(data.get("save")), save_after=bool(data.get("save_after")),
+                         collection_save=bool(data.get("collection_save")), collection_after=bool(data.get("collection_after")),
+                         unknown=bool(data.get("unknown")), start_fail=bool(data.get("start_fail")))
             if data.get("reset"):
                 if not models.get_collection("browser-collection"):
-                    models.save_collections(models.load_collections() + [{"id": "browser-collection", "name": "浏览器回归合集"}])
+                    save_collections(models.load_collections() + [{"id": "browser-collection", "name": "浏览器回归合集"}])
                 models.save_tasks([{
                     "id": task_id, "name": "Bulk " + task_id, "command": ("sleep 30" if data.get("long") else "echo bulk") if task_id == "a" else "task missing.py",
                     "enabled": True, "collection_id": "browser-collection" if data.get("collection") else "", "cron": "0 8 * * *",
@@ -152,6 +166,114 @@ const {chromium} = require(process.env.FLS_PLAYWRIGHT_CORE);
     await page.goto(base+'/login');
     await login();
     await page.goto(base+path);
+    if(process.env.FLS_DELETE_COLLECTION_ONLY){
+     const target='browser-collection';
+     const form=()=>page.locator('form[action^="/collection/delete/'+target+'"]');
+     const notice=()=>page.locator('[data-bulk-recovery="collection-delete:'+target+'"]');
+     const exists=async ()=>(await state()).collections.some(c=>c.id===target);
+     const members=async ()=>(await state()).tasks.map(t=>[t.id,t.collection_id]);
+     const postResponse=()=>page.waitForResponse(r=>r.request().method()==='POST' && new URL(r.url()).pathname==='/collection/delete/'+target);
+     const remove=async status=>{
+      const response=postResponse();
+      await form().getByRole('button',{name:'删除任务合集',exact:true}).click();
+      assert.equal((await response).status(),status);
+     };
+     if(process.env.FLS_DELETE_COLLECTION_REJOIN_ONLY){
+      await fixture({collection_save:true});
+      await remove(500);
+      await notice().getByRole('button',{name:'继续删除合集',exact:true}).waitFor();
+      assert.deepEqual(await members(),[['a',''],['b','']]);
+      await fixture({});
+      assert.equal((await page.request.post(base+'/api/collection/add-task/'+target,{headers,data:{task_ids:['a']}})).status(),200);
+      await notice().getByRole('button',{name:'继续删除合集',exact:true}).click();
+      await settled();
+      await notice().getByRole('link',{name:'重新选择合集和任务',exact:true}).waitFor();
+      assert.equal(await exists(),true);
+      assert.deepEqual(await members(),[['a',target],['b','']]);
+      assert.equal(await notice().getByRole('button',{name:'继续删除合集',exact:true}).count(),0);
+      await notice().scrollIntoViewIfNeeded();
+      if(process.env.FLS_BULK_SCREENSHOTS) await page.screenshot({path:process.env.FLS_BULK_SCREENSHOTS+'/collection-delete-rejoined-'+viewport.width+'.png'});
+      await notice().getByRole('link',{name:'重新选择合集和任务',exact:true}).click();
+      await form().waitFor();
+      assert.deepEqual(errors,[]);
+      console.log(JSON.stringify({path,viewport,deleteCollectionRejoined:true,status:'passed'}));
+      await context.close();
+      continue;
+     }
+     await fixture({save:true});
+     await remove(500);
+     await form().getByRole('button',{name:'继续删除合集',exact:true}).waitFor();
+     assert.equal(await exists(),true);
+     assert.deepEqual(await members(),[['a',target],['b',target]]);
+     await fixture({collection_save:true});
+     let response=postResponse();
+     await form().getByRole('button',{name:'继续删除合集',exact:true}).click();
+     assert.equal((await response).status(),500);
+     await page.getByText(/合集记录仍保留/).first().waitFor();
+     assert.deepEqual(await members(),[['a',''],['b','']]);
+     assert.equal(await exists(),true);
+     await fixture({});
+     await notice().getByRole('button',{name:'继续删除合集',exact:true}).click();
+     await settled();
+     assert.equal(await exists(),false);
+     await fixture({reset:true,collection:true,collection_after:true});
+     await page.goto(base+'/collections');
+     await remove(503);
+     await page.getByText(/合集和成员关系已删除/).first().waitFor();
+     assert.equal(await exists(),false);
+     assert.equal(await page.getByRole('button',{name:'继续删除合集',exact:true}).count(),0);
+     await fixture({reset:true,collection:true});
+     await page.goto(base+'/collections');
+     const match=url=>url.pathname==='/collection/delete/'+target;
+     let dropped=false;
+     await page.route(match,async route=>{
+      if(!dropped){dropped=true;await route.fetch();return route.abort();}
+      return route.continue();
+     });
+     await form().getByRole('button',{name:'删除任务合集',exact:true}).click();
+     await notice().getByRole('button',{name:'查询本次操作结果',exact:true}).waitFor();
+     assert.equal(await exists(),false);
+     assert.equal((await page.request.post(base+'/collection/new',{headers,form:{name:'Delete later '+viewport.width}})).status(),200);
+     const later=(await state()).collections.find(c=>c.name==='Delete later '+viewport.width);
+     const assign=()=>page.request.post(base+'/api/collection/add-task/'+later.id,{headers,data:{task_ids:['b']}});
+     assert.equal((await assign()).status(),200);
+     await page.reload();
+     await notice().getByRole('button',{name:'查询本次操作结果',exact:true}).click();
+     await settled();
+     assert.deepEqual(await members(),[['a',''],['b',later.id]]);
+     await page.unroute(match);
+     await fixture({reset:true,collection:true});
+     await page.goto(base+'/collections');
+     assert.equal((await assign()).status(),200);
+     await remove(409);
+     await notice().getByRole('link',{name:'重新选择合集和任务',exact:true}).waitFor();
+     assert.equal(await exists(),true);
+     assert.deepEqual(await members(),[['a',target],['b',later.id]]);
+     await fixture({reset:true,collection:true});
+     await page.goto(base+'/collections');
+     let rejected=false;
+     await page.route(match,route=>{
+      if(!rejected){rejected=true;return route.fulfill({status:502,contentType:'text/plain',body:'fixture form unavailable'});}
+      return route.continue();
+     });
+     await remove(502);
+     await notice().getByRole('button',{name:'查询本次操作结果',exact:true}).waitFor();
+     assert.equal(await exists(),true);
+     await page.goto(base+'/logout');
+     await login();
+     await page.goto(base+'/collections');
+     await notice().getByRole('button',{name:'查询本次操作结果',exact:true}).click();
+     await settled();
+     assert.equal(await exists(),false);
+     await page.unroute(match);
+     await notice().scrollIntoViewIfNeeded();
+     if(process.env.FLS_BULK_SCREENSHOTS) await page.screenshot({path:process.env.FLS_BULK_SCREENSHOTS+'/collection-delete-'+viewport.width+'.png'});
+     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+     assert.deepEqual(errors,[]);
+     console.log(JSON.stringify({path,viewport,deleteCollection:true,status:'passed'}));
+     await context.close();
+     continue;
+    }
     if(process.env.FLS_ADD_COLLECTION_ONLY){
      const target='browser-collection';
      const id=()=>require('node:crypto').randomBytes(16).toString('hex');

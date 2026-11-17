@@ -975,13 +975,15 @@ def get_proxy(proxy_id):
 
 def load_collections():
     with COLLECTION_MUTATION_LOCK:
-        data = read_json(COLLECTION_FILE, [])
-        collections, changed = _normalize_list(data, normalize_collection)
-
-        if changed:
-            save_collections(collections)
-
-        return collections
+        result = {}
+        def normalize(data):
+            if not isinstance(data, list):
+                raise RuntimeError("合集文件不是 JSON 数组，未覆盖原文件，请修复文件或从备份恢复")
+            collections, changed = _normalize_list(data, normalize_collection)
+            result["collections"] = collections
+            return collections if changed else None
+        mutate_json(COLLECTION_FILE, [], normalize, strict=True)
+        return result["collections"]
 
 
 def save_collections(collections):

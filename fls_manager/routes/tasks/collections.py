@@ -21,6 +21,7 @@ from ...utils import h, now_str, get_back_url
 from ...ui.layout import layout
 from ...ui.tables import collapsible_code, task_row_model
 from ...ui.components import page_header, data_toolbar, empty_state
+from ...collection_delete import collection_version, delete_collection
 
 
 COLLECTIONS_PER_PAGE = 10
@@ -692,6 +693,9 @@ def collections_page():
         </div>
         <div class="row-actions-danger">
             <form class="inline-form" method="post" action="/collection/delete/{h(cid)}?back={_back_param(current_back)}">
+                <input type="hidden" name="request_id" value="{uuid.uuid4().hex}">
+                <input type="hidden" name="expected_members" value="{h(json.dumps(sorted(t['id'] for t in col_tasks)))}">
+                <input type="hidden" name="collection_version" value="{collection_version(c)}">
                 <button class="btn btn-red" type="submit" onclick="return confirm('确定删除该合集吗？合集内任务会自动取出。')">删除任务合集</button>
             </form>
         </div>
@@ -848,38 +852,26 @@ def collection_edit(collection_id):
 
 @bp.route("/collection/delete/<collection_id>", methods=["POST"])
 def collection_delete(collection_id):
-    with COLLECTION_MUTATION_LOCK:
-        collections = load_collections()
-        exists = any(c.get("id") == collection_id for c in collections)
-
-        if not exists:
-            abort(404)
-
-        remaining_collections = [
-            c for c in collections if c.get("id") != collection_id
-        ]
-
-        def clear_deleted_collection(tasks):
-            changed = False
-            for task in tasks:
-                if str(task.get("collection_id") or "") == collection_id:
-                    task["collection_id"] = ""
-                    task["updated_at"] = now_str()
-                    changed = True
-            return changed
-
-        try:
-            _tasks, tasks_changed = mutate_tasks(clear_deleted_collection)
-        except Exception as e:
-            return f"合集未删除，任务成员关系未更改：{h(e)}", 500
-
-        try:
-            save_collections(remaining_collections)
-        except Exception as e:
-            state = "任务已移出该合集" if tasks_changed else "任务成员关系未更改"
-            return f"合集删除未完成，{state}；合集记录仍保留：{h(e)}", 500
-
-    return redirect(get_back_url("/collections"))
+    data = request.form.to_dict()
+    data.setdefault("request_id", uuid.uuid4().hex)
+    payload, status = delete_collection(collection_id, data, load_collections=load_collections,
+        save_collections=save_collections, load_tasks=load_tasks, mutate_tasks=mutate_tasks)
+    back = get_back_url("/collections")
+    if status == 200:
+        return redirect(back)
+    recovery = ""
+    if not payload.get("saved") and not payload.get("reselection_required"):
+        request_id = data["request_id"]
+        if isinstance(request_id, str) and len(request_id) == 32:
+            fields = "".join(f'<input type="hidden" name="{name}" value="{h(data[name])}">'
+                             for name in ("expected_members", "collection_version") if name in data)
+            recovery = f'''<form method="post" action="/collection/delete/{h(collection_id)}?back={_back_param(back)}">
+<input type="hidden" name="request_id" value="{h(request_id)}">{fields}
+<button class="btn btn-primary" type="submit" onclick="return confirm('确认继续删除该合集？')">继续删除合集</button></form>'''
+    body = f'''<section class="section" role="alert" data-task-execution-result="{h(json.dumps(payload, ensure_ascii=False))}">
+<h3>合集删除恢复</h3><p>{h(payload['msg'])}</p>{recovery}
+<a class="btn btn-gray" href="{h(back)}">查看任务合集</a></section>'''
+    return layout("合集删除恢复", "collections", body), status
 
 
 @bp.route("/collection/add-task/<collection_id>", methods=["POST"])

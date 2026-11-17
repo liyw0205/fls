@@ -422,3 +422,14 @@ def api_collection_add_task(collection_id):
         return jsonify(payload), status
     except Exception as exc:
         return jsonify(ok=False, msg=str(exc)), 500
+
+
+@bp.route("/api/collection/delete/<collection_id>", methods=["POST"])
+def api_collection_delete(collection_id):
+    from ..collection_delete import delete_collection
+    from ..models import load_collections, save_collections
+
+    data = request.get_json(silent=True) if request.is_json else request.form.to_dict()
+    payload, status = delete_collection(collection_id, data, load_collections=load_collections,
+        save_collections=save_collections, load_tasks=load_tasks, mutate_tasks=mutate_tasks)
+    return jsonify(payload), status
