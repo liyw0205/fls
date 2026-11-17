@@ -4,7 +4,12 @@ from ._common import *
 @bp.route("/online-scripts")
 def online_scripts_page():
     source = get_online_script_source()
-    all_items = load_online_script_cache()
+    cache_error = ""
+    try:
+        all_items = load_online_script_cache()
+    except Exception as exc:
+        all_items = []
+        cache_error = f"在线脚本源缓存无法读取，未覆盖原文件：{exc}。请检查源数据后重试。"
 
     q = request.args.get("q", "").strip()
     page = max(1, int(request.args.get("page", "1") or 1))
@@ -125,6 +130,8 @@ def online_scripts_page():
 
 {message_card(msg, "success", strong=True)}
 {message_card(err, "error", strong=True)}
+{message_card(cache_error, "error", strong=True)}
+{f'<div class="section"><a class="btn btn-orange" href="/online-scripts/source">检查在线脚本源数据</a></div>' if cache_error else ''}
 
 <section class="section fls-section" id="online-status">
 <div class="card" id="onlineRefreshStatusCard" style="{refresh_display}">

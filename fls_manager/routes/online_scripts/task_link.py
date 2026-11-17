@@ -24,7 +24,14 @@ def _task_link_error(script_id, message, status_code, proxy_id="", retry=False):
 
 @bp.route("/online-scripts/task-link/<script_id>", methods=["POST"])
 def online_scripts_pull_task_link(script_id):
-    item = get_online_script(script_id)
+    try:
+        item = get_online_script(script_id)
+    except Exception as e:
+        return _task_link_error(
+            script_id,
+            f"在线脚本源缓存无法读取，未覆盖原文件：{e}。请检查源数据后重试。",
+            500,
+        )
     if not item:
         return _task_link_error(script_id, "脚本已不在本地缓存中，请刷新在线脚本列表。", 404)
 

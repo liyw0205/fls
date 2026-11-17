@@ -96,15 +96,25 @@ def load_online_script_cache():
     if not ONLINE_SCRIPT_CACHE_FILE.exists():
         return []
 
+    if ONLINE_SCRIPT_CACHE_FILE.is_symlink():
+        raise RuntimeError("在线脚本源缓存不能是符号链接，未覆盖原文件")
+
     try:
         data = json.loads(ONLINE_SCRIPT_CACHE_FILE.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise RuntimeError(f"在线脚本源缓存损坏或无法读取，未覆盖原文件：{exc}") from exc
+    if not isinstance(data, list):
+        raise RuntimeError("在线脚本源缓存损坏或无法读取，未覆盖原文件：根节点必须是数组")
+    try:
         return normalize_online_scripts(data)
-    except Exception:
-        return []
+    except Exception as exc:
+        raise RuntimeError(f"在线脚本源缓存损坏或无法读取，未覆盖原文件：{exc}") from exc
 
 
 def save_online_script_cache(items):
     with storage_transaction():
+        if ONLINE_SCRIPT_CACHE_FILE.is_symlink():
+            raise RuntimeError("在线脚本源缓存不能是符号链接，未覆盖原文件")
         ONLINE_SCRIPT_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
         temp_file = ONLINE_SCRIPT_CACHE_FILE.with_name(
             f".{ONLINE_SCRIPT_CACHE_FILE.name}.{uuid.uuid4().hex}.tmp"
@@ -149,6 +159,8 @@ def merge_task_link_tasks(expected_item, linked_tasks):
 
 def read_cache_text(strict=False):
     try:
+        if ONLINE_SCRIPT_CACHE_FILE.is_symlink():
+            raise RuntimeError("在线脚本源缓存不能是符号链接")
         return ONLINE_SCRIPT_CACHE_FILE.read_text(encoding="utf-8")
     except FileNotFoundError:
         return ""
