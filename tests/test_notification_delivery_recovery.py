@@ -85,6 +85,69 @@ class NotificationDeliveryRecoveryTests(unittest.TestCase):
             self.assertEqual(history[0]["message"], "remote rejected")
             self.assertEqual(history[1]["content"], "output")
 
+    def test_send_success_is_unknown_when_terminal_history_write_fails(self):
+        with isolated_modules() as base_dir:
+            from fls_manager import notify, paths
+            from fls_manager.storage import write_json
+
+            write_json(
+                paths.CONFIG_FILE,
+                {"notify_items": [{"id": "n1", "name": "One", "channel": "bark",
+                                   "enabled": True, "config": {}}]},
+            )
+            with patch.object(notify, "send_one", return_value=(True, "remote accepted")), \
+                 patch.object(notify, "finish_notify_delivery", side_effect=OSError("history disk full")):
+                result = notify.send_by_ids("Task", "output", ["n1"])
+
+            self.assertEqual(result[0]["status"], "unknown")
+            self.assertFalse(result[0]["ok"])
+            self.assertIn("无法确认", result[0]["msg"])
+            self.assertEqual(notify.load_notify_history()[0]["status"], "unknown")
+            self.assertIn("无法确认", read_json(base_dir / "data" / "notify_history.json")[0]["message"])
+
+    def test_terminal_history_is_used_when_finish_call_reports_failure(self):
+        with isolated_modules():
+            from fls_manager import notify, paths
+            from fls_manager.storage import write_json
+
+            write_json(
+                paths.CONFIG_FILE,
+                {"notify_items": [{"id": "n1", "name": "One", "channel": "bark",
+                                   "enabled": True, "config": {}}]},
+            )
+            original_finish = notify.finish_notify_delivery
+
+            def finish_then_report_failure(delivery_id, ok, message):
+                original_finish(delivery_id, ok, message)
+                return False
+
+            with patch.object(notify, "send_one", return_value=(True, "remote accepted")), \
+                 patch.object(notify, "finish_notify_delivery", side_effect=finish_then_report_failure):
+                result = notify.send_by_ids("Task", "output", ["n1"])
+
+            self.assertTrue(result[0]["ok"])
+            self.assertEqual(result[0]["status"], "succeeded")
+            self.assertIn("已按历史记录确认", result[0]["msg"])
+            self.assertEqual(notify.load_notify_history()[0]["status"], "succeeded")
+
+    def test_failed_send_with_terminal_write_failure_stays_unknown_not_failed(self):
+        with isolated_modules():
+            from fls_manager import notify, paths
+            from fls_manager.storage import write_json
+
+            write_json(
+                paths.CONFIG_FILE,
+                {"notify_items": [{"id": "n1", "name": "One", "channel": "bark",
+                                   "enabled": True, "config": {}}]},
+            )
+            with patch.object(notify, "send_one", return_value=(False, "remote rejected")), \
+                 patch.object(notify, "finish_notify_delivery", return_value=False):
+                result = notify.send_by_ids("Task", "output", ["n1"])
+
+            self.assertFalse(result[0]["ok"])
+            self.assertEqual(result[0]["status"], "unknown")
+            self.assertIn("无法确认", result[0]["msg"])
+
     def test_running_rows_recover_to_unknown_and_retry_is_persisted(self):
         with isolated_modules() as base_dir:
             from fls_manager import notify, paths

@@ -1071,19 +1071,44 @@ def send_by_ids(title, content, ids=None, source="task"):
             except Exception as exc:
                 ok, msg = False, str(exc)
 
+            delivery_status = "succeeded" if ok else "failed"
+            result_ok = ok
             try:
-                finish_notify_delivery(delivery_id, ok, msg)
+                persisted = finish_notify_delivery(delivery_id, ok, msg)
             except Exception as exc:
-                msg = f"{msg}；投递结果保存失败：{exc}"
+                persisted = False
+                persist_error = str(exc)
+            else:
+                persist_error = "投递记录不存在"
+
+            if not persisted:
+                # A successful remote send is not a confirmed delivery until its
+                # terminal state is readable from the durable history.
+                NOTIFY_ACTIVE_DELIVERIES.discard(delivery_id)
+                _invalidate_notify_history_cache()
+                try:
+                    actual = get_notify_delivery(delivery_id)
+                except Exception as exc:
+                    actual = None
+                    persist_error = f"{persist_error}；查询投递记录失败：{exc}"
+                if actual and actual.get("status") in ("succeeded", "failed"):
+                    delivery_status = actual["status"]
+                    result_ok = delivery_status == "succeeded"
+                    msg = f"{msg}；投递结果已按历史记录确认"
+                else:
+                    delivery_status = "unknown"
+                    result_ok = False
+                    msg = f"{msg}；投递结果无法确认，已保留为未知，请查询后重试：{persist_error}"
 
             results.append({
                 "id": item_id,
                 "name": item.get("name", item_id),
-                "ok": ok,
+                "ok": result_ok,
+                "status": delivery_status,
                 "msg": msg,
             })
 
-            print(f"[Notify] {item.get('name')} {'发送成功' if ok else '发送失败'}：{msg}")
+            print(f"[Notify] {item.get('name')} {'发送成功' if result_ok else '发送失败/未知'}：{msg}")
 
     return results
 
