@@ -452,6 +452,7 @@ async function flsFetchUpdateInfo(){
 }
 
 function flsRenderUpdateNotice(info){
+    info = info || {};
     const slot = document.getElementById("flsUpdateNoticeSlot");
     if(!slot) return;
 
@@ -466,6 +467,27 @@ function flsRenderUpdateNotice(info){
     current.appendChild(label);
     current.appendChild(value);
     slot.appendChild(current);
+
+    const errorText = String(info.error || "").trim().slice(0, 500);
+    if(errorText){
+        const error = document.createElement("div");
+        error.className = "help fls-update-notice-error";
+        error.textContent = "更新检查失败：" + errorText;
+
+        const retry = document.createElement("button");
+        retry.type = "button";
+        retry.className = "btn btn-gray";
+        retry.textContent = "重试检查";
+        retry.addEventListener("click", function(){
+            if(!flsMarkButtonBusy(retry)) return;
+            window.__FLS_UPDATE_NOTICE_RESOLVED__ = false;
+            flsCheckUpdateNoticeCache().finally(function(){
+                flsRestoreButton(retry);
+            });
+        });
+        error.appendChild(retry);
+        slot.appendChild(error);
+    }
 
     if(!info || !info.available || !info.version) return;
 
@@ -589,7 +611,13 @@ async function flsCheckUpdateNoticeCache(){
             window.__FLS_UPDATE_NOTICE_RESOLVED__ = true;
         }
     } catch(e) {
-        // Keep the browser cache visible. The next sidebar open can retry.
+        const cached = flsReadUpdateNoticeCache();
+        const diagnostic = e && e.payload && (e.payload.error || e.payload.msg)
+            ? (e.payload.error || e.payload.msg)
+            : (e && e.message) || "无法读取更新状态";
+        const rendered = flsMergeUpdateNoticeInfo(cached, cached);
+        rendered.error = String(diagnostic);
+        flsRenderUpdateNotice(rendered);
     } finally {
         window.__FLS_UPDATE_NOTICE_CHECKING__ = false;
     }

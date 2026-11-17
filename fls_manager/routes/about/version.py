@@ -71,7 +71,7 @@ def about_update_info():
     if include_logs and not state.get("checking"):
         logs = get_version_info().get("logs") or []
 
-    return jsonify({
+    payload = {
         "ok": not bool(state.get("error")),
         "checking": bool(state.get("checking")),
         "available": bool(state.get("available")),
@@ -80,7 +80,11 @@ def about_update_info():
         "checked_at": str(state.get("checked_at") or ""),
         "error": str(state.get("error") or ""),
         "logs": logs,
-    })
+    }
+    # A completed refresh failure must be visible to AJAX callers as a
+    # retryable failure, while an in-progress check remains a normal response.
+    status_code = 503 if payload["error"] and not payload["checking"] else 200
+    return jsonify(payload), status_code
 
 
 @bp.route("/about/update-version", methods=["POST"])

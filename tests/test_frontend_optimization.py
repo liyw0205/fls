@@ -1,5 +1,8 @@
 import contextlib
+import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -302,6 +305,76 @@ class FrontendOptimizationTests(unittest.TestCase):
             self.assertTrue(response.get_json()["checking"])
             self.assertEqual(response.get_json()["logs"], [])
             version_info.assert_not_called()
+
+    def test_update_info_api_exposes_completed_refresh_failure_as_retryable(self):
+        with isolated_app() as app:
+            from fls_manager.routes.about.state import set_update_log_state
+
+            set_update_log_state(
+                checking=False,
+                available=False,
+                current_version="def5678",
+                checked_at="2026-09-19 12:00:00",
+                error="git fetch 失败",
+            )
+            response = app.test_client().get(
+                "/api/about/update-info?wait=1",
+                headers={"X-Token": TOKEN},
+            )
+
+            self.assertEqual(response.status_code, 503)
+            self.assertEqual(response.get_json()["ok"], False)
+            self.assertEqual(response.get_json()["error"], "git fetch 失败")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise update recovery rendering")
+    def test_update_notice_renders_retry_button_and_retries_from_cached_error(self):
+        js = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+        start = js.index("function flsRenderUpdateNotice")
+        end = js.index("async function flsOpenUpdateLogModal", start)
+        renderer = js[start:end]
+        result = subprocess.run(
+            ["node", "-e", r"""
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+class Node {
+  constructor(tag) { this.tagName = tag.toUpperCase(); this.children = []; this.hidden = false; this.textContent = ''; this.dataset = {}; }
+  append(...items) { this.children.push(...items); }
+  appendChild(item) { this.children.push(item); return item; }
+  replaceChildren(...items) { this.children = items; }
+  setAttribute() {}
+  addEventListener(name, handler) { if(name === 'click') this.onclick = handler; }
+}
+const slot = new Node('div');
+let retries = 0;
+const context = {
+  window: {__FLS_UPDATE_NOTICE_RESOLVED__: true},
+  document: {getElementById: id => id === 'flsUpdateNoticeSlot' ? slot : null,
+    createElement: tag => new Node(tag),
+    createTextNode: text => String(text)},
+  flsMarkButtonBusy: () => true,
+  flsRestoreButton: () => {},
+  flsCheckUpdateNoticeCache: async () => { retries += 1; },
+};
+(async () => {
+  vm.createContext(context);
+  vm.runInContext(input.renderer, context);
+  context.flsRenderUpdateNotice({current_version:'def5678', error:'HTTP 503: git fetch 失败'});
+  assert.equal(slot.children.length, 2);
+  const error = slot.children[1];
+  assert.match(error.textContent, /更新检查失败：HTTP 503/);
+  assert.equal(error.children.length, 1);
+  await error.children[0].onclick();
+  assert.equal(retries, 1);
+  assert.equal(context.window.__FLS_UPDATE_NOTICE_RESOLVED__, false);
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"""],
+            input=json.dumps({"renderer": renderer}),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_update_info_waits_for_the_current_cache_refresh_once(self):
         with isolated_app() as app:
