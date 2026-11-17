@@ -1519,11 +1519,17 @@ class TaskRuntimeTests(unittest.TestCase):
 
     def test_finish_watcher_retries_failed_attempt_before_notification(self):
         with isolated_fls_modules():
-            from fls_manager import task_runner
+            from fls_manager import models, task_runner
 
             log_file = Path(os.environ["FLS_BASE_DIR"]) / "log" / "retry.log"
             log_file.parent.mkdir(parents=True, exist_ok=True)
             log_fp = open(log_file, "ab", buffering=0)
+            models.save_task_history([{
+                "id": "history-1", "task_id": "t1", "task_name": "Demo",
+                "command": "echo ok", "status": "running", "start_at": "2026-07-04 06:10:00",
+                "end_at": "", "duration_seconds": 0, "return_code": None,
+                "log_file": str(log_file), "message": "运行中",
+            }])
             task_runner.RUNNING["t1"] = {
                 "status": "running",
                 "process": FakeProc(2),

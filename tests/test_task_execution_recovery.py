@@ -341,6 +341,136 @@ class TaskExecutionRecoveryTests(unittest.TestCase):
             self.wait_history("success")
             self.assertEqual(models.get_task("a")["run_count"], 1)
 
+    def test_terminal_history_write_failure_keeps_slot_and_form_recovers(self):
+        with isolated_app() as (app, _):
+            from fls_manager import models, paths, task_runner
+            task = sample_task("a", command="exit 0")
+            task["retry"] = {"attempts": 1, "interval_seconds": 5}
+            models.save_tasks([task])
+            log_file = paths.LOG_DIR / "terminal-history-recovery.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            history_record = {
+                "id": "terminal-history", "task_id": "a", "task_name": "a",
+                "command": "exit 0", "source": "manual", "status": "running",
+                "retry_attempt": 0, "max_retries": 0, "start_at": "2026-11-17 10:00:00",
+                "end_at": "", "duration_seconds": 0, "return_code": None,
+                "pid": 4321, "log_file": str(log_file), "message": "运行中",
+            }
+            models.save_task_history([history_record])
+
+            class ExitedProcess:
+                pid = 4321
+
+                def wait(self, timeout=None):
+                    return 9
+
+                def poll(self):
+                    return 9
+
+            class RecordingTimer:
+                created = []
+
+                def __init__(self, _interval, _callback):
+                    self.cancelled = False
+                    self.started = False
+                    self.created.append(self)
+
+                def start(self):
+                    self.started = True
+
+                def cancel(self):
+                    self.cancelled = True
+
+            process = ExitedProcess()
+            log_fp = open(log_file, "ab", buffering=0)
+            task_runner.RUNNING["a"] = {
+                "status": "running", "process": process, "pid": process.pid,
+                "history_id": history_record["id"], "history_start_ts": time.time() - 2,
+                "history_record": dict(history_record), "log_file": str(log_file),
+                "log_fp": log_fp, "watcher_done": False,
+            }
+
+            RecordingTimer.created = []
+            with patch.object(task_runner.threading, "Timer", RecordingTimer), \
+                    patch.object(task_runner, "update_task_history", side_effect=OSError("disk full")):
+                task_runner.task_finish_watcher(
+                    "a", task, process, str(log_file), log_fp,
+                    history_record["id"], time.time() - 2, 0,
+                )
+
+            self.assertTrue(task_runner.is_running("a"))
+            self.assertIn("a", task_runner.running_task_snapshot(["a"]))
+            self.assertEqual(task_runner.RUNNING["a"]["terminal_status"], "failed")
+            self.assertNotIn("a", task_runner.PENDING_RETRIES)
+            self.assertTrue(RecordingTimer.created[0].cancelled)
+
+            client = app.test_client()
+            self.authenticate(client)
+            api_request_id = "c" * 32
+            with patch.object(task_runner, "update_task_history", side_effect=OSError("disk full")):
+                api_failed = self.post(client, action="stop", request_id=api_request_id)
+            self.assertEqual(api_failed.status_code, 409)
+            self.assertIn("a", api_failed.get_json()["retry_ids"])
+            self.assertIn("历史保存失败", api_failed.get_json()["failures"][0])
+            with patch("fls_manager.routes.api.stop_task_now") as stop:
+                replay = self.post(client, action="stop", request_id=api_request_id)
+                self.assertEqual(replay.get_json(), api_failed.get_json())
+                stop.assert_not_called()
+
+            request_id = "d" * 32
+            with patch.object(task_runner, "update_task_history", side_effect=OSError("disk full")):
+                failed = client.post(
+                    "/stop/a?back=/history",
+                    data={"request_id": request_id, "csrf_token": "execution-csrf"},
+                    headers={"X-CSRF-Token": "execution-csrf"},
+                )
+            self.assertEqual(failed.status_code, 409)
+            self.assertIn("历史保存失败", failed.get_data(as_text=True))
+            retry = TaskFormParser(failed.get_data(as_text=True)).forms[0]
+            self.assertNotEqual(retry["fields"]["request_id"], request_id)
+
+            history_path = paths.TASK_HISTORY_FILE
+            damaged = b"{broken history\n"
+            history_path.write_bytes(damaged)
+            still_failed = client.post(
+                retry["action"],
+                data=dict(retry["fields"], csrf_token="execution-csrf"),
+                headers={"X-CSRF-Token": "execution-csrf"},
+            )
+            self.assertEqual(still_failed.status_code, 409)
+            self.assertEqual(history_path.read_bytes(), damaged)
+            retry = TaskFormParser(still_failed.get_data(as_text=True)).forms[0]
+
+            models.save_task_history([])
+            recovered = client.post(
+                retry["action"],
+                data=dict(retry["fields"], csrf_token="execution-csrf"),
+                headers={"X-CSRF-Token": "execution-csrf"},
+            )
+            self.assertEqual(recovered.status_code, 302)
+            self.assertFalse(task_runner.is_running("a"))
+            stop_replay = client.post(
+                retry["action"],
+                data=dict(retry["fields"], csrf_token="execution-csrf"),
+                headers={"X-CSRF-Token": "execution-csrf"},
+            )
+            self.assertEqual(stop_replay.status_code, 302)
+            history = models.load_task_history()[0]
+            self.assertEqual(history["status"], "failed")
+            self.assertIn("此前未确认退出，当前已确认进程退出", history["message"])
+
+            forms = TaskFormParser(client.get("/history").get_data(as_text=True)).forms
+            rerun = next(form for form in forms if form["action"].startswith("/run/a"))
+            self.assertEqual(
+                client.post(
+                    rerun["action"],
+                    data=dict(rerun["fields"], csrf_token="execution-csrf"),
+                    headers={"X-CSRF-Token": "execution-csrf"},
+                ).status_code,
+                302,
+            )
+            self.wait_history("success")
+
     def test_pending_rename_keeps_recovery_link_and_never_starts_process(self):
         with isolated_app() as (app, _):
             from fls_manager import models

@@ -55,6 +55,13 @@ def _has_running_attempt(task_id, history_id):
         return bool(info and info.get("history_id") == history_id)
 
 
+def _running_history_record(task_id, history_id):
+    with _RUNNING_LOCK:
+        info = RUNNING.get(task_id)
+        record = info.get("history_record") if info and info.get("history_id") == history_id else None
+        return dict(record) if isinstance(record, dict) else None
+
+
 def _update_running_attempt(task_id, history_id, updates):
     with _RUNNING_LOCK:
         info = RUNNING.get(task_id)
@@ -103,6 +110,8 @@ def is_running(task_id):
         status = info.get("status")
         if status in ("starting", "delaying"):
             return True
+        if info.get("watcher_managed"):
+            return True
         if info.get("watcher_done") and info.get("stop_error"):
             return True
 
@@ -139,6 +148,9 @@ def running_task_snapshot(task_ids=None):
 
             status = info.get("status")
             if status in ("starting", "delaying"):
+                snapshot[task_id] = dict(info)
+                continue
+            if info.get("watcher_managed"):
                 snapshot[task_id] = dict(info)
                 continue
             if info.get("watcher_done") and info.get("stop_error"):
@@ -181,9 +193,9 @@ def append_task_log(log_file, text):
         print(f"[TaskLog] 写任务日志失败: {e}")
 
 
-def finish_task_history(history_id, start_ts, status, return_code=None, log_file="", message=""):
+def finish_task_history(history_id, start_ts, status, return_code=None, log_file="", message="", fallback_record=None):
     if not history_id:
-        return
+        return False
 
     try:
         duration = max(0, int(time.time() - float(start_ts or time.time())))
@@ -201,7 +213,12 @@ def finish_task_history(history_id, start_ts, status, return_code=None, log_file
     if message:
         updates["message"] = str(message)
 
-    update_task_history(history_id, updates)
+    return update_task_history(
+        history_id,
+        updates,
+        fallback_record=fallback_record,
+        strict=fallback_record is not None,
+    )
 
 
 def task_retry_config(task):
@@ -519,6 +536,16 @@ def task_finish_watcher(task_id, task_snapshot, proc, log_file, log_fp, history_
             history_status = "failed"
             history_msg = f"退出码 {return_code}"
 
+        if history_id:
+            _update_running_attempt(task_id, history_id, {
+                "status": "running",
+                "watcher_done": True,
+                "stop_error": "任务进程已退出，正在保存终态历史",
+                "terminal_status": history_status,
+                "terminal_message": history_msg,
+                "return_code": return_code,
+            })
+
         retry_scheduled = False
 
         if not manual_stopped and history_status in ("failed", "timeout"):
@@ -536,14 +563,48 @@ def task_finish_watcher(task_id, task_snapshot, proc, log_file, log_fp, history_
             elif retry_msg:
                 history_msg = f"{history_msg}；{retry_msg}"
 
-        finish_task_history(
-            history_id,
-            history_start_ts,
-            history_status,
-            return_code=return_code,
-            log_file=log_file,
-            message=history_msg,
-        )
+        try:
+            if history_id:
+                history_saved = finish_task_history(
+                    history_id,
+                    history_start_ts,
+                    history_status,
+                    return_code=return_code,
+                    log_file=log_file,
+                    message=history_msg,
+                    fallback_record=_running_history_record(task_id, history_id),
+                )
+                if not history_saved:
+                    raise RuntimeError("找不到可更新的任务历史记录")
+        except Exception as exc:
+            recovery_message = f"{history_msg}；终态历史保存失败：{exc}"
+            marker = {
+                "status": "running",
+                "watcher_done": True,
+                "stop_error": "终态历史保存失败，尚未确认任务完成状态",
+                "terminal_status": history_status,
+                "terminal_message": recovery_message,
+                "return_code": return_code,
+            }
+            if not _update_running_attempt(task_id, history_id, marker):
+                return
+
+            if retry_scheduled:
+                try:
+                    cancelled = cancel_task_retry(task_id, "任务终态历史未确认")
+                    retry_message = "终态确认前已取消自动重试" if cancelled else "终态确认前自动重试将被阻止"
+                except Exception as retry_error:
+                    retry_message = f"自动重试取消失败：{retry_error}；任务运行位仍保持占用"
+                recovery_message += f"；{retry_message}，确认后可从历史页重新运行"
+                _update_running_attempt(task_id, history_id, {"terminal_message": recovery_message})
+
+            append_task_log(log_file, f"\n===== {recovery_message} =====\n")
+            try:
+                if log_fp:
+                    log_fp.close()
+            except Exception:
+                pass
+            return
 
         try:
             if log_fp:
@@ -741,6 +802,7 @@ def _start_task_worker(task_id, task_snapshot, cmd_info, process_name, log_file,
                 "log_fp": log_fp,
                 "start_time": time.time(),
                 "status": "running",
+                "watcher_managed": True,
             },
         ):
             force_kill_process(proc)
@@ -888,8 +950,7 @@ def _submit_task_now(task_id, source="manual", retry_attempt=0, retry_token=None
         log_fp = open(log_file, "ab", buffering=0)
         history_id = uuid.uuid4().hex
         history_start_ts = time.time()
-
-        add_task_history({
+        history_record = {
             "id": history_id,
             "task_id": task_id,
             "task_name": task_display_name,
@@ -905,7 +966,8 @@ def _submit_task_now(task_id, source="manual", retry_attempt=0, retry_token=None
             "pid": "-",
             "log_file": str(log_file),
             "message": "已提交启动",
-        })
+        }
+        add_task_history(history_record)
 
         RUNNING[task_id] = {
             "process": None,
@@ -917,6 +979,7 @@ def _submit_task_now(task_id, source="manual", retry_attempt=0, retry_token=None
             "status": "starting",
             "history_id": history_id,
             "history_start_ts": history_start_ts,
+            "history_record": dict(history_record),
         }
         STOPPED_MANUALLY.discard((task_id, history_id))
 
@@ -992,28 +1055,36 @@ def stop_task_now(task_id):
             if info.get("watcher_done") and info.get("stop_error"):
                 terminal_status = info.get("terminal_status") or "stopped"
                 terminal_message = info.get("terminal_message") or f"任务已结束，退出码 {return_code}"
-                if terminal_status == "timeout":
+                if terminal_status in ("failed", "timeout"):
                     terminal_message += "；此前未确认退出，当前已确认进程退出"
                 log_file = info.get("log_file") or ""
                 log_fp = info.get("log_fp")
                 if log_file:
                     append_task_log(log_file, f"\n===== 已确认任务进程退出，退出码 {return_code} =====\n")
                 try:
+                    history_saved = finish_task_history(
+                        info.get("history_id"),
+                        info.get("history_start_ts"),
+                        terminal_status,
+                        return_code=return_code,
+                        log_file=log_file,
+                        message=terminal_message,
+                        fallback_record=info.get("history_record"),
+                    )
+                except Exception as e:
+                    return False, f"停止失败：任务进程已退出，但历史保存失败：{e}"
+                if not history_saved:
+                    return False, "停止失败：任务进程已退出，但未找到可更新的历史记录"
+                try:
                     if log_fp:
                         log_fp.close()
                 except Exception:
                     pass
-                finish_task_history(
-                    info.get("history_id"),
-                    info.get("history_start_ts"),
-                    terminal_status,
-                    return_code=return_code,
-                    log_file=log_file,
-                    message=terminal_message,
-                )
                 _pop_running(task_id, history_id=info.get("history_id"))
                 STOPPED_MANUALLY.discard((task_id, info.get("history_id")))
                 return True, "已确认任务进程退出"
+            if info.get("watcher_managed"):
+                return True, "已确认任务进程退出，正在完成终态记录"
             _pop_running(task_id, history_id=info.get("history_id"))
             STOPPED_MANUALLY.discard((task_id, info.get("history_id")))
             return False, f"任务已结束，退出码 {return_code}"
@@ -1057,7 +1128,8 @@ def stop_task_now(task_id):
             log_file=info.get("log_file", ""),
             message="手动结束",
         )
-
-    _pop_running(task_id, history_id=info.get("history_id"))
+        _pop_running(task_id, history_id=info.get("history_id"))
+    elif not info.get("watcher_managed"):
+        _pop_running(task_id, history_id=info.get("history_id"))
 
     return True, "已结束"

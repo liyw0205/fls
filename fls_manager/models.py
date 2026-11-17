@@ -900,7 +900,7 @@ def add_task_history(record):
     mutate_json(TASK_HISTORY_FILE, [], add_record)
 
 
-def update_task_history(record_id, updates):
+def update_task_history(record_id, updates, fallback_record=None, *, strict=False):
     if not record_id:
         return False
 
@@ -908,18 +908,32 @@ def update_task_history(record_id, updates):
 
     def update_record(data):
         nonlocal changed
+        if strict and (
+            not isinstance(data, list)
+            or any(not isinstance(item, dict) for item in data)
+        ):
+            raise RuntimeError("任务历史格式无效，未覆盖原文件")
         history = data if isinstance(data, list) else []
-        history = [item for item in history if isinstance(item, dict)]
+        if not strict:
+            history = [item for item in history if isinstance(item, dict)]
 
         for item in history:
-            if item.get("id") == record_id:
+            if isinstance(item, dict) and item.get("id") == record_id:
                 item.update(updates or {})
                 changed = True
                 break
 
+        if not changed and fallback_record is not None:
+            fallback = dict(fallback_record)
+            if fallback.get("id") != record_id:
+                raise ValueError("任务历史恢复记录标识不匹配")
+            fallback.update(updates or {})
+            history.insert(0, fallback)
+            changed = True
+
         return history[:TASK_HISTORY_LIMIT] if changed else None
 
-    mutate_json(TASK_HISTORY_FILE, [], update_record)
+    mutate_json(TASK_HISTORY_FILE, [], update_record, strict=strict)
 
     return changed
 

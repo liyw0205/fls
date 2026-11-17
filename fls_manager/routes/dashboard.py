@@ -234,11 +234,11 @@ def history_table_rows(items):
             item.get("status") in ("failed", "start_failed")
             and "重试计划失败" in str(item.get("message") or "")
         )
-        recovered_timeout = (
-            item.get("status") == "timeout"
+        recovered_terminal = (
+            item.get("status") in ("failed", "timeout")
             and "此前未确认退出，当前已确认进程退出" in str(item.get("message") or "")
         )
-        if item.get("status") == "unknown" or retry_plan_failed or recovered_timeout:
+        if item.get("status") == "unknown" or retry_plan_failed or recovered_terminal:
             if task_id in task_ids:
                 rerun_btn = (
                     f'<form class="inline-form" method="post" '
