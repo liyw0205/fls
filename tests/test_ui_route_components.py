@@ -2653,7 +2653,7 @@ class UiRouteComponentTests(unittest.TestCase):
                     ) as start_install_thread:
                         response = app.test_client().post(
                             "/online-scripts/install/demo",
-                            data={"proxy_id": "proxy-1", "force": "1"},
+                            data={"proxy_id": "", "force": "1"},
                             headers={"X-Token": TOKEN},
                         )
 
@@ -2681,7 +2681,7 @@ class UiRouteComponentTests(unittest.TestCase):
                 {
                     "install_id": install_id,
                     "item": item,
-                    "proxy_id": "proxy-1",
+                    "proxy_id": "",
                     "import_task": False,
                     "force": True,
                     "enable_task": False,

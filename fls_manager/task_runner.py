@@ -55,6 +55,19 @@ def _has_running_attempt(task_id, history_id):
         return bool(info and info.get("history_id") == history_id)
 
 
+def _join_task_watcher(info, timeout=5):
+    """Wait briefly for a terminal watcher before releasing a stopped task."""
+    watcher = (info or {}).get("watcher_thread")
+    if not watcher or watcher is threading.current_thread():
+        return
+    try:
+        if watcher.is_alive():
+            watcher.join(timeout=max(0, timeout))
+    except Exception:
+        # The stop result is still governed by the durable history state.
+        pass
+
+
 def _running_history_record(task_id, history_id):
     with _RUNNING_LOCK:
         info = RUNNING.get(task_id)
@@ -829,6 +842,7 @@ def _start_task_worker(task_id, task_snapshot, cmd_info, process_name, log_file,
                 name=f"fls-task-watch-{task_id[:8]}",
             )
             th.start()
+            _update_running_attempt(task_id, history_id, {"watcher_thread": th})
         except Exception as watcher_error:
             # A process is already owned by RUNNING at this point. If the
             # watcher cannot get a thread, finish it from the current worker
@@ -1084,6 +1098,9 @@ def stop_task_now(task_id):
                 STOPPED_MANUALLY.discard((task_id, info.get("history_id")))
                 return True, "已确认任务进程退出"
             if info.get("watcher_managed"):
+                _join_task_watcher(info)
+                if not _has_running_attempt(task_id, info.get("history_id")):
+                    return True, "已确认任务进程退出"
                 return True, "已确认任务进程退出，正在完成终态记录"
             _pop_running(task_id, history_id=info.get("history_id"))
             STOPPED_MANUALLY.discard((task_id, info.get("history_id")))
@@ -1101,6 +1118,11 @@ def stop_task_now(task_id):
             return False, f"停止失败：{detail}"
 
         watcher_done = bool(info.get("watcher_done"))
+        if not watcher_done:
+            _join_task_watcher(info)
+            if not _has_running_attempt(task_id, info.get("history_id")):
+                return True, "已确认任务进程退出"
+            watcher_done = bool(info.get("watcher_done"))
     else:
         watcher_done = False
 
