@@ -53,6 +53,39 @@ def _record_path(request_id):
     return DATA_DIR / "task_bulk_requests" / (request_id + ".json")
 
 
+def execute_toggle(task_id, data, **operations):
+    if not isinstance(data, dict):
+        return {"ok": False, "msg": "请求必须是对象"}, 400
+    value = data.get("enabled")
+    if "enabled" in data and value is None:
+        return {"ok": False, "msg": "启用状态不能为空，未执行操作"}, 400
+    if value is not None and not (isinstance(value, bool) or isinstance(value, str) and value in ("0", "1")):
+        return {"ok": False, "msg": "启用状态无效，未执行操作"}, 400
+    if data.get("request_id") and value is None:
+        return {"ok": False, "msg": "使用提交标识时必须指定启用状态"}, 400
+    try:
+        action, ids, request_id = parse_bulk_request({
+            "action": "enable" if value in ("1", True) else "disable",
+            "task_ids": [task_id], "request_id": data.get("request_id", ""),
+        })
+    except ValueError as exc:
+        return {"ok": False, "msg": str(exc)}, 400
+    with BULK_LOCK:
+        if value is None:
+            task = next((task for task in operations["load_tasks"]() if task["id"] == task_id), None)
+            if task is None:
+                return {"ok": False, "msg": "任务不存在"}, 404
+            action = "disable" if task.get("enabled", True) else "enable"
+        payload, status = execute_bulk(action, ids, request_id, **operations)
+        if status == 404:
+            payload["msg"] = "任务不存在"
+        if payload.get("saved"):
+            payload["enabled"] = action == "enable"
+        if status == 200:
+            payload["msg"] = "已切换"
+        return payload, status
+
+
 def _read_record(request_id):
     try:
         record = json.loads(_record_path(request_id).read_text(encoding="utf-8"))

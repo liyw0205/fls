@@ -182,6 +182,8 @@ def _task_card(task, back_url, collection_id=""):
             <div class="row-actions-danger">
                 <!-- Legacy action markers: action="/run/{h(task_id)}?back={_back_param(back_url)}" action="/stop/{h(task_id)}?back={_back_param(back_url)}" -->
                 <form class="inline-form" method="post" action="/task/toggle/{h(task_id)}?back={_back_param(back_url)}">
+                    <input type="hidden" name="enabled" value="{'0' if enabled else '1'}">
+                    <input type="hidden" name="request_id" value="{uuid.uuid4().hex}">
                     <button class="btn {toggle_class}" type="submit">{toggle_text}任务</button>
                 </form>
                 <form class="inline-form" method="post" action="/task/collection/clear/{h(task_id)}?back={_back_param(back_url)}">

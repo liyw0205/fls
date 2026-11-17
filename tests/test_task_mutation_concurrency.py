@@ -149,8 +149,13 @@ class TaskMutationConcurrencyTests(unittest.TestCase):
                     headers={"X-Token": TOKEN},
                 )
 
-            self.assertEqual(response.status_code, 500)
-            self.assertEqual(response.get_json(), {"ok": False, "msg": "scheduler unavailable"})
+            self.assertEqual(response.status_code, 503)
+            payload = response.get_json()
+            self.assertFalse(payload["ok"])
+            self.assertIn("scheduler unavailable", payload["msg"])
+            self.assertTrue(payload["saved"])
+            self.assertTrue(payload["reload_required"])
+            self.assertEqual(payload["retry_ids"], [])
             persisted = (base_dir / "data" / "tasks.json").read_text(encoding="utf-8")
             self.assertIn('"enabled": false', persisted)
 

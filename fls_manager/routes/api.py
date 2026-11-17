@@ -327,30 +327,14 @@ def api_task_action(action, task_id):
             return _task_action_result(ok, msg)
 
         if action == "toggle":
-            result = {}
-
-            def toggle(tasks):
-                task = next((item for item in tasks if item.get("id") == task_id), None)
-                if task is None:
-                    return False
-                task["enabled"] = not task.get("enabled", True)
-                task["updated_at"] = now_str()
-                result["enabled"] = task["enabled"]
-                return True
-
-            def after_toggle():
-                if not result["enabled"]:
-                    cancel_task_retry(task_id, "任务已禁用")
-
-            _tasks, changed = mutate_tasks(toggle, reload_scheduler, after_toggle)
-            if not changed:
-                return jsonify({"ok": False, "msg": "任务不存在"}), 404
-
-            return jsonify({
-                "ok": True,
-                "msg": "已切换",
-                "enabled": bool(result["enabled"]),
-            })
+            from ..task_bulk import execute_toggle
+            data = request.get_json(silent=True) if request.is_json else request.form.to_dict()
+            payload, status = execute_toggle(
+                task_id, data, load_tasks=load_tasks, mutate_tasks=mutate_tasks,
+                run_task=run_task_now, stop_task=stop_task_now,
+                cancel_retry=cancel_task_retry, reload_scheduler=reload_scheduler,
+            )
+            return jsonify(payload), status
 
         if action == "copy":
             result = {}

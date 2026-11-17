@@ -20,6 +20,8 @@ def main():
         from fls_manager.app import create_app
         from fls_manager import models, scheduler
         from fls_manager.routes import api
+        from fls_manager.routes.tasks import actions
+        from fls_manager.routes import dashboard
         from fls_manager.config import save_config
 
         save_config({"notify_items": [], "notify_default_ids": []})
@@ -48,6 +50,9 @@ def main():
         api.reload_scheduler = reload
         api.mutate_tasks = mutate
         api.run_task_now = run
+        actions.reload_scheduler = reload
+        actions.mutate_tasks = mutate
+        dashboard.reload_scheduler = reload
 
         @app.route("/api/fixture/bulk", methods=["POST", "GET"])
         def fixture():
@@ -123,6 +128,57 @@ const {chromium} = require(process.env.FLS_PLAYWRIGHT_CORE);
     await page.goto(base+'/login');
     await login();
     await page.goto(base+path);
+    if(process.env.FLS_TOGGLE_ONLY){
+     const toggle=()=>path==='/tasks'
+      ? page.locator('[onclick*="taskAjaxAction(\'toggle\',\'a\'"]:visible').first()
+      : page.locator('form[action^="/task/toggle/a"] button:visible');
+     const clickToggle=async status=>{
+      const response=page.waitForResponse(r=>r.request().method()==='POST' && new URL(r.url()).pathname===(path==='/tasks'?'/api/task/bulk-action':'/task/toggle/a'));
+      await toggle().click();
+      assert.equal((await response).status(),status);
+      if(path==='/tasks') await settled();
+     };
+     await fixture({reload:true});
+     await clickToggle(503);
+     await page.getByRole('button',{name:'重新加载调度器',exact:true}).waitFor();
+     assert.equal((await state()).tasks.find(t=>t.id==='a').enabled,false);
+     await page.getByRole('button',{name:'重新加载调度器',exact:true}).click();
+     await page.getByText(/调度器重载失败/).first().waitFor();
+     await fixture({});
+     const restored=page.waitForResponse(r=>r.request().method()==='POST' && new URL(r.url()).pathname===(path==='/tasks'?'/api/scheduler/reload':'/scheduler/reload'));
+     await page.getByRole('button',{name:'重新加载调度器',exact:true}).click();
+     assert.equal((await restored).status(),path==='/tasks'?200:302);
+     await toggle().waitFor();
+     assert.equal((await state()).tasks.find(t=>t.id==='a').enabled,false);
+     await fixture({save:true});
+     await clickToggle(500);
+     const retry=page.getByRole('button',{name:path==='/tasks'?'重试未完成项':'重试保存状态',exact:true});
+     await retry.waitFor();
+     assert.equal((await state()).tasks.find(t=>t.id==='a').enabled,false);
+     await fixture({});
+     await retry.click();
+     if(path==='/tasks') await settled();
+     await toggle().waitFor();
+     assert.equal((await state()).tasks.find(t=>t.id==='a').enabled,true);
+     if(path==='/tasks'){
+      let dropped=false;
+      await page.route('**/api/task/bulk-action',async route=>{
+       if(!dropped){ dropped=true; await route.fetch(); return route.abort(); }
+       return route.continue();
+      });
+      await toggle().click();
+      await page.getByRole('button',{name:'查询本次操作结果',exact:true}).waitFor();
+      await settled();
+      await page.reload();
+      await page.getByRole('button',{name:'查询本次操作结果',exact:true}).click();
+      await settled();
+      assert.equal((await state()).tasks.find(t=>t.id==='a').enabled,false);
+     }
+     assert.deepEqual(errors,[]);
+     console.log(JSON.stringify({path,viewport,toggle:true,status:'passed'}));
+     await context.close();
+     continue;
+    }
     if(process.env.FLS_BULK_EXTRA_ONLY){
      await choose(['a','b']);
      const original=await state();

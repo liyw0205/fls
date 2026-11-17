@@ -72,7 +72,7 @@ def _task_action_buttons(task_id, enabled, config_path="", pinned=False, include
         </div>
     </div>
     <div class="row-actions-danger">
-        <button class="btn {toggle_class}" type="button" aria-label="{h(toggle_text)}任务" onclick="taskAjaxAction('toggle','{h(task_id)}',this)">{h(toggle_label)}</button>
+        <button class="btn {toggle_class}" type="button" data-enabled="{'0' if enabled else '1'}" aria-label="{h(toggle_text)}任务" onclick="taskAjaxAction('toggle','{h(task_id)}',this)">{h(toggle_label)}</button>
         <button class="btn btn-gray" type="button" aria-label="删除任务" onclick="taskAjaxAction('delete','{h(task_id)}',this)">{delete_label}</button>
     </div>
 </div>
@@ -931,7 +931,19 @@ function taskShowRecovery(payload){{
     return true;
 }}
 
+function taskToggleOptions(taskId){{
+    const options = taskBulkOptions();
+    options.scope = "task:" + taskId;
+    options.ids = () => [taskId];
+    options.select = () => {{}};
+    return options;
+}}
+
 async function taskAjaxAction(action, taskId, source){{
+    if(action === "toggle" && source && source.dataset.enabled){{
+        await flsSubmitTaskBulk(taskToggleOptions(taskId), source.dataset.enabled === "1" ? "enable" : "disable", source);
+        return;
+    }}
     if(action === "delete"){{
         if(!confirm("确定删除该任务吗？")) return;
     }}
@@ -1030,6 +1042,7 @@ async function refreshTasksBlockPartial(keepSelection){{
 
 taskUpdateBulkState();
 flsRestoreTaskBulk(taskBulkOptions());
+taskUniqueIds().forEach(taskId => flsRestoreTaskBulk(taskToggleOptions(taskId)));
 </script>
 """
 

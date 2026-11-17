@@ -69,7 +69,7 @@ def layout(title, active, body):
 <link rel="stylesheet" href="/static/fls_responsive.css?v=20260920-3&actions=2">
 <link rel="stylesheet" href="/static/fls_theme.css?v=20260920-3&actions=2&theme=neumorphism&rev=20260930-1">
 <link rel="stylesheet" href="/static/fls_density.css?v=20260930-2">
-<script src="/static/fls.js?v=20260920-3&actions=6&editor=20261117-1"></script>
+<script src="/static/fls.js?v=20260920-3&actions=6&editor=20261117-1&toggle=1"></script>
 
 </head>
 

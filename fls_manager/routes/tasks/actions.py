@@ -1,4 +1,7 @@
-from flask import redirect, url_for, abort
+import uuid
+from urllib.parse import quote
+
+from flask import redirect, url_for, abort, request
 
 from . import bp
 
@@ -46,26 +49,31 @@ def task_delete(task_id):
 
 @bp.route("/task/toggle/<task_id>", methods=["POST"])
 def task_toggle(task_id):
-    result = {}
-
-    def toggle(current_tasks):
-        task = next((item for item in current_tasks if item.get("id") == task_id), None)
-        if task is None:
-            return False
-        task["enabled"] = not task.get("enabled", True)
-        task["updated_at"] = now_str()
-        result["enabled"] = task["enabled"]
-        return True
-
-    def after_toggle():
-        if not result["enabled"]:
-            cancel_task_retry(task_id, "任务已禁用")
-
-    _tasks, changed = mutate_tasks(toggle, reload_scheduler, after_toggle)
-    if not changed:
-        abort(404)
-
-    return redirect(get_back_url("/tasks"))
+    from ...task_bulk import execute_toggle
+    back_url = get_back_url("/tasks")
+    try:
+        payload, status = execute_toggle(
+            task_id, request.form.to_dict(), load_tasks=load_tasks, mutate_tasks=mutate_tasks,
+            run_task=run_task_now, stop_task=stop_task_now,
+            cancel_retry=cancel_task_retry, reload_scheduler=reload_scheduler,
+        )
+    except Exception as exc:
+        payload, status = {"msg": str(exc)}, 500
+    if status == 200:
+        return redirect(back_url)
+    recovery = ""
+    if payload.get("reload_required"):
+        recovery = f'''<form method="post" action="/scheduler/reload?back={h(quote(back_url, safe=''))}">
+<button class="btn btn-primary" type="submit">重新加载调度器</button></form>'''
+    elif payload.get("retry_ids"):
+        enabled = "1" if payload["action"] == "enable" else "0"
+        recovery = f'''<form method="post" action="/task/toggle/{h(task_id)}?back={h(quote(back_url, safe=''))}">
+<input type="hidden" name="enabled" value="{enabled}">
+<input type="hidden" name="request_id" value="{uuid.uuid4().hex}">
+<button class="btn btn-primary" type="submit">重试保存状态</button></form>'''
+    body = f'''<section class="section" role="alert" data-task-toggle-recovery>
+<p>{h(payload['msg'])}</p>{recovery}<a class="btn btn-gray" href="{h(back_url)}">返回任务列表</a></section>'''
+    return layout("任务状态恢复", "tasks", body), status
 
 
 @bp.route("/task/pin/<task_id>", methods=["POST"])
