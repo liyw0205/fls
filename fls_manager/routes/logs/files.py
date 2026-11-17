@@ -206,20 +206,26 @@ def logfile_delete(filename):
 @bp.route("/api/logs/groups/delete", methods=["POST"])
 def api_log_groups_delete():
     data = request.get_json(silent=True) or {}
-    raw_groups = data.get("groups") or request.form.getlist("groups")
-    raw_versions = data.get("group_versions", {})
+    raw_groups = data.get("groups") if isinstance(data, dict) and "groups" in data else request.form.getlist("groups")
+    raw_versions = data.get("group_versions", {}) if isinstance(data, dict) else {}
 
     if isinstance(raw_groups, str):
         raw_groups = [raw_groups]
+    elif raw_groups is None:
+        raw_groups = []
+    elif not isinstance(raw_groups, list):
+        return jsonify({"ok": False, "msg": "日志分组选择无效，未删除任何文件"}), 400
 
     group_names = []
     seen = set()
 
     for raw_name in raw_groups or []:
-        name = str(raw_name or "").strip()
+        if not isinstance(raw_name, str):
+            return jsonify({"ok": False, "msg": "日志分组选择无效，未删除任何文件"}), 400
+        name = raw_name.strip()
 
         if not name or name in seen:
-            continue
+            return jsonify({"ok": False, "msg": "日志分组选择无效，未删除任何文件"}), 400
 
         seen.add(name)
         group_names.append(name)

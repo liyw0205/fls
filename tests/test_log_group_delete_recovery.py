@@ -69,6 +69,23 @@ class LogGroupDeleteRecoveryTests(unittest.TestCase):
             self.assertEqual(no_csrf.status_code, 400)
             self.assertTrue(files["a.log"].exists())
 
+    def test_invalid_group_types_and_duplicates_are_zero_side_effects(self):
+        with isolated_app() as (app, base_dir):
+            files, versions = self.seed(base_dir)
+            client = app.test_client()
+            for groups in (["Group A", 7], ["Group A", "Group A"], ["Group A", ""]):
+                with self.subTest(groups=groups):
+                    response = client.post(
+                        "/api/logs/groups/delete",
+                        json={"groups": groups, "group_versions": versions},
+                        headers={"X-Token": TOKEN},
+                    )
+                    self.assertEqual(response.status_code, 400)
+                    self.assertFalse(response.get_json()["ok"])
+                    self.assertTrue(files["a.log"].exists())
+                    self.assertTrue(files["b.log"].exists())
+                    self.assertTrue(files["c.log"].exists())
+
     def test_logs_page_exposes_group_versions_and_recovery_request_code(self):
         with isolated_app() as (app, base_dir):
             self.seed(base_dir)
