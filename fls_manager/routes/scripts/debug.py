@@ -584,6 +584,7 @@ def scripts_debug_log(debug_id):
 {header_card}
 
 <pre class="log" id="log">加载中...</pre>
+<section class="section" id="logRecovery" role="alert" hidden></section>
 {log_controls()}
 
 <script>
@@ -606,6 +607,7 @@ async function loadScriptDebugLog(){{
 
         const res = await fetch("/api/scripts/debug-log/{h(debug_id)}?lines=1600", {{cache:"no-store"}});
         const json = await flsReadJsonResponse(res);
+        flsLogPollRecovered(loadScriptDebugLog);
 
         const statusEl = document.getElementById("debugStatus");
         if(statusEl) statusEl.textContent = json.status_label || (json.running ? "运行中" : "已结束");
@@ -642,13 +644,13 @@ async function loadScriptDebugLog(){{
             window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
         }}
     }} catch(e) {{
-        document.getElementById("log").textContent = "日志读取失败：" + e + "。下一步：检查调试日志文件和脚本状态后重试";
+        flsLogPollFailed(e, loadScriptDebugLog, "调试日志");
     }}
 }}
 
 if(window.__FLS_ACTIVE_LOG_INTERVAL__) clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
 loadScriptDebugLog();
-window.__FLS_ACTIVE_LOG_INTERVAL__ = setInterval(loadScriptDebugLog, 2000);
+if(!window.__FLS_ACTIVE_LOG_INTERVAL__) window.__FLS_ACTIVE_LOG_INTERVAL__ = setInterval(loadScriptDebugLog, 2000);
 </script>
 """
     return layout("脚本调试日志", "pull", body)

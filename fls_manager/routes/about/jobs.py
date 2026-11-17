@@ -55,6 +55,7 @@ def about_job_log(job_id):
     body = f"""
 {header_card}
 <pre class="log" id="log">加载中...</pre>
+<section class="section" id="logRecovery" role="alert" hidden></section>
 {log_controls()}
 <div class="fls-job-actions action-row" id="aboutJobActions"{job_actions_hidden}>
     {restart_action}
@@ -92,6 +93,7 @@ async function loadAboutJobLog(){{
 
         const res = await fetch("/api/about/job-log/{h(job_id)}?lines=1600", {{cache:"no-store"}});
         const json = await flsReadJsonResponse(res);
+        flsLogPollRecovered(loadAboutJobLog);
 
         document.getElementById("aboutJobStatus").textContent = json.status || "-";
         document.getElementById("aboutJobUpdatedAt").textContent = json.updated_at || "-";
@@ -129,13 +131,13 @@ async function loadAboutJobLog(){{
             window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
         }}
     }} catch(e) {{
-        document.getElementById("log").textContent = "记录读取失败：" + e + "。下一步：返回关于页面后重试";
+        flsLogPollFailed(e, loadAboutJobLog, "操作记录");
     }}
 }}
 
 if(window.__FLS_ACTIVE_LOG_INTERVAL__) clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
 loadAboutJobLog();
-window.__FLS_ACTIVE_LOG_INTERVAL__ = setInterval(loadAboutJobLog, 2000);
+if(!window.__FLS_ACTIVE_LOG_INTERVAL__) window.__FLS_ACTIVE_LOG_INTERVAL__ = setInterval(loadAboutJobLog, 2000);
 </script>
 """
 

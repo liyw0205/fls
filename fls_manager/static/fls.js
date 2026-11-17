@@ -194,6 +194,52 @@ async function flsReadTextResponse(response){
     return response.text();
 }
 
+function flsLogPollRecovered(loader){
+    const recovery = document.getElementById("logRecovery");
+    if(recovery){
+        recovery.hidden = true;
+        recovery.replaceChildren();
+    }
+    window.__FLS_LOG_AUTH_BLOCKED__ = false;
+    if(typeof loader === "function" && !window.__FLS_ACTIVE_LOG_INTERVAL__){
+        window.__FLS_ACTIVE_LOG_INTERVAL__ = setInterval(loader, 2000);
+    }
+}
+
+function flsLogPollFailed(error, loader, label){
+    const recovery = document.getElementById("logRecovery");
+    if(!recovery) return;
+    recovery.replaceChildren();
+    const status = Number(error && error.status || 0);
+    const message = document.createElement("p");
+    if(status === 401 || status === 403){
+        message.textContent = status === 401
+            ? "会话已失效，现有日志已保留；重新登录后可继续读取。"
+            : "当前会话无权读取日志；现有日志已保留，请核对权限或重新登录。";
+        const login = document.createElement("a");
+        login.className = "btn btn-primary";
+        login.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
+        login.textContent = "重新登录";
+        recovery.append(message, login);
+        window.__FLS_LOG_AUTH_BLOCKED__ = true;
+    }else{
+        message.textContent = String(label || "日志") + "读取失败：" + String(error || "未知错误") + "。现有日志已保留，请重试。";
+        const retry = document.createElement("button");
+        retry.type = "button";
+        retry.className = "btn btn-primary";
+        retry.textContent = "立即重试";
+        retry.addEventListener("click", function(){
+            if(typeof loader === "function") loader();
+        });
+        recovery.append(message, retry);
+    }
+    recovery.hidden = false;
+    if(window.__FLS_ACTIVE_LOG_INTERVAL__){
+        clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
+        window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
+    }
+}
+
 document.addEventListener("submit", function(event){
     const form = event.target;
     if(!form || String(form.dataset.noBusyState || "") === "true") return;

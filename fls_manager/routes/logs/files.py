@@ -23,6 +23,7 @@ def logfile_view(filename):
 </div>
 
 <pre class="log" id="log">加载中...</pre>
+<section class="section" id="logRecovery" role="alert" hidden></section>
 {log_controls()}
 
 <script>
@@ -45,6 +46,7 @@ async function loadLog(){{
 
         const res = await fetch("/api/logfile/{h(filename)}?lines=1500", {{cache:"no-store"}});
         const text = await flsReadTextResponse(res);
+        flsLogPollRecovered(loadLog);
         const old = window.__FLS_LOG_LAST_TEXT__ || "";
         const changed = text !== old;
 
@@ -69,13 +71,13 @@ async function loadLog(){{
             }}
         }}
     }} catch(e) {{
-        document.getElementById("log").textContent = "日志读取失败：" + e + "。下一步：返回日志列表并检查服务状态后重试";
+        flsLogPollFailed(e, loadLog, "日志文件");
     }}
 }}
 
 if(window.__FLS_ACTIVE_LOG_INTERVAL__) clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
 loadLog();
-window.__FLS_ACTIVE_LOG_INTERVAL__ = setInterval(loadLog, 2000);
+if(!window.__FLS_ACTIVE_LOG_INTERVAL__) window.__FLS_ACTIVE_LOG_INTERVAL__ = setInterval(loadLog, 2000);
 </script>
 """
     return layout("日志文件", "logs", body)
