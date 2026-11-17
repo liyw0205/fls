@@ -1,6 +1,7 @@
 from .bp import bp
 import os
 import json
+import hashlib
 import stat
 import sys
 import time
@@ -13,6 +14,8 @@ import threading
 import subprocess
 from pathlib import Path
 from datetime import datetime
+from contextlib import contextmanager
+from urllib.parse import quote
 
 from flask import request, Response, redirect, url_for, jsonify, abort
 
@@ -34,6 +37,7 @@ BACKUP_ACTIVITY_CONDITION = threading.Condition(threading.RLock())
 ACTIVE_BACKUP_WORKERS = 0
 RESTORE_ACTIVE = False
 BACKUP_JOB_LIMIT = 100
+BACKUP_DIRECTORY_FD_SUPPORTED = os.open in os.supports_dir_fd and hasattr(os, "O_DIRECTORY")
 BACKUP_DEPENDENCY_TIMEOUT_SECONDS = 120
 MIB = 1024 * 1024
 
@@ -105,8 +109,71 @@ def end_restore_activity():
 # ============================================================
 
 def backup_dir():
+    if BACKUP_DIR.is_symlink():
+        raise ValueError("备份目录不能是符号链接")
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     return BACKUP_DIR
+
+
+def validate_backup_filename(filename):
+    if (not isinstance(filename, str) or not filename.endswith(".tar.gz")
+        or filename != filename.strip() or "/" in filename or "\\" in filename or ":" in filename
+        or any(ord(char) < 32 or ord(char) == 127 for char in filename)):
+        raise ValueError("备份文件名无效，请刷新备份列表后重新选择")
+    return filename
+
+
+@contextmanager
+def backup_directory_fd():
+    if not BACKUP_DIRECTORY_FD_SUPPORTED:
+        yield backup_dir()
+        return
+    directory = os.open(backup_dir(), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        yield directory
+    finally:
+        os.close(directory)
+
+
+def backup_file_version(info):
+    identity = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    return hashlib.sha256(repr(identity).encode("ascii")).hexdigest()
+
+
+def backup_entry_stat(directory, filename):
+    if isinstance(directory, Path):
+        backup_dir()
+        return (directory / filename).lstat()
+    return os.stat(filename, dir_fd=directory, follow_symlinks=False)
+
+
+def backup_entry_unlink(directory, filename):
+    if isinstance(directory, Path):
+        backup_safe_file(filename).unlink()
+    else:
+        os.unlink(filename, dir_fd=directory)
+
+
+def open_backup_entry(directory, filename):
+    expected = backup_entry_stat(directory, filename)
+    if not stat.S_ISREG(expected.st_mode):
+        raise ValueError("备份文件不是常规文件")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    if isinstance(directory, Path):
+        descriptor = os.open(backup_safe_file(filename), flags)
+    else:
+        descriptor = os.open(filename, flags, dir_fd=directory)
+    source = os.fdopen(descriptor, "rb")
+    try:
+        actual = os.fstat(source.fileno())
+        if (not stat.S_ISREG(actual.st_mode)
+            or backup_file_version(actual) != backup_file_version(expected)
+            or backup_file_version(backup_entry_stat(directory, filename)) != backup_file_version(actual)):
+            raise ValueError("备份文件已变化，请刷新列表后重新下载")
+        return source
+    except BaseException:
+        source.close()
+        raise
 
 
 def _backup_job_snapshot(info):
@@ -199,10 +266,7 @@ def get_backup_job(job_id):
 
 
 def backup_safe_file(filename):
-    filename = str(filename or "").split("/")[-1].split("\\")[-1].strip()
-
-    if not filename:
-        raise ValueError("文件名为空")
+    validate_backup_filename(filename)
 
     base = backup_dir().resolve()
     candidate = base / filename
@@ -290,25 +354,27 @@ def parse_items_from_form(prefix="items"):
 
 
 def list_backup_files():
-    backup_dir()
-
     files = []
-
-    for item in BACKUP_DIR.glob("*.tar.gz"):
-        if item.is_symlink() or not item.is_file():
-            continue
-
-        try:
-            stat = item.stat()
+    with backup_directory_fd() as directory:
+        for name in os.listdir(directory):
+            try:
+                validate_backup_filename(name)
+            except ValueError:
+                continue
+            try:
+                info = backup_entry_stat(directory, name)
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                continue
             files.append({
-                "name": item.name,
-                "size": stat.st_size,
-                "size_text": fmt_size(stat.st_size),
-                "mtime": stat.st_mtime,
-                "mtime_text": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                "name": name,
+                "version": backup_file_version(info),
+                "size": info.st_size,
+                "size_text": fmt_size(info.st_size),
+                "mtime": info.st_mtime,
+                "mtime_text": datetime.fromtimestamp(info.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
             })
-        except Exception:
-            pass
 
     files.sort(key=lambda x: x.get("mtime", 0), reverse=True)
     return files
@@ -883,7 +949,10 @@ def install_dependencies(dep_file):
 # ============================================================
 
 def backup_rows_html():
-    files = list_backup_files()
+    try:
+        files = list_backup_files()
+    except Exception:
+        return empty_table_row(4, "备份列表无法读取，请检查目录权限后刷新列表")
 
     if not files:
         return empty_table_row(4, "暂无备份", '<a class="btn btn-primary" href="#backup-create">创建备份</a>')
@@ -903,10 +972,15 @@ def backup_rows_html():
     <td>
         <div class="row-actions" aria-label="备份 {h(name)} 行操作">
             <div class="row-actions-primary">
-                <a class="btn btn-primary" href="/backup/download/{h(name)}">下载备份</a>
+                <a class="btn btn-primary" href="/backup/download/{h(quote(name, safe=''))}">下载备份</a>
             </div>
             <div class="row-actions-danger">
-                <button class="btn btn-red" type="button" onclick="flsDeleteBackup('{h(name)}', this)">删除备份</button>
+                <button class="btn btn-red" type="button" data-filename="{h(name)}" data-version="{h(item['version'])}" onclick="flsDeleteBackup(this.dataset.filename, this.dataset.version, this)">删除备份</button>
+                <noscript><form method="post" action="/backup/delete">
+                    <input type="hidden" name="filename" value="{h(name)}">
+                    <input type="hidden" name="version" value="{h(item['version'])}">
+                    <button class="btn btn-red" type="submit">确认删除备份</button>
+                </form></noscript>
             </div>
         </div>
     </td>

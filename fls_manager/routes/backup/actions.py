@@ -5,6 +5,49 @@ from . import _common as backup
 from ...storage import storage_transaction, write_json
 
 
+def submit_backup_deletion(data):
+    def result(message, status, **extra):
+        return {"ok": status == 200, "msg": message, **extra}, status
+
+    if not isinstance(data, dict):
+        return result("请求必须是对象", 400)
+    filename, version = data.get("filename"), data.get("version")
+    try:
+        backup.validate_backup_filename(filename)
+    except ValueError as exc:
+        return result(str(exc), 400)
+    if not isinstance(version, str) or not re.fullmatch(r"[a-f0-9]{64}", version):
+        return result("缺少有效文件版本，请刷新备份列表后重新选择", 400)
+
+    try:
+        with backup.BACKUP_JOB_LOCK, backup.backup_directory_fd() as directory:
+            try:
+                current = backup.backup_entry_stat(directory, filename)
+            except FileNotFoundError:
+                return result("原备份已不存在，未重复删除", 200, deleted=True)
+            if not backup.stat.S_ISREG(current.st_mode):
+                return result("备份文件不是常规文件，未删除", 400, deleted=False)
+            if backup.backup_file_version(current) != version:
+                return result("备份文件已变化，未删除。请刷新列表，核对后重新选择", 409, deleted=False)
+            try:
+                backup.backup_entry_unlink(directory, filename)
+            except OSError as exc:
+                try:
+                    actual = backup.backup_entry_stat(directory, filename)
+                except FileNotFoundError:
+                    return result("原备份已删除，删除确认异常", 200, deleted=True)
+                except OSError:
+                    return result("删除结果无法确认，请刷新列表核对，不要直接重复删除", 503, deleted=None)
+                if backup.backup_file_version(actual) == version:
+                    return result(f"备份未删除，请检查目录权限后重试：{exc}", 500, deleted=False)
+                return result("原文件已变化，删除结果无法确认，请刷新列表核对", 503, deleted=None)
+            return result("已删除", 200, deleted=True)
+    except ValueError as exc:
+        return result(str(exc), 400, deleted=False)
+    except OSError:
+        return result("备份目录无法读取，请修复目录权限后刷新列表", 500, deleted=None)
+
+
 def submit_backup_cancellation(job_id):
     def result(message, status, *, accepted=False, **extra):
         return {"ok": status == 200, "msg": message, "job_id": job_id,

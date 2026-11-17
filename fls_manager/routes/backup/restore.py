@@ -3,6 +3,7 @@ from . import _common as backup_state
 import hashlib
 import json
 import re
+from flask import send_file
 from contextlib import nullcontext
 from ... import models
 from ...storage import storage_transaction
@@ -241,28 +242,23 @@ def _commit_restore_directories(entries):
 @bp.route("/backup/download/<path:filename>")
 def backup_download(filename):
     try:
-        target = backup_safe_file(filename)
-    except ValueError:
+        validate_backup_filename(filename)
+        with backup_directory_fd() as directory:
+            source = open_backup_entry(directory, filename)
+        try:
+            info = os.fstat(source.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                source.close()
+                abort(404)
+            response = send_file(source, mimetype="application/gzip", as_attachment=True, download_name=filename)
+            response.content_length = info.st_size
+            response.call_on_close(source.close)
+            return response
+        except BaseException:
+            source.close()
+            raise
+    except (ValueError, OSError):
         abort(404)
-
-    if not target.exists() or not target.is_file():
-        abort(404)
-
-    def generate():
-        with open(target, "rb") as f:
-            while True:
-                data = f.read(1024 * 1024)
-
-                if not data:
-                    break
-
-                yield data
-
-    return Response(
-        generate(),
-        mimetype="application/gzip",
-        headers={"Content-Disposition": f'attachment; filename="{target.name}"'},
-    )
 
 @bp.route("/backup/export")
 def backup_export():

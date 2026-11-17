@@ -1,6 +1,18 @@
 from ._common import *
 
 
+@bp.route("/backup/delete", methods=["POST"])
+def backup_delete():
+    from .actions import submit_backup_deletion
+    if any(len(request.form.getlist(key)) != 1 for key in ("filename", "version")):
+        payload, status = {"msg": "请选择唯一备份文件及版本"}, 400
+    else:
+        payload, status = submit_backup_deletion(dict(request.form))
+    body = f'<section class="section" role="alert"><p>{h(payload["msg"])}</p></section>'
+    body += '<a class="btn btn-primary" href="/backup#backup-list">查询实际备份列表</a>'
+    return layout("备份删除结果", "backup", body), status
+
+
 @bp.route("/backup/cancel/<job_id>", methods=["POST"])
 def backup_cancel(job_id):
     from .actions import submit_backup_cancellation
@@ -114,6 +126,10 @@ def backup_page():
     <br>
 
     <button class="btn btn-blue" type="button" onclick="flsRefreshBackupList(this)">刷新备份列表</button>
+    <div id="backupDeleteRecovery" role="status" hidden>
+        <p id="backupDeleteMessage"></p>
+        <button class="btn btn-gray" type="button" onclick="flsRefreshBackupList(this)">查询实际备份列表</button>
+    </div>
 
     <br><br>
 
@@ -417,6 +433,14 @@ async function flsRefreshBackupList(source){{
 
         const tbody = document.getElementById("backupListTbody");
         if(!tbody) return;
+        const pending = JSON.parse(sessionStorage.getItem("fls-backup-delete") || "null");
+        if(pending){{
+            const current = (json.items || []).find(item => item.name === pending.filename);
+            flsBackupDeleteRecovery(!current ? "原备份已不存在，请核对当前列表。" :
+                current.version === pending.version ? "原备份仍存在，可核对后重新确认删除。" :
+                "同名备份已变化，未继续删除，请核对当前列表后重新选择。");
+            sessionStorage.removeItem("fls-backup-delete");
+        }}
 
         if(!json.items || !json.items.length){{
             tbody.innerHTML = "<tr class='empty-state-row'><td colspan='4'><div class='empty-state'><p>暂无备份</p><div class='empty-state-actions'><a class='btn btn-primary' href='#backup-create'>创建备份</a></div></div></td></tr>";
@@ -433,7 +457,7 @@ async function flsRefreshBackupList(source){{
                     "<td>" +
                     "<div class='row-actions' aria-label='备份 " + flsEscapeHtml(item.name) + " 行操作'>" +
                         "<div class='row-actions-primary'><a class='btn btn-primary' href='/backup/download/" + encodeURIComponent(item.name) + "'>下载备份</a></div>" +
-                        "<div class='row-actions-danger'><button class='btn btn-red' type='button' onclick='flsDeleteBackup(" + JSON.stringify(item.name) + ", this)'>删除备份</button></div>" +
+                        "<div class='row-actions-danger'><button class='btn btn-red' type='button' data-filename='" + flsEscapeHtml(item.name) + "' data-version='" + flsEscapeHtml(item.version) + "' onclick='flsDeleteBackup(this.dataset.filename, this.dataset.version, this)'>删除备份</button></div>" +
                     "</div>" +
                 "</td>" +
             "</tr>";
@@ -452,13 +476,20 @@ async function flsRefreshBackupList(source){{
     }}
 }}
 
-async function flsDeleteBackup(filename, source){{
+function flsBackupDeleteRecovery(message){{
+    document.getElementById("backupDeleteRecovery").hidden = false;
+    document.getElementById("backupDeleteMessage").textContent = message;
+}}
+
+async function flsDeleteBackup(filename, version, source){{
     if(!confirm("确定删除备份 " + filename + " 吗？")) return;
     if(!flsMarkButtonBusy(source, "删除中...")) return;
 
     try {{
+        sessionStorage.setItem("fls-backup-delete", JSON.stringify({{filename, version}}));
         const fd = new FormData();
         fd.append("filename", filename);
+        fd.append("version", version);
 
         const res = await fetch("/api/backup/delete", {{
             method: "POST",
@@ -470,20 +501,26 @@ async function flsDeleteBackup(filename, source){{
         const json = await flsReadJsonResponse(res);
 
         if(!json.ok){{
-            alert(flsActionFailure(json.msg || "删除失败", "检查备份文件后重试"));
+            flsBackupDeleteRecovery(json.msg || "删除失败，请查询实际备份列表");
             return;
         }}
 
+        sessionStorage.removeItem("fls-backup-delete");
+        flsBackupDeleteRecovery(json.msg || "已删除");
         await flsRefreshBackupList();
 
     }} catch(e) {{
-        alert(flsActionFailure("删除请求失败：" + e, "检查服务状态后重试"));
+        const payload = e && e.payload;
+        flsBackupDeleteRecovery(payload && payload.msg || "删除结果未确认，请查询实际备份列表：" + String(e));
     }} finally {{
         flsRestoreButton(source);
     }}
 }}
 
 setTimeout(function(){{
+    if(sessionStorage.getItem("fls-backup-delete")){{
+        flsBackupDeleteRecovery("上次删除结果未确认，请先查询实际备份列表。");
+    }}
     const pending = flsBackupRequest();
     const jobId = new URLSearchParams(location.search).get("job_id");
     if(pending){{

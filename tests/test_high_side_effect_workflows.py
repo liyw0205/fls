@@ -1570,8 +1570,9 @@ class BackupIsolationTests(unittest.TestCase):
                 response = post_restore(app, restore_test_archive())
 
             body = response.get_data(as_text=True)
-            self.assertEqual(response.status_code, 500)
+            self.assertEqual(response.status_code, 503)
             self.assertIn("状态可能不完整", body)
+            self.assertIn("不要重复导入", body)
             self.assertIn("恢复副本保留在", body)
             preserved = list(paths.SCRIPT_DIR.parent.glob(".scripts-restore-*/previous/old.py"))
             self.assertEqual(len(preserved), 1)

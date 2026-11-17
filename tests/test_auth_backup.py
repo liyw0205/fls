@@ -450,7 +450,9 @@ class BackupSafetyTests(unittest.TestCase):
         with isolated_fls_env(token="unit-token"):
             from fls_manager.routes.backup._common import backup_safe_file
 
-            target = backup_safe_file("../../demo.tar.gz")
+            with self.assertRaises(ValueError):
+                backup_safe_file("../../demo.tar.gz")
+            target = backup_safe_file("demo.tar.gz")
             self.assertEqual(target.name, "demo.tar.gz")
             self.assertIn("backups", target.parts)
 
@@ -637,8 +639,9 @@ class BackupSafetyTests(unittest.TestCase):
                 mtime = path.stat().st_mtime
                 self.assertEqual(
                     set(item),
-                    {"name", "size", "size_text", "mtime", "mtime_text"},
+                    {"name", "version", "size", "size_text", "mtime", "mtime_text"},
                 )
+                self.assertRegex(item["version"], r"^[a-f0-9]{64}$")
                 self.assertEqual(item["size"], size)
                 self.assertEqual(item["size_text"], size_text)
                 self.assertEqual(item["mtime"], mtime)
@@ -682,28 +685,18 @@ class BackupSafetyTests(unittest.TestCase):
 
     def test_api_backup_delete_missing_file_is_idempotent(self):
         with isolated_fls_env(token="unit-token"):
-            missing_target = MagicMock()
-            missing_target.exists.return_value = False
-
-            with patch(
-                "fls_manager.routes.backup.api.backup_safe_file",
-                return_value=missing_target,
-            ) as backup_safe_file:
-                response = load_app().test_client().post(
-                    "/api/backup/delete",
-                    data={"filename": "already-gone.tar.gz"},
-                    headers={"X-Token": "unit-token"},
-                )
+            response = load_app().test_client().post(
+                "/api/backup/delete",
+                data={"filename": "already-gone.tar.gz", "version": "a" * 64},
+                headers={"X-Token": "unit-token"},
+            )
 
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.content_type, "application/json")
             self.assertEqual(
                 response.get_json(),
-                {"ok": True, "msg": "已删除"},
+                {"ok": True, "msg": "原备份已不存在，未重复删除", "deleted": True},
             )
-            backup_safe_file.assert_called_once_with("already-gone.tar.gz")
-            missing_target.exists.assert_called_once_with()
-            missing_target.unlink.assert_not_called()
 
     def test_safe_extract_zip_accepts_regular_paths(self):
         with isolated_fls_env(token="unit-token"):
