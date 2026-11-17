@@ -41,6 +41,12 @@ def online_scripts_pull_task_link(script_id):
         return _task_link_error(script_id, "该脚本没有配置外部任务源 task_link，请检查脚本源数据。", 400)
 
     proxy_id = request.form.get("proxy_id", "").strip()
+    try:
+        validate_proxy_id(proxy_id)
+    except ValueError as e:
+        return _task_link_error(script_id, str(e), 400, proxy_id=proxy_id, retry=True)
+    except Exception as e:
+        return _task_link_error(script_id, f"读取代理配置失败：{e}", 500, proxy_id=proxy_id, retry=True)
 
     try:
         linked_tasks = fetch_task_link_tasks(

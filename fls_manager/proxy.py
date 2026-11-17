@@ -313,6 +313,19 @@ def get_proxy(proxy_id):
     return None
 
 
+def validate_proxy_id(proxy_id):
+    """Validate an explicitly selected proxy before any network side effect."""
+    proxy_id = str(proxy_id or "").strip()
+    if not proxy_id:
+        return None
+    proxy = get_proxy(proxy_id)
+    if not proxy:
+        raise ValueError("所选代理不存在或已停用，请在代理管理中恢复，或明确更换代理")
+    if not build_proxy_url(proxy):
+        raise ValueError("所选代理缺少有效连接地址，请修复代理设置后重试")
+    return proxy
+
+
 def get_proxy_for_test(proxy_id):
     if not proxy_id:
         return None

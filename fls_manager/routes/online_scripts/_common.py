@@ -14,6 +14,7 @@ from ...ui.log_controls import log_controls
 from ...logs import tail_file
 from ...proxy import (
     proxy_select_options,
+    validate_proxy_id,
     requests_proxy_dict,
     github_proxy_url,
 )

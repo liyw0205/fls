@@ -8,7 +8,7 @@ from pathlib import Path
 from ..config import load_config
 from ..storage import storage_transaction
 from ..utils import now_str, LazyModule
-from ..proxy import requests_proxy_dict, github_proxy_url
+from ..proxy import requests_proxy_dict, github_proxy_url, validate_proxy_id
 from .constants import (
     DEFAULT_ONLINE_SCRIPT_SOURCE,
     ONLINE_SCRIPT_CACHE_FILE,
@@ -186,6 +186,8 @@ def fetch_task_link_tasks(item, proxy_id="", timeout=12):
     if not task_link:
         return []
 
+    validate_proxy_id(proxy_id)
+
     real_url = github_proxy_url(task_link, proxy_id)
 
     with closing(requests.get(
@@ -225,6 +227,7 @@ def fetch_task_link_tasks(item, proxy_id="", timeout=12):
 
 
 def fetch_online_scripts(proxy_id="", timeout=12, publish_cache=True):
+    validate_proxy_id(proxy_id)
     url = get_online_script_source()
     real_url = github_proxy_url(url, proxy_id)
 

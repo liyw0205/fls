@@ -11,6 +11,12 @@ from ...utils import now_str
 
 def _submit_online_refresh(proxy_id):
     try:
+        validate_proxy_id(proxy_id)
+    except ValueError as e:
+        return {"ok": False, "status": "参数错误", "error": str(e)}, 400
+    except Exception as e:
+        return {"ok": False, "status": "代理不可读", "error": f"读取代理配置失败：{e}"}, 500
+    try:
         info = reserve_online_refresh(proxy_id)
     except Exception as e:
         return {

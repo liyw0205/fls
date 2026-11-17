@@ -136,6 +136,13 @@ class OnlineTaskLinkTests(unittest.TestCase):
             from fls_manager.online_scripts import source
 
             source.save_online_script_cache([self.item(tasks=[self.task("existing")])])
+            from fls_manager.models import save_proxies
+            save_proxies([
+                {"id": "first", "name": "First", "type": "http",
+                 "host": "127.0.0.1", "port": "8080", "enabled": True},
+                {"id": "second", "name": "Second", "type": "http",
+                 "host": "127.0.0.1", "port": "8081", "enabled": True},
+            ])
             barrier = threading.Barrier(2)
 
             def fetch(_item, proxy_id="", **_kwargs):
@@ -175,7 +182,8 @@ class OnlineTaskLinkTests(unittest.TestCase):
             from fls_manager.online_scripts import source
 
             source.save_online_script_cache([self.item()])
-            save_proxies([{"id": "chosen", "name": "Chosen proxy", "type": "http", "enabled": True}])
+            save_proxies([{"id": "chosen", "name": "Chosen proxy", "type": "http",
+                           "host": "127.0.0.1", "port": "8080", "enabled": True}])
             client = app.test_client()
             with client.session_transaction() as session:
                 session.update(token=TOKEN, token_expire_at=int(time.time()) + 3600,
@@ -204,6 +212,29 @@ class OnlineTaskLinkTests(unittest.TestCase):
             selected_page = client.get("/online-scripts/install-select/demo")
             self.assertEqual(selected_page.status_code, 200)
             self.assertIn("importable", selected_page.get_data(as_text=True))
+
+    def test_invalid_proxy_is_rejected_before_external_fetch_or_cache_write(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.models import save_proxies
+            from fls_manager.online_scripts import source
+
+            source.save_online_script_cache([self.item(tasks=[self.task("existing")])])
+            original = source.load_online_script_cache()
+            save_proxies([{"id": "disabled", "name": "Disabled", "type": "http",
+                           "host": "127.0.0.1", "port": "8080", "enabled": False}])
+            client = app.test_client()
+            for proxy_id in ("missing", "disabled"):
+                with self.subTest(proxy_id=proxy_id):
+                    with patch("fls_manager.routes.online_scripts.task_link.fetch_task_link_tasks") as fetch:
+                        response = client.post(
+                            "/online-scripts/task-link/demo",
+                            data={"proxy_id": proxy_id},
+                            headers={"X-Token": TOKEN, "X-Requested-With": "FLS-Ajax"},
+                        )
+                    self.assertEqual(response.status_code, 400)
+                    self.assertIn("代理", response.get_data(as_text=True))
+                    fetch.assert_not_called()
+                    self.assertEqual(source.load_online_script_cache(), original)
 
     def test_session_expiry_and_csrf_rejection_do_not_fetch_or_mutate(self):
         with isolated_app() as (app, _base_dir):

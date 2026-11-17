@@ -16,6 +16,7 @@ from ..proxy import (
     apply_proxy_env,
     github_proxy_url,
     build_git_command_with_github_proxy,
+    validate_proxy_id,
 )
 from .constants import (
     ONLINE_INSTALL_RUNNING,
@@ -254,6 +255,7 @@ def run_logged_command(cmd, cwd, log_file, env=None, shell=False, install_id="")
 
 
 def download_online_script_logged(item, proxy_id, log_file, force=False, install_id=""):
+    validate_proxy_id(proxy_id)
     SCRIPT_DIR.mkdir(parents=True, exist_ok=True)
 
     script_type = item.get("type")

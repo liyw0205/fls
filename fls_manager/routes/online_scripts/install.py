@@ -22,6 +22,18 @@ def _start_install_job(
     retry_of="",
 ):
     """Register and launch one install, keeping startup failures durable."""
+    try:
+        validate_proxy_id(proxy_id)
+    except ValueError as e:
+        return _install_retry_error(
+            retry_of or script_id, "代理选择无效", str(e), 400,
+            actions_html=f'<a class="btn btn-orange" href="/online-scripts/install-select/{h(script_id)}">重新选择安装选项</a>',
+        )
+    except Exception as e:
+        return _install_retry_error(
+            retry_of or script_id, "代理配置无法读取", f"读取代理配置失败：{e}", 500,
+            actions_html=f'<a class="btn btn-orange" href="/online-scripts/install-select/{h(script_id)}">重新选择安装选项</a>',
+        )
     if retry_of:
         target = online_script_target(item)
         if target.exists() and not force:
@@ -158,6 +170,18 @@ def online_scripts_install(script_id):
             )
 
     proxy_id = request.form.get("proxy_id", "").strip()
+    try:
+        validate_proxy_id(proxy_id)
+    except ValueError as e:
+        return _install_retry_error(
+            script_id, "代理选择无效", str(e), 400,
+            actions_html=f'<a class="btn btn-orange" href="/online-scripts/install-select/{h(script_id)}">重新选择安装选项</a>',
+        )
+    except Exception as e:
+        return _install_retry_error(
+            script_id, "代理配置无法读取", f"读取代理配置失败：{e}", 500,
+            actions_html=f'<a class="btn btn-orange" href="/online-scripts/install-select/{h(script_id)}">重新选择安装选项</a>',
+        )
     import_task = request.form.get("import_task") == "1"
     enable_task = request.form.get("enable_task") == "1"
     force = request.form.get("force") == "1"

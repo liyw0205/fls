@@ -414,6 +414,9 @@ class OnlineInstallLifecycleTests(unittest.TestCase):
 
             item = self.item()
             item["task_cron"] = [{"name": "Daily", "command": "task demo"}]
+            from fls_manager.models import save_proxies
+            save_proxies([{"id": "proxy-1", "name": "Proxy 1", "type": "http",
+                           "host": "127.0.0.1", "port": "8080", "enabled": True}])
             cache_file = base_dir / "data" / "online_scripts_cache.json"
             cache_file.parent.mkdir(parents=True, exist_ok=True)
             cache_file.write_text(json.dumps([item]), encoding="utf-8")
@@ -475,6 +478,47 @@ class OnlineInstallLifecycleTests(unittest.TestCase):
             self.assertTrue(kwargs["enable_task"])
             self.assertEqual(kwargs["selected_task_indexes"], ["1"])
             self.assertFalse(kwargs["force"])
+
+    def test_install_and_retry_reject_invalid_proxy_without_start_or_new_record(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.models import save_proxies
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE
+            from fls_manager.online_scripts.source import save_online_script_cache
+
+            save_proxies([{"id": "disabled", "name": "Disabled", "type": "http",
+                           "host": "127.0.0.1", "port": "8080", "enabled": False}])
+            item = self.item()
+            save_online_script_cache([item])
+            client = app.test_client()
+            with patch("fls_manager.routes.online_scripts.install.start_install_thread") as start:
+                initial = client.post(
+                    "/online-scripts/install/demo",
+                    data={"proxy_id": "missing"},
+                    headers={"X-Token": TOKEN, "X-Requested-With": "FLS-Ajax"},
+                )
+            self.assertEqual(initial.status_code, 400)
+            start.assert_not_called()
+            self.assertFalse(ONLINE_INSTALL_JOBS_FILE.exists())
+
+            log_file = base_dir / "log" / "invalid-proxy.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_file.write_text("partial\n", encoding="utf-8")
+            original = {
+                "id": "invalid-proxy", "script_id": "demo", "script_name": "Demo",
+                "log_file": str(log_file), "proxy_id": "disabled", "import_task": False,
+                "enable_task": False, "selected_task_indexes": [], "force": False,
+                "running": False, "status": "失败", "returncode": 1, "error": "failed",
+                "updated_at": "2026-11-18 00:00:00",
+            }
+            ONLINE_INSTALL_JOBS_FILE.write_text(json.dumps({"invalid-proxy": original}), encoding="utf-8")
+            with patch("fls_manager.routes.online_scripts.install.start_install_thread") as start:
+                retry = client.post(
+                    "/online-scripts/install-retry/invalid-proxy",
+                    headers={"X-Token": TOKEN, "X-Requested-With": "FLS-Ajax"},
+                )
+            self.assertEqual(retry.status_code, 400)
+            start.assert_not_called()
+            self.assertEqual(json.loads(ONLINE_INSTALL_JOBS_FILE.read_text(encoding="utf-8"))["invalid-proxy"], original)
 
     def test_retry_unknown_install_reports_deleted_script_without_starting(self):
         with isolated_app() as (app, base_dir):

@@ -211,6 +211,9 @@ class OnlineSourceRefreshTests(unittest.TestCase):
                     import fls_manager.routes.online_scripts.refresh as refresh
 
                     source.save_online_script_cache([{"id": "stable", "name": "Stable", "type": "raw", "link": "x"}])
+                    from fls_manager.models import save_proxies
+                    save_proxies([{"id": "chosen", "name": "Chosen", "type": "http",
+                                   "host": "127.0.0.1", "port": "8080", "enabled": True}])
                     cache = base_dir / "data" / "online_scripts_cache.json"
                     original = cache.read_bytes()
                     real_persist = constants.persist_online_refresh
@@ -278,7 +281,8 @@ class OnlineSourceRefreshTests(unittest.TestCase):
             from fls_manager.models import save_proxies
             import fls_manager.routes.online_scripts.refresh as refresh
 
-            save_proxies([{"id": "chosen", "name": "Chosen", "type": "http", "enabled": True}])
+            save_proxies([{"id": "chosen", "name": "Chosen", "type": "http",
+                           "host": "127.0.0.1", "port": "8080", "enabled": True}])
             client = app.test_client()
             with client.session_transaction() as session:
                 session.update(token=TOKEN, token_expire_at=int(time.time()) + 3600,
@@ -298,6 +302,35 @@ class OnlineSourceRefreshTests(unittest.TestCase):
                 )
             self.assertEqual(recovered.status_code, 302)
             self.assertEqual(start.call_args.args[1], "chosen")
+
+    def test_refresh_rejects_invalid_proxy_before_reservation_or_worker(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.models import save_proxies
+            import fls_manager.routes.online_scripts.refresh as refresh
+
+            save_proxies([
+                {"id": "disabled", "name": "Disabled", "type": "http",
+                 "host": "127.0.0.1", "port": "8080", "enabled": False},
+                {"id": "no-address", "name": "No address", "type": "http", "enabled": True},
+            ])
+            client = app.test_client()
+            for path in ("/online-scripts/refresh", "/api/online-scripts/refresh"):
+                for proxy_id in ("missing", "disabled", "no-address"):
+                    with self.subTest(path=path, proxy_id=proxy_id):
+                        with patch.object(refresh, "reserve_online_refresh") as reserve, patch.object(
+                            refresh, "start_refresh_thread",
+                        ) as start:
+                            response = client.post(
+                                path,
+                                data={"proxy_id": proxy_id},
+                                headers={"X-Token": TOKEN, "X-Requested-With": "FLS-Ajax"},
+                            )
+                        self.assertEqual(response.status_code, 400)
+                        self.assertNotIn("Location", response.headers)
+                        detail = response.get_json().get("error", "") if response.is_json else response.get_data(as_text=True)
+                        self.assertIn("代理", detail)
+                        reserve.assert_not_called()
+                        start.assert_not_called()
 
     def test_refresh_status_returns_json_diagnostic_when_restart_recovery_cannot_persist(self):
         with isolated_app() as (app, base_dir):
