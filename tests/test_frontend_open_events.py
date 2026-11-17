@@ -152,6 +152,27 @@ class FrontendOpenEventTests(unittest.TestCase):
 
             record.assert_called_once_with("页面打开通知已发送：1/2 个通道成功")
 
+    def test_notification_worker_start_failure_does_not_break_page_dispatch(self):
+        with isolated_app() as app:
+            from fls_manager.frontend_events import dispatch_frontend_open_event
+
+            with app.test_request_context(
+                "/",
+                headers={"User-Agent": "test-agent", "X-Forwarded-For": "127.0.0.1"},
+            ):
+                with patch(
+                    "fls_manager.frontend_events.start_refresh_log_job",
+                    create=True,
+                ), patch(
+                    "fls_manager.frontend_events.threading.Thread",
+                    side_effect=RuntimeError("notification thread denied"),
+                ), patch(
+                    "fls_manager.frontend_events._log_frontend_event"
+                ) as record:
+                    dispatch_frontend_open_event()
+
+            record.assert_called_once_with("页面打开通知线程启动失败：notification thread denied")
+
 
 if __name__ == "__main__":
     unittest.main()

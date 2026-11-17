@@ -59,10 +59,15 @@ def dispatch_frontend_open_event():
     # prevents the first status request from caching the initial empty state.
     _start_update_log_refresh()
 
-    worker = threading.Thread(
-        target=_frontend_open_worker,
-        args=(ip, user_agent),
-        daemon=True,
-        name="fls-frontend-open",
-    )
-    worker.start()
+    try:
+        worker = threading.Thread(
+            target=_frontend_open_worker,
+            args=(ip, user_agent),
+            daemon=True,
+            name="fls-frontend-open",
+        )
+        worker.start()
+    except Exception as exc:
+        # Notification delivery is best effort and must not turn a successful
+        # page request into a server error when its worker cannot start.
+        _log_frontend_event(f"页面打开通知线程启动失败：{exc}")
