@@ -150,11 +150,14 @@ def api_about_job_log(job_id):
 
     if not info:
         return jsonify({
+            "ok": False,
+            "msg": "操作记录不存在或面板已重启",
             "running": False,
             "status": "记录不存在或面板已重启",
             "updated_at": "-",
             "log": "任务记录不存在或面板已重启。请到日志管理中查找 about-*.log。",
-        })
+            "recovery_url": "/logs",
+        }), 404
 
     log_file = info.get("log_file", "")
 

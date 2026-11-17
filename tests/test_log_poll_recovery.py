@@ -82,6 +82,15 @@ console.log("ok");
         result = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
         self.assertEqual(result.stdout.strip(), "ok")
 
+    def test_missing_about_job_is_an_explicit_recoverable_http_error(self):
+        with isolated_app() as (app, _base_dir):
+            response = app.test_client().get(
+                "/api/about/job-log/missing", headers={"X-Token": TOKEN}
+            )
+            self.assertEqual(response.status_code, 404)
+            self.assertFalse(response.get_json()["ok"])
+            self.assertEqual(response.get_json()["recovery_url"], "/logs")
+
 
 if __name__ == "__main__":
     unittest.main()
