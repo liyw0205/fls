@@ -92,6 +92,10 @@ def logs_page():
 """
 
         for task_name, log_files in show:
+            try:
+                group_version = log_group_version(log_files)
+            except (OSError, ValueError):
+                group_version = ""
             rows = ""
 
             latest_time = "-"
@@ -105,6 +109,10 @@ def logs_page():
                 pass
 
             for f in log_files:
+                try:
+                    file_version = log_file_version(f)
+                except (OSError, ValueError):
+                    file_version = ""
                 try:
                     size = f.stat().st_size / 1024
                     size_text = f"{size:.1f} KB"
@@ -128,6 +136,7 @@ def logs_page():
             </div>
             <div class="row-actions-danger">
                 <form class="inline-form" method="post" action="/logfile/delete/{h(f.name)}?back=/logs">
+                    <input type="hidden" name="version" value="{h(file_version)}">
                     <button class="btn btn-red" type="submit" onclick="return confirm('确定删除日志 {h(f.name)} 吗？')">删除日志</button>
                 </form>
             </div>
@@ -163,6 +172,7 @@ def logs_page():
                     class="log-group-select"
                     type="checkbox"
                     value="{h(task_name)}"
+                    data-version="{h(group_version)}"
                     onclick="event.stopPropagation()"
                     onchange="flsLogsUpdateBulkState()"
                     aria-label="选择日志分组 {h(title)}"
@@ -182,6 +192,7 @@ def logs_page():
                         class="btn btn-red"
                         type="button"
                         data-group="{h(task_name)}"
+                        data-version="{h(group_version)}"
                         onclick="event.preventDefault();event.stopPropagation();flsLogsDeleteGroups([this.dataset.group], this);"
                     >删除本组日志</button>
                 </div>
@@ -345,6 +356,34 @@ function flsLogsDeleteSelectedGroups(source){
     flsLogsDeleteGroups(flsLogsSelectedGroups(), source);
 }
 
+function flsLogsGroupVersions(groups, source){
+    const versions = {};
+    (groups || []).forEach(function(group){
+        const box = Array.prototype.slice.call(document.querySelectorAll(".log-group-select")).find(function(item){
+            return item.value === group;
+        });
+        if(box && box.dataset.version) versions[group] = box.dataset.version;
+    });
+    if(source && source.dataset && source.dataset.group && source.dataset.version){
+        versions[source.dataset.group] = source.dataset.version;
+    }
+    return versions;
+}
+
+function flsLogsRestorePendingGroups(){
+    let pending;
+    try { pending = JSON.parse(sessionStorage.getItem("fls-log-delete-recovery") || "null"); } catch(e) { pending = null; }
+    if(!pending || !Array.isArray(pending.groups)) return;
+    pending.groups.forEach(function(group){
+        const box = Array.prototype.slice.call(document.querySelectorAll(".log-group-select")).find(function(item){
+            return item.value === group;
+        });
+        if(box) box.checked = true;
+    });
+    sessionStorage.removeItem("fls-log-delete-recovery");
+    flsLogsUpdateBulkState();
+}
+
 // Compatibility marker for callers using the legacy group-delete signature.
 // flsLogsDeleteGroups([this.dataset.group]);
 async function flsLogsDeleteGroups(groups, source){
@@ -368,12 +407,17 @@ async function flsLogsDeleteGroups(groups, source){
                 "X-Requested-With": "XMLHttpRequest"
             },
             credentials: "same-origin",
-            body: JSON.stringify({groups: groups})
+            body: JSON.stringify({groups: groups, group_versions: flsLogsGroupVersions(groups, source)})
         });
 
         var json = await flsReadJsonResponse(res);
 
         if(!json.ok){
+            if(Array.isArray(json.retry_groups) && json.retry_groups.length){
+                sessionStorage.setItem("fls-log-delete-recovery", JSON.stringify({groups: json.retry_groups}));
+                if(typeof flsClearPageCache === "function") flsClearPageCache();
+                location.reload();
+            }
             alert(flsActionFailure(json.msg || "删除失败", "检查日志分组后重试"));
             return;
         }
@@ -396,6 +440,7 @@ async function flsLogsDeleteGroups(groups, source){
 }
 
 flsLogsUpdateBulkState();
+flsLogsRestorePendingGroups();
 </script>
 """
 

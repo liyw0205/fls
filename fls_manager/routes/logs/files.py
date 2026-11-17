@@ -163,6 +163,7 @@ def logfile_delete(filename):
 def api_log_groups_delete():
     data = request.get_json(silent=True) or {}
     raw_groups = data.get("groups") or request.form.getlist("groups")
+    raw_versions = data.get("group_versions", {})
 
     if isinstance(raw_groups, str):
         raw_groups = [raw_groups]
@@ -181,32 +182,61 @@ def api_log_groups_delete():
 
     if not group_names:
         return jsonify({"ok": False, "msg": "请选择日志分组"}), 400
+    if not isinstance(raw_versions, dict):
+        return jsonify({"ok": False, "msg": "日志分组版本无效，未删除任何文件"}), 400
+    group_versions = {}
+    for group_name, version in raw_versions.items():
+        if (not isinstance(group_name, str) or not isinstance(version, str)
+            or len(version) != 64 or any(c not in "0123456789abcdef" for c in version)):
+            return jsonify({"ok": False, "msg": "日志分组版本无效，未删除任何文件"}), 400
+        group_versions[group_name] = version
 
     groups = load_log_groups()
     deleted = 0
     missing = []
     failed = []
+    conflicts = []
+    results = []
 
     for group_name in group_names:
         log_files = groups.get(group_name)
 
         if not log_files:
             missing.append(group_name)
+            results.append({"group": group_name, "status": "missing", "deleted": 0})
             continue
 
+        expected = group_versions.get(group_name)
+        try:
+            actual = log_group_version(log_files)
+        except (OSError, ValueError) as exc:
+            failed.append(f"{group_name}: {exc}")
+            results.append({"group": group_name, "status": "failed", "deleted": 0})
+            continue
+        if expected and expected != actual:
+            conflicts.append(group_name)
+            results.append({"group": group_name, "status": "conflict", "deleted": 0})
+            continue
+
+        group_deleted = 0
+        group_failed = False
         for file_path in log_files:
             try:
                 if file_path.exists() and file_path.is_file() and file_path.parent == LOG_DIR:
                     file_path.unlink()
                     deleted += 1
+                    group_deleted += 1
             except Exception as e:
                 failed.append(f"{file_path.name}: {e}")
+                group_failed = True
+        results.append({"group": group_name, "status": "failed" if group_failed else "deleted", "deleted": group_deleted})
 
-    if failed:
+    retry_groups = conflicts + [row["group"] for row in results if row["status"] == "failed"]
+    if failed or conflicts:
         return jsonify({
-            "ok": False,
-            "msg": f"已删除 {deleted} 个日志文件，{len(failed)} 个删除失败：{'；'.join(failed[:3])}",
-        }), 500
+            "ok": False, "partial": bool(deleted), "retry_groups": retry_groups, "results": results,
+            "msg": f"已删除 {deleted} 个日志文件，{len(conflicts)} 个分组已变化，{len(failed)} 个删除失败，请核对后重试",
+        }), 409 if conflicts else 500
 
     msg = f"已删除 {deleted} 个日志文件"
 
@@ -218,4 +248,5 @@ def api_log_groups_delete():
         "msg": msg,
         "deleted": deleted,
         "groups": group_names,
+        "results": results,
     })

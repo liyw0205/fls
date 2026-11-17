@@ -40,6 +40,13 @@ def log_file_version(file_path):
     return hashlib.sha256(repr(identity).encode("ascii")).hexdigest()
 
 
+def log_group_version(log_files):
+    entries = []
+    for file_path in sorted(log_files, key=lambda item: item.name):
+        entries.append((file_path.name, log_file_version(file_path)))
+    return hashlib.sha256(repr(entries).encode("utf-8")).hexdigest()
+
+
 def page_links(base, q, page, pages):
     def build_url(p):
         url = f"{base}?page={int(p)}"
