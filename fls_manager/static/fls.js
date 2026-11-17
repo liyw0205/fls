@@ -110,6 +110,52 @@ async function flsReadJsonResponse(response){
         throw new Error("响应对象不可用");
     }
 
+    const status = response.status;
+    const readErrorPayload = async body => {
+        let payload = null;
+        try { payload = JSON.parse(body); } catch(e) {}
+        const message = payload && (payload.msg || payload.error || payload.message);
+        if(message) return {payload:payload, message:String(message)};
+
+        let detail = String(body || "");
+        const contentType = response.headers && response.headers.get
+            ? String(response.headers.get("content-type") || "").toLowerCase() : "";
+        if(contentType.includes("text/html") || /^\s*<!doctype\s+html|^\s*<html\b/i.test(detail)){
+            if(typeof DOMParser !== "undefined"){
+                const doc = new DOMParser().parseFromString(detail, "text/html");
+                detail = doc.body ? (doc.body.innerText || doc.body.textContent || "") : "";
+            }else{
+                detail = detail.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ")
+                    .replace(/<[^>]*>/g, " ");
+            }
+        }
+        detail = detail.replace(/\s+/g, " ").trim().slice(0, 500);
+        return {payload:payload, message:detail};
+    };
+
+    // Check status before parsing and consume each native response body once.
+    if(typeof response.text === "function"){
+        if(!response.ok){
+            let body = "";
+            try { body = await response.text(); } catch(e) {}
+            const diagnostic = await readErrorPayload(body);
+            const error = new Error("HTTP " + status + (diagnostic.message ? ": " + diagnostic.message : ""));
+            error.status = status;
+            error.payload = diagnostic.payload;
+            throw error;
+        }
+        let body = "";
+        try { body = await response.text(); } catch(e) {}
+        try {
+            return JSON.parse(body);
+        } catch(e) {
+            const error = new Error("响应解析失败：" + status);
+            error.status = status;
+            throw error;
+        }
+    }
+
+    // Keep lightweight response doubles used by legacy callers/tests compatible.
     if(!response.ok){
         let payload = null;
         try {
@@ -117,8 +163,8 @@ async function flsReadJsonResponse(response){
         } catch(e) {}
 
         const message = payload && (payload.msg || payload.error || payload.message);
-        const error = new Error(String(message || ("HTTP " + response.status)));
-        error.status = response.status;
+        const error = new Error(String(message || ("HTTP " + status)));
+        error.status = status;
         error.payload = payload;
         throw error;
     }
@@ -126,8 +172,8 @@ async function flsReadJsonResponse(response){
     try {
         return await response.json();
     } catch(e) {
-        const error = new Error("响应解析失败：" + response.status);
-        error.status = response.status;
+        const error = new Error("响应解析失败：" + status);
+        error.status = status;
         throw error;
     }
 }

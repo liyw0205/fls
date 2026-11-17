@@ -342,6 +342,56 @@ await new Promise(resolve => setImmediate(resolve));
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise the response reader")
+    def test_json_reader_preserves_bounded_non_json_http_diagnostic(self):
+        source = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+        reader = source[source.index("async function flsReadJsonResponse("):source.index("async function flsReadTextResponse(")]
+        result = subprocess.run(
+            ["node", "-e", r"""
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+const context = {};
+vm.createContext(context);
+vm.runInContext(input.reader, context);
+(async () => {
+  for(const status of [401, 403, 409, 500, 502, 503]){
+    let reads = 0;
+    const response = {ok:false, status, headers:{get:()=> 'text/plain'},
+      text:async()=>{reads++; return 'upstream diagnostic '+status;}};
+    let error;
+    try { await context.flsReadJsonResponse(response); } catch(e) { error = e; }
+    assert.equal(error.status, status);
+    assert.match(error.message, new RegExp('HTTP '+status));
+    assert.match(error.message, /upstream diagnostic/);
+    assert.equal(reads, 1);
+  }
+  let htmlError;
+  try {
+    await context.flsReadJsonResponse({ok:false,status:502,headers:{get:()=> 'text/html'},
+      text:async()=> '<html><body><h1>Gateway unavailable</h1><script>private marker</script></body></html>'});
+  } catch(e) { htmlError = e; }
+  assert.match(htmlError.message, /Gateway unavailable/);
+  assert.doesNotMatch(htmlError.message, /private marker|<script/i);
+  let longError;
+  try {
+    await context.flsReadJsonResponse({ok:false,status:502,headers:{get:()=> 'text/plain'},
+      text:async()=> 'x'.repeat(2000)});
+  } catch(e) { longError = e; }
+  assert.equal(longError.message.length, 510);
+  const success = await context.flsReadJsonResponse({ok:true,status:200,headers:{get:()=> 'application/json'},
+    text:async()=> '{"ok":true}'});
+  assert.equal(JSON.stringify(success), '{"ok":true}');
+  console.log('JSON response diagnostics passed');
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"""],
+            input=json.dumps({"reader": reader}),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
