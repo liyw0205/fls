@@ -1,3 +1,4 @@
+import json
 import uuid
 from math import ceil
 from urllib.parse import quote
@@ -699,6 +700,8 @@ def collections_page():
     <hr style="border:0;border-top:1px solid #eef2f7;margin:14px 0;">
 
     <form method="post" action="/collection/add-task/{h(cid)}?back={_back_param(current_back + '#collection-' + cid)}">
+        <input type="hidden" name="request_id" value="{uuid.uuid4().hex}">
+        <input type="hidden" name="expected_collections" value="{h(json.dumps({t['id']: str(t.get('collection_id') or '') for t in available_tasks}, ensure_ascii=False))}">
         <div class="form-item">
             <label>搜索并加入任务</label>
             <select name="task_ids" size="8" multiple aria-label="选择要加入合集的任务">{task_options}</select>
@@ -881,42 +884,39 @@ def collection_delete(collection_id):
 
 @bp.route("/collection/add-task/<collection_id>", methods=["POST"])
 def collection_add_task(collection_id):
-    with COLLECTION_MUTATION_LOCK:
-        collection = get_collection(collection_id)
+    from ...task_bulk import execute_assign_collection
+    from ...ui.components import message_card
 
-        if not collection:
+    back_url = get_back_url("/collections")
+    task_ids = _collection_task_ids_from_form()
+    if not task_ids and "request_id" not in request.form:
+        if not get_collection(collection_id):
             abort(404)
-
-        task_ids = _collection_task_ids_from_form()
-        if not task_ids:
-            return redirect(get_back_url("/collections"))
-
-        selected = set(task_ids)
-        result = {"missing": False}
-
-        def add_to_collection(tasks):
-            existing = {
-                str(task.get("id") or "")
-                for task in tasks
-                if str(task.get("id") or "") in selected
-            }
-            if existing != selected:
-                result["missing"] = True
-                return False
-
-            for task in tasks:
-                if task.get("id") in selected:
-                    task["collection_id"] = collection_id
-                    task["updated_at"] = now_str()
-                    task["pinned"] = False
-            return bool(selected)
-
-        try:
-            mutate_tasks(add_to_collection)
-        except Exception as e:
-            return f"合集成员更新失败，任务未更改：{h(e)}", 500
-
-        if result["missing"]:
-            abort(404)
-
-    return redirect(get_back_url("/collections"))
+        return redirect(back_url)
+    data = dict(request.form.to_dict(), task_ids=task_ids)
+    data.setdefault("request_id", uuid.uuid4().hex)
+    try:
+        payload, status = execute_assign_collection(collection_id, data, get_collection=get_collection,
+                                                    load_tasks=load_tasks, mutate_tasks=mutate_tasks)
+    except Exception as exc:
+        payload, status = {"ok": False, "msg": str(exc)}, 500
+    if status == 200:
+        return redirect(back_url)
+    retry_ids = payload.get("retry_ids") or payload.get("unknown_ids")
+    recovery = ""
+    if status != 404 and not (payload.get("saved") and not retry_ids):
+        request_id = uuid.uuid4().hex if retry_ids else data["request_id"]
+        if isinstance(request_id, str) and len(request_id) == 32:
+            selected = retry_ids or task_ids
+            fields = "".join(f'<input type="hidden" name="task_ids" value="{h(task_id)}">' for task_id in selected)
+            expected = payload.get("expected_collections", data.get("expected_collections"))
+            if expected is not None:
+                encoded = json.dumps(expected, ensure_ascii=False) if isinstance(expected, dict) else expected
+                fields += f'<input type="hidden" name="expected_collections" value="{h(encoded)}">'
+            recovery = f'''<form method="post" action="/collection/add-task/{h(collection_id)}?back={_back_param(back_url)}">
+<input type="hidden" name="request_id" value="{h(request_id)}">{fields}
+<button class="btn btn-primary" type="submit" onclick="return confirm('确认任务合集归属后继续加入？')">{'重试加入合集' if retry_ids else '查询本次操作结果'}</button></form>'''
+    body = message_card(payload["msg"], "error", strong=True, title="合集加入恢复") + f'''
+<section class="section" role="alert" data-task-execution-result="{h(json.dumps(payload, ensure_ascii=False))}">
+<p>{h(payload['msg'])}</p>{recovery}<a class="btn btn-gray" href="{h(back_url)}">查看任务合集</a></section>'''
+    return layout("合集加入恢复", "collections", body), status

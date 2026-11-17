@@ -407,3 +407,18 @@ def api_task_bulk_action():
         return jsonify(payload), status
     except Exception as exc:
         return jsonify({"ok": False, "msg": str(exc), "action": action, "count": len(task_ids)}), 500
+
+
+@bp.route("/api/collection/add-task/<collection_id>", methods=["POST"])
+def api_collection_add_task(collection_id):
+    from ..models import get_collection
+    from ..task_bulk import execute_assign_collection
+
+    data = request.get_json(silent=True) if request.is_json else dict(
+        request.form.to_dict(), task_ids=request.form.getlist("task_ids"))
+    try:
+        payload, status = execute_assign_collection(collection_id, data, get_collection=get_collection,
+                                                    load_tasks=load_tasks, mutate_tasks=mutate_tasks)
+        return jsonify(payload), status
+    except Exception as exc:
+        return jsonify(ok=False, msg=str(exc)), 500

@@ -666,6 +666,12 @@ function flsBulkNotice(options, state, error){
         login.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
         login.textContent = "重新登录";
         notice.append(login);
+    } else if(payload.reselection_required){
+        const link = document.createElement("a");
+        link.className = "btn btn-primary";
+        link.href = "/collections";
+        link.textContent = "重新选择合集和任务";
+        notice.append(link);
     } else if((payload.retry_ids || []).length){
         button("重试未完成项", control => {
             options.select(payload.retry_ids);
@@ -710,12 +716,12 @@ function flsBulkNotice(options, state, error){
         link.className = "btn btn-gray";
         link.textContent = "查看任务历史";
         notice.append(link);
-        button(options.single ? "确认后重试本项" : "重新选择结果未知项", control => {
+        button(options.single || options.confirmRetry ? "确认后重试本项" : "重新选择结果未知项", control => {
             if(!confirm("结果未知的任务可能已执行。确认查看任务历史后重新选择？")) return;
             state.selection = Array.from(new Set([...(state.selection || []), ...payload.unknown_ids]));
             flsBulkSave(options.scope, state);
             options.select(state.selection);
-            if(options.single) return flsSubmitTaskBulk(options, payload.action, control);
+            if(options.single || options.confirmRetry) return flsSubmitTaskBulk(options, payload.action, control);
         });
     }
     button("刷新列表", async control => {
@@ -757,6 +763,9 @@ async function flsSubmitTaskBulk(options, action, source, replay){
             state = {selection:ids, pending:{action:action, task_ids:ids, request_id:requestId}};
             if(action === "clear_collection" && options.expectedCollection !== undefined){
                 state.pending.expected_collection = options.expectedCollection;
+            }
+            if(action === "assign_collection" && options.expectedCollections !== undefined){
+                state.pending.expected_collections = options.expectedCollections;
             }
             flsBulkSave(options.scope, state);
         }
@@ -1866,6 +1875,10 @@ if (document.readyState === "loading") {
     function restoreTaskExecutions(){
         if(!document.querySelector(".content") || /^\/(login|logout)$/.test(location.pathname)) return;
         try {
+            Object.keys(sessionStorage).filter(key => key.startsWith(flsBulkStorageKey("collection-add:"))).forEach(key => {
+                const id = key.slice(flsBulkStorageKey("collection-add:").length);
+                flsRestoreTaskBulk(collectionAddOptions(id));
+            });
             Object.keys(sessionStorage).filter(key => key.startsWith(flsBulkStorageKey("task:"))).forEach(key => {
                 const state = JSON.parse(sessionStorage.getItem(key));
                 const action = (state.pending || state.payload || {}).action;
@@ -1876,7 +1889,35 @@ if (document.readyState === "loading") {
         } catch(e) {}
     }
 
+    function collectionAddOptions(collectionId){
+        const scope = "collection-add:" + collectionId;
+        const state = flsBulkState(scope);
+        const options = {
+            scope:scope, block:".content", confirmRetry:true,
+            selection:state.selection || (state.pending || {}).task_ids || [],
+            expectedCollections:(state.pending || state.payload || {}).expected_collections,
+            ids:() => options.selection, select:ids => {options.selection = ids;},
+            endpoint:() => "/api/collection/add-task/" + encodeURIComponent(collectionId),
+            refresh:() => ajaxLoad("/collections", false, {force:true})
+        };
+        return options;
+    }
+
     function trackTaskExecution(url, data){
+        const collection = url.pathname.match(/^\/collection\/add-task\/([^/]+)$/);
+        if(collection && data.has("request_id")){
+            const id = decodeURIComponent(collection[1]);
+            const options = collectionAddOptions(id);
+            const state = flsBulkState(options.scope);
+            if(state.pending && state.pending.request_id !== data.get("request_id")){
+                flsBulkNotice(options, state, "上次请求尚未确认，请先查询本次操作结果");
+                return false;
+            }
+            const pending = {action:"assign_collection", task_ids:data.getAll("task_ids"), request_id:data.get("request_id")};
+            if(data.has("expected_collections")) pending.expected_collections = JSON.parse(data.get("expected_collections"));
+            flsBulkSave(options.scope, {selection:pending.task_ids, pending:pending});
+            return options;
+        }
         const match = url.pathname.match(/^\/(run|stop|task\/collection\/clear)\/([^/]+)$/);
         if(!match || !data.has("request_id")) return null;
         const taskId = decodeURIComponent(match[2]);
@@ -2094,7 +2135,12 @@ if (document.readyState === "loading") {
 
             if (!res.ok) {
                 await handleFormErrorResponse(res, fetchUrl, form, submitter, execution);
-                if(execution) flsRestoreTaskBulk(taskExecutionOptions(execution.ids()[0]));
+                if(execution){
+                    const options = execution.scope.startsWith("collection-add:")
+                        ? collectionAddOptions(execution.scope.slice("collection-add:".length))
+                        : taskExecutionOptions(execution.ids()[0]);
+                    flsRestoreTaskBulk(options);
+                }
                 setLoading(false);
                 return;
             }
