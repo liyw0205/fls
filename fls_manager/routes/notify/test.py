@@ -1,54 +1,27 @@
+import json
+from urllib.parse import quote
+
 from ._common import *
-from ...ui.components import table_card
+from ...notify_test_actions import submit_notification_test
 
 
 @bp.route("/notify/test/<item_id>", methods=["GET", "POST"])
 def notify_test(item_id):
-    item = get_notify_item(item_id)
-
-    if not item:
-        abort(404)
-
-    ok, msg, _delivery_id = send_notify_with_history(
-        item,
-        "FLS 通知测试",
-        f"这是一条测试通知。\n时间：{now_str()}",
-        source="test",
-        sender=send_one,
-    )
-
-    status_badge = (
-        '<span class="badge green status-badge status-success" role="status">成功</span>'
-        if ok else
-        '<span class="badge red status-badge status-error" role="status">失败</span>'
-    )
-    result_text = (
-        str(msg)
-        if ok else
-        f"{msg}。下一步：检查通知渠道设置和网络后重试"
-    )
-    rows = f"""
-<tr>
-    <td><b>通知</b></td>
-    <td>{h(item.get("name"))}</td>
-</tr>
-<tr>
-    <td><b>渠道</b></td>
-    <td>{h(channel_name(item.get("channel")))}</td>
-</tr>
-<tr>
-    <td><b>结果</b></td>
-    <td>{status_badge}</td>
-</tr>
-<tr>
-    <td><b>返回</b></td>
-    <td>{h(result_text)}</td>
-</tr>
-"""
-    body = table_card(
-        "通知测试结果",
-        ["项目", "值"],
-        rows,
-        actions_html='<a class="btn btn-gray" href="/notify">返回通知管理</a>',
-    )
-    return layout("通知测试", "notify", body)
+    if request.method == "GET":
+        return redirect(url_for("notify.notify_page"))
+    data = dict(request.form.to_dict(), item_id=item_id)
+    payload, status = submit_notification_test(data, sender=send_one)
+    body = f'<section class="section" role="alert" data-notify-result="{h(json.dumps(payload, ensure_ascii=False))}"><p>{h(payload["msg"])}</p><p>{h(payload.get("detail", ""))}</p></section>'
+    delivery_id = payload.get("delivery_id")
+    if delivery_id:
+        if payload.get("delivery_status") in ("failed", "unknown") and payload.get("history_available", True):
+            body += f'<form method="post" action="/notify/retry/{h(delivery_id)}"><section class="section"><button class="btn btn-primary" type="submit">确认后重试此投递</button></section></form>'
+        body += '<a class="btn btn-blue" href="/notify/history">查看投递记录</a>'
+    if not payload.get("resolved"):
+        if payload.get("confirm_required"):
+            data["confirm_retry"] = "1"
+        fields = "".join(f'<input type="hidden" name="{key}" value="{h(data[key])}">'
+                         for key in ("request_id", "version", "confirm_retry") if key in data)
+        body += f'<form method="post" action="/notify/test/{h(quote(item_id, safe=""))}">{fields}<section class="section"><button class="btn btn-primary" type="submit">{"确认后继续测试" if payload.get("confirm_required") else "查询原测试结果"}</button></section></form>'
+    body += '<a class="btn btn-gray" href="/notify">返回通知管理</a>'
+    return layout("通知测试结果", "notify", body), status

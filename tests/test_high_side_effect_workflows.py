@@ -425,16 +425,17 @@ class NotificationIsolationTests(unittest.TestCase):
                 "config": {},
             }
 
-            with patch(
-                "fls_manager.routes.notify.test.get_notify_item",
-                return_value=item,
-            ):
+            from fls_manager.config import save_config
+            from fls_manager.notify_actions import notification_config, notification_version
+            save_config({"notify_items": [item]})
+            with patch("fls_manager.app.dispatch_frontend_open_event"):
                 with patch(
                     "fls_manager.routes.notify.test.send_one",
                     return_value=(True, "mock sent"),
                 ) as send_one:
-                    response = app.test_client().get(
+                    response = app.test_client().post(
                         "/notify/test/notify-1",
+                        data={"request_id": "a" * 32, "version": notification_version(notification_config(), "notify-1")},
                         headers={"X-Token": TOKEN},
                     )
 
@@ -443,7 +444,7 @@ class NotificationIsolationTests(unittest.TestCase):
             self.assertIn("通知测试结果", html)
             self.assertIn("mock sent", html)
             send_one.assert_called_once()
-            self.assertIs(send_one.call_args.args[0], item)
+            self.assertEqual(send_one.call_args.args[0], item)
             self.assertEqual(send_one.call_args.args[1], "FLS 通知测试")
 
     def test_notify_new_test_persists_item_and_uses_mock_sender(self):

@@ -155,6 +155,8 @@ def notify_page():
         <div class="row-actions" aria-label="通知 {h(item.get('name', ''))} 行操作">
             <div class="row-actions-primary">
                 <form class="inline-form" method="post" action="/notify/test/{h(item_id)}">
+                    <input type="hidden" name="request_id" value="{uuid.uuid4().hex}">
+                    <input type="hidden" name="version" value="{notification_version(cfg, item_id)}">
                     <button class="btn btn-orange" type="submit">发送测试通知</button>
                 </form>
             </div>

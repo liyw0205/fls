@@ -181,14 +181,14 @@ def get_notify_delivery(delivery_id):
     return None
 
 
-def create_notify_delivery(item, title, content, source="manual", retry_of=""):
+def create_notify_delivery(item, title, content, source="manual", retry_of="", *, delivery_id=None):
     """Persist a running delivery before contacting the external channel."""
     item = item if isinstance(item, dict) else {}
     raw_content = _notify_text(content)
     stored_content = raw_content[:NOTIFY_CONTENT_LIMIT]
     now = now_str()
     row = {
-        "id": uuid.uuid4().hex,
+        "id": delivery_id or uuid.uuid4().hex,
         "item_id": _notify_text(item.get("id")).strip(),
         "item_name": _notify_text(item.get("name"), "未命名通知").strip() or "未命名通知",
         "channel": _notify_text(item.get("channel")).strip(),
@@ -207,6 +207,8 @@ def create_notify_delivery(item, title, content, source="manual", retry_of=""):
     with NOTIFY_HISTORY_LOCK:
         raw = read_json(NOTIFY_HISTORY_FILE, [])
         rows, _changed = _notify_history_rows(raw)
+        if any(existing["id"] == row["id"] for existing in rows):
+            raise ValueError("通知投递标识已存在")
         rows.insert(0, row)
         write_json(NOTIFY_HISTORY_FILE, rows[:NOTIFY_HISTORY_LIMIT])
         NOTIFY_ACTIVE_DELIVERIES.add(row["id"])

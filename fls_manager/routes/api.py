@@ -478,3 +478,13 @@ def api_notify_action():
     data = request.get_json(silent=True) if request.is_json else dict(request.form.to_dict(), default_ids=request.form.getlist("default_ids"))
     payload, status = mutate_notification(data, load_tasks=load_tasks, save_config=save_config)
     return jsonify(payload), status
+
+
+@bp.route("/api/notify/test/<item_id>", methods=["POST"])
+def api_notify_test(item_id):
+    from ..notify_test_actions import submit_notification_test
+    data = request.get_json(silent=True) if request.is_json else request.form.to_dict()
+    if isinstance(data, dict):
+        data = dict(data, item_id=item_id)
+    payload, status = submit_notification_test(data)
+    return jsonify(payload), status

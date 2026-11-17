@@ -18,7 +18,7 @@ def main():
         from werkzeug.serving import make_server
         from fls_manager.app import create_app
         from fls_manager import models, proxy_actions, scheduler
-        from fls_manager import notify_actions
+        from fls_manager import notify_actions, notify_test_actions, notify
         from fls_manager.notify import send_by_ids
         from fls_manager.config import load_config
         from fls_manager.config import save_config
@@ -27,15 +27,19 @@ def main():
 
         save_config({"notify_items": [], "notify_default_ids": []})
         app = create_app()
+        if os.environ.get("FLS_NOTIFY_TESTS"):
+            import fls_manager.app as app_module
+            app_module.dispatch_frontend_open_event = lambda: None
         fault = {}
         save, receipt = models.save_proxies, proxy_actions.write_json
         notify_receipt = notify_actions.write_json
+        test_receipt, delivery_write = notify_test_actions.write_json, notify.write_json
         deliveries = []
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
         class Webhook(BaseHTTPRequestHandler):
             def do_POST(self):
                 deliveries.append(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode())
-                self.send_response(200)
+                self.send_response(503 if fault.get("test_network") else 200)
                 self.end_headers()
                 self.wfile.write(b"accepted")
             def log_message(self, *args):
@@ -67,17 +71,35 @@ def main():
                 raise OSError("fixture notification receipt rejected")
             return notify_receipt(path, row)
 
+        def write_test(path, row):
+            if fault.get("test_request"):
+                raise OSError("fixture test request rejected")
+            return test_receipt(path, row)
+
+        def write_delivery(path, rows):
+            status = rows[0]["status"] if rows else ""
+            if fault.get("test_history") and status == "running":
+                raise OSError("fixture test history rejected")
+            if (fault.get("test_result") or fault.get("test_result_after")) and status == "succeeded":
+                if fault.get("test_result_after"):
+                    delivery_write(path, rows)
+                raise OSError("fixture delivery confirmation rejected")
+            return delivery_write(path, rows)
+
         models.save_proxies = actions.save_proxies = persist
         proxy_actions.write_json = write
         notify_routes.save_config = persist_notify
         notify_actions.write_json = write_notify
+        notify_test_actions.write_json = write_test
+        notify.write_json = write_delivery
 
         @app.route("/api/fixture/proxy", methods=["GET", "POST"])
         def fixture():
             if request.method == "GET":
                 cfg = load_config()
                 return jsonify(proxies=models.load_proxies(), tasks=models.load_tasks(), history=models.load_task_history(),
-                               notify=cfg.get("notify_items", []), defaults=cfg.get("notify_default_ids", []), deliveries=deliveries)
+                               notify=cfg.get("notify_items", []), defaults=cfg.get("notify_default_ids", []), deliveries=deliveries,
+                               delivery_history=notify.load_notify_history())
             data = request.get_json()
             fault.clear()
             fault.update(data)
@@ -160,6 +182,61 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
     return res;
    };
    const notice=async text=>{await page.locator('[data-proxy-result]').waitFor();assert.match(await page.locator('[data-proxy-result]').innerText(),text);};
+   if(process.env.FLS_NOTIFY_TESTS){
+    await fixture({notify_reset:true});
+    await page.goto(base+'/login');await login();await page.goto(base+'/notify');
+    const tform=()=>page.locator('form[action="/notify/test/n"]:visible').first();
+    const tnotice=async text=>{await page.locator('[data-notify-result]').waitFor();assert.match(await page.locator('[data-notify-result]').innerText(),text);};
+    const count=async()=>(await state()).deliveries.length;
+    const fields=await tform().evaluate(f=>Object.fromEntries(new FormData(f)));
+    await page.request.get(base+'/notify/test/n');assert.equal(await count(),0);
+    assert.equal((await page.request.post(base+'/notify/test/n',{form:{...fields,csrf_token:'bad'}})).status(),400);
+    await fixture({notify_changed:true});
+    assert.equal((await submit(tform())).status(),409);await tnotice(/已变化/);assert.equal(await count(),0);
+    await page.goto(base+'/notify');await fixture({test_history:true});
+    assert.equal((await submit(tform())).status(),500);await tnotice(/无法确认/);assert.equal(await count(),0);
+    await fixture({});assert.equal((await submit(tform())).status(),409);await tnotice(/确认后继续/);
+    assert.equal((await submit(page.locator('form[action="/notify/test/n"]:has(input[name="confirm_retry"][value="1"])'))).status(),200);await tnotice(/已发送/);assert.equal(await count(),1);
+    // A lost completed response survives refresh and does not repeat the webhook.
+    await page.goto(base+'/notify');
+    await page.route('**/notify/test/n',async route=>{await route.fetch();await route.abort();},{times:1});
+    await tform().locator('button').click();await page.locator('[data-collection-save-pending]').waitFor();
+    assert.equal(await count(),2);await page.reload();
+    await page.getByRole('button',{name:'查询本次保存结果',exact:true}).click();
+    await tnotice(/已发送/);await page.waitForFunction(()=>!document.querySelector('[data-collection-save-pending]'));
+    assert.equal(await count(),2);
+    // A failed delivery is retried explicitly through its persisted history row.
+    await page.goto(base+'/notify');await fixture({test_network:true});
+    const failedFields=await tform().evaluate(f=>Object.fromEntries(new FormData(f)));
+    assert.equal((await submit(tform())).status(),502);await tnotice(/发送失败/);assert.equal(await count(),3);
+    await fixture({});await submit(page.locator('form[action^="/notify/retry/"]'));
+    await page.waitForURL(u=>u.pathname.startsWith('/notify/retry/'));assert.equal(await count(),4);
+    assert.equal((await page.request.post(base+'/notify/test/n',{form:failedFields})).status(),200);assert.equal(await count(),4);
+    // A missing completion receipt is unknown and provides an executable retry.
+    await page.goto(base+'/notify');await fixture({test_result:true});
+    assert.equal((await submit(tform())).status(),503);await tnotice(/结果未知/);assert.equal(await count(),5);
+    await page.evaluate(()=>{document.documentElement.style.scrollBehavior='auto';window.scrollTo(0,0);});await page.waitForTimeout(100);
+    if(process.env.FLS_BULK_SCREENSHOTS) await page.screenshot({path:process.env.FLS_BULK_SCREENSHOTS+'/notify-test-'+viewport.width+'.png',fullPage:true});
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
+    await fixture({});await submit(page.locator('form[action^="/notify/retry/"]'));assert.equal(await count(),6);
+    await page.goto(base+'/notify');await fixture({test_result_after:true});
+    assert.equal((await submit(tform())).status(),503);await tnotice(/已发送/);assert.equal(await count(),7);
+    assert.equal(await page.locator('form[action^="/notify/retry/"]').count(),0);
+    // A gateway response and re-login preserve the original pending request.
+    await fixture({});await page.goto(base+'/notify');
+    await page.route('**/notify/test/n',r=>r.fulfill({status:502,contentType:'text/plain',body:'fixture gateway'}),{times:1});
+    await tform().locator('button').click();await page.locator('[data-collection-save-pending]').waitFor();
+    await page.goto(base+'/logout');await login();
+    await page.getByRole('button',{name:'查询本次保存结果',exact:true}).click();await tnotice(/已发送/);
+    assert.equal(await count(),8);
+    await page.goto(base+'/notify');
+    const apiFields=await tform().evaluate(f=>Object.fromEntries(new FormData(f)));
+    assert.equal((await page.request.post(base+'/api/notify/test/n',{headers,data:apiFields})).status(),200);
+    assert.equal((await page.request.post(base+'/api/notify/test/n',{headers,data:apiFields})).status(),200);
+    assert.equal(await count(),9);
+    assert.deepEqual(errors,[]);console.log('notification test recovery passed '+viewport.width);
+    await context.close();continue;
+   }
    if(process.env.FLS_NOTIFY_ACTIONS){
     await fixture({notify_reset:true});
     await page.goto(base+'/login');await login();await page.goto(base+'/notify');
