@@ -493,7 +493,26 @@ def backup_import():
         return layout("备份导入完成", "backup", body)
 
     except BackupLimitExceeded as e:
-        return restore_error(f"备份导入失败：{e}。请调低文件大小或调整服务端备份限制。", 413)
+        details = {"request_id": request_id} if request_id else {}
+        if request_owned and restore_record:
+            details.update(restored=False, live_state_unchanged=True)
+            try:
+                with storage_transaction(), BACKUP_RESTORE_REQUEST_LOCK:
+                    current = _read_restore_request(request_id)
+                    if current and current.get("state") in ("received", "failed"):
+                        current.update(state="failed", error=str(e))
+                        _save_restore_request(current)
+                        details["state"] = "failed"
+                    elif current:
+                        details["state"] = current.get("state", "unknown")
+            except Exception:
+                # The upload is rejected before live directories are staged or changed.
+                pass
+        return restore_error(
+            f"备份导入失败：{e}。请调低文件大小或调整服务端备份限制。",
+            413,
+            **details,
+        )
     except BackupRestoreWriteError as e:
         state = (
             "现有目录已恢复到原状态"
