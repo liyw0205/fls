@@ -1,5 +1,6 @@
 from .bp import bp
 import os
+import json
 import stat
 import sys
 import time
@@ -16,7 +17,7 @@ from datetime import datetime
 from flask import request, Response, redirect, url_for, jsonify, abort
 
 from ...paths import BASE_DIR, DATA_DIR, SCRIPT_DIR, LOG_DIR
-from ...storage import read_json, mutate_json
+from ...storage import mutate_json, storage_transaction
 from ...ui.layout import layout
 from ...ui.components import page_header, empty_table_row
 from ...utils import h, now_str, safe_name, prune_completed_records
@@ -131,12 +132,7 @@ def persist_backup_job(info):
             return
 
         def update(data):
-            jobs = data if isinstance(data, dict) else {}
-            jobs = {
-                str(key): value
-                for key, value in jobs.items()
-                if isinstance(value, dict)
-            }
+            jobs = validate_backup_jobs(data)
             jobs[job_id] = snapshot
             ordered = sorted(
                 jobs.items(),
@@ -145,12 +141,21 @@ def persist_backup_job(info):
             )
             return dict(ordered[:BACKUP_JOB_LIMIT])
 
-        mutate_json(BACKUP_JOBS_FILE, {}, update)
+        mutate_json(BACKUP_JOBS_FILE, {}, update, strict=True)
+
+
+def validate_backup_jobs(data):
+    if not isinstance(data, dict) or any(not isinstance(value, dict) or value.get("id") != key for key, value in data.items()):
+        raise RuntimeError("备份作业记录损坏，未覆盖原文件")
+    return data
 
 
 def _load_persisted_backup_job(job_id):
-    data = read_json(BACKUP_JOBS_FILE, {})
-    jobs = data if isinstance(data, dict) else {}
+    with storage_transaction():
+        try:
+            jobs = validate_backup_jobs(json.loads(BACKUP_JOBS_FILE.read_text(encoding="utf-8")))
+        except FileNotFoundError:
+            jobs = {}
     info = jobs.get(str(job_id or ""))
     return dict(info) if isinstance(info, dict) else None
 
@@ -563,16 +568,18 @@ def _create_backup_worker(job_id, items, cancel_event):
             BACKUP_CANCEL_EVENTS.pop(job_id, None)
 
 
-def create_backup_worker(job_id, items, cancel_event):
-    begin_backup_activity()
+def create_backup_worker(job_id, items, cancel_event, reserved=False):
+    if not reserved:
+        begin_backup_activity()
     try:
         _create_backup_worker(job_id, items, cancel_event)
     finally:
         end_backup_activity()
 
 
-def start_backup_job(items):
-    job_id = uuid.uuid4().hex
+def start_backup_job(items, *, job_id=None):
+    global ACTIVE_BACKUP_WORKERS
+    job_id = job_id or uuid.uuid4().hex
 
     with BACKUP_JOB_LOCK:
         prune_completed_records(BACKUP_JOBS)
@@ -581,6 +588,10 @@ def start_backup_job(items):
                 BACKUP_CANCEL_EVENTS.pop(old_id, None)
         cancel_event = threading.Event()
         now = now_str()
+        with BACKUP_ACTIVITY_CONDITION:
+            if RESTORE_ACTIVE:
+                raise BackupJobStartError("正在恢复备份，请恢复结束后重试")
+            ACTIVE_BACKUP_WORKERS += 1
         BACKUP_JOBS[job_id] = {
             "id": job_id,
             "items": list(items or []),
@@ -600,6 +611,7 @@ def start_backup_job(items):
         except Exception as e:
             BACKUP_JOBS.pop(job_id, None)
             BACKUP_CANCEL_EVENTS.pop(job_id, None)
+            end_backup_activity()
             raise BackupJobStartError(
                 f"备份状态保存失败，任务未启动：{e}"
             ) from e
@@ -607,12 +619,13 @@ def start_backup_job(items):
         try:
             th = threading.Thread(
                 target=create_backup_worker,
-                args=(job_id, items, cancel_event),
+                args=(job_id, items, cancel_event, True),
                 daemon=True,
                 name=f"fls-backup-{job_id[:8]}",
             )
             th.start()
         except Exception as e:
+            end_backup_activity()
             info = BACKUP_JOBS[job_id]
             info.update({
                 "running": False,

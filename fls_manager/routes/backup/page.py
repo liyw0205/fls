@@ -1,6 +1,25 @@
 from ._common import *
 
 
+@bp.route("/backup/create", methods=["POST"])
+def backup_create():
+    from .actions import submit_backup_creation
+    data = dict(request.form, items=request.form.getlist("items"))
+    payload, status = submit_backup_creation(data)
+    body = f'<section class="section" role="alert"><p>{h(payload["msg"])}</p></section>'
+    job_id = payload.get("job_id")
+    if job_id:
+        body += f'<a class="btn btn-primary" href="/backup?job_id={h(job_id)}">查看原备份进度</a>'
+    elif not payload.get("resolved"):
+        fields = f'<input type="hidden" name="request_id" value="{h(data.get("request_id", ""))}">'
+        fields += "".join(f'<input type="hidden" name="items" value="{h(item)}">' for item in data["items"])
+        if payload.get("confirm_required"):
+            fields += '<input type="hidden" name="confirm_retry" value="1">'
+        body += f'<form method="post" action="/backup/create">{fields}<section class="section"><button class="btn btn-primary" type="submit">{"确认后继续原备份" if payload.get("confirm_required") else "查询原备份请求"}</button></section></form>'
+    body += '<a class="btn btn-gray" href="/backup">返回备份列表</a>'
+    return layout("备份创建结果", "backup", body), status
+
+
 @bp.route("/backup")
 def backup_page():
     header = page_header(
@@ -25,7 +44,8 @@ def backup_page():
 
     <br>
 
-    <form id="backupCreateForm" aria-label="创建备份">
+    <form id="backupCreateForm" aria-label="创建备份" method="post" action="/backup/create">
+        <input type="hidden" name="request_id" value="{uuid.uuid4().hex}">
         <label style="display:block;margin:8px 0;">
             <input type="checkbox" name="items" value="data" checked style="width:auto;">
             配置数据，data：任务、配置、变量、代理、通知等
@@ -39,6 +59,7 @@ def backup_page():
         <br>
 
         <button class="btn btn-primary" type="button" onclick="flsCreateBackup(this)">创建备份</button>
+        <noscript><button class="btn btn-primary" type="submit">提交备份</button></noscript>
     </form>
 </div>
 </section>
@@ -145,9 +166,47 @@ function flsShowBackupJob(text){{
     if(el) el.innerHTML = text;
 }}
 
-async function flsCreateBackup(source){{
+function flsBackupRequest(){{
+    const raw = sessionStorage.getItem("fls-backup-request");
+    return raw ? JSON.parse(raw) : null;
+}}
+
+function flsNewBackupRequest(){{
+    return Array.from(crypto.getRandomValues(new Uint8Array(16)), value=>value.toString(16).padStart(2, "0")).join("");
+}}
+
+function flsResetBackupRequest(source){{
+    if(!confirm("已核对备份列表，并确认需要重新选择创建备份吗？")) return;
+    sessionStorage.removeItem("fls-backup-request");
+    document.getElementById("backupCreateForm").elements.request_id.value = flsNewBackupRequest();
+    document.querySelectorAll("#backupCreateForm button").forEach(flsRestoreButton);
+    flsRestoreButton(source);
+    flsShowBackupJob("请选择备份内容后创建新备份。");
+}}
+
+function flsBackupRecovery(message, confirmRequired){{
+    flsShowBackupJob("<p role='alert'>" + flsEscapeHtml(message) + "</p><button class='btn btn-primary' type='button' onclick='flsResumeBackup(" + !!confirmRequired + ", this)'>" + (confirmRequired ? "确认后继续原备份" : "查询原备份请求") + "</button> <a class='btn btn-gray' href='/login?next=%2Fbackup'>重新登录</a>");
+}}
+
+function flsResumeBackup(confirmRetry, source){{
+    const pending = flsBackupRequest();
+    if(!pending) return;
+    if(pending.job_id) return flsPollBackupJob(pending.job_id, source);
+    return flsCreateBackup(source, confirmRetry);
+}}
+
+async function flsCreateBackup(source, confirmRetry){{
     const form = document.getElementById("backupCreateForm");
-    const fd = new FormData(form);
+    const pending = flsBackupRequest();
+    if(pending && pending.job_id){{
+        await flsPollBackupJob(pending.job_id, source);
+        return;
+    }}
+    const fd = new FormData();
+    const selected = pending || {{request_id: form.elements.request_id.value, items: new FormData(form).getAll("items")}};
+    fd.append("request_id", selected.request_id);
+    selected.items.forEach(item=>fd.append("items", item));
+    if(confirmRetry) fd.append("confirm_retry", "1");
 
     if(!fd.getAll("items").length){{
         alert(flsActionFailure("请至少选择一个备份内容", "勾选配置或脚本后重试"));
@@ -155,6 +214,7 @@ async function flsCreateBackup(source){{
     }}
 
     if(!flsMarkButtonBusy(source, "创建中...")) return;
+    sessionStorage.setItem("fls-backup-request", JSON.stringify(selected));
     flsShowBackupJob("已提交备份任务，正在准备...");
 
     try {{
@@ -177,20 +237,30 @@ async function flsCreateBackup(source){{
             return;
         }}
 
+        sessionStorage.setItem("fls-backup-request", JSON.stringify({{...selected, job_id:json.job_id}}));
         await flsPollBackupJob(json.job_id, source);
 
     }} catch(e) {{
         const payload = e && e.payload;
         if(payload && payload.job_id) {{
+            sessionStorage.setItem("fls-backup-request", JSON.stringify({{...selected, job_id:payload.job_id}}));
             await flsPollBackupJob(payload.job_id, source);
             return;
         }}
-        flsShowBackupJob("<span style='color:#dc2626;font-weight:800;'>" + flsEscapeHtml(flsActionFailure("请求失败：" + String(e), "检查服务状态后重试")) + "</span>");
+        if(payload && payload.resolved){{
+            sessionStorage.removeItem("fls-backup-request");
+            form.elements.request_id.value = flsNewBackupRequest();
+            flsShowBackupJob("<p role='alert'>" + flsEscapeHtml(payload.msg) + "</p><a class='btn btn-gray' href='/backup'>返回备份列表</a>");
+        }}else{{
+            flsBackupRecovery("请求结果未确认：" + String(e), payload && payload.confirm_required);
+        }}
         flsRestoreButton(source);
     }}
 }}
 
 async function flsPollBackupJob(jobId, source){{
+    clearTimeout(window.flsBackupPollTimer);
+    if(!document.getElementById("backupCreateForm")) return;
     try {{
         const res = await fetch("/api/backup/job/" + encodeURIComponent(jobId), {{
             cache: "no-store",
@@ -237,16 +307,26 @@ async function flsPollBackupJob(jobId, source){{
         flsShowBackupJob(html);
 
         if(json.running){{
-            setTimeout(function(){{
+            window.flsBackupPollTimer = setTimeout(function(){{
                 flsPollBackupJob(jobId, source);
             }}, 1500);
         }}else{{
+            const pending = flsBackupRequest();
+            if(pending && pending.job_id === jobId){{
+                sessionStorage.removeItem("fls-backup-request");
+                document.getElementById("backupCreateForm").elements.request_id.value = flsNewBackupRequest();
+            }}
+            document.querySelectorAll("#backupCreateForm button").forEach(flsRestoreButton);
             flsRestoreButton(source);
             flsRefreshBackupList();
         }}
 
     }} catch(e) {{
-        flsShowBackupJob("<span style='color:#dc2626;font-weight:800;'>" + flsEscapeHtml(flsActionFailure("状态读取失败：" + String(e), "刷新页面后重试")) + "</span>");
+        if(e.status === 404){{
+            flsShowBackupJob("<p role='alert'>原备份作业记录不存在，请先核对备份列表。</p><button class='btn btn-blue' type='button' onclick='flsRefreshBackupList(this)'>刷新备份列表</button> <button class='btn btn-orange' type='button' onclick='flsResetBackupRequest(this)'>核对后重新选择备份</button>");
+        }}else{{
+            flsBackupRecovery("状态读取失败：" + String(e));
+        }}
         flsRestoreButton(source);
     }}
 }}
@@ -270,7 +350,7 @@ async function flsCancelBackup(jobId, source){{
         flsShowBackupJob(flsEscapeHtml(json.msg || "已请求取消"));
         await flsPollBackupJob(jobId, source);
     }} catch(e) {{
-        flsShowBackupJob("<span style='color:#dc2626;font-weight:800;'>" + flsEscapeHtml(flsActionFailure("取消请求失败：" + String(e), "刷新状态后重试")) + "</span>");
+        flsBackupRecovery("取消结果未确认，请查询原备份状态：" + String(e));
         flsRestoreButton(source);
     }}
 }}
@@ -355,6 +435,18 @@ async function flsDeleteBackup(filename, source){{
         flsRestoreButton(source);
     }}
 }}
+
+setTimeout(function(){{
+    const pending = flsBackupRequest();
+    const jobId = new URLSearchParams(location.search).get("job_id");
+    if(pending){{
+        if(pending.job_id) flsPollBackupJob(pending.job_id);
+        else flsBackupRecovery("上次备份请求结果未确认，请先查询原请求。");
+    }}else if(jobId && /^[a-f0-9]{{32}}$/.test(jobId)){{
+        sessionStorage.setItem("fls-backup-request", JSON.stringify({{job_id:jobId}}));
+        flsPollBackupJob(jobId);
+    }}
+}}, 0);
 </script>
 """
     return layout("备份恢复", "backup", body)

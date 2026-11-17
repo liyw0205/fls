@@ -4,6 +4,14 @@ from ._common import _load_persisted_backup_job
 
 @bp.route("/api/backup/create", methods=["POST"])
 def api_backup_create():
+    if request.is_json or "request_id" in request.form:
+        from .actions import submit_backup_creation
+        data = request.get_json(silent=True) if request.is_json else dict(request.form, items=request.form.getlist("items"))
+        payload, status = submit_backup_creation(data)
+        return jsonify(payload), status
+    selected = request.form.getlist("items")
+    if any(item not in ("data", "scripts") for item in selected) or len(selected) != len(set(selected)):
+        return jsonify({"ok": False, "msg": "备份内容选择无效"}), 400
     items = parse_items_from_form("items")
 
     if not items:
@@ -32,7 +40,10 @@ def api_backup_create():
 
 @bp.route("/api/backup/job/<job_id>")
 def api_backup_job(job_id):
-    info = get_backup_job(job_id)
+    try:
+        info = get_backup_job(job_id)
+    except Exception:
+        return jsonify({"ok": False, "msg": "备份作业记录无法读取，请修复存储后重新查询"}), 500
 
     if not info:
         return jsonify({
