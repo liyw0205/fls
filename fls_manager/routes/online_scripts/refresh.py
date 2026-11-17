@@ -1,5 +1,7 @@
 from ._common import *
 from ...online_scripts.constants import (
+    ONLINE_REFRESH_LOCK,
+    ONLINE_REFRESH_STATE,
     reserve_online_refresh,
     update_online_refresh_state,
 )
@@ -31,6 +33,15 @@ def _submit_online_refresh(proxy_id):
             )
         except Exception as state_error:
             error += f"；同步状态保存失败：{state_error}。请检查状态文件权限和磁盘空间后重试。"
+            with ONLINE_REFRESH_LOCK:
+                ONLINE_REFRESH_STATE.update(
+                    running=False,
+                    status="启动失败",
+                    message="",
+                    error=error,
+                    updated_at=now_str(),
+                    log_file=log_file,
+                )
         return {"ok": False, "id": info["id"], "status": "启动失败", "error": error}, 500
     return {"ok": True, "id": info["id"], "status": "运行中"}, 202
 

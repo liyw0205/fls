@@ -3,7 +3,7 @@ import threading
 import os
 
 from ..paths import DATA_DIR
-from ..storage import read_json, mutate_json, storage_transaction
+from ..storage import mutate_json, storage_transaction
 from ..utils import now_str
 
 DEFAULT_ONLINE_SCRIPT_SOURCE = "https://cdn.jsdelivr.net/gh/liyw0205/fls-scripts@main/index.json"
@@ -37,28 +37,64 @@ def _refresh_snapshot(info):
         "updated_at", "log_file",
     )
     return {
-        field: info.get(field, False if field == "cache_published" else "")
+        field: info.get(field, False if field in ("running", "cache_published") else "")
         for field in fields
     }
 
 
-def persist_online_refresh(info):
+def _validate_refresh_snapshot(info):
     snapshot = _refresh_snapshot(info)
-    ONLINE_REFRESH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    temp = ONLINE_REFRESH_STATE_FILE.with_name(
-        f".{ONLINE_REFRESH_STATE_FILE.name}.{threading.get_ident()}.tmp"
-    )
-    try:
-        temp.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(temp, ONLINE_REFRESH_STATE_FILE)
-    finally:
-        temp.unlink(missing_ok=True)
+    if (
+        type(snapshot["running"]) is not bool
+        or type(snapshot["cache_published"]) is not bool
+        or any(not isinstance(snapshot[field], str) for field in ("id", "status", "message", "error", "updated_at", "log_file"))
+    ):
+        raise RuntimeError("在线脚本源同步状态损坏，未覆盖原文件")
+    return snapshot
+
+
+def _read_online_refresh_file():
+    with storage_transaction():
+        try:
+            raw = ONLINE_REFRESH_STATE_FILE.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return {}
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"在线脚本源同步状态损坏，未覆盖原文件：{exc}") from exc
+        if not isinstance(data, dict):
+            raise RuntimeError("在线脚本源同步状态损坏，未覆盖原文件：根节点必须是对象")
+        return _validate_refresh_snapshot(data)
+
+
+def persist_online_refresh(info):
+    snapshot = _validate_refresh_snapshot(info)
+    with storage_transaction():
+        if ONLINE_REFRESH_STATE_FILE.is_symlink():
+            raise RuntimeError("在线脚本源同步状态文件不能是符号链接")
+        _read_online_refresh_file()
+        ONLINE_REFRESH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        temp = ONLINE_REFRESH_STATE_FILE.with_name(
+            f".{ONLINE_REFRESH_STATE_FILE.name}.{threading.get_ident()}.tmp"
+        )
+        try:
+            temp.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(temp, ONLINE_REFRESH_STATE_FILE)
+        finally:
+            temp.unlink(missing_ok=True)
 
 
 def update_online_refresh_state(**updates):
     with ONLINE_REFRESH_LOCK:
+        previous = dict(ONLINE_REFRESH_STATE)
         ONLINE_REFRESH_STATE.update(updates)
-        persist_online_refresh(ONLINE_REFRESH_STATE)
+        try:
+            persist_online_refresh(ONLINE_REFRESH_STATE)
+        except Exception:
+            ONLINE_REFRESH_STATE.clear()
+            ONLINE_REFRESH_STATE.update(previous)
+            raise
         return dict(ONLINE_REFRESH_STATE)
 
 
@@ -66,11 +102,11 @@ def get_online_refresh_state():
     with ONLINE_REFRESH_LOCK:
         current = dict(ONLINE_REFRESH_STATE)
         loaded_from_file = False
-        if not current.get("id"):
-            data = read_json(ONLINE_REFRESH_STATE_FILE, {})
-            if isinstance(data, dict):
-                current.update(_refresh_snapshot(data))
-                loaded_from_file = bool(data)
+        if ONLINE_REFRESH_STATE_FILE.exists():
+            data = _read_online_refresh_file()
+            if data and not current.get("id"):
+                current.update(data)
+                loaded_from_file = True
         if loaded_from_file and current.get("running"):
             current["running"] = False
             current["status"] = "结果未知"

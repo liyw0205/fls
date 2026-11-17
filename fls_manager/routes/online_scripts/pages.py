@@ -25,7 +25,17 @@ def online_scripts_page():
     msg = request.args.get("msg", "").strip()
     err = request.args.get("err", "").strip()
 
-    refresh_state = get_online_refresh_state()
+    try:
+        refresh_state = get_online_refresh_state()
+    except Exception as exc:
+        refresh_state = {
+            "running": False,
+            "status": "状态不可读",
+            "message": "",
+            "error": f"在线脚本源同步状态无法读取，未覆盖原文件：{exc}",
+            "updated_at": "",
+            "log_file": "",
+        }
     refresh_running = refresh_state.get("running")
     refresh_message = refresh_state.get("message", "")
     refresh_error = refresh_state.get("error", "")
