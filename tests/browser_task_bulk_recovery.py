@@ -19,6 +19,7 @@ def main():
         from werkzeug.serving import make_server
         from fls_manager.app import create_app
         from fls_manager import models, scheduler
+        from fls_manager import collection_save
         from fls_manager.routes import api
         from fls_manager.routes.tasks import actions
         from fls_manager.routes.tasks import collections as collection_routes
@@ -28,12 +29,13 @@ def main():
         save_config({"notify_items": [], "notify_default_ids": []})
         app = create_app()
         fault = {"reload": False, "save": False, "save_after": False, "collection_save": False,
-                 "collection_after": False, "unknown": False, "start_fail": False}
+                 "collection_after": False, "collection_receipt": False, "unknown": False, "start_fail": False}
         reload_scheduler = api.reload_scheduler
         mutate_tasks = api.mutate_tasks
         run_task = api.run_task_now
         stop_task = api.stop_task_now
         save_collections = models.save_collections
+        write_collection_request = collection_save.write_json
 
         def run(*args, **kwargs):
             if fault["start_fail"]:
@@ -70,6 +72,11 @@ def main():
                 raise OSError("fixture after collection publication")
             return result
 
+        def write_collection_receipt(path, record):
+            if fault["collection_receipt"] and record.get("state") != "prepared":
+                raise OSError("fixture collection receipt rejected")
+            return write_collection_request(path, record)
+
         api.reload_scheduler = reload
         api.mutate_tasks = mutate
         api.run_task_now = run
@@ -81,6 +88,7 @@ def main():
         collection_routes.mutate_tasks = mutate
         collection_routes.save_collections = save_collection_records
         models.save_collections = save_collection_records
+        collection_save.write_json = write_collection_receipt
         dashboard.reload_scheduler = reload
 
         @app.route("/api/fixture/bulk", methods=["POST", "GET"])
@@ -90,6 +98,7 @@ def main():
             data = request.get_json()
             fault.update(reload=bool(data.get("reload")), save=bool(data.get("save")), save_after=bool(data.get("save_after")),
                          collection_save=bool(data.get("collection_save")), collection_after=bool(data.get("collection_after")),
+                         collection_receipt=bool(data.get("collection_receipt")),
                          unknown=bool(data.get("unknown")), start_fail=bool(data.get("start_fail")))
             if data.get("reset"):
                 if not models.get_collection("browser-collection"):
@@ -166,6 +175,135 @@ const {chromium} = require(process.env.FLS_PLAYWRIGHT_CORE);
     await page.goto(base+'/login');
     await login();
     await page.goto(base+path);
+    if(process.env.FLS_SAVE_COLLECTION_ONLY){
+     const id=()=>require('node:crypto').randomBytes(16).toString('hex');
+     const form=()=>page.locator('form').filter({has:page.locator('input[name="name"]:not([type="hidden"])')});
+     const pending=()=>page.locator('[data-collection-save-pending]');
+     const values=()=>form().evaluate(f=>Object.fromEntries(new FormData(f)));
+     const save=async (status,label='保存合集设置')=>{
+      const response=page.waitForResponse(r=>r.request().method()==='POST' && /^\/collection\/(new|edit\/[^/]+)$/.test(new URL(r.url()).pathname));
+      await form().getByRole('button',{name:label,exact:true}).click();
+      assert.equal((await response).status(),status);
+     };
+     const count=async name=>(await state()).collections.filter(c=>c.name===name).length;
+     if(process.env.FLS_SAVE_COLLECTION_EXTRA_ONLY){
+      await page.goto(base+'/collection/new');
+      await form().locator('[name="name"]').fill('Interrupted '+viewport.width);
+      await form().locator('[name="remark"]').fill('Original draft');
+      const fields=await values();
+      await fixture({collection_save:true,collection_receipt:true});
+      await save(500);
+      await form().getByRole('button',{name:'确认后重试保存',exact:true}).waitFor();
+      assert.equal(await count('Interrupted '+viewport.width),0);
+      await fixture({});
+      await save(302,'确认后重试保存');
+      await page.waitForURL(url=>url.pathname==='/collections');
+      assert.equal(await count('Interrupted '+viewport.width),1);
+      assert.equal((await page.request.post(base+'/collection/new',{headers,form:fields})).status(),200);
+      assert.equal(await count('Interrupted '+viewport.width),1);
+      await page.goto(base+'/collection/new');
+      await form().locator('[name="name"]').fill('Invalid version '+viewport.width);
+      const before=(await state()).collections;
+      await form().evaluate(form=>{
+       const input=document.createElement('input');input.type='hidden';input.name='collection_version';input.value='invalid';form.append(input);
+      });
+      await save(400);
+      await page.getByText('合集版本无效，未保存',{exact:true}).waitFor();
+      assert.deepEqual((await state()).collections,before);
+      assert.equal(await form().locator('[name="name"]').inputValue(),'Invalid version '+viewport.width);
+      if(process.env.FLS_BULK_SCREENSHOTS) await page.screenshot({path:process.env.FLS_BULK_SCREENSHOTS+'/collection-save-extra-'+viewport.width+'.png'});
+      assert.equal(await form().locator('[name="collection_version"]').count(),0);
+      await save(302);
+      await page.waitForURL(url=>url.pathname==='/collections');
+      assert.equal(await count('Invalid version '+viewport.width),1);
+      assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+      assert.deepEqual(errors,[]);
+      console.log(JSON.stringify({path,viewport,saveCollectionExtra:true,status:'passed'}));
+      await context.close();
+      continue;
+     }
+     await page.goto(base+'/collection/new');
+     await form().locator('[name="name"]').fill('Save draft '+viewport.width);
+     await form().locator('[name="remark"]').fill('Keep this draft');
+     const original=await values();
+     await fixture({collection_save:true});
+     await save(500);
+     await page.getByText(/合集创建失败，未保存/).waitFor();
+     assert.equal(await form().locator('[name="remark"]').inputValue(),'Keep this draft');
+     assert.equal((await values()).request_id,original.request_id);
+     await form().locator('[name="name"]').fill('Corrected '+viewport.width);
+     await fixture({collection_after:true});
+     await save(503);
+     await page.getByRole('link',{name:'查看已保存合集',exact:true}).waitFor();
+     assert.equal(await form().count(),0);
+     assert.equal(await count('Corrected '+viewport.width),1);
+     await fixture({});
+     await page.getByRole('link',{name:'查看已保存合集',exact:true}).click();
+     await form().locator('[name="name"]').waitFor();
+     const editUrl=await form().getAttribute('action');
+     const target=editUrl.split('/').pop();
+     await form().locator('[name="name"]').fill('Merged '+viewport.width);
+     assert.equal((await page.request.post(base+'/api/collection/save',{headers,data:{collection_id:target,name:'Other editor',remark:'Other remark',request_id:id()}})).status(),200);
+     await save(409);
+     await page.getByText('Other editor',{exact:true}).waitFor();
+     assert.equal(await form().locator('[name="name"]').inputValue(),'Merged '+viewport.width);
+     await save(302,'合并后保存合集设置');
+     await page.waitForURL(url=>url.pathname==='/collections');
+     assert.equal(await count('Merged '+viewport.width),1);
+     await page.goto(base+'/collection/new');
+     const dropMatch=url=>url.pathname==='/collection/new';
+     let dropped=false;
+     await page.route(dropMatch,async route=>{
+      if(route.request().method()==='POST' && !dropped){dropped=true;await route.fetch();return route.abort();}
+      return route.continue();
+     });
+     await form().locator('[name="name"]').fill('Lost response '+viewport.width);
+     await form().getByRole('button',{name:'保存合集设置',exact:true}).click();
+     await pending().getByRole('button',{name:'查询本次保存结果',exact:true}).waitFor();
+     await page.reload();
+     await form().locator('[name="name"]').fill('Must not duplicate');
+     await form().getByRole('button',{name:'保存合集设置',exact:true}).click();
+     assert.equal(await count('Must not duplicate'),0);
+     const replay=page.waitForResponse(r=>r.request().method()==='POST' && new URL(r.url()).pathname==='/collection/new');
+     await pending().getByRole('button',{name:'查询本次保存结果',exact:true}).click();
+     assert.equal((await replay).status(),302);
+     await page.waitForURL(url=>url.pathname==='/collections');
+     assert.equal(await count('Lost response '+viewport.width),1);
+     await page.unroute(dropMatch);
+     await page.goto(base+editUrl);
+     await form().locator('[name="name"]').fill('After login '+viewport.width);
+     const match=url=>url.pathname===editUrl;
+     let rejected=false;
+     await page.route(match,route=>{
+      if(route.request().method()==='POST' && !rejected){rejected=true;return route.fulfill({status:502,contentType:'text/plain',body:'fixture save unavailable'});}
+      return route.continue();
+     });
+     await save(502);
+     await pending().getByRole('button',{name:'查询本次保存结果',exact:true}).waitFor();
+     await page.goto(base+'/logout');
+     await login();
+     await page.goto(base+editUrl);
+     await pending().getByRole('button',{name:'查询本次保存结果',exact:true}).click();
+     await page.waitForURL(url=>url.pathname==='/collections');
+     assert.equal(await count('After login '+viewport.width),1);
+     await page.unroute(match);
+     await page.goto(base+editUrl);
+     await form().locator('[name="name"]').fill('Recovered deletion '+viewport.width);
+     assert.equal((await page.request.post(base+'/api/collection/delete/'+target,{headers,data:{request_id:id()}})).status(),200);
+     await save(404);
+     await page.getByText('原合集已删除，可将草稿保存为新合集。',{exact:true}).waitFor();
+     assert.equal(await form().getAttribute('action'),'/collection/new');
+     assert.equal(await form().locator('[name="name"]').inputValue(),'Recovered deletion '+viewport.width);
+     if(process.env.FLS_BULK_SCREENSHOTS) await page.screenshot({path:process.env.FLS_BULK_SCREENSHOTS+'/collection-save-'+viewport.width+'.png'});
+     await save(302);
+     await page.waitForURL(url=>url.pathname==='/collections');
+     assert.equal(await count('Recovered deletion '+viewport.width),1);
+     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+     assert.deepEqual(errors,[]);
+     console.log(JSON.stringify({path,viewport,saveCollection:true,status:'passed'}));
+     await context.close();
+     continue;
+    }
     if(process.env.FLS_DELETE_COLLECTION_ONLY){
      const target='browser-collection';
      const form=()=>page.locator('form[action^="/collection/delete/'+target+'"]');

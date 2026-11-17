@@ -1883,6 +1883,7 @@ if (document.readyState === "loading") {
     function restoreTaskExecutions(){
         if(!document.querySelector(".content") || /^\/(login|logout)$/.test(location.pathname)) return;
         try {
+            restoreCollectionSaves();
             Object.keys(sessionStorage).filter(key => key.startsWith(flsBulkStorageKey("collection-add:"))).forEach(key => {
                 const id = key.slice(flsBulkStorageKey("collection-add:").length);
                 flsRestoreTaskBulk(collectionAddOptions(id));
@@ -1910,6 +1911,49 @@ if (document.readyState === "loading") {
         };
     }
 
+    function restoreCollectionSaves(){
+        Object.keys(sessionStorage).filter(key => key.startsWith(flsBulkStorageKey("collection-save:"))).forEach(key => {
+            const state = JSON.parse(sessionStorage.getItem(key));
+            if(!state || !state.fields || !state.url) return;
+            const scope = key.slice(flsBulkStorageKey("").length);
+            let notice = Array.from(document.querySelectorAll("[data-collection-save-pending]")).find(el=>el.dataset.collectionSavePending===scope);
+            if(!notice){
+                notice = document.createElement("section");
+                notice.className = "section";
+                notice.dataset.collectionSavePending = scope;
+                document.querySelector(".content").prepend(notice);
+            }
+            notice.replaceChildren();
+            const message = document.createElement("p");
+            message.textContent = "合集保存结果尚未确认，请先查询原提交。";
+            const form = document.createElement("form");
+            form.method = "post";
+            form.action = state.url;
+            Object.entries({...state.fields, csrf_token:flsGetCsrfToken()}).forEach(([name,value])=>{
+                const input = document.createElement("input");
+                input.type = "hidden";
+                input.name = name;
+                input.value = value;
+                form.append(input);
+            });
+            const button = document.createElement("button");
+            button.type = "submit";
+            button.className = "btn btn-primary";
+            button.textContent = "查询本次保存结果";
+            form.append(button);
+            const login = document.createElement("a");
+            login.className = "btn btn-gray";
+            login.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
+            login.textContent = "重新登录";
+            notice.append(message, form, login);
+        });
+    }
+
+    function clearCollectionSave(scope){
+        sessionStorage.removeItem(flsBulkStorageKey(scope));
+        Array.from(document.querySelectorAll("[data-collection-save-pending]")).filter(el=>el.dataset.collectionSavePending===scope).forEach(el=>el.remove());
+    }
+
     function collectionAddOptions(collectionId){
         const scope = "collection-add:" + collectionId;
         const state = flsBulkState(scope);
@@ -1925,6 +1969,19 @@ if (document.readyState === "loading") {
     }
 
     function trackTaskExecution(url, data){
+        const save = url.pathname.match(/^\/collection\/(new|edit\/[^/]+)$/);
+        if(save && data.has("request_id")){
+            const scope = "collection-save:" + save[1];
+            const fields = Object.fromEntries(data);
+            delete fields.csrf_token;
+            const previous = flsBulkState(scope);
+            if(previous.fields && ["request_id", "name", "remark", "collection_version"].some(name=>previous.fields[name]!==fields[name])){
+                restoreCollectionSaves();
+                return false;
+            }
+            flsBulkSave(scope, {url:url.pathname, fields:fields});
+            return {kind:"collection-save", scope:scope};
+        }
         const deletion = url.pathname.match(/^\/collection\/delete\/([^/]+)$/);
         if(deletion && data.has("request_id")){
             const id = decodeURIComponent(deletion[1]);
@@ -1980,6 +2037,10 @@ if (document.readyState === "loading") {
         if(contentType.indexOf("text/html") >= 0 && body.trim()){
             try {
                 const errorDoc = new DOMParser().parseFromString(body, "text/html");
+                if(execution && execution.kind === "collection-save"){
+                    const saved = errorDoc.querySelector("[data-collection-save-result]");
+                    if(saved && JSON.parse(saved.dataset.collectionSaveResult).resolved) clearCollectionSave(execution.scope);
+                }
                 const result = errorDoc.querySelector("[data-task-execution-result]");
                 if(execution && result){
                     const payload = JSON.parse(result.dataset.taskExecutionResult);
@@ -2174,6 +2235,11 @@ if (document.readyState === "loading") {
             if (!res.ok) {
                 await handleFormErrorResponse(res, fetchUrl, form, submitter, execution);
                 if(execution){
+                    if(execution.kind === "collection-save"){
+                        restoreCollectionSaves();
+                        setLoading(false);
+                        return;
+                    }
                     const options = execution.scope.startsWith("collection-add:")
                         ? collectionAddOptions(execution.scope.slice("collection-add:".length))
                         : execution.scope.startsWith("collection-delete:")
@@ -2187,6 +2253,7 @@ if (document.readyState === "loading") {
 
             const replaced = await replaceHtml(res, true);
             if(execution && replaced && new URL(res.url || fetchUrl).pathname !== "/login"){
+                if(execution.kind === "collection-save") clearCollectionSave(execution.scope);
                 sessionStorage.removeItem(flsBulkStorageKey(execution.scope));
                 Array.from(document.querySelectorAll("[data-bulk-recovery]")).filter(el => el.dataset.bulkRecovery === execution.scope).forEach(el => el.remove());
             }
@@ -2194,7 +2261,10 @@ if (document.readyState === "loading") {
         } catch(err) {
             setLoading(false);
             restoreFormSubmission(form, submitter);
-            if(execution) flsRestoreTaskBulk(execution);
+            if(execution){
+                if(execution.kind === "collection-save") restoreCollectionSaves();
+                else flsRestoreTaskBulk(execution);
+            }
             flsToast(flsActionFailure("请求失败：" + String(err), "检查网络或登录状态后重试"), "error", 6000);
         }
     }, true);

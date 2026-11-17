@@ -433,3 +433,14 @@ def api_collection_delete(collection_id):
     payload, status = delete_collection(collection_id, data, load_collections=load_collections,
         save_collections=save_collections, load_tasks=load_tasks, mutate_tasks=mutate_tasks)
     return jsonify(payload), status
+
+
+@bp.route("/api/collection/save", methods=["POST"])
+def api_collection_save():
+    from ..collection_save import save_collection
+    from ..models import load_collections, save_collections, unique_collection_name
+
+    data = request.get_json(silent=True) if request.is_json else request.form.to_dict()
+    payload, status = save_collection(data, load_collections=load_collections,
+        save_collections=save_collections, unique_collection_name=unique_collection_name)
+    return jsonify(payload), status

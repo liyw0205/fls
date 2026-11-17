@@ -11,7 +11,6 @@ from ...models import (
     load_tasks,
     save_tasks,
     mutate_tasks,
-    COLLECTION_MUTATION_LOCK,
     load_collections,
     save_collections,
     get_collection,
@@ -22,6 +21,7 @@ from ...ui.layout import layout
 from ...ui.tables import collapsible_code, task_row_model
 from ...ui.components import page_header, data_toolbar, empty_state
 from ...collection_delete import collection_version, delete_collection
+from ...collection_save import save_collection
 
 
 COLLECTIONS_PER_PAGE = 10
@@ -500,7 +500,7 @@ document.querySelectorAll(".collection-bulk-toolbar").forEach(toolbar => {
 """
 
 
-def _collection_form(item=None):
+def _collection_form(item=None, *, request_id=None, version=None, confirm_retry=False, conflict=False):
     item = item or {
         "id": "",
         "name": "",
@@ -508,6 +508,15 @@ def _collection_form(item=None):
     }
 
     title = "编辑任务合集" if item.get("id") else "新建任务合集"
+    request_id = request_id or uuid.uuid4().hex
+    action = "/collection/edit/" + quote(item["id"], safe="") if item.get("id") else "/collection/new"
+    fields = f'<input type="hidden" name="request_id" value="{h(request_id)}">'
+    if version is not None:
+        fields += f'<input type="hidden" name="collection_version" value="{h(version)}">'
+    if confirm_retry:
+        fields += '<input type="hidden" name="confirm_retry" value="1">'
+    confirmation = ' onclick="return confirm(\'确认当前合集状态后保存此草稿？\')"' if confirm_retry or conflict else ""
+    label = "合并后保存合集设置" if conflict else "确认后重试保存" if confirm_retry else "保存合集设置"
 
     header = page_header(
         title,
@@ -517,7 +526,8 @@ def _collection_form(item=None):
 
     return f"""
 {header}
-<form method="post">
+<form method="post" action="{h(action)}">
+{fields}
 <section class="section fls-form-section">
     <h2 class="section-title">合集信息</h2>
     <div class="form-item">
@@ -534,7 +544,7 @@ def _collection_form(item=None):
 </section>
 
 <section class="section fls-form-section fls-save-section">
-    <button class="btn btn-primary" type="submit">保存合集设置</button>
+    <button class="btn btn-primary" type="submit"{confirmation}>{label}</button>
     <a class="btn btn-gray" href="/collections">返回</a>
 </section>
 </form>
@@ -788,33 +798,15 @@ def collections_page():
 @bp.route("/collection/new", methods=["GET", "POST"])
 def collection_new():
     if request.method == "POST":
-        name = request.form.get("name", "").strip()
-        remark = request.form.get("remark", "").strip()
-
-        with COLLECTION_MUTATION_LOCK:
-            collections = load_collections()
-
-            item = {
-                "id": uuid.uuid4().hex,
-                "name": unique_collection_name(name),
-                "remark": remark,
-                "created_at": now_str(),
-                "updated_at": now_str(),
-            }
-
-            collections.append(item)
-            try:
-                save_collections(collections)
-            except Exception as e:
-                return f"合集创建失败，未保存：{h(e)}", 500
-
-        return redirect(url_for("tasks.collections_page"))
+        return _save_collection_form("")
 
     return layout("新建任务合集", "collections", _collection_form())
 
 
 @bp.route("/collection/edit/<collection_id>", methods=["GET", "POST"])
 def collection_edit(collection_id):
+    if request.method == "POST":
+        return _save_collection_form(collection_id)
     collections = load_collections()
     item = None
 
@@ -826,28 +818,46 @@ def collection_edit(collection_id):
     if not item:
         abort(404)
 
-    if request.method == "POST":
-        name = request.form.get("name", "").strip()
-        remark = request.form.get("remark", "").strip()
+    return layout("编辑任务合集", "collections", _collection_form(item, version=collection_version(item)))
 
-        with COLLECTION_MUTATION_LOCK:
-            collections = load_collections()
-            item = next((c for c in collections if c.get("id") == collection_id), None)
-            if not item:
-                abort(404)
 
-            item["name"] = unique_collection_name(name, exclude_id=collection_id)
-            item["remark"] = remark
-            item["updated_at"] = now_str()
-
-            try:
-                save_collections(collections)
-            except Exception as e:
-                return f"合集更新失败，原有内容未更改：{h(e)}", 500
-
+def _save_collection_form(collection_id):
+    data = dict(request.form.to_dict(), collection_id=collection_id)
+    data.setdefault("request_id", uuid.uuid4().hex)
+    payload, status = save_collection(data, load_collections=load_collections,
+        save_collections=save_collections, unique_collection_name=unique_collection_name)
+    if status == 200:
         return redirect(url_for("tasks.collections_page"))
-
-    return layout("编辑任务合集", "collections", _collection_form(item))
+    body = f'''<section class="section" role="alert" data-collection-save-result="{h(json.dumps(payload, ensure_ascii=False))}">
+<p>{h(payload['msg'])}</p></section>'''
+    if payload.get("saved"):
+        body += f'<a class="btn btn-primary" href="/collection/edit/{h(payload["collection_id"])}">查看已保存合集</a>'
+    else:
+        draft = {"id": collection_id, "name": data.get("name", ""), "remark": data.get("remark", "")}
+        if status == 404:
+            draft["id"] = ""
+            body += '<p>原合集已删除，可将草稿保存为新合集。</p>'
+        current = payload.get("current")
+        if status == 400:
+            if payload.get("invalid_field") == "request_id":
+                data["request_id"] = uuid.uuid4().hex
+            if payload.get("invalid_field") == "collection_version":
+                if not collection_id:
+                    data.pop("collection_version", None)
+                else:
+                    try:
+                        current = get_collection(collection_id)
+                        payload["conflict"] = bool(current)
+                    except Exception as exc:
+                        body += f'<p>当前合集读取失败：{h(exc)}</p>'
+        conflict = bool(payload.get("conflict") and current and collection_id)
+        if conflict:
+            body += f'<section class="section"><h3>当前已保存内容</h3><p>{h(current["name"])}</p><p>{h(current["remark"])}</p></section>'
+        body += _collection_form(draft, request_id=uuid.uuid4().hex if conflict or status == 404 else data["request_id"],
+            version=collection_version(current) if conflict else data.get("collection_version") if status != 404 else None,
+            confirm_retry=payload.get("confirm_required", False), conflict=conflict)
+    body += '<a class="btn btn-gray" href="/collections">查看任务合集</a>'
+    return layout("合集保存恢复", "collections", body), status
 
 
 @bp.route("/collection/delete/<collection_id>", methods=["POST"])
