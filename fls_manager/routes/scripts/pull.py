@@ -152,6 +152,66 @@ def _import_archive_atomic(source, target, mode):
                     pass
 
 
+def _atomic_write_script(target, content):
+    target = Path(target)
+    missing_parents = []
+    parent = target.parent
+    while not os.path.lexists(parent):
+        missing_parents.append(parent)
+        parent = parent.parent
+    for directory in reversed(missing_parents):
+        directory.mkdir()
+    staging_parent = Path(tempfile.mkdtemp(prefix=".fls-fetch-", dir=str(target.parent)))
+    staged = staging_parent / target.name
+    published = False
+    try:
+        staged.write_bytes(content)
+        os.replace(staged, target)
+        published = True
+    finally:
+        shutil.rmtree(staging_parent, ignore_errors=True)
+        if not published:
+            for directory in missing_parents:
+                try:
+                    directory.rmdir()
+                except OSError:
+                    pass
+
+
+def _clone_repo_atomic(url, target, proxy_id, env):
+    target = Path(target)
+    if os.path.lexists(target):
+        raise FileExistsError(f"目标目录已存在：{target}")
+    missing_parents = []
+    parent = target.parent
+    while not os.path.lexists(parent):
+        missing_parents.append(parent)
+        parent = parent.parent
+    for directory in reversed(missing_parents):
+        directory.mkdir()
+    staging_parent = Path(tempfile.mkdtemp(prefix=".fls-repo-", dir=str(target.parent)))
+    staged = staging_parent / "repo"
+    published = False
+    try:
+        subprocess.check_call(
+            build_repo_pull_command(url, staged, proxy_id),
+            cwd=str(SCRIPT_DIR),
+            env=env,
+        )
+        if os.path.lexists(target):
+            raise FileExistsError(f"目标目录已存在：{target}")
+        os.replace(staged, target)
+        published = True
+    finally:
+        shutil.rmtree(staging_parent, ignore_errors=True)
+        if not published:
+            for directory in missing_parents:
+                try:
+                    directory.rmdir()
+                except OSError:
+                    pass
+
+
 @bp.route("/pull/fetch", methods=["GET", "POST"])
 def pull_fetch():
     current_rel = request.args.get("p", "").strip().strip("/")
@@ -182,19 +242,9 @@ def pull_fetch():
                     target_rel = f"{current_rel}/{repo_name}" if current_rel else repo_name
                     target = script_safe_path(target_rel)
 
-                    if target.exists():
-                        raise FileExistsError(f"目标目录已存在：{target}")
-
                     env = os.environ.copy()
                     env = apply_proxy_env(env, proxy_id)
-
-                    git_cmd = build_repo_pull_command(url, target, proxy_id)
-
-                    subprocess.check_call(
-                        git_cmd,
-                        cwd=str(SCRIPT_DIR),
-                        env=env,
-                    )
+                    _clone_repo_atomic(url, target, proxy_id, env)
 
                     msg = f"仓库导入成功：{target}"
                     msg_kind = "success"
@@ -205,8 +255,7 @@ def pull_fetch():
 
                     target_rel = f"{current_rel}/{filename}" if current_rel else filename
                     target = script_safe_path(target_rel)
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(fetch_file_bytes(url, proxy_id))
+                    _atomic_write_script(target, fetch_file_bytes(url, proxy_id))
 
                     msg = f"远程文件导入成功：{target}"
                     msg_kind = "success"

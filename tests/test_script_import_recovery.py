@@ -127,6 +127,78 @@ class ScriptImportRecoveryTests(unittest.TestCase):
             self.assertFalse((base / "scripts" / "bundle").exists())
             self.assertFalse((base / "outside.py").exists())
 
+    def test_remote_file_publish_failure_preserves_existing_file_and_cleans_stage(self):
+        with isolated_app() as (app, base):
+            target = base / "scripts" / "demo.py"
+            target.write_text("old\n", encoding="utf-8")
+            from fls_manager.routes.scripts import pull
+
+            with patch.object(pull, "fetch_file_bytes", return_value=b"new\n"), \
+                    patch.object(pull.os, "replace", side_effect=OSError("fixture file publish interrupted")):
+                response = app.test_client().post(
+                    "/pull/fetch",
+                    data={"url": "https://example.invalid/demo.py", "filename": "demo.py"},
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("脚本导入失败", response.get_data(as_text=True))
+            self.assertEqual(target.read_text(encoding="utf-8"), "old\n")
+            self.assertEqual(list((base / "scripts").glob(".fls-fetch-*")), [])
+
+    def test_repo_clone_failure_cleans_staging_and_new_parent(self):
+        with isolated_app() as (app, base):
+            from fls_manager.routes.scripts import pull
+
+            with patch.object(pull, "build_repo_pull_command", return_value=["git", "clone"]), \
+                    patch.object(pull.subprocess, "check_call", side_effect=OSError("fixture clone interrupted")):
+                response = app.test_client().post(
+                    "/pull/fetch",
+                    data={
+                        "url": "https://example.invalid/repo.git",
+                        "filename": "repo",
+                        "pull_type": "repo",
+                        "current_rel": "new-parent",
+                    },
+                    headers={"X-Token": TOKEN},
+                )
+
+            scripts = base / "scripts"
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("脚本导入失败", response.get_data(as_text=True))
+            self.assertFalse((scripts / "new-parent").exists())
+            self.assertEqual(list(scripts.glob(".fls-repo-*")), [])
+
+    def test_repo_clone_publishes_only_after_staged_clone_completes(self):
+        with isolated_app() as (app, base):
+            from fls_manager.routes.scripts import pull
+
+            def fake_clone(command, cwd, env):
+                target = Path(command[-1])
+                target.mkdir(parents=True)
+                (target / "README.md").write_text("ready\n", encoding="utf-8")
+
+            with patch.object(
+                pull,
+                "build_repo_pull_command",
+                side_effect=lambda _url, target, _proxy: ["git", "clone", str(target)],
+            ), \
+                    patch.object(pull.subprocess, "check_call", side_effect=fake_clone):
+                response = app.test_client().post(
+                    "/pull/fetch",
+                    data={
+                        "url": "https://example.invalid/repo.git",
+                        "filename": "repo",
+                        "pull_type": "repo",
+                    },
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("仓库导入成功", response.get_data(as_text=True))
+            self.assertEqual((base / "scripts" / "repo" / "README.md").read_text(encoding="utf-8"), "ready\n")
+            self.assertEqual(list((base / "scripts").glob(".fls-repo-*")), [])
+
 
 if __name__ == "__main__":
     unittest.main()
