@@ -113,6 +113,50 @@ class OnlineInstallStorageRecoveryTests(unittest.TestCase):
             self.assertEqual(response.status_code, 404)
             self.assertIn("记录不存在", response.json["error"])
 
+    def test_corrupt_script_cache_keeps_install_log_and_exposes_repair_action(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import (
+                ONLINE_INSTALL_JOBS_FILE, persist_online_install,
+            )
+            from fls_manager.online_scripts.constants import ONLINE_SCRIPT_CACHE_FILE
+
+            self.seed_cache()
+            log_file = base_dir / "log" / "cache-corrupt.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_file.write_text("download completed\n", encoding="utf-8")
+            persist_online_install({
+                "id": "cache-corrupt", "script_id": "demo", "script_name": "Demo",
+                "log_file": str(log_file), "proxy_id": "", "import_task": False,
+                "enable_task": False, "selected_task_indexes": [], "selected_tasks": [],
+                "force": False, "retry_of": "", "retried_by": "",
+                "running": False, "status": "失败", "start_time": 1,
+                "returncode": 1, "error": "下载失败", "scheduler_reload_pending": False,
+                "scheduler_reload_error": "", "updated_at": "2026-11-18 00:00:00",
+            })
+            raw = b"not-json"
+            ONLINE_SCRIPT_CACHE_FILE.write_bytes(raw)
+            client = app.test_client()
+
+            api = client.get(
+                "/api/online-scripts/log/cache-corrupt", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(api.status_code, 200)
+            payload = api.get_json()
+            self.assertEqual(payload["status"], "失败")
+            self.assertIn("download completed", payload["log"])
+            self.assertFalse(payload["recovery"]["available"])
+            self.assertIn("缓存无法读取", payload["recovery"]["reason"])
+            self.assertEqual(payload["recovery"]["href"], "/online-scripts/source")
+
+            page = client.get(
+                "/online-scripts/log/cache-corrupt", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(page.status_code, 200)
+            html = page.get_data(as_text=True)
+            self.assertIn("检查在线脚本源数据", html)
+            self.assertEqual(ONLINE_SCRIPT_CACHE_FILE.read_bytes(), raw)
+            self.assertTrue(ONLINE_INSTALL_JOBS_FILE.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

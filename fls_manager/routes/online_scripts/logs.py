@@ -37,7 +37,16 @@ def _install_recovery(info):
     if not script_id:
         return {"available": False, "reason": "安装记录缺少脚本 ID"}
 
-    item = get_online_script(script_id)
+    try:
+        item = get_online_script(script_id)
+    except Exception as exc:
+        return {
+            "available": False,
+            "script_id": script_id,
+            "reason": f"在线脚本源缓存无法读取，未覆盖原文件：{exc}",
+            "href": "/online-scripts/source",
+            "label": "检查在线脚本源数据",
+        }
     if not item:
         return {
             "available": False,
