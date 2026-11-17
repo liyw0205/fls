@@ -534,14 +534,22 @@ def backup_import():
             if e.live_state_unchanged
             else "现有目录状态可能不完整"
         )
+        outcome_unknown = not e.live_state_unchanged
         if request_owned:
             restore_record.update(state="failed" if e.live_state_unchanged else "unknown", error=str(e))
             try:
                 _save_restore_request(restore_record)
             except Exception:
                 pass
-        return restore_error(f"备份恢复失败，{state}：{e}。请检查磁盘空间和目录权限后再操作。", 500,
-                             live_state_unchanged=e.live_state_unchanged)
+        return restore_error(
+            f"备份恢复失败，{state}：{e}。"
+            + ("请检查任务和脚本状态，不要重复导入。" if outcome_unknown else "请检查磁盘空间和目录权限后再操作。"),
+            503 if outcome_unknown else 500,
+            live_state_unchanged=e.live_state_unchanged,
+            restore_outcome_unknown=outcome_unknown,
+            request_id=request_id,
+            state="unknown" if outcome_unknown else "failed",
+        )
     except Exception as e:
         if request_owned and not directories_restored:
             restore_record.update(state="unknown" if commit_attempted else "failed", error=str(e))

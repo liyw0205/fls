@@ -7,6 +7,7 @@ import tarfile
 import subprocess
 import tempfile
 import threading
+from pathlib import Path
 
 from tools.browser_regression import seed_browser_fixture, TOKEN, find_playwright_core, find_chromium
 
@@ -49,6 +50,22 @@ def main():
 
         def restore_directories(entries):
             restores.append(True)
+            if fault.get("rollback"):
+                real_replace = restore.os.replace
+
+                def fail_install_and_rollback(source, destination):
+                    source, destination = Path(source), Path(destination)
+                    if source.name == "replacement" and destination == SCRIPT_DIR:
+                        raise OSError("fixture script replacement failure")
+                    if source.name == "previous" and destination == SCRIPT_DIR:
+                        raise OSError("fixture script rollback failure")
+                    return real_replace(source, destination)
+
+                restore.os.replace = fail_install_and_rollback
+                try:
+                    return commit(entries)
+                finally:
+                    restore.os.replace = real_replace
             return commit(entries)
 
         scheduler._reload_scheduler_locked = apply_scheduler
@@ -104,6 +121,11 @@ def main():
                 backup.MAX_BACKUP_EXTRACTED_BYTES = (
                     1 if fault.get("archive_limit") else extracted_limit
                 )
+                if fault.get("rollback"):
+                    SCRIPT_DIR.mkdir(parents=True, exist_ok=True)
+                    (SCRIPT_DIR / "rollback-original.py").write_text(
+                        "print('original')", encoding="utf-8"
+                    )
                 if fault.get("block"):
                     release.clear()
                 else:
@@ -126,7 +148,7 @@ def main():
         env = dict(os.environ, FLS_UI_BASE=f"http://127.0.0.1:{server.server_port}", FLS_UI_TOKEN=TOKEN,
                    FLS_PLAYWRIGHT_CORE=str(playwright), FLS_CHROMIUM=str(chromium), FLS_RESTORE_ARCHIVE=base64.b64encode(archive.getvalue()).decode())
         try:
-            script = LIMIT_SCRIPT if os.environ.get("FLS_BACKUP_LIMIT_RECOVERY") else CANCEL_SCRIPT if os.environ.get("FLS_BACKUP_CANCEL") else IDENTITY_SCRIPT if os.environ.get("FLS_RESTORE_IDENTITY") else RESTORE_SCRIPT if os.environ.get("FLS_BACKUP_RESTORE") else SCRIPT
+            script = ROLLBACK_SCRIPT if os.environ.get("FLS_BACKUP_ROLLBACK_RECOVERY") else LIMIT_SCRIPT if os.environ.get("FLS_BACKUP_LIMIT_RECOVERY") else CANCEL_SCRIPT if os.environ.get("FLS_BACKUP_CANCEL") else IDENTITY_SCRIPT if os.environ.get("FLS_RESTORE_IDENTITY") else RESTORE_SCRIPT if os.environ.get("FLS_BACKUP_RESTORE") else SCRIPT
             result = subprocess.run(["node", "-e", script], env=env, timeout=180)
             if result.returncode:
                 raise SystemExit(result.returncode)
@@ -414,6 +436,52 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    assert.equal(await page.evaluate(()=>sessionStorage.getItem('fls-backup-restore')),null);
    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
    assert.deepEqual(errors,[]);console.log('backup limit recovery passed '+viewport.width);
+   await context.close();
+  }
+ }finally{await browser.close();}
+})().catch(e=>{console.error(e);process.exit(1)});
+'''
+
+
+ROLLBACK_SCRIPT = r'''
+const assert=require('node:assert/strict');
+const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
+(async()=>{
+ const browser=await chromium.launch({executablePath:process.env.FLS_CHROMIUM,args:['--no-sandbox']});
+ try{
+  const width=Number(process.env.FLS_BACKUP_ROLLBACK_VIEWPORT||390);
+  for(const viewport of [{width,height:width===390?844:800}]){
+   const context=await browser.newContext({viewport}),page=await context.newPage();
+   page.on('dialog',d=>d.accept());const errors=[];page.on('pageerror',e=>errors.push(e.message));
+   const base=process.env.FLS_UI_BASE,headers={'X-Token':process.env.FLS_UI_TOKEN};
+   const fixture=async data=>assert.equal((await page.request.post(base+'/api/fixture/backup',{headers,data})).status(),200);
+   const state=async()=>(await page.request.get(base+'/api/fixture/backup',{headers})).json();
+   const archive={name:'rollback.tar.gz',mimeType:'application/gzip',buffer:Buffer.from(process.env.FLS_RESTORE_ARCHIVE,'base64')};
+   await page.goto(base+'/login');await page.locator('[name="token"]').fill(process.env.FLS_UI_TOKEN);
+   await page.locator('button[type="submit"]').click();await page.waitForURL(u=>u.pathname!='/login');
+   await page.goto(base+'/backup');const initial=await state();
+   await fixture({rollback:true});
+   const form=page.locator('form[action="/backup/import"]');
+   await form.locator('[name="file"]').setInputFiles(archive);
+   const requestId=await form.locator('[name="restore_request_id"]').inputValue();
+   const response=page.waitForResponse(r=>new URL(r.url()).pathname==='/backup/import'&&r.request().method()==='POST');
+   await form.locator('button[type="submit"]').click();
+   const uploadResponse=await response;
+   assert.equal(uploadResponse.status(),503,await uploadResponse.text());
+   await page.getByText('现有目录状态可能不完整',{exact:false}).waitFor();
+   await page.getByRole('link',{name:'返回备份恢复',exact:true}).click();
+   const recovery=page.locator('#backupRestoreRecovery');
+   const query=recovery.getByRole('button',{name:'查询原恢复请求',exact:true});
+   await query.waitFor();await query.click();
+   await recovery.getByText('fixture script rollback failure',{exact:false}).waitFor();
+   assert.equal(await recovery.getByRole('button',{name:'选择原文件继续恢复',exact:true}).count(),0);
+   assert.match(await recovery.innerText(),/不要重新导入/);
+   assert.equal(JSON.parse(await page.evaluate(()=>sessionStorage.getItem('fls-backup-restore'))).restore_request_id,requestId);
+   const after=await state();assert.equal(after.restores,initial.restores+1);assert.equal(after.script,"");
+   const status=await page.request.get(base+'/api/backup/restore/'+requestId,{headers});
+   assert.equal(status.status(),503);assert.equal((await status.json()).state,'unknown');
+   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
+   assert.deepEqual(errors,[]);console.log('backup rollback recovery passed '+viewport.width);
    await fixture({});await context.close();
   }
  }finally{await browser.close();}

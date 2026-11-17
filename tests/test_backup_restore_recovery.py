@@ -1,6 +1,7 @@
 import io
 import json
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from tests.test_bulk_workflows import TOKEN, sample_task
@@ -155,6 +156,75 @@ class BackupRestoreRecoveryTests(unittest.TestCase):
             self.assertLessEqual(len(payload["error"]), 1000)
             self.assertNotIn("\x00", payload["error"])
             self.assertEqual(marker.read_text(encoding="utf-8"), "preserve")
+
+    def test_rollback_failure_is_unknown_and_preserves_recovery_workspace(self):
+        with isolated_app() as (app, base):
+            from fls_manager.routes.backup import restore
+            from fls_manager.routes.backup._common import SCRIPT_DIR
+
+            request_id = "f" * 32
+            marker = base / "data/restore-marker.txt"
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text("old data", encoding="utf-8")
+            SCRIPT_DIR.mkdir(parents=True, exist_ok=True)
+            old_script = SCRIPT_DIR / "original.py"
+            old_script.write_text("old script", encoding="utf-8")
+            task = sample_task("restored", command="echo restored", cron="0 0 1 1 *")
+            archive_data = restore_test_archive(
+                {"tasks.json": json.dumps([task]).encode()}
+            ).getvalue()
+            real_replace = restore.os.replace
+
+            def fail_install_and_rollback(source, destination):
+                source = Path(source)
+                destination = Path(destination)
+                if source.name == "replacement" and destination == SCRIPT_DIR:
+                    raise OSError("script replacement failed")
+                if source.name == "previous" and destination == SCRIPT_DIR:
+                    raise OSError("script rollback failed")
+                return real_replace(source, destination)
+
+            def submit():
+                return app.test_client().post(
+                    "/api/backup/import",
+                    data={
+                        "file": (io.BytesIO(archive_data), "restore.tar.gz"),
+                        "restore_items": ["data", "scripts"],
+                        "restore_request_id": request_id,
+                    },
+                    headers={"X-Token": TOKEN},
+                )
+
+            with patch.object(restore.os, "replace", side_effect=fail_install_and_rollback):
+                response = submit()
+
+            self.assertEqual(response.status_code, 503)
+            payload = response.get_json()
+            self.assertTrue(payload["restore_outcome_unknown"])
+            self.assertEqual(payload["state"], "unknown")
+            self.assertEqual(payload["request_id"], request_id)
+            self.assertIn("不要重复导入", payload["msg"])
+            self.assertEqual(marker.read_text(encoding="utf-8"), "old data")
+
+            workspaces = list(base.glob(".scripts-restore-*"))
+            self.assertEqual(len(workspaces), 1)
+            self.assertEqual(
+                (workspaces[0] / "previous" / "original.py").read_text(encoding="utf-8"),
+                "old script",
+            )
+
+            status = app.test_client().get(
+                "/api/backup/restore/" + request_id,
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(status.status_code, 503)
+            self.assertTrue(status.get_json()["restore_outcome_unknown"])
+            self.assertIn("script rollback failed", status.get_json()["error"])
+            with patch.object(restore, "_stage_restore_directory") as stage:
+                replay = submit()
+                self.assertEqual(replay.status_code, 503)
+                self.assertTrue(replay.get_json()["restore_outcome_unknown"])
+                stage.assert_not_called()
 
     def test_dependency_failure_or_missing_list_is_partial_completion(self):
         for api in (False, True):
