@@ -584,6 +584,43 @@ class ProxyQualityIsolationTests(unittest.TestCase):
 
 
 class AboutAuxiliaryIsolationTests(unittest.TestCase):
+    def test_about_refresh_thread_start_failure_is_terminal_and_queryable(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.routes.about.helpers import start_refresh_log_job
+            from fls_manager.routes.about.state import ABOUT_JOBS, update_log_state
+
+            with patch(
+                "fls_manager.routes.about.helpers.git_available",
+                return_value=True,
+            ), patch(
+                "fls_manager.routes.about.helpers.is_git_repo",
+                return_value=True,
+            ), patch(
+                "fls_manager.routes.about.helpers.git_text",
+                return_value="abc1234",
+            ), patch(
+                "fls_manager.routes.about.helpers.threading.Thread",
+                side_effect=RuntimeError("thread start denied"),
+            ):
+                job_id, started = start_refresh_log_job()
+
+            self.assertTrue(started)
+            info = ABOUT_JOBS[job_id]
+            self.assertFalse(info["running"])
+            self.assertEqual(info["status"], "启动失败")
+            self.assertEqual(info["returncode"], 1)
+            self.assertIn("thread start denied", info["error"])
+            state = update_log_state()
+            self.assertFalse(state["checking"])
+            self.assertIn("thread start denied", state["error"])
+
+            response = app.test_client().get(
+                "/api/about/update-info?wait=1",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(response.status_code, 503)
+            self.assertIn("thread start denied", response.get_json()["error"])
+
     def test_network_time_sync_uses_mock_clock_and_reloads_scheduler(self):
         from datetime import datetime, timedelta, timezone
 

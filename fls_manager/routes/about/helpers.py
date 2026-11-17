@@ -513,13 +513,36 @@ def start_about_job(action, title, target, args=()):
             "updated_at": now_str(),
         }
 
-    th = threading.Thread(
-        target=target,
-        args=(job_id,) + tuple(args),
-        daemon=True,
-        name=f"fls-about-{action}-{job_id[:8]}",
-    )
-    th.start()
+    try:
+        th = threading.Thread(
+            target=target,
+            args=(job_id,) + tuple(args),
+            daemon=True,
+            name=f"fls-about-{action}-{job_id[:8]}",
+        )
+        th.start()
+    except Exception as exc:
+        message = str(exc) or exc.__class__.__name__
+        timestamp = now_str()
+        with ABOUT_STATE_LOCK:
+            info = ABOUT_JOBS.get(job_id)
+            if info is not None:
+                info.update(
+                    running=False,
+                    status="启动失败",
+                    returncode=1,
+                    error=message,
+                    updated_at=timestamp,
+                )
+        append_job_log(log_file, "")
+        append_job_log(log_file, f"===== 操作启动失败: {timestamp} =====")
+        append_job_log(log_file, f"错误: {message}")
+        if action == "refresh-log":
+            set_update_log_state(
+                checking=False,
+                checked_at=timestamp,
+                error=message,
+            )
 
     return job_id
 
