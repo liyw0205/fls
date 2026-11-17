@@ -25,14 +25,21 @@ ONLINE_REFRESH_STATE = {
     "status": "",
     "message": "",
     "error": "",
+    "cache_published": False,
     "updated_at": "",
     "log_file": "",
 }
 
 
 def _refresh_snapshot(info):
-    fields = ("id", "running", "status", "message", "error", "updated_at", "log_file")
-    return {field: info.get(field, "") for field in fields}
+    fields = (
+        "id", "running", "status", "message", "error", "cache_published",
+        "updated_at", "log_file",
+    )
+    return {
+        field: info.get(field, False if field == "cache_published" else "")
+        for field in fields
+    }
 
 
 def persist_online_refresh(info):
@@ -88,6 +95,7 @@ def reserve_online_refresh(proxy_id=""):
             "status": "运行中",
             "message": "正在后台同步在线脚本源，请稍候...",
             "error": "",
+            "cache_published": False,
             "updated_at": now_str(),
             "log_file": "",
             "proxy_id": proxy_id,

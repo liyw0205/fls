@@ -12,6 +12,8 @@ from ..proxy import requests_proxy_dict, github_proxy_url
 from .constants import (
     DEFAULT_ONLINE_SCRIPT_SOURCE,
     ONLINE_SCRIPT_CACHE_FILE,
+    ONLINE_REFRESH_LOCK,
+    ONLINE_REFRESH_STATE,
     update_online_refresh_state,
 )
 from .logs import append_log, online_refresh_log_file
@@ -298,6 +300,7 @@ def refresh_worker(refresh_id, proxy_id="", log_file=""):
             status="运行中",
             message="正在后台同步在线脚本源，请稍候...",
             error="",
+            cache_published=False,
             updated_at=now_str(),
             log_file=str(log_file),
         )
@@ -309,6 +312,10 @@ def refresh_worker(refresh_id, proxy_id="", log_file=""):
 
         items = fetch_online_scripts(proxy_id=proxy_id, timeout=20, publish_cache=False)
         save_online_script_cache(items)
+        # Cache replacement is a separate durable side effect; retain that
+        # fact when the later status-file write cannot be confirmed.
+        with ONLINE_REFRESH_LOCK:
+            ONLINE_REFRESH_STATE["cache_published"] = True
         msg = f"同步在线脚本源成功，共 {len(items)} 条"
         append_log(log_file, msg)
 
@@ -318,12 +325,22 @@ def refresh_worker(refresh_id, proxy_id="", log_file=""):
             status="已完成",
             message=msg,
             error="",
+            cache_published=True,
             updated_at=now_str(),
             log_file=str(log_file),
         )
 
     except Exception as e:
-        err = f"远程脚本源刷新失败：{e}。下一步：检查脚本源地址、代理和网络后重试"
+        cache_published = bool(ONLINE_REFRESH_STATE.get("cache_published"))
+        if cache_published:
+            err = (
+                f"在线脚本源缓存已发布，但同步结果无法确认：{e}。"
+                "请先查看当前缓存和刷新日志，再决定是否重试"
+            )
+            status = "结果未知"
+        else:
+            err = f"远程脚本源刷新失败：{e}。下一步：检查脚本源地址、代理和网络后重试"
+            status = "失败"
         try:
             append_log(log_file, err)
         except Exception:
@@ -332,9 +349,10 @@ def refresh_worker(refresh_id, proxy_id="", log_file=""):
             update_online_refresh_state(
                 id=refresh_id,
                 running=False,
-                status="失败",
+                status=status,
                 message="",
                 error=err,
+                cache_published=cache_published,
                 updated_at=now_str(),
                 log_file=str(log_file),
             )

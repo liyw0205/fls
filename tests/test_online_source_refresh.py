@@ -111,6 +111,44 @@ class OnlineSourceRefreshTests(unittest.TestCase):
             payload = app.test_client().get("/api/online-scripts/refresh-status", headers={"X-Token": TOKEN}).json
             self.assertEqual(payload["status"], "失败")
 
+    def test_cache_publish_then_status_write_failure_is_unknown_and_queryable(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import source
+            from fls_manager.online_scripts.constants import get_online_refresh_state
+
+            source.save_online_script_cache([{"id": "old", "name": "Old", "type": "raw", "link": "x"}])
+            real_update = source.update_online_refresh_state
+            calls = 0
+
+            def update(**changes):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("state disk full")
+                return real_update(**changes)
+
+            with patch.object(
+                source,
+                "fetch_online_scripts",
+                return_value=[{"id": "new", "name": "New", "type": "raw", "link": "x"}],
+            ), patch.object(source, "update_online_refresh_state", side_effect=update):
+                source.refresh_worker("published-unknown", log_file=str(base_dir / "refresh.log"))
+
+            state = get_online_refresh_state()
+            self.assertEqual(state["status"], "结果未知")
+            self.assertFalse(state["running"])
+            self.assertTrue(state["cache_published"])
+            self.assertIn("缓存已发布", state["error"])
+            self.assertEqual(source.load_online_script_cache()[0]["id"], "new")
+            self.assertEqual(json.loads((base_dir / "data" / "online_script_refresh.json").read_text())["status"], "结果未知")
+            payload = app.test_client().get(
+                "/api/online-scripts/refresh-status", headers={"X-Token": TOKEN},
+            ).get_json()
+            self.assertEqual(payload["status"], "结果未知")
+            self.assertTrue(payload["cache_published"])
+            page = app.test_client().get("/online-scripts", headers={"X-Token": TOKEN}).get_data(as_text=True)
+            self.assertIn("缓存已发布", page)
+
     def test_refresh_worker_publishes_real_fetched_cache_only_once(self):
         with isolated_app() as (_app, base_dir):
             from fls_manager.online_scripts import source
