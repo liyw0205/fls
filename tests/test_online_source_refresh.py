@@ -312,9 +312,11 @@ for(const status of [401, 403, 409, 500, 200]) {
   onlineRefreshStatusCard: {style: {}},
   onlineRefreshStatusText: {innerHTML: ''},
   onlineRefreshBtn: {disabled: true, textContent: '正在同步中...'},
+  onlineRefreshLogin: {hidden: true, href: ''},
 };
 const context = {
   window: {},
+  location: {pathname: '/online-scripts', search: ''},
   document: {getElementById: id => elements[id]},
   fetch: async () => ({ok: status === 200, status, json: async () => {
     if(status === 200) throw new Error('not JSON');
@@ -331,6 +333,8 @@ await new Promise(resolve => setImmediate(resolve));
   else assert.match(elements.onlineRefreshStatusText.innerHTML, /重新同步/);
   assert.equal(elements.onlineRefreshBtn.disabled, false);
   assert.equal(elements.onlineRefreshBtn.textContent, '重新同步在线脚本源');
+  assert.equal(elements.onlineRefreshLogin.hidden, !(status === 401 || status === 403));
+  if(status === 401 || status === 403) assert.match(elements.onlineRefreshLogin.href, /\/login\?next=/);
 }
   console.log('refresh polling error recovery passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -124,6 +124,7 @@ def online_scripts_page():
         更新时间：{h(refresh_updated_at or "-")}<br>
         日志：{h(refresh_log or "-")}
     </div>
+    <a id="onlineRefreshLogin" class="btn btn-gray" href="/login?next=%2Fonline-scripts" hidden>重新登录</a>
 </div>
 </section>
 
@@ -158,8 +159,10 @@ async function updateOnlineRefreshStatus(){{
         const card = document.getElementById("onlineRefreshStatusCard");
         const text = document.getElementById("onlineRefreshStatusText");
         const btn = document.getElementById("onlineRefreshBtn");
+        const login = document.getElementById("onlineRefreshLogin");
 
         if(!card || !text) return;
+        if(login) login.hidden = true;
 
         if(json.running){{
             window.__FLS_ONLINE_REFRESH_WAS_RUNNING__ = true;
@@ -217,9 +220,11 @@ async function updateOnlineRefreshStatus(){{
         const card = document.getElementById("onlineRefreshStatusCard");
         const text = document.getElementById("onlineRefreshStatusText");
         const btn = document.getElementById("onlineRefreshBtn");
+        const login = document.getElementById("onlineRefreshLogin");
         const status = e && e.status ? "HTTP " + e.status : "请求失败";
         const detail = e && e.message ? e.message : String(e || "未知错误");
-        const next = e && (e.status === 401 || e.status === 403)
+        const denied = e && (e.status === 401 || e.status === 403);
+        const next = denied
             ? "登录状态已失效，请重新登录后重试"
             : "确认面板服务和网络后点击重新同步";
         if(card) card.style.display = "block";
@@ -230,6 +235,10 @@ async function updateOnlineRefreshStatus(){{
         if(btn) {{
             btn.disabled = false;
             btn.textContent = "重新同步在线脚本源";
+        }}
+        if(login) {{
+            login.hidden = !denied;
+            if(denied) login.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
         }}
     }}
 }}
