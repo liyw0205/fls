@@ -1057,12 +1057,48 @@ def dashboard():
 </div>
 </section>
 
+<section class="section" id="flsDashboardRuntimeRecovery" hidden>
+    <div class="feedback feedback-error" role="status">
+        <span id="flsDashboardRuntimeErrorText"></span>
+        <button class="btn btn-primary" id="flsDashboardRuntimeRetry" type="button">重新读取状态</button>
+        <a class="btn btn-gray" id="flsDashboardRuntimeLogin" href="#" hidden>重新登录</a>
+    </div>
+</section>
+
 {shortcut_section}
 {abnormal_table}
 {environment_table}
 
 <script>
 const FLS_DASHBOARD_RUNTIME_INTERVAL_MS = 3000;
+let flsDashboardRuntimeBlocked = false;
+
+function flsDashboardClearRuntimeError(){{
+    const box = document.getElementById("flsDashboardRuntimeRecovery");
+    const login = document.getElementById("flsDashboardRuntimeLogin");
+    if(box) box.hidden = true;
+    if(login) login.hidden = true;
+}}
+
+function flsDashboardShowRuntimeError(error){{
+    flsDashboardRuntimeBlocked = true;
+    if(window.__FLS_DASHBOARD_RUNTIME_INTERVAL__){{
+        clearInterval(window.__FLS_DASHBOARD_RUNTIME_INTERVAL__);
+        window.__FLS_DASHBOARD_RUNTIME_INTERVAL__ = null;
+    }}
+    const box = document.getElementById("flsDashboardRuntimeRecovery");
+    const text = document.getElementById("flsDashboardRuntimeErrorText");
+    const login = document.getElementById("flsDashboardRuntimeLogin");
+    const status = Number(error && error.status || 0);
+    const payload = error && error.payload || {{}};
+    const message = payload.msg || payload.error || (error && error.message) || "状态读取失败";
+    if(text) text.textContent = (status ? ("HTTP " + status + "：") : "") + message;
+    if(login){{
+        login.hidden = status !== 401 && status !== 403;
+        login.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
+    }}
+    if(box) box.hidden = false;
+}}
 
 async function flsDashboardRefreshRuntime(){{
     if(document.hidden){{
@@ -1087,14 +1123,22 @@ async function flsDashboardRefreshRuntime(){{
         const res = await fetch("/api/dashboard/runtime", {{cache:"no-store"}});
         const json = await flsReadJsonResponse(res);
 
-        if(!json.ok) return;
+        if(!json.ok){{
+            const error = new Error(json.msg || "状态读取失败");
+            error.payload = json;
+            throw error;
+        }}
 
         if(nowEl) nowEl.textContent = json.current_time || "-";
         if(uptimeEl) uptimeEl.textContent = json.panel_uptime || "-";
         if(systemCpuEl) systemCpuEl.textContent = json.system_cpu_percent || "-";
         if(cpuEl) cpuEl.textContent = json.panel_cpu_current || "-";
         if(peakEl) peakEl.textContent = json.panel_cpu_peak || "-";
-    }} catch(e) {{}}
+        flsDashboardRuntimeBlocked = false;
+        flsDashboardClearRuntimeError();
+    }} catch(e) {{
+        flsDashboardShowRuntimeError(e);
+    }}
 }}
 
 function flsDashboardStartRuntimeTimer(){{
@@ -1103,7 +1147,7 @@ function flsDashboardStartRuntimeTimer(){{
         window.__FLS_DASHBOARD_RUNTIME_INTERVAL__ = null;
     }}
 
-    if(!document.hidden){{
+    if(!document.hidden && !flsDashboardRuntimeBlocked){{
         window.__FLS_DASHBOARD_RUNTIME_INTERVAL__ = setInterval(
             flsDashboardRefreshRuntime,
             FLS_DASHBOARD_RUNTIME_INTERVAL_MS
@@ -1126,13 +1170,24 @@ window.__FLS_DASHBOARD_VISIBILITY_HANDLER__ = function(){{
             clearInterval(window.__FLS_DASHBOARD_RUNTIME_INTERVAL__);
             window.__FLS_DASHBOARD_RUNTIME_INTERVAL__ = null;
         }}
-    }}else{{
+    }}else if(!flsDashboardRuntimeBlocked){{
         flsDashboardRefreshRuntime();
         flsDashboardStartRuntimeTimer();
     }}
 }};
 
 document.addEventListener("visibilitychange", window.__FLS_DASHBOARD_VISIBILITY_HANDLER__);
+const flsDashboardRetry = document.getElementById("flsDashboardRuntimeRetry");
+if(flsDashboardRetry){{
+    flsDashboardRetry.addEventListener("click", async function(){{
+        if(flsDashboardRetry.disabled) return;
+        flsDashboardRetry.disabled = true;
+        flsDashboardRuntimeBlocked = false;
+        await flsDashboardRefreshRuntime();
+        if(!flsDashboardRuntimeBlocked) flsDashboardStartRuntimeTimer();
+        flsDashboardRetry.disabled = false;
+    }});
+}}
 
 flsDashboardRefreshRuntime();
 flsDashboardStartRuntimeTimer();
