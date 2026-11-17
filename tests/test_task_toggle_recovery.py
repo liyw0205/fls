@@ -99,3 +99,44 @@ class TaskToggleRecoveryTests(unittest.TestCase):
                         response = client.post(url, data={"enabled": "0", "request_id": "e" * 32}, headers={"X-Token": TOKEN})
                         self.assertIn(response.status_code, (200, 302))
                         self.assertFalse(models.get_task("a")["enabled"])
+
+    def test_log_toggle_recovery_returns_to_log_and_old_form_cannot_reverse_later_state(self):
+        with isolated_app() as (app, _):
+            from fls_manager import models, scheduler
+            self.seed()
+            scheduler.reload_scheduler()
+            client = app.test_client()
+            with client.session_transaction() as session:
+                session.update(token=TOKEN, token_expire_at=int(time.time()) + 3600,
+                               security_verified=True, csrf_token="toggle-csrf")
+            page = client.get("/log/a?back=/collections")
+            form = next(form for form in TaskFormParser(page.get_data(as_text=True)).forms
+                        if form["action"].startswith("/task/toggle/a"))
+            self.assertEqual(form["fields"]["enabled"], "0")
+            self.assertRegex(form["fields"]["request_id"], r"^[a-f0-9]{32}$")
+            with patch("fls_manager.routes.tasks.actions.mutate_tasks", side_effect=OSError("disk full")):
+                failed = client.post(form["action"], data=form["fields"])
+            self.assertEqual(failed.status_code, 500)
+            self.assertTrue(models.get_task("a")["enabled"])
+            retry = TaskFormParser(failed.get_data(as_text=True)).forms[0]
+            self.assertEqual(retry["fields"]["enabled"], "0")
+            with patch("fls_manager.routes.tasks.actions.reload_scheduler", side_effect=OSError("reload rejected")):
+                saved = client.post(retry["action"], data=retry["fields"])
+            self.assertEqual(saved.status_code, 503)
+            self.assertFalse(models.get_task("a")["enabled"])
+            recovery = TaskFormParser(saved.get_data(as_text=True)).forms[0]
+            response = client.post(recovery["action"], data=recovery["fields"])
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.location, "/log/a?back=%2Fcollections")
+            self.assertIsNone(scheduler.scheduler.get_job("task_a"))
+            current = client.get(response.location)
+            enable = next(form for form in TaskFormParser(current.get_data(as_text=True)).forms
+                          if form["action"].startswith("/task/toggle/a"))
+            self.assertEqual(enable["fields"]["enabled"], "1")
+            self.assertEqual(client.post(enable["action"], data=enable["fields"]).status_code, 302)
+            self.assertTrue(models.get_task("a")["enabled"])
+            self.assertIsNotNone(scheduler.scheduler.get_job("task_a"))
+            with patch("fls_manager.routes.tasks.actions.mutate_tasks") as mutate:
+                self.assertEqual(client.post(retry["action"], data=retry["fields"]).status_code, 503)
+                mutate.assert_not_called()
+            self.assertTrue(models.get_task("a")["enabled"])

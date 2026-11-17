@@ -145,6 +145,46 @@ const {chromium} = require(process.env.FLS_PLAYWRIGHT_CORE);
     await page.goto(base+'/login');
     await login();
     await page.goto(base+path);
+    if(process.env.FLS_TOGGLE_LOG_ONLY){
+     await page.goto(base+'/log/a?back=/collections');
+     const toggle=()=>page.locator('form[action^="/task/toggle/a"]');
+     const old=await toggle().evaluate(form=>({action:form.getAttribute('action'),fields:Object.fromEntries(new FormData(form))}));
+     assert.equal(old.fields.enabled,'0');
+     assert.match(old.fields.request_id,/^[a-f0-9]{32}$/);
+     await fixture({save:true});
+     let response=page.waitForResponse(r=>r.request().method()==='POST' && new URL(r.url()).pathname==='/task/toggle/a');
+     await toggle().getByRole('button',{name:'停用任务',exact:true}).click();
+     assert.equal((await response).status(),500);
+     assert.equal((await state()).tasks.find(t=>t.id==='a').enabled,true);
+     await fixture({reload:true});
+     response=page.waitForResponse(r=>r.request().method()==='POST' && new URL(r.url()).pathname==='/task/toggle/a');
+     await page.getByRole('button',{name:'重试保存状态',exact:true}).click();
+     assert.equal((await response).status(),503);
+     assert.equal((await state()).tasks.find(t=>t.id==='a').enabled,false);
+     await fixture({});
+     await page.getByRole('button',{name:'重新加载调度器',exact:true}).click();
+     await page.waitForURL(url=>url.pathname==='/log/a' && url.searchParams.get('back')==='/collections');
+     assert.equal(await toggle().locator('input[name="enabled"]').inputValue(),'1');
+     await toggle().getByRole('button',{name:'启用任务',exact:true}).click();
+     await toggle().getByRole('button',{name:'停用任务',exact:true}).waitFor();
+     assert.equal((await state()).tasks.find(t=>t.id==='a').enabled,true);
+     await page.route('**/task/toggle/a?*',async route=>{
+      await route.fetch();
+      return route.abort();
+     });
+     await toggle().getByRole('button',{name:'停用任务',exact:true}).click();
+     await page.getByText(/请求失败：/).waitFor();
+     assert.equal((await state()).tasks.find(t=>t.id==='a').enabled,false);
+     await page.unroute('**/task/toggle/a?*');
+     await toggle().getByRole('button',{name:'停用任务',exact:true}).click();
+     await toggle().getByRole('button',{name:'启用任务',exact:true}).waitFor();
+     assert.equal((await state()).tasks.find(t=>t.id==='a').enabled,false);
+     assert.deepEqual(errors,[]);
+     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+     console.log(JSON.stringify({path,viewport,toggleLog:true,status:'passed'}));
+     await context.close();
+     continue;
+    }
     if(process.env.FLS_EXECUTION_FORM_ERRORS_ONLY){
      await fixture({reset:true,config:true});
      await page.goto(base+'/task/config/a');

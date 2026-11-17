@@ -1,4 +1,5 @@
 import uuid
+from urllib.parse import quote
 
 from flask import request, abort, Response
 
@@ -128,7 +129,9 @@ def log_view(task_id):
         </div>
         <div class="row-actions-danger">
             <!-- Legacy action markers: action="/run/{h(task_id)}?back={h(back_url)}" action="/stop/{h(task_id)}?back={h(back_url)}" -->
-            <form class="inline-form" method="post" action="/task/toggle/{h(task_id)}?back={h(back_url)}">
+            <form class="inline-form" method="post" action="/task/toggle/{h(task_id)}?back={h(quote('/log/' + task_id + '?back=' + quote(back_url, safe=''), safe=''))}">
+                <input type="hidden" name="enabled" value="{'0' if enabled else '1'}">
+                <input type="hidden" name="request_id" value="{uuid.uuid4().hex}">
                 <button class="btn {toggle_class}" type="submit">{toggle_text}任务</button>
             </form>
         </div>
