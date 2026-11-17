@@ -30,7 +30,7 @@ def main():
 
         save_config({"notify_items": [], "notify_default_ids": []})
         app = create_app()
-        fault = {"reload": False, "log_error": False, "save": False, "save_after": False, "collection_save": False,
+        fault = {"reload": False, "log_status": 0, "save": False, "save_after": False, "collection_save": False,
                  "collection_after": False, "collection_receipt": False, "env_save": False,
                  "env_after": False, "env_receipt": False, "unknown": False, "start_fail": False}
         reload_scheduler = api.reload_scheduler
@@ -116,7 +116,7 @@ def main():
             if request.method == "GET":
                 return jsonify(tasks=models.load_tasks(), history=models.load_task_history(), collections=models.load_collections(), env=models.load_global_env())
             data = request.get_json()
-            fault.update(reload=bool(data.get("reload")), log_error=bool(data.get("log_error")), save=bool(data.get("save")), save_after=bool(data.get("save_after")),
+            fault.update(reload=bool(data.get("reload")), log_status=int(data.get("log_status") or 0), save=bool(data.get("save")), save_after=bool(data.get("save_after")),
                          collection_save=bool(data.get("collection_save")), collection_after=bool(data.get("collection_after")),
                          collection_receipt=bool(data.get("collection_receipt")),
                          env_save=bool(data.get("env_save")), env_after=bool(data.get("env_after")), env_receipt=bool(data.get("env_receipt")),
@@ -143,8 +143,8 @@ def main():
 
         @app.before_request
         def fail_task_log_for_browser_recovery():
-            if fault["log_error"] and request.path == "/api/log/a":
-                return Response("fixture task log diagnostic", status=502, mimetype="text/plain")
+            if fault["log_status"] and request.path == "/api/log/a":
+                return Response("fixture task log diagnostic", status=fault["log_status"], mimetype="text/plain")
 
         server = make_server("127.0.0.1", 0, app, threaded=True)
         threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -968,11 +968,30 @@ const {chromium} = require(process.env.FLS_PLAYWRIGHT_CORE);
      assert.equal((await state()).history[0].status,'running');
      await notice().getByRole('link',{name:'查看任务日志',exact:true}).scrollIntoViewIfNeeded();
      if(path==='/tasks'){
-      await fixture({log_error:true});
       await notice().getByRole('link',{name:'查看任务日志',exact:true}).click();
       await page.waitForURL(url=>url.pathname==='/log/a');
+      await page.evaluate(async()=>{await loadLog();document.getElementById('log').textContent='retained task log marker';});
+      await fixture({log_status:502});
+      await page.evaluate(()=>loadLog());
       await page.getByText(/日志读取失败：.*HTTP 502: fixture task log diagnostic/).waitFor();
+      assert.equal(await page.locator('#log').textContent(),'retained task log marker');
       await fixture({});
+      await page.getByRole('button',{name:'立即重试',exact:true}).click();
+      await page.waitForFunction(()=>document.getElementById('logRecovery').hidden);
+      const pollCount=()=>page.evaluate(()=>window.__FLS_ACTIVE_LOG_INTERVAL__);
+      await fixture({log_status:401});
+      await page.evaluate(()=>loadLog());
+      await page.getByText(/会话已失效/).waitFor();
+      assert.equal(await pollCount(),null);
+      assert.match(await page.getByRole('link',{name:'重新登录',exact:true}).getAttribute('href'),/^\/login\?next=/);
+      await fixture({log_status:403});
+      await page.evaluate(()=>loadLog());
+      await page.getByText(/当前会话无权读取日志/).waitFor();
+      assert.equal(await pollCount(),null);
+      await fixture({});
+      await page.evaluate(()=>loadLog());
+      await page.waitForFunction(()=>document.getElementById('logRecovery').hidden);
+      assert.notEqual(await pollCount(),null);
       await page.goto(base+'/tasks');
      }
      if(process.env.FLS_BULK_SCREENSHOTS) await page.screenshot({path:process.env.FLS_BULK_SCREENSHOTS+'/execution-'+path.slice(1)+'-'+viewport.width+'.png'});

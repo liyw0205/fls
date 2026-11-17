@@ -159,11 +159,13 @@ def log_view(task_id):
 </section>
 
 <pre class="log" id="log">加载中...</pre>
+<section class="section" id="logRecovery" role="alert" hidden></section>
 {log_controls()}
 
 <script>
 window.__FLS_LOG_LAST_TEXT__ = "";
 window.__FLS_LOG_NEAR_BOTTOM__ = true;
+window.__FLS_LOG_AUTH_BLOCKED__ = false;
 
 function nearBottom(){{
     return document.documentElement.scrollHeight - window.innerHeight - window.scrollY < 90;
@@ -181,6 +183,15 @@ async function loadLog(){{
 
         const res = await fetch("/api/log/{h(task_id)}?lines=1200", {{cache:"no-store"}});
         const text = await flsReadTextResponse(res);
+        const recovery = document.getElementById("logRecovery");
+        if(recovery){{
+            recovery.hidden = true;
+            recovery.replaceChildren();
+        }}
+        if(window.__FLS_LOG_AUTH_BLOCKED__){{
+            window.__FLS_LOG_AUTH_BLOCKED__ = false;
+            if(!window.__FLS_ACTIVE_LOG_INTERVAL__) window.__FLS_ACTIVE_LOG_INTERVAL__ = setInterval(loadLog, 2000);
+        }}
         const old = window.__FLS_LOG_LAST_TEXT__ || "";
         const changed = text !== old;
 
@@ -207,11 +218,38 @@ async function loadLog(){{
             }}
         }}
     }} catch(e) {{
-        document.getElementById("log").textContent = "日志读取失败：" + e + "。下一步：刷新页面并检查任务日志文件后重试";
+        const recovery = document.getElementById("logRecovery");
+        if(!recovery) return;
+        recovery.replaceChildren();
+        const message = document.createElement("p");
+        const status = Number(e && e.status || 0);
+        if(status === 401 || status === 403){{
+            message.textContent = status === 401
+                ? "会话已失效，现有日志已保留；重新登录后可继续读取。"
+                : "当前会话无权读取日志；现有日志已保留，请核对权限或重新登录。";
+            const login = document.createElement("a");
+            login.className = "btn btn-primary";
+            login.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
+            login.textContent = "重新登录";
+            recovery.append(message, login);
+            window.__FLS_LOG_AUTH_BLOCKED__ = true;
+            if(window.__FLS_ACTIVE_LOG_INTERVAL__) clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
+            window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
+        }}else{{
+            message.textContent = "日志读取失败：" + String(e) + "。现有日志已保留，系统将继续重试。";
+            const retry = document.createElement("button");
+            retry.type = "button";
+            retry.className = "btn btn-primary";
+            retry.textContent = "立即重试";
+            retry.addEventListener("click", loadLog);
+            recovery.append(message, retry);
+        }}
+        recovery.hidden = false;
     }}
 }}
 
 if(window.__FLS_ACTIVE_LOG_INTERVAL__) clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
+window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
 
 loadLog();
 window.__FLS_ACTIVE_LOG_INTERVAL__ = setInterval(loadLog, 2000);
