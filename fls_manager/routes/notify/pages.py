@@ -1,5 +1,8 @@
 from ._common import *
 from ...ui.components import page_header_card, table_card, empty_table_row
+from ...notify_actions import notification_config, notification_snapshot, notification_version
+from ...models import TASKS_MUTATION_LOCK
+from ...storage import storage_transaction
 
 
 def _notify_history_status_badge(status):
@@ -114,8 +117,9 @@ def notify_retry(delivery_id):
 
 @bp.route("/notify")
 def notify_page():
-    items = notify_items()
-    defaults = set(default_notify_ids())
+    cfg = notification_snapshot()
+    items = cfg["notify_items"]
+    defaults = set(cfg.get("notify_default_ids", []))
 
     rows = ""
 
@@ -157,11 +161,16 @@ def notify_page():
             <div class="row-actions-secondary">
                 <a class="btn btn-blue" href="/notify/edit/{h(item_id)}">编辑通知设置</a>
                 <form class="inline-form" method="post" action="/notify/toggle/{h(item_id)}">
+                    <input type="hidden" name="request_id" value="{uuid.uuid4().hex}">
+                    <input type="hidden" name="version" value="{notification_version(cfg, item_id)}">
+                    <input type="hidden" name="enabled" value="{0 if item.get('enabled', True) else 1}">
                     <button class="btn {toggle_class}" type="submit">{toggle_text}</button>
                 </form>
             </div>
             <div class="row-actions-danger">
                 <form class="inline-form" method="post" action="/notify/delete/{h(item_id)}">
+                    <input type="hidden" name="request_id" value="{uuid.uuid4().hex}">
+                    <input type="hidden" name="version" value="{notification_version(cfg, item_id)}">
                     <button class="btn btn-red" type="submit" onclick="return confirm('确定删除该通知吗？')">删除通知</button>
                 </form>
             </div>
@@ -188,9 +197,11 @@ def notify_page():
 {header}
 
 <form method="post" action="/notify/default">
+<input type="hidden" name="request_id" value="{uuid.uuid4().hex}">
+<input type="hidden" name="version" value="{notification_version(cfg)}">
 <section class="section fls-form-section" id="notify-defaults">
     <h2 class="section-title">全局默认通知</h2>
-    <select name="default_ids" multiple size="6">{default_options(defaults)}</select>
+    <select name="default_ids" multiple size="6">{default_options(defaults, items)}</select>
     <div class="help">
         这里设置全局默认通知。任务选择“使用全局默认通知”时会使用这里的配置。
     </div>
@@ -207,10 +218,12 @@ def notify_page():
 @bp.route("/notify/new", methods=["GET", "POST"])
 def notify_new():
     if request.method == "POST":
-        item = notify_item_from_form()
-        items = notify_items()
-        items.append(item)
-        save_notify_items(items)
+        with TASKS_MUTATION_LOCK, storage_transaction():
+            notification_snapshot()
+            item = notify_item_from_form()
+            items = notify_items()
+            items.append(item)
+            save_notify_items(items)
 
         if request.form.get("action") == "test":
             send_notify_with_history(
@@ -228,7 +241,17 @@ def notify_new():
 
 @bp.route("/notify/edit/<item_id>", methods=["GET", "POST"])
 def notify_edit(item_id):
-    items = notify_items()
+    pending_test = []
+    with TASKS_MUTATION_LOCK, storage_transaction():
+        response = _notify_edit_locked(item_id, pending_test)
+    if pending_test:
+        send_notify_with_history(pending_test[0], "FLS 通知测试", f"这是一条测试通知。\n时间：{now_str()}", source="test", sender=send_one)
+    return response
+
+
+def _notify_edit_locked(item_id, pending_test):
+    cfg = notification_snapshot()
+    items = cfg["notify_items"]
     item = None
 
     for one in items:
@@ -241,22 +264,26 @@ def notify_edit(item_id):
 
     if request.method == "POST":
         new_item = notify_item_from_form(item)
+        if request.form.get("version") != notification_version(cfg, item_id):
+            return notify_form(new_item, notice="通知设置已变化，草稿未保存，请查看当前设置后合并。"), 409
+        if not new_item["enabled"]:
+            from ...models import load_tasks
+            if any(task.get("notify", {}).get("mode") == "custom" and item_id in task["notify"].get("ids", []) for task in load_tasks()):
+                return notify_form(new_item, notice="通知仍被任务单独引用，请先更换任务通知选择。"), 409
 
         for idx, one in enumerate(items):
             if one.get("id") == item_id:
                 items[idx] = new_item
                 break
 
-        save_notify_items(items)
+        cfg["notify_items"] = items
+        if not new_item["enabled"]:
+            cfg["notify_default_ids"] = [value for value in cfg.get("notify_default_ids", []) if value != item_id]
+        from ...config import save_config
+        save_config(cfg)
 
         if request.form.get("action") == "test":
-            send_notify_with_history(
-                new_item,
-                "FLS 通知测试",
-                f"这是一条测试通知。\n时间：{now_str()}",
-                source="test",
-                sender=send_one,
-            )
+            pending_test.append(new_item)
 
         return redirect(url_for("notify.notify_page"))
 

@@ -16,7 +16,7 @@ from email.utils import formataddr
 
 from .config import load_config, save_config
 from .paths import NOTIFY_HISTORY_FILE
-from .storage import read_json, write_json
+from .storage import read_json, write_json, storage_transaction
 from .utils import now_str, LazyModule
 
 requests = LazyModule("requests")
@@ -434,6 +434,11 @@ def save_full_config(cfg):
 
 
 def notify_items():
+    with storage_transaction():
+        return _notify_items_locked()
+
+
+def _notify_items_locked():
     cfg = get_config()
     items = cfg.get("notify_items")
 
@@ -486,9 +491,10 @@ def notify_items():
 
 
 def save_notify_items(items):
-    cfg = get_config()
-    cfg["notify_items"] = items
-    save_full_config(cfg)
+    with storage_transaction():
+        cfg = get_config()
+        cfg["notify_items"] = items
+        save_full_config(cfg)
 
 
 def enabled_notify_items():

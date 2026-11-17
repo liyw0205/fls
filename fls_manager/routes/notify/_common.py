@@ -63,7 +63,7 @@ def notify_item_from_form(old=None):
         "id": old.get("id") or uuid.uuid4().hex,
         "name": unique_notify_name(channel, request.form.get("name", ""), old.get("id", "")),
         "channel": channel,
-        "enabled": request.form.get("enabled", "1") == "1",
+        "enabled": request.form.get("enabled") == "1",
         "log_mode": normalize_notify_log_mode(
             request.form.get("log_mode", old.get("log_mode", "full"))
         ),
@@ -83,11 +83,13 @@ def channel_options(selected):
     return options
 
 
-def default_options(selected_ids):
+def default_options(selected_ids, items=None):
     selected_ids = set(selected_ids or [])
     options = ""
 
-    for item in enabled_notify_items():
+    for item in enabled_notify_items() if items is None else items:
+        if not item.get("enabled", True):
+            continue
         s = "selected" if item.get("id") in selected_ids else ""
         options += f'<option value="{h(item.get("id"))}" {s}>{h(item.get("name"))} [{h(channel_name(item.get("channel")))}]</option>'
 
@@ -97,7 +99,7 @@ def default_options(selected_ids):
     return options
 
 
-def notify_form(item=None):
+def notify_form(item=None, notice=""):
     if item is None:
         item = {
             "id": "",
@@ -158,10 +160,17 @@ def notify_form(item=None):
         help_html="设置通知渠道、启停状态和测试动作。",
         actions_html='<a class="btn btn-gray" href="/notify">返回通知管理</a>',
     )
+    if notice:
+        header += f'<section class="section" role="alert"><p>{h(notice)}</p><a class="btn btn-gray" href="/notify">查看当前通知设置</a></section>'
+    version_field = ""
+    if item.get("id"):
+        from ...notify_actions import notification_config, notification_version
+        version_field = f'<input type="hidden" name="version" value="{notification_version(notification_config(), item["id"])}">'
 
     body = f"""
 {header}
 <form method="post">
+{version_field}
 <section class="section fls-form-section">
     <h2 class="section-title">{h(title)}</h2>
     <div class="help">通知名称留空时会自动使用渠道名；若重名会自动追加序号。</div>

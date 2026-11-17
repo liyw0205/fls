@@ -18,13 +18,30 @@ def main():
         from werkzeug.serving import make_server
         from fls_manager.app import create_app
         from fls_manager import models, proxy_actions, scheduler
+        from fls_manager import notify_actions
+        from fls_manager.notify import send_by_ids
+        from fls_manager.config import load_config
         from fls_manager.config import save_config
         from fls_manager.routes.proxy import actions
+        from fls_manager.routes.notify import actions as notify_routes
 
         save_config({"notify_items": [], "notify_default_ids": []})
         app = create_app()
         fault = {}
         save, receipt = models.save_proxies, proxy_actions.write_json
+        notify_receipt = notify_actions.write_json
+        deliveries = []
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        class Webhook(BaseHTTPRequestHandler):
+            def do_POST(self):
+                deliveries.append(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode())
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"accepted")
+            def log_message(self, *args):
+                pass
+        webhook = ThreadingHTTPServer(("127.0.0.1", 0), Webhook)
+        threading.Thread(target=webhook.serve_forever, daemon=True).start()
 
         def persist(values):
             if fault.get("save"):
@@ -38,13 +55,29 @@ def main():
                 raise OSError("fixture receipt rejected")
             return receipt(path, row)
 
+        def persist_notify(values):
+            if fault.get("notify_save"):
+                raise OSError("fixture notification rejected")
+            save_config(values)
+            if fault.get("notify_after"):
+                raise OSError("fixture notification confirmation rejected")
+
+        def write_notify(path, row):
+            if fault.get("notify_receipt") and row["state"] != "prepared":
+                raise OSError("fixture notification receipt rejected")
+            return notify_receipt(path, row)
+
         models.save_proxies = actions.save_proxies = persist
         proxy_actions.write_json = write
+        notify_routes.save_config = persist_notify
+        notify_actions.write_json = write_notify
 
         @app.route("/api/fixture/proxy", methods=["GET", "POST"])
         def fixture():
             if request.method == "GET":
-                return jsonify(proxies=models.load_proxies(), tasks=models.load_tasks(), history=models.load_task_history())
+                cfg = load_config()
+                return jsonify(proxies=models.load_proxies(), tasks=models.load_tasks(), history=models.load_task_history(),
+                               notify=cfg.get("notify_items", []), defaults=cfg.get("notify_default_ids", []), deliveries=deliveries)
             data = request.get_json()
             fault.clear()
             fault.update(data)
@@ -59,6 +92,20 @@ def main():
                 values = models.load_proxies()
                 values[0]["enabled"] = False
                 save(values)
+            if data.get("notify_reset"):
+                deliveries.clear()
+                save_config({"notify_items": [
+                    {"id": value, "name": "Webhook " + value, "enabled": True, "channel": "webhook", "log_mode": "full",
+                     "config": {"WEBHOOK_URL": f"http://127.0.0.1:{webhook.server_port}/{value}"}} for value in ("n", "other")],
+                     "notify_default_ids": ["n", "other"]})
+                models.save_tasks([{"id": "run", "name": "Notify reference", "command": "echo notification", "notify": {"mode": "custom" if data.get("notify_reference") else "none", "ids": ["n"] if data.get("notify_reference") else []}}])
+            if data.get("notify_changed"):
+                cfg = load_config()
+                cfg["notify_items"][0]["name"] = "Changed notification"
+                save_config(cfg)
+            if data.get("notify_send"):
+                results = send_by_ids("Saved defaults", "Actual payload", ["__default__"])
+                return jsonify(ok=all(row["ok"] for row in results), ids=[row["id"] for row in results])
             return jsonify(ok=True)
 
         server = make_server("127.0.0.1", 0, app, threaded=True)
@@ -71,6 +118,8 @@ def main():
                 raise SystemExit(result.returncode)
         finally:
             server.shutdown()
+            webhook.shutdown()
+            webhook.server_close()
             scheduler.scheduler.shutdown(wait=False)
 
 
@@ -111,6 +160,79 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
     return res;
    };
    const notice=async text=>{await page.locator('[data-proxy-result]').waitFor();assert.match(await page.locator('[data-proxy-result]').innerText(),text);};
+   if(process.env.FLS_NOTIFY_ACTIONS){
+    await fixture({notify_reset:true});
+    await page.goto(base+'/login');await login();await page.goto(base+'/notify');
+    const nform=action=>page.locator('form[action="/notify/'+action+(action==='default'?'':'/n')+'"]:visible').first();
+    const nnotice=async text=>{await page.locator('[data-notify-result]').waitFor();assert.match(await page.locator('[data-notify-result]').innerText(),text);};
+    const defaults=async()=>[...(await state()).defaults].sort();
+    await fixture({notify_save:true});
+    assert.equal((await submit(nform('toggle'))).status(),500);await nnotice(/保存失败/);
+    assert.deepEqual(await defaults(),['n','other']);
+    await fixture({notify_after:true});
+    assert.equal((await submit(nform('toggle'))).status(),503);await nnotice(/已保存/);
+    assert.deepEqual(await defaults(),['other']);
+    await fixture({});await page.goto(base+'/notify');await submit(nform('toggle'));
+    await page.waitForURL(u=>u.pathname==='/notify');
+    assert.equal((await state()).notify[0].enabled,true);
+    // A stale default form cannot discard later changes and retains valid selections.
+    await nform('default').locator('select').selectOption(['n','other']);
+    await fixture({notify_changed:true});
+    assert.equal((await submit(nform('default'))).status(),409);await nnotice(/已变化/);
+    await page.getByLabel('重新核对默认通知').selectOption(['n','other']);
+    await submit(nform('default'));await page.waitForURL(u=>u.pathname==='/notify');
+    assert.deepEqual(await defaults(),['n','other']);
+    const fields=await nform('default').evaluate(f=>Object.fromEntries(new FormData(f)));
+    assert.equal((await page.request.post(base+'/notify/default',{form:{...fields,default_ids:'missing'}})).status(),400);
+    assert.deepEqual(await defaults(),['n','other']);
+    assert.equal((await page.request.post(base+'/notify/delete/n',{form:{csrf_token:'bad'}})).status(),400);
+    await nform('default').locator('select').selectOption(['other']);
+    await fixture({notify_save:true});
+    assert.equal((await submit(nform('default'))).status(),500);await nnotice(/保存失败/);
+    assert.deepEqual(await nform('default').locator('[name="default_ids"]').evaluateAll(v=>v.map(x=>x.value)),['other']);
+    await fixture({});await submit(nform('default'));await page.waitForURL(u=>u.pathname==='/notify');
+    const delivered=await page.request.post(base+'/api/fixture/proxy',{headers,data:{notify_send:true}});
+    assert.deepEqual((await delivered.json()).ids,['other']);
+    assert.ok((await state()).deliveries.some(body=>body.includes('Actual payload')));
+    // Custom task references block both stop and delete, with an executable task form.
+    await fixture({notify_reset:true,notify_reference:true});await page.goto(base+'/notify');
+    assert.equal((await submit(nform('delete'))).status(),409);await nnotice(/任务单独引用/);
+    await page.getByRole('link',{name:'设置任务：Notify reference',exact:true}).click();
+    await page.waitForURL(u=>u.pathname==='/task/edit/run');
+    await page.locator('[name="notify_mode"][value="none"]').check();
+    await page.locator('button[type="submit"]').filter({hasText:'保存任务'}).click();
+    await page.waitForURL(u=>u.pathname!='/task/edit/run');
+    await page.goto(base+'/notify');
+    // The delete response is lost after one atomic config write; old replay cannot delete a replacement.
+    await page.route('**/notify/delete/n',async route=>{await route.fetch();await route.abort();},{times:1});
+    await nform('delete').locator('button').click();
+    await page.locator('[data-collection-save-pending]').waitFor();
+    assert.deepEqual(await defaults(),['other']);
+    await fixture({notify_reset:true});await page.reload();
+    await page.getByRole('button',{name:'查询本次保存结果',exact:true}).click();
+    await page.waitForFunction(()=>!document.querySelector('[data-collection-save-pending]'));
+    assert.equal((await state()).notify.length,2);
+    // Non-JSON failure, refresh and a fresh login keep all selected defaults.
+    await page.goto(base+'/notify');await nform('default').locator('select').selectOption(['n','other']);
+    await page.route('**/notify/default',r=>r.fulfill({status:502,contentType:'text/plain',body:'fixture unavailable'}),{times:1});
+    await nform('default').locator('button').click();
+    await page.locator('[data-collection-save-pending]').waitFor();
+    await page.goto(base+'/logout');await login();
+    await page.getByRole('button',{name:'查询本次保存结果',exact:true}).click();
+    await page.waitForFunction(()=>!document.querySelector('[data-collection-save-pending]'));
+    assert.deepEqual(await defaults(),['n','other']);
+    await fixture({notify_save:true,notify_receipt:true});await page.goto(base+'/notify');
+    assert.equal((await submit(nform('toggle'))).status(),500);await nnotice(/确认后重试/);
+    await fixture({});await submit(nform('toggle'));await page.waitForURL(u=>u.pathname==='/notify');
+    assert.equal((await state()).notify[0].enabled,false);
+    await fixture({notify_save:true});
+    assert.equal((await submit(nform('delete'))).status(),500);await nnotice(/保存失败/);
+    await page.evaluate(()=>{document.documentElement.style.scrollBehavior='auto';window.scrollTo(0,0);});await page.waitForTimeout(200);
+    if(process.env.FLS_BULK_SCREENSHOTS) await page.screenshot({path:process.env.FLS_BULK_SCREENSHOTS+'/notify-actions-'+viewport.width+'.png',fullPage:true});
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
+    assert.deepEqual(errors,[]);console.log('notification actions passed '+viewport.width);
+    await context.close();continue;
+   }
    await fixture({reset:true});
    await page.goto(base+'/login');await login();await open();
    await fixture({save:true});

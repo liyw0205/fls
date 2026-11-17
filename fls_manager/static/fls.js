@@ -1919,7 +1919,7 @@ if (document.readyState === "loading") {
     }
 
     function restoreCollectionSaves(){
-        Object.keys(sessionStorage).filter(key => ["collection-save:", "env-save:", "proxy-save:"].some(prefix=>key.startsWith(flsBulkStorageKey(prefix)))).forEach(key => {
+        Object.keys(sessionStorage).filter(key => ["collection-save:", "env-save:", "proxy-save:", "notify-save:"].some(prefix=>key.startsWith(flsBulkStorageKey(prefix)))).forEach(key => {
             const state = JSON.parse(sessionStorage.getItem(key));
             if(!state || !state.fields || !state.url) return;
             const scope = key.slice(flsBulkStorageKey("").length);
@@ -1932,7 +1932,7 @@ if (document.readyState === "loading") {
             }
             notice.replaceChildren();
             const message = document.createElement("p");
-            message.textContent = scope.startsWith("proxy-save:") ? "代理操作结果尚未确认，请先查询原提交。" : scope.startsWith("env-save:") ? "变量操作结果尚未确认，请先查询原提交。" : "合集保存结果尚未确认，请先查询原提交。";
+            message.textContent = scope.startsWith("notify-save:") ? "通知操作结果尚未确认，请先查询原提交。" : scope.startsWith("proxy-save:") ? "代理操作结果尚未确认，请先查询原提交。" : scope.startsWith("env-save:") ? "变量操作结果尚未确认，请先查询原提交。" : "合集保存结果尚未确认，请先查询原提交。";
             const form = document.createElement("form");
             form.method = "post";
             form.action = state.url;
@@ -1978,11 +1978,12 @@ if (document.readyState === "loading") {
     }
 
     function trackTaskExecution(url, data){
-        if((/^\/env\/(new|view|import|edit\/[^/]+|delete\/[^/]+)$/.test(url.pathname) || /^\/proxy\/(new|(toggle|delete|edit)\/[^/]+)$/.test(url.pathname)) && data.has("request_id")){
-            const scope = (url.pathname.startsWith("/proxy/") ? "proxy-save:" : "env-save:") + url.pathname;
+        if((/^\/env\/(new|view|import|edit\/[^/]+|delete\/[^/]+)$/.test(url.pathname) || /^\/proxy\/(new|(toggle|delete|edit)\/[^/]+)$/.test(url.pathname) || /^\/notify\/(default|(toggle|delete)\/[^/]+)$/.test(url.pathname)) && data.has("request_id")){
+            const scope = (url.pathname.startsWith("/notify/") ? "notify-save:" : url.pathname.startsWith("/proxy/") ? "proxy-save:" : "env-save:") + url.pathname;
             const fields = Object.fromEntries(data);
             delete fields.csrf_token;
             if(data.has("items")) fields.items = data.getAll("items");
+            if(url.pathname === "/notify/default") fields.default_ids = data.getAll("default_ids");
             const previous = flsBulkState(scope);
             if(previous.fields && Object.keys({...previous.fields,...fields}).some(name=>name!=="confirm_retry" && JSON.stringify(previous.fields[name])!==JSON.stringify(fields[name]))){
                 restoreCollectionSaves();
@@ -2060,8 +2061,8 @@ if (document.readyState === "loading") {
             try {
                 const errorDoc = new DOMParser().parseFromString(body, "text/html");
                 if(execution && execution.kind === "collection-save"){
-                    const saved = errorDoc.querySelector("[data-collection-save-result], [data-env-result], [data-proxy-result]");
-                    if(saved && JSON.parse(saved.dataset.collectionSaveResult || saved.dataset.envResult || saved.dataset.proxyResult).resolved) clearCollectionSave(execution.scope);
+                    const saved = errorDoc.querySelector("[data-collection-save-result], [data-env-result], [data-proxy-result], [data-notify-result]");
+                    if(saved && JSON.parse(saved.dataset.collectionSaveResult || saved.dataset.envResult || saved.dataset.proxyResult || saved.dataset.notifyResult).resolved) clearCollectionSave(execution.scope);
                 }
                 const result = errorDoc.querySelector("[data-task-execution-result]");
                 if(execution && result){
