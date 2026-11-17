@@ -1,4 +1,6 @@
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from tests.test_ui_route_components import TOKEN, isolated_app
 
@@ -75,6 +77,80 @@ class LogGroupDeleteRecoveryTests(unittest.TestCase):
             self.assertIn("group_versions", html)
             self.assertIn("fls-log-delete-recovery", html)
             self.assertIn("flsLogsRestorePendingGroups", html)
+
+    def test_file_replaced_after_group_snapshot_is_not_deleted(self):
+        with isolated_app() as (app, base_dir):
+            files, versions = self.seed(base_dir)
+            from fls_manager.routes.logs import files as log_routes
+
+            original_snapshot = log_routes.log_group_file_versions
+
+            def snapshot_then_replace(paths):
+                result = original_snapshot(paths)
+                files["c.log"].write_text(
+                    "===== 启动任务: Group B =====\nreplacement\n",
+                    encoding="utf-8",
+                )
+                return result
+
+            with patch.object(log_routes, "log_group_file_versions", side_effect=snapshot_then_replace):
+                response = self.post(app.test_client(), ["Group B"], {"Group B": versions["Group B"]})
+
+            payload = response.get_json()
+            self.assertEqual(response.status_code, 409)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["retry_groups"], ["Group B"])
+            self.assertEqual(payload["results"][0]["status"], "conflict")
+            self.assertTrue(files["c.log"].exists())
+            self.assertEqual(files["c.log"].read_text(encoding="utf-8"), "===== 启动任务: Group B =====\nreplacement\n")
+
+    def test_replacement_after_one_file_delete_is_reported_and_preserved(self):
+        with isolated_app() as (app, base_dir):
+            files, versions = self.seed(base_dir)
+
+            real_unlink = Path.unlink
+            calls = {"count": 0}
+
+            def unlink_then_replace():
+                calls["count"] += 1
+                path = files["a.log"] if calls["count"] == 1 else files["b.log"]
+                result = real_unlink(path)
+                if path == files["b.log"]:
+                    path.write_text(
+                        "===== 启动任务: Group A =====\nreplacement\n",
+                        encoding="utf-8",
+                    )
+                return result
+
+            with patch.object(Path, "unlink", side_effect=unlink_then_replace):
+                response = self.post(app.test_client(), ["Group A"], {"Group A": versions["Group A"]})
+
+            payload = response.get_json()
+            self.assertEqual(response.status_code, 409)
+            self.assertTrue(payload["partial"])
+            self.assertEqual(payload["retry_groups"], ["Group A"])
+            self.assertEqual(payload["results"][0]["status"], "conflict")
+            self.assertFalse(files["a.log"].exists())
+            self.assertTrue(files["b.log"].exists())
+            self.assertEqual(files["b.log"].read_text(encoding="utf-8"), "===== 启动任务: Group A =====\nreplacement\n")
+
+    def test_symlink_member_is_rejected_without_deleting_group_files(self):
+        with isolated_app() as (app, base_dir):
+            files, versions = self.seed(base_dir)
+            outside = base_dir / "outside.log"
+            outside.write_text("===== 启动任务: Group A =====\nprivate\n", encoding="utf-8")
+            linked = files["b.log"]
+            linked.unlink()
+            linked.symlink_to(outside)
+
+            response = self.post(app.test_client(), ["Group A"], {"Group A": versions["Group A"]})
+            payload = response.get_json()
+            self.assertEqual(response.status_code, 500)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["results"][0]["status"], "failed")
+            self.assertTrue(files["a.log"].exists())
+            self.assertTrue(linked.is_symlink())
+            self.assertEqual(outside.read_text(encoding="utf-8"), "===== 启动任务: Group A =====\nprivate\n")
 
 
 if __name__ == "__main__":

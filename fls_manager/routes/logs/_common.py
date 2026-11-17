@@ -1,6 +1,7 @@
 from .bp import bp
 import hashlib
 import stat
+import threading
 from datetime import datetime
 from math import ceil
 from urllib.parse import quote
@@ -13,6 +14,9 @@ from ...utils import h, get_back_url
 from ...ui.layout import layout
 from ...ui.log_controls import log_controls
 from ...ui.components import pagination_card, page_header, empty_state, data_toolbar
+
+
+LOG_FILES_MUTATION_LOCK = threading.RLock()
 
 
 def safe_log_file(filename):
@@ -41,9 +45,18 @@ def log_file_version(file_path):
 
 
 def log_group_version(log_files):
-    entries = []
-    for file_path in sorted(log_files, key=lambda item: item.name):
-        entries.append((file_path.name, log_file_version(file_path)))
+    return log_group_version_from_files(log_group_file_versions(log_files))
+
+
+def log_group_file_versions(log_files):
+    return {file_path: log_file_version(file_path) for file_path in log_files}
+
+
+def log_group_version_from_files(file_versions):
+    entries = [
+        (file_path.name, version)
+        for file_path, version in sorted(file_versions.items(), key=lambda item: item[0].name)
+    ]
     return hashlib.sha256(repr(entries).encode("utf-8")).hexdigest()
 
 

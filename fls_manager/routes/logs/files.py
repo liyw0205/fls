@@ -1,6 +1,50 @@
 from ._common import *
 
 
+def _delete_group_file(file_path, expected_version):
+    """Delete one file only when its identity is unchanged, then confirm absence."""
+    with LOG_FILES_MUTATION_LOCK:
+        try:
+            actual_version = log_file_version(file_path)
+        except FileNotFoundError:
+            return "missing", 0, ""
+        except (OSError, ValueError) as exc:
+            return "failed", 0, f"{file_path.name}: {exc}"
+
+        if actual_version != expected_version:
+            return "conflict", 0, f"{file_path.name}: 文件在删除前已变化"
+
+        try:
+            file_path.unlink()
+        except FileNotFoundError:
+            return "missing", 0, ""
+        except Exception as exc:
+            try:
+                after_version = log_file_version(file_path)
+            except FileNotFoundError:
+                return "deleted", 1, ""
+            except (OSError, ValueError) as check_error:
+                return "unknown", 0, f"{file_path.name}: 删除结果无法确认：{exc}；{check_error}"
+            if after_version != expected_version:
+                return "conflict", 0, f"{file_path.name}: 删除期间文件已变化，未删除新文件"
+            return "failed", 0, f"{file_path.name}: {exc}"
+
+        try:
+            file_path.lstat()
+        except FileNotFoundError:
+            return "deleted", 1, ""
+        except OSError as exc:
+            return "unknown", 0, f"{file_path.name}: 删除结果无法确认：{exc}"
+
+        try:
+            after_version = log_file_version(file_path)
+        except (OSError, ValueError) as exc:
+            return "unknown", 0, f"{file_path.name}: 删除后仍存在且无法确认：{exc}"
+        if after_version != expected_version:
+            return "conflict", 0, f"{file_path.name}: 删除期间文件已变化，未删除新文件"
+        return "failed", 0, f"{file_path.name}: 删除后文件仍存在"
+
+
 @bp.route("/logfile/<filename>")
 def logfile_view(filename):
     back_url = get_back_url("/logs")
@@ -206,13 +250,14 @@ def api_log_groups_delete():
             results.append({"group": group_name, "status": "missing", "deleted": 0})
             continue
 
-        expected = group_versions.get(group_name)
         try:
-            actual = log_group_version(log_files)
+            file_versions = log_group_file_versions(log_files)
+            actual = log_group_version_from_files(file_versions)
         except (OSError, ValueError) as exc:
             failed.append(f"{group_name}: {exc}")
             results.append({"group": group_name, "status": "failed", "deleted": 0})
             continue
+        expected = group_versions.get(group_name)
         if expected and expected != actual:
             conflicts.append(group_name)
             results.append({"group": group_name, "status": "conflict", "deleted": 0})
@@ -220,16 +265,21 @@ def api_log_groups_delete():
 
         group_deleted = 0
         group_failed = False
-        for file_path in log_files:
-            try:
-                if file_path.exists() and file_path.is_file() and file_path.parent == LOG_DIR:
-                    file_path.unlink()
-                    deleted += 1
-                    group_deleted += 1
-            except Exception as e:
-                failed.append(f"{file_path.name}: {e}")
+        group_conflict = False
+        for file_path in sorted(file_versions, key=lambda item: item.name):
+            outcome, count, detail = _delete_group_file(file_path, file_versions[file_path])
+            deleted += count
+            group_deleted += count
+            if outcome == "conflict":
+                group_conflict = True
+            elif outcome in ("failed", "unknown"):
                 group_failed = True
-        results.append({"group": group_name, "status": "failed" if group_failed else "deleted", "deleted": group_deleted})
+            if detail:
+                failed.append(detail)
+        if group_conflict:
+            conflicts.append(group_name)
+        status = "conflict" if group_conflict else "failed" if group_failed else "deleted"
+        results.append({"group": group_name, "status": status, "deleted": group_deleted})
 
     retry_groups = conflicts + [row["group"] for row in results if row["status"] == "failed"]
     if failed or conflicts:
