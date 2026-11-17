@@ -397,14 +397,42 @@ def deps_install_log(install_id):
 {header_card}
 
 <pre class="log" id="log">加载中...</pre>
+<div id="installPollError" class="help" role="status" aria-live="polite" hidden></div>
+<button id="installPollRetry" class="btn btn-primary" type="button" hidden>立即重试读取日志</button>
+<a id="installPollLogin" class="btn btn-primary" hidden>重新登录</a>
 
 <script>
+const installPollError = document.getElementById("installPollError");
+const installPollRetry = document.getElementById("installPollRetry");
+const installPollLogin = document.getElementById("installPollLogin");
+let installLogRequestPending = false;
+let installLogHasLoaded = false;
+
+function stopInstallLogPolling(){{
+    if(window.__FLS_ACTIVE_LOG_INTERVAL__){{
+        clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
+        window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
+    }}
+}}
+
+function startInstallLogPolling(){{
+    if(!window.__FLS_ACTIVE_LOG_INTERVAL__){{
+        window.__FLS_ACTIVE_LOG_INTERVAL__ = setInterval(loadLog, 2000);
+    }}
+}}
+
 async function loadLog(){{
+    if(installLogRequestPending) return;
+    installLogRequestPending = true;
     try {{
         const res = await fetch("/api/deps/install-log/{h(install_id)}?lines=1200", {{cache:"no-store"}});
         const json = await flsReadJsonResponse(res);
+        if(!json || typeof json !== "object" || json.ok === false){{
+            const error = new Error((json && (json.msg || json.error)) || "安装日志响应无效");
+            error.status = res.status;
+            throw error;
+        }}
 
-        document.getElementById("log").textContent = json.log || "暂无日志";
         var logEl = document.getElementById("log");
         var logText = json.log || "暂无日志";
 
@@ -418,22 +446,43 @@ async function loadLog(){{
         const errorEl = document.getElementById("installError");
         errorEl.textContent = json.error || "";
         errorEl.hidden = !json.error;
+        installLogHasLoaded = true;
+        installPollError.textContent = "";
+        installPollError.hidden = true;
+        installPollRetry.hidden = true;
+        installPollLogin.hidden = true;
 
         if(json.running){{
             window.scrollTo(0, document.documentElement.scrollHeight);
+            startInstallLogPolling();
+        }}else{{
+            stopInstallLogPolling();
         }}
     }} catch(e) {{
-        document.getElementById("log").textContent = "日志读取失败：" + e + "。下一步：检查安装日志文件和服务状态后重试";
+        if(!installLogHasLoaded){{
+            document.getElementById("log").textContent = "暂未读取到安装日志";
+        }}
+        const denied = e && (e.status === 401 || e.status === 403);
+        const message = e && e.message ? e.message : String(e);
+        installPollError.textContent = denied
+            ? "日志读取失败：" + message + "。现有日志和安装状态已保留，请重新登录后继续读取。"
+            : "日志读取失败：" + message + "。现有日志和安装状态已保留，可手动重试。";
+        installPollError.hidden = false;
+        installPollRetry.hidden = denied;
+        installPollLogin.hidden = !denied;
+        if(denied){{
+            installPollLogin.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
+        }}
+        stopInstallLogPolling();
+    }}finally{{
+        installLogRequestPending = false;
     }}
 }}
 
-if(window.__FLS_ACTIVE_LOG_INTERVAL__) {{
-    clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
-    window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
-}}
+installPollRetry.addEventListener("click", loadLog);
+stopInstallLogPolling();
 
 loadLog();
-window.__FLS_ACTIVE_LOG_INTERVAL__ = setInterval(loadLog, 2000);
 </script>
 """
     return layout("安装日志", "deps", body)
