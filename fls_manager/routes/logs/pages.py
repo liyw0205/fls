@@ -404,7 +404,8 @@ async function flsLogsDeleteGroups(groups, source){
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
-                "X-Requested-With": "XMLHttpRequest"
+                "X-Requested-With": "XMLHttpRequest",
+                "X-CSRF-Token": flsGetCsrfToken()
             },
             credentials: "same-origin",
             body: JSON.stringify({groups: groups, group_versions: flsLogsGroupVersions(groups, source)})
