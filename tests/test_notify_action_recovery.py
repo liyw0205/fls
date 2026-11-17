@@ -252,7 +252,7 @@ class NotifyActionRecoveryTests(unittest.TestCase):
             from fls_manager import models
             from fls_manager.config import save_config, load_config
             from fls_manager.storage import storage_transaction
-            from fls_manager.routes.notify import pages
+            from fls_manager.routes.notify import actions
             self.seed()
             client = app.test_client()
             self.authenticate(client)
@@ -263,10 +263,10 @@ class NotifyActionRecoveryTests(unittest.TestCase):
             def send(*args, **kwargs):
                 with ThreadPoolExecutor(1) as pool:
                     pool.submit(concurrent_config).result(3)
-                return True, "sent", "delivery"
+                return True, "sent"
             form["fields"].update(channel="webhook", enabled="1", log_mode="full", action="test")
-            with patch.object(pages, "send_notify_with_history", side_effect=send) as sending:
-                self.assertEqual(client.post("/notify/edit/n", data=form["fields"]).status_code, 302)
+            with patch.object(actions, "send_one", side_effect=send) as sending:
+                self.assertEqual(client.post("/notify/edit/n", data=form["fields"]).status_code, 200)
                 sending.assert_called_once()
             self.assertEqual(load_config()["task_timeout_seconds"], 123)
 

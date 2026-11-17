@@ -1978,7 +1978,7 @@ if (document.readyState === "loading") {
     }
 
     function trackTaskExecution(url, data){
-        if((/^\/env\/(new|view|import|edit\/[^/]+|delete\/[^/]+)$/.test(url.pathname) || /^\/proxy\/(new|(toggle|delete|edit)\/[^/]+)$/.test(url.pathname) || /^\/notify\/(default|(toggle|delete|test)\/[^/]+)$/.test(url.pathname)) && data.has("request_id")){
+        if((/^\/env\/(new|view|import|edit\/[^/]+|delete\/[^/]+)$/.test(url.pathname) || /^\/proxy\/(new|(toggle|delete|edit)\/[^/]+)$/.test(url.pathname) || /^\/notify\/(new|default|(edit|toggle|delete|test)\/[^/]+)$/.test(url.pathname)) && data.has("request_id")){
             const scope = (url.pathname.startsWith("/notify/") ? "notify-save:" : url.pathname.startsWith("/proxy/") ? "proxy-save:" : "env-save:") + url.pathname;
             const fields = Object.fromEntries(data);
             delete fields.csrf_token;

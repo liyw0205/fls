@@ -473,10 +473,10 @@ def api_proxy_action():
 
 @bp.route("/api/notify/action", methods=["POST"])
 def api_notify_action():
-    from ..notify_actions import mutate_notification
+    from ..notify_actions import apply_notification
     from ..config import save_config
     data = request.get_json(silent=True) if request.is_json else dict(request.form.to_dict(), default_ids=request.form.getlist("default_ids"))
-    payload, status = mutate_notification(data, load_tasks=load_tasks, save_config=save_config)
+    payload, status = apply_notification(data, load_tasks=load_tasks, save_config=save_config)
     return jsonify(payload), status
 
 

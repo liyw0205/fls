@@ -1,8 +1,6 @@
 from ._common import *
 from ...ui.components import page_header_card, table_card, empty_table_row
-from ...notify_actions import notification_config, notification_snapshot, notification_version
-from ...models import TASKS_MUTATION_LOCK
-from ...storage import storage_transaction
+from ...notify_actions import notification_snapshot, notification_version
 
 
 def _notify_history_status_badge(status):
@@ -220,38 +218,17 @@ def notify_page():
 @bp.route("/notify/new", methods=["GET", "POST"])
 def notify_new():
     if request.method == "POST":
-        with TASKS_MUTATION_LOCK, storage_transaction():
-            notification_snapshot()
-            item = notify_item_from_form()
-            items = notify_items()
-            items.append(item)
-            save_notify_items(items)
-
-        if request.form.get("action") == "test":
-            send_notify_with_history(
-                item,
-                "FLS 通知测试",
-                f"这是一条测试通知。\n时间：{now_str()}",
-                source="test",
-                sender=send_one,
-            )
-
-        return redirect(url_for("notify.notify_page"))
+        from .actions import notify_submit
+        return notify_submit("new")
 
     return notify_form()
 
 
 @bp.route("/notify/edit/<item_id>", methods=["GET", "POST"])
 def notify_edit(item_id):
-    pending_test = []
-    with TASKS_MUTATION_LOCK, storage_transaction():
-        response = _notify_edit_locked(item_id, pending_test)
-    if pending_test:
-        send_notify_with_history(pending_test[0], "FLS 通知测试", f"这是一条测试通知。\n时间：{now_str()}", source="test", sender=send_one)
-    return response
-
-
-def _notify_edit_locked(item_id, pending_test):
+    if request.method == "POST":
+        from .actions import notify_submit
+        return notify_submit("edit", item_id)
     cfg = notification_snapshot()
     items = cfg["notify_items"]
     item = None
@@ -264,31 +241,7 @@ def _notify_edit_locked(item_id, pending_test):
     if not item:
         abort(404)
 
-    if request.method == "POST":
-        new_item = notify_item_from_form(item)
-        if request.form.get("version") != notification_version(cfg, item_id):
-            return notify_form(new_item, notice="通知设置已变化，草稿未保存，请查看当前设置后合并。"), 409
-        if not new_item["enabled"]:
-            from ...models import load_tasks
-            if any(task.get("notify", {}).get("mode") == "custom" and item_id in task["notify"].get("ids", []) for task in load_tasks()):
-                return notify_form(new_item, notice="通知仍被任务单独引用，请先更换任务通知选择。"), 409
-
-        for idx, one in enumerate(items):
-            if one.get("id") == item_id:
-                items[idx] = new_item
-                break
-
-        cfg["notify_items"] = items
-        if not new_item["enabled"]:
-            cfg["notify_default_ids"] = [value for value in cfg.get("notify_default_ids", []) if value != item_id]
-        from ...config import save_config
-        save_config(cfg)
-
-        if request.form.get("action") == "test":
-            pending_test.append(new_item)
-
-        return redirect(url_for("notify.notify_page"))
-
+    item = dict(item, _version=notification_version(cfg, item_id))
     url_channel = request.args.get("channel", "").strip()
     if url_channel in NOTIFY_CHANNELS:
         item = dict(item)

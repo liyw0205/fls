@@ -108,11 +108,14 @@ class FrontendMethodContractTests(unittest.TestCase):
                 headers=headers,
             )
             self.assertEqual(created_proxy.status_code, 302)
-            client.post(
+            notify_form = client.get("/notify/new", headers=headers).get_data(as_text=True)
+            notify_request = next(form for form in CollectionFormParser(notify_form).forms if form["action"] == "/notify/new")["fields"]["request_id"]
+            created = client.post(
                 "/notify/new",
-                data={"name": "fixture-notify", "channel": "bark"},
+                data={"name": "fixture-notify", "channel": "bark", "request_id": notify_request, "enabled": "1"},
                 headers=headers,
             )
+            self.assertEqual(created.status_code, 302)
 
             for page in self.pages:
                 with self.subTest(page=page):
@@ -157,11 +160,14 @@ class FrontendMethodContractTests(unittest.TestCase):
                 headers=headers,
             )
             self.assertEqual(created.status_code, 302)
-            client.post(
+            notify_form = client.get("/notify/new", headers=headers).get_data(as_text=True)
+            notify_request = next(form for form in CollectionFormParser(notify_form).forms if form["action"] == "/notify/new")["fields"]["request_id"]
+            created = client.post(
                 "/notify/new",
-                data={"name": "fixture-notify", "channel": "bark"},
+                data={"name": "fixture-notify", "channel": "bark", "request_id": notify_request, "enabled": "1"},
                 headers=headers,
             )
+            self.assertEqual(created.status_code, 302)
 
             proxy_html = client.get("/proxy", headers=headers).get_data(as_text=True)
             notify_html = client.get("/notify", headers=headers).get_data(as_text=True)

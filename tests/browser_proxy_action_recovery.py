@@ -27,7 +27,7 @@ def main():
 
         save_config({"notify_items": [], "notify_default_ids": []})
         app = create_app()
-        if os.environ.get("FLS_NOTIFY_TESTS"):
+        if os.environ.get("FLS_NOTIFY_TESTS") or os.environ.get("FLS_NOTIFY_SAVES"):
             import fls_manager.app as app_module
             app_module.dispatch_frontend_open_event = lambda: None
         fault = {}
@@ -125,6 +125,10 @@ def main():
                 cfg = load_config()
                 cfg["notify_items"][0]["name"] = "Changed notification"
                 save_config(cfg)
+            if data.get("notify_remove"):
+                cfg = load_config()
+                cfg["notify_items"] = [row for row in cfg["notify_items"] if row["id"] != data["notify_remove"]]
+                save_config(cfg)
             if data.get("notify_send"):
                 results = send_by_ids("Saved defaults", "Actual payload", ["__default__"])
                 return jsonify(ok=all(row["ok"] for row in results), ids=[row["id"] for row in results])
@@ -182,6 +186,96 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
     return res;
    };
    const notice=async text=>{await page.locator('[data-proxy-result]').waitFor();assert.match(await page.locator('[data-proxy-result]').innerText(),text);};
+   if(process.env.FLS_NOTIFY_SAVES){
+    await fixture({notify_reset:true});
+    await page.goto(base+'/login');await login();await page.goto(base+'/notify/new');
+    const nnotice=async text=>{await page.locator('[data-notify-result]').first().waitFor();assert.match(await page.locator('[data-notify-result]').first().innerText(),text);};
+    const editForm=()=>page.locator('form:has(select[name="channel"])');
+    const saveNotice=async (kind='save')=>{
+     const f=editForm(),path=new URL(await f.getAttribute('action'),base).pathname;
+     const pending=page.waitForResponse(r=>new URL(r.url()).pathname===path&&r.request().method()==='POST');
+     await f.locator('button[name="action"][value="'+kind+'"]').click();
+     const res=await pending;await page.waitForFunction(()=>!document.querySelector('.fls-loading-overlay.active'));return res;
+    };
+    const fill=async name=>{
+     await page.getByLabel('通知名称',{exact:true}).fill(name);
+     await page.getByLabel('通知渠道',{exact:true}).selectOption('webhook');
+     await page.getByLabel('请求 URL',{exact:true}).fill((await state()).notify[0].config.WEBHOOK_URL);
+     await page.getByLabel('请求体',{exact:true}).fill('Saved draft\n$content');
+     await page.getByLabel('请求头',{exact:true}).fill('Authorization: browser-private');
+    };
+    await fill('Browser saved notification');
+    await page.getByLabel('通知渠道',{exact:true}).selectOption('bark');
+    await page.getByLabel('Bark 地址或设备码',{exact:true}).fill('kept-bark-draft');
+    await page.getByLabel('通知渠道',{exact:true}).selectOption('webhook');
+    assert.equal(await page.getByLabel('请求体',{exact:true}).inputValue(),'Saved draft\n$content');
+    await page.getByLabel('通知模式',{exact:true}).evaluate(s=>{s.add(new Option('Invalid','bad',true,true));});
+    assert.equal((await saveNotice()).status(),400);await nnotice(/通知模式无效/);
+    assert.equal(await page.getByLabel('请求体',{exact:true}).inputValue(),'Saved draft\n$content');
+    assert.equal((await state()).notify.length,2);
+    await page.getByLabel('通知模式',{exact:true}).selectOption('trimmed');
+    await fixture({notify_save:true});
+    assert.equal((await saveNotice()).status(),500);await nnotice(/保存失败/);
+    const requestId=await editForm().locator('[name="request_id"]').inputValue();
+    await page.getByLabel('通知名称',{exact:true}).fill('Corrected saved notification');
+    assert.equal(await editForm().locator('[name="request_id"]').inputValue(),requestId);
+    await fixture({notify_after:true});
+    assert.equal((await saveNotice()).status(),503);await nnotice(/已保存/);
+    assert.equal((await state()).notify.length,3);
+    await fixture({});await page.getByRole('link',{name:'查看已保存通知',exact:true}).click();
+    assert.equal(await page.getByLabel('通知名称',{exact:true}).inputValue(),'Corrected saved notification');
+    assert.equal(await page.getByLabel('请求头',{exact:true}).inputValue(),'Authorization: browser-private');
+    // A stale edit retains the draft and requires an explicit merge against current settings.
+    await page.goto(base+'/notify/edit/n');await page.getByLabel('通知名称',{exact:true}).fill('Merged notification');
+    await fixture({notify_changed:true});assert.equal((await saveNotice()).status(),409);await nnotice(/已变化/);
+    assert.match(await page.locator('.content').innerText(),/Changed notification/);
+    assert.equal(await page.getByLabel('通知名称',{exact:true}).inputValue(),'Merged notification');
+    await saveNotice();await page.waitForURL(u=>u.pathname==='/notify');
+    assert.equal((await state()).notify[0].name,'Merged notification');
+    // Lost save+test response must not create another channel or repeat the webhook.
+    await page.goto(base+'/notify/new');await fill('Lost save and test');
+    await page.route('**/notify/new',async route=>{await route.fetch();await route.abort();},{times:1});
+    await editForm().locator('button[value="test"]').click();await page.locator('[data-collection-save-pending]').waitFor();
+    assert.equal((await state()).notify.length,4);assert.equal((await state()).deliveries.length,1);
+    await page.reload();await page.getByRole('button',{name:'查询本次保存结果',exact:true}).click();
+    await nnotice(/通知已保存/);await page.waitForFunction(()=>!document.querySelector('[data-collection-save-pending]'));
+    assert.equal((await state()).notify.length,4);assert.equal((await state()).deliveries.length,1);
+    // Persistence confirmation failure resumes only the test, with the exact saved version.
+    await page.goto(base+'/notify/new');await fill('Partial saved test');await fixture({notify_after:true});
+    assert.equal((await saveNotice('test')).status(),503);await nnotice(/已保存/);
+    assert.equal((await state()).notify.length,5);assert.equal((await state()).deliveries.length,1);
+    await fixture({});await submit(page.locator('form[action^="/notify/test/"]'));
+    await nnotice(/已发送/);assert.equal((await state()).deliveries.length,2);
+    // A failed webhook offers the original history row, not another save.
+    await page.goto(base+'/notify/edit/n');await fixture({test_network:true});
+    assert.equal((await saveNotice('test')).status(),502);await nnotice(/通知已保存/);
+    assert.equal(await page.locator('form:has(select[name="channel"])').count(),0);
+    await fixture({});await submit(page.locator('form[action^="/notify/retry/"]'));
+    assert.equal((await state()).deliveries.length,4);assert.equal((await state()).notify.length,5);
+    // A gateway error and fresh login preserve both the draft and original create identifier.
+    await page.goto(base+'/notify/new');await fill('Login recovery');
+    await page.route('**/notify/new',r=>r.fulfill({status:502,contentType:'text/plain',body:'gateway'}),{times:1});
+    await editForm().locator('button[value="save"]').click();await page.locator('[data-collection-save-pending]').waitFor();
+    await page.goto(base+'/logout');await login();await page.getByRole('button',{name:'查询本次保存结果',exact:true}).click();
+    await page.waitForFunction(()=>!document.querySelector('[data-collection-save-pending]'));
+    assert.equal((await state()).notify.length,6);
+    // Interrupted save can be confirmed, and a deleted channel can explicitly save as new.
+    await page.goto(base+'/notify/edit/n');await fixture({notify_save:true,notify_receipt:true});
+    assert.equal((await saveNotice()).status(),500);await nnotice(/确认后重试/);
+    await fixture({});await saveNotice();await page.waitForURL(u=>u.pathname==='/notify');
+    await page.goto(base+'/notify/edit/n');await page.getByLabel('通知名称',{exact:true}).fill('Deleted draft');
+    await fixture({notify_remove:'n'});assert.equal((await saveNotice()).status(),404);await nnotice(/不存在/);
+    assert.equal(await editForm().getAttribute('action'),'/notify/new');
+    await saveNotice();await page.waitForURL(u=>u.pathname==='/notify');assert.equal((await state()).notify.length,6);
+    // Leave a real conflict recovery page for visual verification.
+    await fixture({notify_reset:true});await page.goto(base+'/notify/edit/n');await fill('Preserved final draft');
+    await fixture({notify_changed:true});assert.equal((await saveNotice()).status(),409);await nnotice(/已变化/);
+    await page.evaluate(()=>{document.documentElement.style.scrollBehavior='auto';window.scrollTo(0,0);});await page.waitForTimeout(150);
+    if(process.env.FLS_BULK_SCREENSHOTS) await page.screenshot({path:process.env.FLS_BULK_SCREENSHOTS+'/notify-save-'+viewport.width+'.png',fullPage:true});
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
+    assert.deepEqual(errors,[]);console.log('notification save recovery passed '+viewport.width);
+    await context.close();continue;
+   }
    if(process.env.FLS_NOTIFY_TESTS){
     await fixture({notify_reset:true});
     await page.goto(base+'/login');await login();await page.goto(base+'/notify');

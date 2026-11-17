@@ -452,7 +452,7 @@ class NotificationIsolationTests(unittest.TestCase):
             from fls_manager import paths
 
             with patch(
-                "fls_manager.routes.notify.pages.send_one",
+                "fls_manager.routes.notify.actions.send_one",
                 return_value=(True, "mock sent"),
             ) as send_one:
                 response = app.test_client().post(
@@ -462,11 +462,13 @@ class NotificationIsolationTests(unittest.TestCase):
                         "channel": "bark",
                         "BARK_PUSH": "fixture-token",
                         "action": "test",
+                        "request_id": "c" * 32,
+                        "enabled": "1",
                     },
                     headers={"X-Token": TOKEN},
                 )
 
-            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.status_code, 200)
             items = read_json(base_dir / "data" / "config.json")["notify_items"]
             self.assertEqual(len(items), 1)
             self.assertEqual(items[0]["name"], "Mock bark")
@@ -490,6 +492,8 @@ class NotificationIsolationTests(unittest.TestCase):
                     "channel": "bark",
                     "log_mode": "trimmed",
                     "BARK_PUSH": "fixture-token",
+                    "request_id": "d" * 32,
+                    "enabled": "1",
                 },
                 headers=headers,
             )

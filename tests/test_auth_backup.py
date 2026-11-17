@@ -308,7 +308,8 @@ class CsrfSafetyTests(unittest.TestCase):
     def test_session_post_requires_csrf_token(self):
         with isolated_fls_env(token="unit-token") as base_dir:
             client = load_app().test_client()
-            login_client(client)
+            with patch("fls_manager.app.dispatch_frontend_open_event"):
+                login_client(client)
 
             response = client.post(
                 "/task/new",
