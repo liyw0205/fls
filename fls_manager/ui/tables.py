@@ -937,7 +937,7 @@ function taskToggleOptions(taskId){{
     options.single = true;
     options.ids = () => [taskId];
     options.select = () => {{}};
-    options.endpoint = data => (["copy", "delete", "run", "stop"].includes(data.action))
+    options.endpoint = data => (["copy", "delete", "run", "stop", "clear_collection"].includes(data.action))
         ? "/api/task/action/" + data.action + "/" + encodeURIComponent(taskId) : "/api/task/bulk-action";
     return options;
 }}

@@ -69,7 +69,7 @@ def main():
         @app.route("/api/fixture/bulk", methods=["POST", "GET"])
         def fixture():
             if request.method == "GET":
-                return jsonify(tasks=models.load_tasks(), history=models.load_task_history())
+                return jsonify(tasks=models.load_tasks(), history=models.load_task_history(), collections=models.load_collections())
             data = request.get_json()
             fault.update(reload=bool(data.get("reload")), save=bool(data.get("save")), unknown=bool(data.get("unknown")), start_fail=bool(data.get("start_fail")))
             if data.get("reset"):
@@ -145,6 +145,66 @@ const {chromium} = require(process.env.FLS_PLAYWRIGHT_CORE);
     await page.goto(base+'/login');
     await login();
     await page.goto(base+path);
+    if(process.env.FLS_CLEAR_COLLECTION_ONLY){
+     const form=()=>page.locator('form[action^="/task/collection/clear/a"]');
+     const notice=()=>page.locator('[data-bulk-recovery="task:a"]');
+     const readTask=async ()=>(await state()).tasks.find(t=>t.id==='a');
+     const clear=async status=>{
+      const response=page.waitForResponse(r=>r.request().method()==='POST' && new URL(r.url()).pathname==='/task/collection/clear/a');
+      await form().getByRole('button',{name:'移出合集',exact:true}).click();
+      assert.equal((await response).status(),status);
+     };
+     assert.equal(await form().locator('input[name="expected_collection"]').inputValue(),'browser-collection');
+     await fixture({save:true});
+     await clear(500);
+     await page.getByRole('button',{name:'重试移出合集',exact:true}).waitFor();
+     assert.equal((await readTask()).collection_id,'browser-collection');
+     await fixture({});
+     await page.getByRole('button',{name:'重试移出合集',exact:true}).click();
+     await page.waitForURL(url=>url.pathname==='/collections');
+     assert.equal((await readTask()).collection_id,'');
+     await fixture({reset:true,collection:true});
+     await page.goto(base+'/collections');
+     const match=url=>url.pathname==='/task/collection/clear/a';
+     let dropped=false;
+     await page.route(match,async route=>{
+      if(!dropped){dropped=true;await route.fetch();return route.abort();}
+      return route.continue();
+     });
+     await form().getByRole('button',{name:'移出合集',exact:true}).click();
+     await notice().getByRole('button',{name:'查询本次操作结果',exact:true}).waitFor();
+     assert.equal((await readTask()).collection_id,'');
+     await page.reload();
+     assert.equal(await form().count(),0);
+     await notice().getByRole('button',{name:'查询本次操作结果',exact:true}).click();
+     await settled();
+     assert.equal((await readTask()).collection_id,'');
+     await page.unroute(match);
+     await fixture({reset:true,collection:true});
+     await page.goto(base+'/collections');
+     assert.equal((await page.request.post(base+'/collection/new',{headers,form:{name:'Later collection',remark:'fixture'}})).status(),200);
+     const later=(await state()).collections.find(c=>c.name==='Later collection');
+     assert.ok(later);
+     const edit=await page.request.get(base+'/task/edit/a',{headers});
+     const fields=await page.evaluate(html=>{
+      const form=new DOMParser().parseFromString(html,'text/html').querySelector('form[method="post"]');
+      return Object.fromEntries(Array.from(form.querySelectorAll('input[name],select[name],textarea[name]')).filter(el=>!['checkbox','radio'].includes(el.type)||el.checked).map(el=>[el.name,el.value]));
+     },await edit.text());
+     fields.collection_id=later.id;
+     assert.equal((await page.request.post(base+'/task/edit/a',{headers,form:fields})).status(),200);
+     assert.equal((await readTask()).collection_id,later.id);
+     await clear(409);
+     await page.getByText('任务已加入其他合集，未移出，请刷新后重新选择',{exact:true}).first().waitFor();
+     assert.equal((await readTask()).collection_id,later.id);
+     await notice().getByRole('button',{name:'重试未完成项',exact:true}).click();
+     await settled();
+     assert.equal((await readTask()).collection_id,later.id);
+     assert.deepEqual(errors,[]);
+     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+     console.log(JSON.stringify({path,viewport,clearCollection:true,status:'passed'}));
+     await context.close();
+     continue;
+    }
     if(process.env.FLS_TOGGLE_LOG_ONLY){
      await page.goto(base+'/log/a?back=/collections');
      const toggle=()=>page.locator('form[action^="/task/toggle/a"]');

@@ -318,7 +318,7 @@ def api_task_action(action, task_id):
             )
             return jsonify(payload), status
 
-        if action in ("copy", "delete"):
+        if action in ("copy", "delete", "clear_collection"):
             from ..task_bulk import execute_single
             data = request.get_json(silent=True) if request.is_json else request.form.to_dict()
             payload, status = execute_single(

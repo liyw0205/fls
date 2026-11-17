@@ -116,35 +116,33 @@ def task_pin(task_id):
 
 @bp.route("/task/collection/clear/<task_id>", methods=["POST"])
 def task_collection_clear(task_id):
-    result = {}
-
-    def clear_collection(current_tasks):
-        task = next((item for item in current_tasks if item.get("id") == task_id), None)
-        if task is None:
-            return False
-        result["found"] = True
-        if not str(task.get("collection_id") or ""):
-            return False
-        task["collection_id"] = ""
-        task["updated_at"] = now_str()
-        return True
-
+    from ...task_bulk import execute_clear_collection
+    back_url = get_back_url("/collections")
+    data = request.form.to_dict()
+    data.setdefault("request_id", uuid.uuid4().hex)
     try:
-        mutate_tasks(clear_collection)
-    except Exception as e:
-        back_url = get_back_url("/collections")
-        body = f"""
-{message_card(f"移出合集失败，任务归属未更改：{h(e)}", "error", strong=True, title="移出失败")}
-<div class="card">
-    <a class="btn btn-gray" href="{h(back_url)}">返回并刷新后重试</a>
-</div>
-"""
-        return layout("移出任务", "collections", body), 500
-
-    if not result.get("found"):
-        abort(404)
-
-    return redirect(get_back_url("/collections"))
+        payload, status = execute_clear_collection(
+            task_id, data, load_tasks=load_tasks, mutate_tasks=mutate_tasks,
+            run_task=run_task_now, stop_task=stop_task_now,
+            cancel_retry=cancel_task_retry, reload_scheduler=reload_scheduler,
+        )
+    except Exception as exc:
+        payload, status = {"ok": False, "msg": str(exc)}, 500
+    if status == 200:
+        return redirect(back_url)
+    retry_allowed = bool(payload.get("retry_ids") or payload.get("unknown_ids"))
+    request_id = uuid.uuid4().hex if retry_allowed else data["request_id"]
+    recovery = ""
+    if status != 404 and isinstance(request_id, str) and len(request_id) == 32:
+        expected_collection = payload.get("expected_collection", data.get("expected_collection"))
+        expected = f'<input type="hidden" name="expected_collection" value="{h(expected_collection)}">' if isinstance(expected_collection, str) else ""
+        recovery = f'''<form method="post" action="/task/collection/clear/{h(task_id)}?back={h(quote(back_url, safe=''))}">
+<input type="hidden" name="request_id" value="{h(request_id)}">{expected}
+<button class="btn btn-primary" type="submit" onclick="return confirm('确认任务合集归属后继续？')">{'重试移出合集' if retry_allowed else '查询本次操作结果'}</button></form>'''
+    body = message_card(payload["msg"], "error", strong=True, title="移出失败") + f'''
+<section class="section" role="alert" data-task-execution-result="{h(json.dumps(payload, ensure_ascii=False))}">
+<p>{h(payload['msg'])}</p>{recovery}<a class="btn btn-gray" href="{h(back_url)}">返回并刷新后重试</a></section>'''
+    return layout("移出任务", "collections", body), status
 
 
 def _task_execution_response(action, task_id):

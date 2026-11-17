@@ -2486,7 +2486,7 @@ class BulkWorkflowTests(unittest.TestCase):
 
             self.assertEqual(page.status_code, 500)
             page_body = page.get_data(as_text=True)
-            self.assertIn("任务归属未更改", page_body)
+            self.assertIn("任务合集归属未更改", page_body)
             self.assertIn("task file is read-only", page_body)
             self.assertIn("刷新后重试", page_body)
 

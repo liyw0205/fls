@@ -630,6 +630,9 @@ function flsBulkNotice(options, state, error){
     }
     notice.replaceChildren();
     const payload = state.payload || {};
+    if(payload.action === "clear_collection" && typeof payload.expected_collection === "string"){
+        options.expectedCollection = payload.expected_collection;
+    }
     const message = document.createElement("p");
     message.textContent = error || payload.msg || flsBulkActionMessage(payload, "操作结果尚未确认");
     notice.append(message);
@@ -752,6 +755,9 @@ async function flsSubmitTaskBulk(options, action, source, replay){
             const bytes = crypto.getRandomValues(new Uint8Array(16));
             const requestId = Array.from(bytes, value => value.toString(16).padStart(2, "0")).join("");
             state = {selection:ids, pending:{action:action, task_ids:ids, request_id:requestId}};
+            if(action === "clear_collection" && options.expectedCollection !== undefined){
+                state.pending.expected_collection = options.expectedCollection;
+            }
             flsBulkSave(options.scope, state);
         }
     } catch(e){
@@ -1847,11 +1853,13 @@ if (document.readyState === "loading") {
     }
 
     function taskExecutionOptions(taskId){
+        const payload = flsBulkState("task:" + taskId).payload || {};
         return {
             scope:"task:" + taskId, block:document.querySelector("#tasksBlock") ? "#tasksBlock" : ".content",
             single:true, ids:() => [taskId], select:() => {},
+            expectedCollection:payload.expected_collection,
             endpoint:data => "/api/task/action/" + data.action + "/" + encodeURIComponent(taskId),
-            refresh:() => ajaxLoad(/^\/(run|stop)\//.test(location.pathname) ? "/tasks" : location.href, false, {force:true})
+            refresh:() => ajaxLoad(/^\/(run|stop|task\/collection\/clear)\//.test(location.pathname) ? "/tasks" : location.href, false, {force:true})
         };
     }
 
@@ -1861,7 +1869,7 @@ if (document.readyState === "loading") {
             Object.keys(sessionStorage).filter(key => key.startsWith(flsBulkStorageKey("task:"))).forEach(key => {
                 const state = JSON.parse(sessionStorage.getItem(key));
                 const action = (state.pending || state.payload || {}).action;
-                if(!["run", "stop"].includes(action)) return;
+                if(!["run", "stop", "clear_collection"].includes(action)) return;
                 const taskId = key.slice(flsBulkStorageKey("task:").length);
                 flsRestoreTaskBulk(taskExecutionOptions(taskId));
             });
@@ -1869,7 +1877,7 @@ if (document.readyState === "loading") {
     }
 
     function trackTaskExecution(url, data){
-        const match = url.pathname.match(/^\/(run|stop)\/([^/]+)$/);
+        const match = url.pathname.match(/^\/(run|stop|task\/collection\/clear)\/([^/]+)$/);
         if(!match || !data.has("request_id")) return null;
         const taskId = decodeURIComponent(match[2]);
         const options = taskExecutionOptions(taskId);
@@ -1878,7 +1886,9 @@ if (document.readyState === "loading") {
             flsBulkNotice(options, state, "上次请求尚未确认，请先查询本次操作结果");
             return false;
         }
-        flsBulkSave(options.scope, {selection:[taskId], pending:{action:match[1], task_ids:[taskId], request_id:data.get("request_id")}});
+        const pending = {action:match[1] === "task/collection/clear" ? "clear_collection" : match[1], task_ids:[taskId], request_id:data.get("request_id")};
+        if(data.has("expected_collection")) pending.expected_collection = data.get("expected_collection");
+        flsBulkSave(options.scope, {selection:[taskId], pending:pending});
         return options;
     }
 
