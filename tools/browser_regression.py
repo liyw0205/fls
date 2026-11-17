@@ -612,11 +612,14 @@ async function runActionAudit(page, audit) {
     return {
       disabled: button.disabled,
       busy: button.getAttribute("aria-busy"),
-      feedback: Array.from(document.querySelectorAll("#flsToastBox .fls-toast")).map(item => item.textContent).join(" | ")
+      feedback: document.querySelector('[data-bulk-recovery]')?.textContent || "",
+      retry: Array.from(document.querySelectorAll('[data-bulk-recovery] button')).some(item => item.textContent === "查询本次操作结果")
     };
   }));
   auditPostCalls(collection, "collection bulk", audit);
-  auditFeedback(collection, "collection bulk", audit);
+  if(!collection.state?.feedback.includes("fixture collection failure") || !collection.state?.retry){
+    issue(audit, "action-feedback", "collection bulk recovery missing");
+  }
   if (collection.state && (collection.state.disabled || collection.state.busy)) issue(audit, "button-state", "collection bulk not restored");
 
   await page.goto(process.env.FLS_BASE_URL + "/backup", {
@@ -818,7 +821,7 @@ async function runEditorAudit(browser, results) {
     console.log(JSON.stringify({total:results.length,failures},null,2));
     process.exit(failures.length ? 1 : 0);
   }
-  for (const [width, height] of viewports) {
+  for (const [width, height] of (process.env.FLS_ACTION_ONLY === "1" ? [] : viewports)) {
     const context = await browser.newContext({
       viewport: {width, height},
       extraHTTPHeaders: {"X-Token": process.env.FLS_TOKEN}
@@ -1307,7 +1310,7 @@ async function runEditorAudit(browser, results) {
     await actionContext.close();
     results.push(actionAudit);
   }
-  if (process.env.FLS_ACTION_FIXTURE === "1") {
+  if (process.env.FLS_ACTION_FIXTURE === "1" && process.env.FLS_ACTION_ONLY !== "1") {
     await runEditorAudit(browser, results);
   }
   await browser.close();
@@ -1318,7 +1321,7 @@ async function runEditorAudit(browser, results) {
 '''
 
 
-def run_node(base_url, playwright_core, chromium, token, action_fixture=False, editors_only=False, paths=None):
+def run_node(base_url, playwright_core, chromium, token, action_fixture=False, editors_only=False, paths=None, actions_only=False):
     env = os.environ.copy()
     env.update(
         FLS_BASE_URL=base_url.rstrip("/"),
@@ -1327,6 +1330,7 @@ def run_node(base_url, playwright_core, chromium, token, action_fixture=False, e
         FLS_CHROMIUM=chromium,
         FLS_ACTION_FIXTURE="1" if action_fixture else "0",
         FLS_EDITOR_ONLY="1" if editors_only else "0",
+        FLS_ACTION_ONLY="1" if actions_only else "0",
         FLS_BROWSER_PATHS=json.dumps(paths or []),
     )
     # Chromium inherits the Node stdout descriptor.  A temporary regular file
@@ -1361,10 +1365,11 @@ def main():
     parser.add_argument("--base-url", help="reuse an already running FLS server")
     parser.add_argument("--token", default=TOKEN, help="token sent in X-Token header")
     parser.add_argument("--editors-only", action="store_true", help="run editor save/recovery workflows in an isolated fixture")
+    parser.add_argument("--actions-only", action="store_true", help="run only existing action workflows in an isolated fixture")
     parser.add_argument("--path", action="append", help="check only this page path (repeatable), plus navigation and action workflows")
     args = parser.parse_args()
-    if args.editors_only and args.base_url:
-        parser.error("--editors-only requires an isolated fixture; omit --base-url")
+    if (args.editors_only or args.actions_only) and args.base_url:
+        parser.error("workflow-only checks require an isolated fixture; omit --base-url")
 
     playwright_core = find_playwright_core()
     chromium = find_chromium()
@@ -1412,6 +1417,7 @@ def main():
             action_fixture=bool(temp_dir),
             editors_only=args.editors_only,
             paths=args.path,
+            actions_only=args.actions_only,
         )
         print(result.stdout, end="")
         return result.returncode

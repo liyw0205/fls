@@ -74,25 +74,6 @@ def api_notify_retry(delivery_id):
     return jsonify(payload), 500
 
 
-def _unique_task_ids(values):
-    if isinstance(values, str):
-        values = [values]
-
-    result = []
-    seen = set()
-
-    for value in values or []:
-        task_id = str(value or "").strip()
-
-        if not task_id or task_id in seen:
-            continue
-
-        seen.add(task_id)
-        result.append(task_id)
-
-    return result
-
-
 def _copy_task(tasks, task_id):
     for task in tasks:
         if task.get("id") != task_id:
@@ -143,47 +124,8 @@ def _task_action_result(ok, msg):
     return jsonify(payload)
 
 
-def _bulk_failure_status(action, failures):
-    if action == "run":
-        messages = [str(item or "") for item in failures]
-        if messages and all("任务启动失败" in item for item in messages):
-            return 500
-        if messages and all("命令解析失败" in item for item in messages):
-            return 400
-
-    return 409
-
-
-def _bulk_response(action, task_ids, payload, failures=None, completed_count=0, blocked_count=0):
-    failures = failures or []
-    if action == "run" and any("脚本重命名待恢复" in str(item) for item in failures):
-        from ..models import get_task
-        from ..script_rename import pending_script_rename
-        for task_id in task_ids:
-            pending = pending_script_rename(task_id=task_id, task=get_task(task_id))
-            if pending:
-                payload["recovery_url"] = f"/scripts/rename-recovery/{pending['id']}"
-                break
-    if (failures or blocked_count) and completed_count == 0:
-        payload["ok"] = False
-        return jsonify(payload), _bulk_failure_status(action, failures)
-    return jsonify(payload)
-
-
 def _delete_stop_failed(ok, msg):
     return not ok and msg != "任务未运行"
-
-
-def _bulk_payload(action, task_ids, msg, **extra):
-    payload = {
-        "ok": True,
-        "msg": msg,
-        "action": action,
-        "count": len(task_ids),
-    }
-    payload.update(extra)
-
-    return payload
 
 
 def _status_task_signature(tasks):
@@ -495,236 +437,42 @@ def api_task_action(action, task_id):
 
 @bp.route("/api/task/bulk-action", methods=["POST"])
 def api_task_bulk_action():
-    action = ""
-    task_ids = []
+    from ..task_bulk import parse_bulk_request, execute_bulk
 
     try:
-        data = request.get_json(silent=True) or {}
-        action = str(data.get("action") or request.form.get("action") or "").strip()
-
-        raw_task_ids = data.get("task_ids")
-        if raw_task_ids is None:
-            raw_task_ids = request.form.getlist("task_ids")
-
-        task_ids = _unique_task_ids(raw_task_ids)
-
-        if action not in ("enable", "disable", "run", "stop", "delete", "clear_collection"):
-            return jsonify({
-                "ok": False,
-                "msg": "未知批量操作",
-                "action": action,
-                "count": len(task_ids),
-            }), 400
-
-        if not task_ids:
-            return jsonify({
-                "ok": False,
-                "msg": "请选择任务",
-                "action": action,
-                "count": 0,
-            }), 400
-
-        tasks = load_tasks()
-        task_map = {str(task.get("id") or ""): task for task in tasks}
-        missing = [task_id for task_id in task_ids if task_id not in task_map]
-
-        if missing:
-            return jsonify({
-                "ok": False,
-                "msg": f"有 {len(missing)} 个任务不存在，请刷新后重试",
-                "action": action,
-                "count": len(task_ids),
-                "missing_count": len(missing),
-                "missing_ids": missing,
-            }), 404
-
-        selected = set(task_ids)
-
-        if action in ("enable", "disable"):
-            enabled = action == "enable"
-            result = {"changed_count": 0}
-
-            def set_enabled(current_tasks):
-                for task in current_tasks:
-                    if task.get("id") in selected and bool(task.get("enabled", True)) != enabled:
-                        task["enabled"] = enabled
-                        task["updated_at"] = now_str()
-                        result["changed_count"] += 1
-                return result["changed_count"] > 0
-
-            def cancel_disabled_retries():
-                if not enabled:
-                    for task_id in task_ids:
-                        cancel_task_retry(task_id, "任务已禁用")
-
-            mutate_tasks(set_enabled, reload_scheduler, cancel_disabled_retries)
-            changed_count = result["changed_count"]
-
-            return jsonify(_bulk_payload(
-                action,
-                task_ids,
-                f"已{'启用' if enabled else '禁用'} {changed_count} 个任务",
-                updated_count=changed_count,
-            ))
-
-        if action == "run":
-            ok_count = 0
-            failed = []
-
-            for task_id in task_ids:
-                ok, msg = run_task_now(task_id, source="manual")
-                if ok:
-                    ok_count += 1
-                else:
-                    task = task_map.get(task_id) or {}
-                    name = task.get("name") or task.get("command") or task_id
-                    failed.append(f"{name}: {msg}")
-
-            parts = [f"已提交运行 {ok_count} 个任务"]
-            if failed:
-                parts.append(f"{len(failed)} 个未运行：{'；'.join(failed[:3])}")
-                if len(failed) > 3:
-                    parts.append(f"等 {len(failed)} 个")
-
-            return _bulk_response(
-                action,
-                task_ids,
-                _bulk_payload(
-                    action,
-                    task_ids,
-                    "；".join(parts),
-                    submitted_count=ok_count,
-                    failed_count=len(failed),
-                    failures=failed,
-                ),
-                failures=failed,
-                completed_count=ok_count,
-            )
-
-        if action == "stop":
-            ok_count = 0
-            skipped = 0
-            failed = []
-
-            for task_id in task_ids:
-                ok, msg = stop_task_now(task_id)
-                if ok:
-                    ok_count += 1
-                elif msg == "任务未运行":
-                    skipped += 1
-                else:
-                    task = task_map.get(task_id) or {}
-                    name = task.get("name") or task.get("command") or task_id
-                    failed.append(f"{name}: {msg}")
-
-            parts = [f"已结束 {ok_count} 个任务"]
-            if skipped:
-                parts.append(f"跳过 {skipped} 个未运行任务")
-            if failed:
-                parts.append(f"{len(failed)} 个结束失败：{'；'.join(failed[:3])}")
-                if len(failed) > 3:
-                    parts.append(f"等 {len(failed)} 个")
-
-            return _bulk_response(
-                action,
-                task_ids,
-                _bulk_payload(
-                    action,
-                    task_ids,
-                    "；".join(parts),
-                    stopped_count=ok_count,
-                    skipped_count=skipped,
-                    failed_count=len(failed),
-                    failures=failed,
-                ),
-                failures=failed,
-                completed_count=ok_count,
-                blocked_count=skipped,
-            )
-
-        if action == "delete":
-            deleted_ids = []
-            failed = []
-
-            for task_id in task_ids:
-                ok, msg = stop_task_now(task_id)
-
-                if not _delete_stop_failed(ok, msg):
-                    deleted_ids.append(task_id)
-                    continue
-
-                task = task_map.get(task_id) or {}
-                name = task.get("name") or task.get("command") or task_id
-                failed.append(f"{name}: {msg}")
-
-            deleted = set(deleted_ids)
-
-            if deleted:
-                def remove_deleted(current_tasks):
-                    remaining = [task for task in current_tasks if task.get("id") not in deleted]
-                    if len(remaining) == len(current_tasks):
-                        return False
-                    current_tasks[:] = remaining
-                    return True
-
-                mutate_tasks(remove_deleted, reload_scheduler)
-
-            parts = [f"已删除 {len(deleted_ids)} 个任务"]
-            if failed:
-                parts.append(f"{len(failed)} 个删除失败：{'；'.join(failed[:3])}")
-                if len(failed) > 3:
-                    parts.append(f"等 {len(failed)} 个")
-
-            return _bulk_response(
-                action,
-                task_ids,
-                _bulk_payload(
-                    action,
-                    task_ids,
-                    "；".join(parts),
-                    deleted_count=len(deleted_ids),
-                    failed_count=len(failed),
-                    failures=failed,
-                ),
-                failures=failed,
-                completed_count=len(deleted_ids),
-            )
-
-        if action == "clear_collection":
-            result = {"changed_count": 0}
-
-            def clear_collection(current_tasks):
-                for task in current_tasks:
-                    if task.get("id") in selected and str(task.get("collection_id") or ""):
-                        task["collection_id"] = ""
-                        task["updated_at"] = now_str()
-                        result["changed_count"] += 1
-                return result["changed_count"] > 0
-
-            try:
-                mutate_tasks(clear_collection)
-            except Exception as e:
-                return jsonify({
-                    "ok": False,
-                    "msg": f"任务合集归属未更改，保存失败：{e}",
-                    "action": action,
-                    "count": len(task_ids),
-                }), 500
-            changed_count = result["changed_count"]
-
-            return jsonify(_bulk_payload(
-                action,
-                task_ids,
-                f"已取出 {changed_count} 个任务",
-                updated_count=changed_count,
-            ))
-
-        return jsonify({"ok": False, "msg": "未知批量操作"}), 400
-
-    except Exception as e:
-        return jsonify({
-            "ok": False,
-            "msg": str(e),
-            "action": action,
-            "count": len(task_ids),
-        }), 500
+        data = request.get_json(silent=True) if request.is_json else {
+            "action": request.form.get("action", ""),
+            "task_ids": request.form.getlist("task_ids"),
+            "request_id": request.form.get("request_id", ""),
+        }
+        action, task_ids, request_id = parse_bulk_request(data)
+    except ValueError as exc:
+        invalid = data if isinstance(data, dict) else {}
+        values = invalid.get("task_ids", [])
+        values = [values] if isinstance(values, str) else values
+        count = len({value.strip() for value in values if isinstance(value, str) and value.strip()}) if isinstance(values, list) else 0
+        return jsonify({"ok": False, "msg": str(exc), "action": invalid.get("action", ""), "count": count}), 400
+    try:
+        payload, status = execute_bulk(
+            action, task_ids, request_id,
+            load_tasks=load_tasks, mutate_tasks=mutate_tasks,
+            run_task=run_task_now, stop_task=stop_task_now,
+            cancel_retry=cancel_task_retry, reload_scheduler=reload_scheduler,
+        )
+        if action == "run" and any("脚本重命名待恢复" in row["msg"] for row in payload.get("results", [])):
+            from ..models import get_task
+            from ..script_rename import pending_script_rename
+            for task_id in payload.get("retry_ids", []):
+                try:
+                    pending = pending_script_rename(task_id=task_id, task=get_task(task_id))
+                except Exception as exc:
+                    payload["ok"] = False
+                    payload["msg"] += f"；恢复入口读取失败：{exc}"
+                    status = 500
+                    break
+                if pending:
+                    payload["recovery_url"] = f"/scripts/rename-recovery/{pending['id']}"
+                    break
+        return jsonify(payload), status
+    except Exception as exc:
+        return jsonify({"ok": False, "msg": str(exc), "action": action, "count": len(task_ids)}), 500

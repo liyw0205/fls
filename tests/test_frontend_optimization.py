@@ -61,7 +61,7 @@ class FrontendOptimizationTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertIn('/static/favicon-generated.png?v=20260920-1', html)
             self.assertIn('/static/fls.css?v=20260920-3', html)
-            self.assertIn('/static/fls.js?v=20260920-3&actions=5', html)
+            self.assertIn('/static/fls.js?v=20260920-3&actions=6', html)
             self.assertIn('/static/fls_theme.css?v=20260920-3', html)
             self.assertIn('theme=neumorphism&rev=20260930-1', html)
             self.assertIn('/static/fls_density.css?v=20260930-2', html)

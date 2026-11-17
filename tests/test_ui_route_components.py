@@ -1263,7 +1263,7 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertIn("task-bulk-btn", html)
             self.assertIn("taskBulkAction('enable')", html)
             self.assertIn("taskBulkAction('delete')", html)
-            self.assertIn("flsBulkActionMessage(json", html)
+            self.assertIn("flsSubmitTaskBulk(taskBulkOptions()", html)
             self.assertIn("task-action-more", html)
             self.assertIn("task-action-more-menu", html)
             self.assertIn("taskAjaxAction('copy','task-list')", html)

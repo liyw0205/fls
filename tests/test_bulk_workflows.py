@@ -927,6 +927,14 @@ class BulkWorkflowTests(unittest.TestCase):
                     "action": "delete",
                     "count": 2,
                     "deleted_count": 0,
+                    "stopped_ids": [],
+                    "completed_ids": [],
+                    "retry_ids": ["t1", "t2"],
+                    "unknown_ids": [],
+                    "results": [
+                        {"task_id": "t1", "status": "failed", "msg": "停止失败 1"},
+                        {"task_id": "t2", "status": "failed", "msg": "停止失败 2"},
+                    ],
                     "failed_count": 2,
                     "failures": ["Task t1: 停止失败 1", "Task t2: 停止失败 2"],
                 },
@@ -2071,7 +2079,7 @@ class BulkWorkflowTests(unittest.TestCase):
             self.assertIn("multiple", html)
             self.assertIn("collection-bulk-toolbar", html)
             self.assertIn("flsCollectionTaskBulkAction", html)
-            self.assertIn("flsBulkActionMessage(json", html)
+            self.assertIn("flsSubmitTaskBulk(flsCollectionBulkOptions", html)
 
     def test_collection_add_task_keeps_legacy_task_id_compatibility_and_dedupes(self):
         with isolated_app() as (app, base_dir):

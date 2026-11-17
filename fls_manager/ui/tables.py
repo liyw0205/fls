@@ -887,91 +887,25 @@ function taskToggleAll(checked){{
     taskUpdateBulkState();
 }}
 
+function taskBulkOptions(){{
+    return {{
+        scope:"tasks", block:"#tasksBlock", ids:taskSelectedIds,
+        refresh:() => refreshTasksBlockPartial(true),
+        select:ids => {{
+            const selected = new Set(ids);
+            document.querySelectorAll("#tasksBlock .task-select-checkbox").forEach(box => {{
+                box.checked = selected.has(box.dataset.taskId);
+            }});
+            taskUpdateBulkState();
+        }}
+    }};
+}}
+
 async function taskBulkAction(action, source){{
     const ids = taskSelectedIds();
-
-    if(!ids.length){{
-        alert("请选择任务");
-        return;
-    }}
-
-    const labels = {{
-        enable: "启用",
-        disable: "禁用",
-        run: "运行",
-        stop: "停止",
-        delete: "删除"
-    }};
-
-    const label = labels[action] || "操作";
-
-    if(action === "delete"){{
-        if(!confirm("确定删除选中的 " + ids.length + " 个任务吗？")) return;
-    }}
-
-    if(action === "stop"){{
-        if(!confirm("确定停止选中的 " + ids.length + " 个任务吗？")) return;
-    }}
-
-    if(source && !flsMarkButtonBusy(source, "处理中...")) return;
-
-    ids.forEach(function(id){{
-        document.querySelectorAll('[data-task-id="' + taskCssValue(id) + '"]').forEach(function(row){{
-            row.style.opacity = "0.55";
-        }});
-    }});
-
-    try{{
-        const headers = {{
-            "Content-Type": "application/json",
-            "X-Requested-With": "XMLHttpRequest"
-        }};
-        if(typeof flsGetCsrfToken === "function"){{
-            const csrf = flsGetCsrfToken();
-            if(csrf) headers["X-CSRF-Token"] = csrf;
-        }}
-
-        const res = await fetch("/api/task/bulk-action", {{
-            method: "POST",
-            headers: headers,
-            credentials: "same-origin",
-            body: JSON.stringify({{action: action, task_ids: ids}})
-        }});
-
-        const json = await flsReadJsonResponse(res);
-
-        if(!json.ok){{
-            if(!taskShowRecovery(json)) alert(flsActionFailure(flsBulkActionMessage(json, json.msg || (label + "失败")), "确认选择后重新提交"));
-            flsRestoreButton(source);
-            ids.forEach(function(id){{
-                document.querySelectorAll('[data-task-id="' + taskCssValue(id) + '"]').forEach(function(row){{
-                    row.style.opacity = "1";
-                }});
-            }});
-            return;
-        }}
-
-        const bulkMessage = flsBulkActionMessage(json, json.msg || (label + "完成"));
-        if(bulkMessage){{
-            alert(bulkMessage);
-        }}
-
-        if(typeof flsClearPageCache === "function"){{
-            flsClearPageCache();
-        }}
-
-        await refreshTasksBlockPartial();
-        taskShowRecovery(json);
-
-    }}catch(e){{
-        if(!taskShowRecovery(e.payload)) alert(flsActionFailure("请求失败：" + e, "检查网络或登录状态后重试"));
-        flsRestoreButton(source);
-        ids.forEach(function(id){{
-            document.querySelectorAll('[data-task-id="' + taskCssValue(id) + '"]').forEach(function(row){{
-                row.style.opacity = "1";
-            }});
-        }});
-    }}
+    if(action === "delete" && !confirm("确定删除选中的 " + ids.length + " 个任务吗？")) return;
+    if(action === "stop" && !confirm("确定停止选中的 " + ids.length + " 个任务吗？")) return;
+    await flsSubmitTaskBulk(taskBulkOptions(), action, source);
 }}
 
 function taskShowRecovery(payload){{
@@ -1056,7 +990,7 @@ async function taskAjaxAction(action, taskId, source){{
     }}
 }}
 
-async function refreshTasksBlockPartial(){{
+async function refreshTasksBlockPartial(keepSelection){{
     try{{
         const res = await fetch(window.location.href, {{
             headers: {{"X-Requested-With":"XMLHttpRequest"}},
@@ -1085,14 +1019,17 @@ async function refreshTasksBlockPartial(){{
                 oldScript.parentNode.replaceChild(script, oldScript);
             }});
         }}else{{
+            if(keepSelection) throw new Error("任务列表不可用，请重新登录后刷新");
             location.reload();
         }}
     }}catch(e){{
+        if(keepSelection) throw e;
         location.reload();
     }}
 }}
 
 taskUpdateBulkState();
+flsRestoreTaskBulk(taskBulkOptions());
 </script>
 """
 

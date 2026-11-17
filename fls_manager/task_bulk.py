@@ -1,0 +1,260 @@
+import copy
+import json
+import re
+import threading
+
+from .models import TaskSchedulerReloadError
+from .paths import DATA_DIR
+from .storage import write_json
+from .utils import now_str
+
+
+BULK_LOCK = threading.RLock()
+BULK_ACTIONS = ("enable", "disable", "run", "stop", "delete", "clear_collection")
+
+
+class TaskBulkSelectionChanged(ValueError):
+    pass
+
+
+def parse_bulk_request(data):
+    if not isinstance(data, dict):
+        raise ValueError("批量请求必须是对象")
+    action = data.get("action", "")
+    if not isinstance(action, str) or action.strip() not in BULK_ACTIONS:
+        raise ValueError("未知批量操作")
+    values = data.get("task_ids", [])
+    if isinstance(values, str):
+        values = [values]
+    if not isinstance(values, list) or any(not isinstance(value, str) or "\x00" in value for value in values):
+        raise ValueError("任务选择必须是任务 ID 列表")
+    task_ids = list(dict.fromkeys(value.strip() for value in values if value.strip()))
+    if not task_ids:
+        raise ValueError("请选择任务")
+    request_id = data.get("request_id", "")
+    if not isinstance(request_id, str) or (request_id and not re.fullmatch(r"[a-f0-9]{32}", request_id)):
+        raise ValueError("提交标识无效，请刷新页面后重试")
+    return action.strip(), task_ids, request_id
+
+
+def _result(task_id, status, msg):
+    return {"task_id": task_id, "status": status, "msg": msg}
+
+
+def _with_results(payload, rows):
+    payload["results"] = copy.deepcopy(rows)
+    payload["completed_ids"] = [row["task_id"] for row in rows if row["status"] in ("succeeded", "skipped")]
+    payload["retry_ids"] = [row["task_id"] for row in rows if row["status"] in ("failed", "not_attempted")]
+    payload["unknown_ids"] = [row["task_id"] for row in rows if row["status"] == "unknown"]
+    return payload
+
+
+def _record_path(request_id):
+    return DATA_DIR / "task_bulk_requests" / (request_id + ".json")
+
+
+def _read_record(request_id):
+    try:
+        record = json.loads(_record_path(request_id).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    if not isinstance(record, dict) or record.get("request_id") != request_id or not isinstance(record.get("results"), list):
+        raise RuntimeError("批量操作记录损坏，未重复执行，请修复记录后重试")
+    return record
+
+
+def execute_bulk(action, task_ids, request_id, *, load_tasks, mutate_tasks, run_task,
+                 stop_task, cancel_retry, reload_scheduler):
+    # Serialize submissions without holding task/storage locks while waiting for processes.
+    with BULK_LOCK:
+        record = _read_record(request_id) if request_id else None
+        if record:
+            if record.get("action") != action or record.get("task_ids") != task_ids:
+                return {"ok": False, "msg": "提交标识已用于其他选择，未执行操作"}, 409
+            if "payload" in record:
+                return record["payload"], record["http_status"]
+            payload = _with_results({
+                "ok": False, "action": action, "count": len(task_ids), "request_id": request_id,
+                "msg": "上次请求中断；已完成项不会重复执行，结果未知项请先查看任务历史。",
+            }, record["results"])
+            if action in ("enable", "disable", "delete") and payload["unknown_ids"]:
+                payload["reload_required"] = True
+            return payload, 409
+
+        task_map = {str(task.get("id") or ""): task for task in load_tasks()}
+        missing = [task_id for task_id in task_ids if task_id not in task_map]
+        if missing:
+            return _with_results({"ok": False, "msg": f"有 {len(missing)} 个任务不存在，请刷新后重试",
+                    "action": action, "count": len(task_ids), "missing_count": len(missing),
+                    "missing_ids": missing}, [_result(task_id, "not_attempted", "选择包含不存在的任务，未执行") for task_id in task_ids]), 404
+
+        rows = [_result(task_id, "not_attempted", "尚未执行") for task_id in task_ids]
+        record = {"request_id": request_id, "action": action, "task_ids": task_ids,
+                  "results": rows, "created_at": now_str()}
+
+        def checkpoint():
+            if request_id:
+                write_json(_record_path(request_id), record)
+
+        def finish(payload, status):
+            _with_results(payload, rows)
+            failures = [f"{task_map[row['task_id']].get('name') or row['task_id']}: {row['msg']}"
+                        for row in rows if row["status"] in ("failed", "unknown")]
+            payload.setdefault("failed_count", len(failures))
+            payload.setdefault("failures", failures)
+            if action in ("run", "stop", "delete"):
+                field = {"run": "submitted_count", "stop": "stopped_count", "delete": "deleted_count"}[action]
+                payload.setdefault(field, sum(row["status"] == "succeeded" for row in rows))
+            if action == "stop":
+                payload.setdefault("skipped_count", sum(row["status"] == "skipped" for row in rows))
+            if action == "delete":
+                payload["stopped_ids"] = stopped_ids
+            if request_id:
+                payload["request_id"] = request_id
+                record.update(payload=payload, http_status=status)
+                try:
+                    checkpoint()
+                except Exception as exc:
+                    payload = dict(payload, ok=False, msg=payload["msg"] + f"；操作结果记录保存失败：{exc}")
+                    return payload, 500
+            return payload, status
+
+        # A failed claim must not start tasks or modify the task file.
+        checkpoint()
+        stopped_ids = []
+        count = 0
+        skipped = 0
+        payload = {"ok": True, "action": action, "count": len(task_ids)}
+        status = 200
+        try:
+            if action in ("run", "stop", "delete"):
+                for row in rows:
+                    task_id = row["task_id"]
+                    row.update(status="unknown", msg="执行结果尚未确认，请查看任务历史")
+                    checkpoint()
+                    try:
+                        ok, msg = run_task(task_id, source="manual") if action == "run" else stop_task(task_id)
+                    except Exception as exc:
+                        ok, msg = False, f"执行结果未知：{exc}"
+                    else:
+                        row["status"] = "succeeded" if ok else "failed"
+                        if action != "run" and msg == "任务未运行":
+                            row["status"] = "skipped"
+                            skipped += 1
+                    row["msg"] = msg
+                    if row["status"] in ("succeeded", "skipped"):
+                        if action == "delete":
+                            stopped_ids.append(task_id)
+                            row.update(status="not_attempted", msg="任务已停止，尚未删除")
+                        elif ok:
+                            count += 1
+                    checkpoint()
+
+            if action in ("enable", "disable", "clear_collection", "delete"):
+                selected = set(stopped_ids if action == "delete" else task_ids)
+                selected_rows = [row for row in rows if row["task_id"] in selected]
+                state = {"saved": False, "changed": 0}
+
+                def update(tasks):
+                    existing = {task["id"] for task in tasks}
+                    if not selected.issubset(existing):
+                        raise TaskBulkSelectionChanged("任务选择已变化，未保存，请刷新后重试")
+                    if action == "delete":
+                        tasks[:] = [task for task in tasks if task["id"] not in selected]
+                        state["changed"] = len(selected)
+                    else:
+                        for task in tasks:
+                            if task["id"] not in selected:
+                                continue
+                            field = "collection_id" if action == "clear_collection" else "enabled"
+                            value = "" if action == "clear_collection" else action == "enable"
+                            if task.get(field, True if field == "enabled" else "") != value:
+                                task[field] = value
+                                task["updated_at"] = now_str()
+                                state["changed"] += 1
+                    return state["changed"] > 0
+
+                def after_write():
+                    state["saved"] = True
+                    if action == "disable":
+                        for task_id in task_ids:
+                            cancel_retry(task_id, "任务已禁用")
+
+                if selected:
+                    for row in selected_rows:
+                        row.update(status="unknown", msg="保存结果尚未确认")
+                    checkpoint()
+                    try:
+                        mutate_tasks(update, reload_scheduler if action != "clear_collection" else None, after_write)
+                    except Exception as exc:
+                        # Atomic publication may succeed before a subsequent confirmation fails.
+                        if not state["saved"]:
+                            try:
+                                actual = {task["id"]: task for task in load_tasks()}
+                                state["saved"] = all(
+                                    task_id not in actual if action == "delete" else
+                                    task_id in actual and actual[task_id].get(
+                                        "collection_id" if action == "clear_collection" else "enabled"
+                                    ) == ("" if action == "clear_collection" else action == "enable")
+                                    for task_id in selected
+                                )
+                            except Exception:
+                                state["saved"] = None
+                        if state["saved"] or isinstance(exc, TaskSchedulerReloadError):
+                            for row in selected_rows:
+                                row.update(status="succeeded", msg="已保存")
+                            payload.update(saved=True, reload_required=action != "clear_collection")
+                            payload["msg"] = f"任务已保存，后续应用失败：{exc}"
+                            count = state["changed"]
+                            status = 503
+                        else:
+                            for row in selected_rows:
+                                row.update(status="unknown" if state["saved"] is None else "failed", msg=str(exc))
+                            prefix = "任务合集归属未更改，保存失败" if action == "clear_collection" and state["saved"] is False else "任务保存失败"
+                            payload.update(saved=state["saved"], msg=f"{prefix}：{exc}")
+                            status = 409 if isinstance(exc, TaskBulkSelectionChanged) else 500
+                        payload["ok"] = False
+                    else:
+                        for row in selected_rows:
+                            row.update(status="succeeded", msg="已保存")
+                        payload["saved"] = True
+                        count = state["changed"]
+
+            failures = [f"{task_map[row['task_id']].get('name') or row['task_id']}: {row['msg']}"
+                        for row in rows if row["status"] in ("failed", "unknown")]
+            if action == "delete":
+                payload["stopped_ids"] = stopped_ids
+
+            if action in ("enable", "disable", "clear_collection"):
+                verb = {"enable": "启用", "disable": "禁用", "clear_collection": "取出"}[action]
+                payload.update(updated_count=count)
+                parts = [f"已{verb} {count} 个任务"]
+            else:
+                verb, field, failed_label = {
+                    "run": ("提交运行", "submitted_count", "未运行"),
+                    "stop": ("结束", "stopped_count", "结束失败"),
+                    "delete": ("删除", "deleted_count", "删除失败"),
+                }[action]
+                payload.update({field: count, "failed_count": len(failures), "failures": failures})
+                parts = [f"已{verb} {count} 个任务"]
+                if action == "stop":
+                    payload["skipped_count"] = skipped
+                    if skipped:
+                        parts.append(f"跳过 {skipped} 个未运行任务")
+                if failures:
+                    parts.append(f"{len(failures)} 个{failed_label}：{'；'.join(failures[:3])}")
+                    if len(failures) > 3:
+                        parts.append(f"等 {len(failures)} 个")
+                if status == 200 and count == 0 and (failures or (action == "stop" and skipped)):
+                    payload["ok"] = False
+                    status = 409
+                    if action == "run" and failures:
+                        if all("任务启动失败" in item for item in failures):
+                            status = 500
+                        elif all("命令解析失败" in item for item in failures):
+                            status = 400
+            payload.setdefault("msg", "；".join(parts))
+        except Exception as exc:
+            payload.update(ok=False, msg=f"批量操作记录保存失败，未继续执行：{exc}")
+            status = 500
+        return finish(payload, status)

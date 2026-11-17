@@ -579,11 +579,11 @@ function flsBulkActionMessage(json, fallback){
     const parts = [];
 
     if(action === "enable"){
-        parts.push("已启用 " + (updatedCount || count) + " 个任务");
+        parts.push("已启用 " + updatedCount + " 个任务");
     } else if(action === "disable"){
-        parts.push("已禁用 " + (updatedCount || count) + " 个任务");
+        parts.push("已禁用 " + updatedCount + " 个任务");
     } else if(action === "clear_collection"){
-        parts.push("已取出 " + (updatedCount || count) + " 个任务");
+        parts.push("已取出 " + updatedCount + " 个任务");
     } else if(action === "delete"){
         parts.push("已删除 " + deletedCount + " 个任务");
         const failureText = flsFailureSummary(json.failures, failedCount, "删除失败");
@@ -602,6 +602,181 @@ function flsBulkActionMessage(json, fallback){
     if(parts.length) return parts.join("；");
 
     return fallbackText;
+}
+
+function flsBulkStorageKey(scope){
+    return "fls-task-bulk:" + scope;
+}
+
+function flsBulkState(scope){
+    const saved = sessionStorage.getItem(flsBulkStorageKey(scope));
+    return saved ? JSON.parse(saved) : {};
+}
+
+function flsBulkSave(scope, state){
+    sessionStorage.setItem(flsBulkStorageKey(scope), JSON.stringify(state));
+}
+
+function flsBulkNotice(options, state, error){
+    const block = document.querySelector(options.block);
+    if(!block) return;
+    let notice = Array.from(block.querySelectorAll("[data-bulk-recovery]")).find(el => el.dataset.bulkRecovery === options.scope);
+    if(!notice){
+        notice = document.createElement("section");
+        notice.className = "section";
+        notice.dataset.bulkRecovery = options.scope;
+        notice.setAttribute("role", "status");
+        block.prepend(notice);
+    }
+    notice.replaceChildren();
+    const payload = state.payload || {};
+    const message = document.createElement("p");
+    message.textContent = error || payload.msg || flsBulkActionMessage(payload, "操作结果尚未确认");
+    notice.append(message);
+    function button(label, callback){
+        const control = document.createElement("button");
+        control.type = "button";
+        control.className = "btn btn-primary";
+        control.textContent = label;
+        control.onclick = () => callback(control);
+        notice.append(control);
+    }
+    if(state.pending){
+        button("查询本次操作结果", control => flsSubmitTaskBulk(options, state.pending.action, control, true));
+        const login = document.createElement("a");
+        login.className = "btn btn-gray";
+        login.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
+        login.textContent = "重新登录";
+        notice.append(login);
+    } else if((payload.retry_ids || []).length){
+        button("重试未完成项", control => {
+            options.select(payload.retry_ids);
+            return flsSubmitTaskBulk(options, payload.action, control);
+        });
+    }
+    if(payload.reload_required){
+        button("重新加载调度器", async control => {
+            if(!flsMarkButtonBusy(control)) return;
+            let applied = false;
+            try {
+                const response = await fetch("/api/scheduler/reload", {
+                    method:"POST", credentials:"same-origin",
+                    headers:{"X-CSRF-Token":flsGetCsrfToken(), "X-Requested-With":"XMLHttpRequest"}
+                });
+                const result = await flsReadJsonResponse(response);
+                if(!result.ok) throw new Error(result.msg);
+                applied = true;
+                payload.reload_required = false;
+                payload.msg = "已重新加载调度器";
+                flsBulkSave(options.scope, state);
+                await options.refresh();
+                options.select(state.selection || []);
+                flsBulkNotice(options, state);
+            } catch(e){
+                flsBulkNotice(options, state, (applied ? "调度器已重新加载，页面恢复失败：" : "调度器重载失败：") + e);
+            } finally {
+                flsRestoreButton(control);
+            }
+        });
+    }
+    if(/^\/scripts\/rename-recovery\/[a-f0-9]{32}$/.test(payload.recovery_url || "")){
+        const link = document.createElement("a");
+        link.className = "btn btn-orange";
+        link.href = payload.recovery_url;
+        link.textContent = "恢复重命名";
+        notice.append(link);
+    }
+    if((payload.unknown_ids || []).length){
+        const link = document.createElement("a");
+        link.href = "/history";
+        link.className = "btn btn-gray";
+        link.textContent = "查看任务历史";
+        notice.append(link);
+        button("重新选择结果未知项", () => {
+            if(!confirm("结果未知的任务可能已执行。确认查看任务历史后重新选择？")) return;
+            state.selection = Array.from(new Set([...(state.selection || []), ...payload.unknown_ids]));
+            flsBulkSave(options.scope, state);
+            options.select(state.selection);
+        });
+    }
+    button("刷新列表", async control => {
+        if(!flsMarkButtonBusy(control)) return;
+        try {
+            await options.refresh();
+            options.select(state.selection || []);
+            flsBulkNotice(options, state);
+        } catch(e){
+            message.textContent = "列表刷新失败：" + e;
+        } finally { flsRestoreButton(control); }
+    });
+}
+
+function flsRestoreTaskBulk(options){
+    try {
+        const state = flsBulkState(options.scope);
+        if(state.selection) options.select(state.selection);
+        if(state.pending || state.payload) flsBulkNotice(options, state);
+    } catch(e){
+        // A storage error must not erase the current checkbox selection.
+    }
+}
+
+async function flsSubmitTaskBulk(options, action, source, replay){
+    if(window.__flsTaskBulkBusy) return;
+    const ids = options.ids();
+    let state;
+    try {
+        state = flsBulkState(options.scope);
+        if(state.pending && !replay){
+            flsBulkNotice(options, state, "上次请求尚未确认，请先查询本次操作结果");
+            return;
+        }
+        if(!state.pending){
+            if(!ids.length){ alert("请选择任务"); return; }
+            const bytes = crypto.getRandomValues(new Uint8Array(16));
+            const requestId = Array.from(bytes, value => value.toString(16).padStart(2, "0")).join("");
+            state = {selection:ids, pending:{action:action, task_ids:ids, request_id:requestId}};
+            flsBulkSave(options.scope, state);
+        }
+    } catch(e){
+        alert("无法保存提交标识，未执行操作：" + e);
+        return;
+    }
+    window.__flsTaskBulkBusy = true;
+    flsMarkButtonBusy(source, "处理中...");
+    try {
+        let payload;
+        try {
+            const res = await fetch("/api/task/bulk-action", {
+                method:"POST", credentials:"same-origin",
+                headers:{"Content-Type":"application/json", "X-Requested-With":"XMLHttpRequest", "X-CSRF-Token":flsGetCsrfToken()},
+                body:JSON.stringify(state.pending)
+            });
+            payload = await flsReadJsonResponse(res);
+        } catch(e){
+            if(!e.payload || !Array.isArray(e.payload.results)) throw e;
+            payload = e.payload;
+        }
+        if(!Array.isArray(payload.results)) throw new Error(payload.msg || "操作结果不完整");
+        state = {payload:payload, selection:payload.retry_ids || []};
+        flsBulkSave(options.scope, state);
+        // Apply confirmed results before refreshing, so a failed GET cannot rerun successes.
+        options.select(state.selection);
+        flsClearPageCache();
+        try {
+            await options.refresh();
+            options.select(state.selection);
+            flsBulkNotice(options, state);
+        } catch(e){
+            flsBulkNotice(options, state, payload.msg + "；列表刷新失败：" + e);
+        }
+    } catch(e){
+        flsBulkNotice(options, state, "请求结果未确认：" + e);
+    } finally {
+        window.__flsTaskBulkBusy = false;
+        flsRestoreButton(source);
+        options.select(state.selection || ids);
+    }
 }
 
 function flsMediaQuery(query){
@@ -1246,6 +1421,8 @@ if (document.readyState === "loading") {
     }
 
     function skipPath(path){
+        // Authentication changes the session and its CSRF token.
+        if(path === "/login" || path === "/logout") return true;
         if (path.indexOf("/scripts/download/") === 0) return true;
 
         // 备份下载必须走浏览器原生下载，不能 AJAX
@@ -1795,6 +1972,7 @@ if (document.readyState === "loading") {
         const url = new URL(action, location.href);
 
         if (!sameOrigin(url.href)) return;
+        if(url.pathname === "/login" || url.pathname === "/logout") return;
 
         e.preventDefault();
         e.stopImmediatePropagation();
