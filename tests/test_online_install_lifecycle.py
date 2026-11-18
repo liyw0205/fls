@@ -103,6 +103,46 @@ class OnlineInstallLifecycleTests(unittest.TestCase):
             self.assertEqual(persisted["phase"], "completed")
             self.assertEqual(info["status"], "已完成")
 
+    def test_install_log_reports_later_target_and_imported_task_changes(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.models import load_tasks, save_tasks
+            from fls_manager.online_scripts.constants import get_online_install_job
+            from fls_manager.online_scripts.install import install_worker
+            from fls_manager.online_scripts.source import save_online_script_cache
+
+            info = self.register(base_dir)
+            info.update(import_task=True, selected_task_indexes=["1"], enable_task=False)
+            item = self.item()
+            item["task_cron"] = [{"name": "Daily", "command": "task demo.sh"}]
+            save_online_script_cache([item])
+            target = base_dir / "scripts" / "demo.sh"
+
+            def download(**_kwargs):
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("original", encoding="utf-8")
+                return target
+
+            with patch("fls_manager.online_scripts.install.download_online_script_logged", side_effect=download), patch(
+                "fls_manager.online_scripts.tasks.reload_scheduler",
+            ):
+                install_worker("install", item, import_task=True, selected_task_indexes=["1"])
+
+            client = app.test_client()
+            unchanged = client.get("/api/online-scripts/log/install", headers={"X-Token": TOKEN})
+            self.assertEqual(unchanged.status_code, 200)
+            self.assertFalse(unchanged.json["consistency"]["changed"])
+            target.write_text("changed later", encoding="utf-8")
+            tasks = load_tasks()
+            tasks[0]["command"] = "edited later"
+            save_tasks(tasks)
+            changed = client.get("/api/online-scripts/log/install", headers={"X-Token": TOKEN})
+            self.assertTrue(changed.json["consistency"]["changed"])
+            self.assertEqual(changed.json["consistency"]["target"], "changed")
+            self.assertEqual(changed.json["consistency"]["tasks"], "changed")
+            page = client.get("/online-scripts/log/install", headers={"X-Token": TOKEN})
+            self.assertIn("后来修改", page.get_data(as_text=True))
+            self.assertEqual(get_online_install_job("install")["phase"], "completed")
+
     @unittest.skipIf(os.name == "nt", "Installation commands use sh")
     def test_real_stop_worker_finishes_while_stop_request_waits(self):
         with isolated_app() as (app, base_dir):

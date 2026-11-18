@@ -53,6 +53,7 @@ from ...online_scripts.install import (
     script_has_install,
     request_stop_online_install,
     start_install_thread,
+    verify_install_outputs,
 )
 
 from ...online_scripts.docs import (

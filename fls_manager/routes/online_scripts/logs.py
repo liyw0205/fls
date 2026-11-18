@@ -170,6 +170,9 @@ def api_online_install_log(install_id):
         "log_file": log_file,
         "log": tail_file(log_file, lines),
     }
+    consistency = verify_install_outputs(info)
+    if consistency.get("checked"):
+        payload["consistency"] = consistency
     if info.get("scheduler_reload_pending"):
         payload["scheduler_reload_pending"] = True
         payload["scheduler_reload_error"] = info.get("scheduler_reload_error") or ""
@@ -210,6 +213,10 @@ def online_install_log(install_id):
 
     recovery = _install_recovery(info)
     recovery_html = _install_recovery_html(recovery)
+    consistency = verify_install_outputs(info)
+    consistency_note = ""
+    if consistency.get("changed"):
+        consistency_note = "<span style=\"color:#dc2626;\">安装后的脚本或任务已被后来修改，恢复不会自动覆盖。</span><br>"
 
     stop_install_button = ""
 
@@ -226,6 +233,8 @@ def online_install_log(install_id):
         f'在线脚本下载安装日志：{info.get("script_name") or install_id}',
         help_html=f"""
         状态：<b id="installStatus">{h(info.get("status") or "-")}</b><br>
+        阶段：<span id="installPhase">{h(_install_phase(info))}</span><br>
+        {consistency_note}
         退出码：<span id="installReturncode">{h(info.get("returncode") if info.get("returncode") is not None else "-")}</span><br>
         <span id="installError">{"错误：" + h(_install_error(info)) if _install_error(info) else ""}</span><br>
         日志文件：{h(info.get("log_file") or "-")}
@@ -296,8 +305,14 @@ async function loadLog(){{
         if(retryAction) retryAction.hidden = true;
 
         document.getElementById("installStatus").textContent = json.status || "-";
+        const phaseEl = document.getElementById("installPhase");
+        if(phaseEl) phaseEl.textContent = json.phase || "unknown";
         const errorEl = document.getElementById("installError");
-        if(errorEl) errorEl.textContent = json.error ? "错误：" + json.error : "";
+        let errorText = json.error || "";
+        if(json.consistency && json.consistency.changed){{
+            errorText = (errorText ? errorText + "；" : "") + "安装后的脚本或任务已被后来修改，恢复不会自动覆盖";
+        }}
+        if(errorEl) errorEl.textContent = errorText ? "错误：" + errorText : "";
         document.getElementById("installReturncode").textContent = json.returncode == null ? "-" : String(json.returncode);
 
         const text = json.log || "暂无日志";

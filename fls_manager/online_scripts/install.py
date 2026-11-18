@@ -1,4 +1,6 @@
 import os
+import hashlib
+import json
 import time
 import signal
 import shutil
@@ -9,7 +11,7 @@ import uuid
 from contextlib import closing
 
 from ..paths import SCRIPT_DIR
-from ..models import TaskSchedulerReloadError
+from ..models import TaskSchedulerReloadError, load_tasks
 from ..utils import now_str, LazyModule, prune_completed_records
 from ..proxy import (
     requests_proxy_dict,
@@ -64,6 +66,103 @@ def _set_install_phase(info, phase, *, persist=True):
     info["phase"] = phase
     info["updated_at"] = now_str()
     return _persist_install_state(info) if persist else True
+
+
+def _fingerprint_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 128), b""):
+            digest.update(chunk)
+    stat_result = os.stat(path)
+    return {"kind": "file", "size": stat_result.st_size, "sha256": digest.hexdigest()}
+
+
+def _fingerprint_path(path):
+    path = os.fspath(path)
+    if os.path.islink(path):
+        return {"kind": "symlink", "target": os.readlink(path)}
+    if os.path.isfile(path):
+        return _fingerprint_file(path)
+    if os.path.isdir(path):
+        entries = []
+        root = os.path.abspath(path)
+        for current, dirs, files in os.walk(root, followlinks=False):
+            dirs.sort()
+            files.sort()
+            for name in dirs + files:
+                child = os.path.join(current, name)
+                relative = os.path.relpath(child, root).replace(os.sep, "/")
+                stat_result = os.lstat(child)
+                kind = "symlink" if os.path.islink(child) else "dir" if os.path.isdir(child) else "file"
+                entries.append((relative, kind, stat_result.st_size, stat_result.st_mtime_ns))
+        digest = hashlib.sha256(json.dumps(entries, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+        return {"kind": "directory", "entries": len(entries), "sha256": digest}
+    return {"kind": "missing"}
+
+
+def _task_snapshot_for_install(info):
+    selected = set(str(value) for value in (info.get("selected_task_indexes") or []))
+    if not info.get("import_task") or not selected:
+        return []
+    script_id = str(info.get("script_id") or "")
+    tasks = []
+    for task in load_tasks():
+        if str(task.get("online_script_id") or "") != script_id:
+            continue
+        key = str(task.get("online_script_task_key") or "")
+        if key.count(":") >= 2 and key.split(":", 2)[1] in selected:
+            tasks.append(task)
+    return tasks
+
+
+def _task_snapshot_fingerprint(snapshot):
+    payload = json.dumps(snapshot or [], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def capture_install_outputs(info, target=None):
+    """Record the files/tasks created by this install for later recovery checks."""
+    if target is None:
+        target = info.get("target_path")
+    if not target:
+        return _persist_install_state(info)
+    info["target_path"] = str(target)
+    info["target_fingerprint"] = _fingerprint_path(target)
+    if info.get("import_task"):
+        snapshot = _task_snapshot_for_install(info)
+        info["task_snapshot"] = snapshot
+        info["tasks_fingerprint"] = _task_snapshot_fingerprint(snapshot)
+    info["updated_at"] = now_str()
+    return _persist_install_state(info)
+
+
+def verify_install_outputs(info):
+    """Compare durable install evidence with current files without mutating them."""
+    result = {"checked": False, "changed": False, "target": "not_recorded", "tasks": "not_recorded"}
+    expected_target = info.get("target_fingerprint")
+    target_path = str(info.get("target_path") or "")
+    if expected_target and target_path:
+        try:
+            target = os.path.abspath(target_path)
+            base = os.path.abspath(SCRIPT_DIR)
+            if target != base and not target.startswith(base + os.sep):
+                raise RuntimeError("目标路径超出 scripts 目录")
+            result["target"] = "unchanged" if _fingerprint_path(target) == expected_target else "changed"
+        except Exception as exc:
+            result["target"] = "unreadable"
+            result["target_error"] = str(exc)
+        result["checked"] = True
+    expected_tasks = info.get("tasks_fingerprint")
+    if expected_tasks:
+        try:
+            actual = _task_snapshot_for_install(info)
+            result["tasks"] = "unchanged" if _task_snapshot_fingerprint(actual) == expected_tasks else "changed"
+        except Exception as exc:
+            result["tasks"] = "unreadable"
+            result["tasks_error"] = str(exc)
+        result["checked"] = True
+    result["changed"] = result["target"] in ("changed", "unreadable") or result["tasks"] in ("changed", "unreadable")
+    return result
 
 
 def get_running_install_by_script_id(script_id):
@@ -449,13 +548,14 @@ def install_worker(
             validate_online_task_import(item, selected_task_indexes)
 
         _set_install_phase(info, "downloading")
-        download_online_script_logged(
+        target = download_online_script_logged(
             item=item,
             proxy_id=proxy_id,
             log_file=log_file,
             force=force,
             install_id=install_id,
         )
+        capture_install_outputs(info, target)
 
         if online_install_should_stop(install_id):
             raise InstallStopped("安装已停止")
@@ -472,7 +572,9 @@ def install_worker(
                     selected_task_indexes=selected_task_indexes,
                     raise_on_reload_error=True,
                 )
+                capture_install_outputs(info, target)
             except TaskSchedulerReloadError as e:
+                capture_install_outputs(info, target)
                 with ONLINE_INSTALL_LOCK:
                     info.update(
                         phase="scheduler_reload_pending",
@@ -508,6 +610,8 @@ def install_worker(
         else:
             append_log(log_file, "")
             append_log(log_file, "该脚本未提供 install 命令，跳过安装步骤")
+
+        capture_install_outputs(info, target)
 
         with ONLINE_INSTALL_LOCK:
             if online_install_should_stop(install_id):
