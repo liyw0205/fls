@@ -22,7 +22,7 @@ def main():
         from fls_manager.app import create_app
         import fls_manager.app as app_module
         from fls_manager import scheduler
-        from fls_manager.install_records import persist_install_job
+        from fls_manager.install_records import INSTALL_JOBS_FILE, persist_install_job
         from fls_manager.online_scripts import install, source
         from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING
         from fls_manager.state import DEPS_RUNNING
@@ -57,23 +57,26 @@ def main():
         retry_child_id = "browser-retry-child"
         retry_parent_log = base_dir / "log" / f"deps-install-demo-{retry_parent_id}.log"
         retry_child_log = base_dir / "log" / f"deps-install-demo-{retry_child_id}.log"
-        retry_parent_log.parent.mkdir(parents=True, exist_ok=True)
-        retry_parent_log.write_text("parent attempt failed\n", encoding="utf-8")
-        retry_child_log.write_text("retry attempt failed\n", encoding="utf-8")
-        persist_install_job({
-            "id": retry_parent_id, "request_id": retry_parent_id, "kind": "dependency",
-            "package": "demo", "log_file": str(retry_parent_log), "running": False,
-            "finished": True, "status": "failed", "returncode": 1,
-            "error": "parent attempt failed", "start_time": 1,
-            "updated_at": "2026-11-18 20:10:00",
-        })
-        persist_install_job({
-            "id": retry_child_id, "request_id": retry_child_id, "kind": "dependency",
-            "retry_of": retry_parent_id, "package": "demo", "log_file": str(retry_child_log),
-            "running": False, "finished": True, "status": "failed", "returncode": 2,
-            "error": "retry attempt failed", "start_time": 2,
-            "updated_at": "2026-11-18 20:11:00",
-        })
+
+        def seed_retry_chain():
+            INSTALL_JOBS_FILE.write_text("{}", encoding="utf-8")
+            retry_parent_log.parent.mkdir(parents=True, exist_ok=True)
+            retry_parent_log.write_text("parent attempt failed\n", encoding="utf-8")
+            retry_child_log.write_text("retry attempt failed\n", encoding="utf-8")
+            persist_install_job({
+                "id": retry_parent_id, "request_id": retry_parent_id, "kind": "dependency",
+                "package": "demo", "log_file": str(retry_parent_log), "running": False,
+                "finished": True, "status": "failed", "returncode": 1,
+                "error": "parent attempt failed", "start_time": 1,
+                "updated_at": "2026-11-18 20:10:00",
+            })
+            persist_install_job({
+                "id": retry_child_id, "request_id": retry_child_id, "kind": "dependency",
+                "retry_of": retry_parent_id, "package": "demo", "log_file": str(retry_child_log),
+                "running": False, "finished": True, "status": "failed", "returncode": 2,
+                "error": "retry attempt failed", "start_time": 2,
+                "updated_at": "2026-11-18 20:11:00",
+            })
         app_module.dispatch_frontend_open_event = lambda: None
         fault = {"status": 0}
         dependency_processes = []
@@ -111,6 +114,26 @@ def main():
             if request.method == "POST":
                 data = request.get_json()
                 fault["status"] = int(data.get("status") or 0)
+                if data.get("seed_retry_chain"):
+                    seed_retry_chain()
+                if data.get("fill_capacity"):
+                    for index in range(99):
+                        install_id = f"browser-capacity-{index:03d}"
+                        persist_install_job({
+                            "id": install_id, "request_id": install_id, "kind": "dependency",
+                            "package": "demo", "log_file": str(base_dir / "log" / f"{install_id}.log"),
+                            "running": False, "status": "succeeded", "returncode": 0,
+                            "error": "", "updated_at": "2026-11-18 22:00:00",
+                        })
+                    latest_id = "browser-capacity-latest"
+                    latest_log = base_dir / "log" / f"deps-install-demo-{latest_id}.log"
+                    latest_log.write_text("latest retained failure\n", encoding="utf-8")
+                    persist_install_job({
+                        "id": latest_id, "request_id": latest_id, "kind": "dependency",
+                        "package": "demo", "log_file": str(latest_log), "running": False,
+                        "status": "failed", "returncode": 7, "error": "latest install failed",
+                        "updated_at": "2026-11-18 23:00:00",
+                    })
                 if data.get("reset"):
                     release.unlink(missing_ok=True)
                     (base_dir / "scripts" / "demo.py").unlink(missing_ok=True)
@@ -192,7 +215,8 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
      await page.waitForLoadState('domcontentloaded');
     }
    };
-   await fixture({reset:true});await page.goto(base+'/login');await login();
+   await fixture({seed_retry_chain:true});await fixture({reset:true});
+   await page.goto(base+'/login');await login();
    await page.goto(base+'/deps/install-history?kind=dependency');
    const retryParent=page.locator('tr').filter({hasText:'browser-retry-parent'});
    assert.equal((await retryParent.locator('td').nth(7).textContent()).trim(),'1');
@@ -213,6 +237,18 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    assert.equal(await page.locator('.install-retry-form').count(),0);
    await page.getByRole('link',{name:'查看已提交重试'}).click();
    await page.waitForURL('**/deps/install-log/browser-retry-child?back=/deps/install-history');
+   await fixture({fill_capacity:true});
+   await page.goto(base+'/deps/install-history?kind=dependency&limit=100');
+   assert.equal(await page.locator('tr').filter({hasText:'browser-retry-parent'}).count(),0);
+   assert.equal(await page.locator('tr').filter({hasText:'browser-retry-child'}).count(),0);
+   const latest=page.locator('tr').filter({hasText:'browser-capacity-latest'});
+   assert.equal((await latest.locator('td').nth(3).textContent()).trim(),'安装失败');
+   assert.equal((await latest.locator('td').nth(7).textContent()).trim(),'7');
+   await latest.getByRole('link',{name:'查看日志与恢复',exact:true}).click();
+   await page.waitForURL('**/deps/install-log/browser-capacity-latest?back=/deps');
+   await page.waitForFunction(()=>document.querySelector('#installStatus').textContent==='安装失败');
+   assert.ok((await page.locator('#log').textContent()).includes('latest retained failure'));
+   assert.ok(await page.locator('.install-retry-form [name="request_id"]').inputValue());
    const before=(await state()).downloads;
    const csrf=await page.evaluate(()=>flsGetCsrfToken());
    const installRequestId=require('node:crypto').randomBytes(16).toString('hex');

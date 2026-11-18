@@ -1159,6 +1159,116 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
             self.assertEqual(retry.status_code, 409)
             popen.assert_not_called()
 
+    def test_install_history_retains_active_retry_chain_as_one_capacity_unit(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.install_records import INSTALL_JOB_LIMIT, INSTALL_JOBS_FILE, persist_install_job
+
+            records = {}
+            for index in range(INSTALL_JOB_LIMIT - 1):
+                install_id = f"old-independent-{index:03d}"
+                records[install_id] = {
+                    "id": install_id, "request_id": install_id, "kind": "dependency",
+                    "package": "demo", "log_file": str(base_dir / "log" / f"{install_id}.log"),
+                    "running": False, "status": "succeeded", "returncode": 0,
+                    "error": "", "updated_at": "2026-11-18 18:00:00",
+                }
+            parent_id, child_id = "capacity-chain-parent", "capacity-chain-child"
+            records[parent_id] = {
+                "id": parent_id, "request_id": parent_id, "kind": "dependency",
+                "package": "demo", "log_file": str(base_dir / "log" / f"{parent_id}.log"),
+                "running": False, "status": "failed", "returncode": 1,
+                "error": "parent failed", "updated_at": "2026-11-18 19:00:00",
+                "retried_by": child_id,
+            }
+            INSTALL_JOBS_FILE.write_text(json.dumps(records), encoding="utf-8")
+            child_log = base_dir / "log" / f"{child_id}.log"
+            persist_install_job({
+                "id": child_id, "request_id": child_id, "kind": "dependency",
+                "retry_of": parent_id, "package": "demo", "log_file": str(child_log),
+                "running": True, "status": "prepared", "returncode": None,
+                "error": "", "start_time": 1, "updated_at": "2026-11-18 21:00:00",
+            })
+            persisted = json.loads(INSTALL_JOBS_FILE.read_text(encoding="utf-8"))
+            self.assertEqual(len(persisted), INSTALL_JOB_LIMIT)
+            self.assertIn(parent_id, persisted)
+            self.assertIn(child_id, persisted)
+            self.assertEqual(persisted[parent_id]["retried_by"], child_id)
+            self.assertEqual(persisted[child_id]["retry_of"], parent_id)
+            self.assertEqual(sum(install_id.startswith("old-independent-") for install_id in persisted), INSTALL_JOB_LIMIT - 2)
+
+    def test_install_history_evicts_old_retry_chain_together(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.install_records import INSTALL_JOB_LIMIT, INSTALL_JOBS_FILE, persist_install_job
+
+            parent_id, child_id = "old-chain-parent", "old-chain-child"
+            records = {
+                parent_id: {
+                    "id": parent_id, "request_id": parent_id, "kind": "dependency",
+                    "package": "demo", "log_file": str(base_dir / "log" / f"{parent_id}.log"),
+                    "running": False, "status": "failed", "returncode": 1,
+                    "error": "parent failed", "updated_at": "2026-11-18 18:00:00",
+                    "retried_by": child_id,
+                },
+                child_id: {
+                    "id": child_id, "request_id": child_id, "kind": "dependency",
+                    "package": "demo", "log_file": str(base_dir / "log" / f"{child_id}.log"),
+                    "running": False, "status": "failed", "returncode": 2,
+                    "error": "child failed", "updated_at": "2026-11-18 18:00:00",
+                    "retry_of": parent_id,
+                },
+            }
+            for index in range(INSTALL_JOB_LIMIT - 2):
+                install_id = f"newer-independent-{index:03d}"
+                records[install_id] = {
+                    "id": install_id, "request_id": install_id, "kind": "dependency",
+                    "package": "demo", "log_file": str(base_dir / "log" / f"{install_id}.log"),
+                    "running": False, "status": "succeeded", "returncode": 0,
+                    "error": "", "updated_at": "2026-11-18 19:00:00",
+                }
+            INSTALL_JOBS_FILE.write_text(json.dumps(records), encoding="utf-8")
+            for install_id in ("newer-after-fill-a", "newer-after-fill-b"):
+                persist_install_job({
+                    "id": install_id, "request_id": install_id, "kind": "dependency",
+                    "package": "demo", "log_file": str(base_dir / "log" / f"{install_id}.log"),
+                    "running": False, "status": "succeeded", "returncode": 0,
+                    "error": "", "updated_at": "2026-11-18 20:00:00",
+                })
+            persisted = json.loads(INSTALL_JOBS_FILE.read_text(encoding="utf-8"))
+            self.assertEqual(len(persisted), INSTALL_JOB_LIMIT)
+            self.assertNotIn(parent_id, persisted)
+            self.assertNotIn(child_id, persisted)
+            self.assertFalse(any(
+                info.get("retry_of") == parent_id or info.get("retried_by") == child_id
+                for info in persisted.values()
+            ))
+
+    def test_retry_claim_refuses_a_chain_larger_than_history_capacity(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.install_records import INSTALL_JOB_LIMIT, INSTALL_JOBS_FILE
+
+            records = {}
+            for index in range(INSTALL_JOB_LIMIT):
+                install_id = f"oversized-chain-{index:03d}"
+                records[install_id] = {
+                    "id": install_id, "request_id": install_id, "kind": "dependency",
+                    "package": "demo", "log_file": str(base_dir / "log" / f"{install_id}.log"),
+                    "running": False, "status": "failed", "returncode": 1,
+                    "error": "failed", "updated_at": f"2026-11-18 20:{index // 60:02d}:{index % 60:02d}",
+                    "retry_of": f"oversized-chain-{index - 1:03d}" if index else "",
+                    "retried_by": f"oversized-chain-{index + 1:03d}" if index < INSTALL_JOB_LIMIT - 1 else "",
+                }
+            INSTALL_JOBS_FILE.write_text(json.dumps(records), encoding="utf-8")
+            original_bytes = INSTALL_JOBS_FILE.read_bytes()
+            with patch("fls_manager.routes.deps.subprocess.Popen") as popen:
+                response = app.test_client().post(
+                    f"/api/deps/install-retry/oversized-chain-{INSTALL_JOB_LIMIT - 1:03d}",
+                    json={"request_id": "oversized-chain-new-child"}, headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(response.status_code, 409)
+            self.assertIn("超过历史保留上限", response.json["msg"])
+            popen.assert_not_called()
+            self.assertEqual(INSTALL_JOBS_FILE.read_bytes(), original_bytes)
+
     def test_install_log_rejects_outside_and_symlink_paths_without_reading_them(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.install_records import INSTALL_JOBS_FILE

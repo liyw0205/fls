@@ -16,6 +16,7 @@ from ..state import DEPS_RUNNING
 from ..utils import h, now_str, safe_name, get_back_url, prune_completed_records
 from ..logs import tail_file
 from ..install_records import (
+    InstallHistoryLimitError,
     claim_install_cancel,
     claim_install_retry,
     get_install_job,
@@ -599,6 +600,8 @@ def _retry_install_start(install_id, retry_id):
         return {"ok": False, "request_id": retry_id, "msg": str(exc)}, 400
     except LookupError as exc:
         return {"ok": False, "request_id": retry_id, "msg": str(exc)}, 404
+    except InstallHistoryLimitError as exc:
+        return {"ok": False, "request_id": retry_id, "msg": str(exc)}, 409
     except Exception as exc:
         return {"ok": False, "request_id": retry_id, "msg": f"重试回执无法保存，未启动安装：{exc}"}, 500
 

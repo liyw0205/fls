@@ -15,6 +15,10 @@ INSTALL_STATES = {"prepared", "running", "succeeded", "failed", "unknown", "canc
 CANCEL_STATES = {"", "requested", "cancelled", "completed", "failed", "unknown"}
 
 
+class InstallHistoryLimitError(RuntimeError):
+    pass
+
+
 def _snapshot(info):
     install_id = str(info.get("id") or info.get("request_id") or "")
     return {
@@ -80,6 +84,72 @@ def _read_jobs():
         return data
 
 
+def _bounded_install_jobs(data):
+    if len(data) <= INSTALL_JOB_LIMIT:
+        return dict(data)
+
+    roots = {install_id: install_id for install_id in data}
+
+    def find(install_id):
+        while roots[install_id] != install_id:
+            roots[install_id] = roots[roots[install_id]]
+            install_id = roots[install_id]
+        return install_id
+
+    def union(left, right):
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            roots[right_root] = left_root
+
+    for install_id, info in data.items():
+        for field in ("retry_of", "retried_by"):
+            linked_id = str(info.get(field) or "")
+            if linked_id in data and linked_id != install_id:
+                union(install_id, linked_id)
+
+    groups = {}
+    for install_id in data:
+        groups.setdefault(find(install_id), set()).add(install_id)
+
+    def group_key(group):
+        return max(
+            (str(data[install_id].get("updated_at") or ""), install_id)
+            for install_id in group
+        )
+
+    protected = []
+    disposable = []
+    for group in groups.values():
+        jobs = [data[install_id] for install_id in group]
+        if any(
+            job.get("running")
+            or job.get("status") in ("prepared", "running")
+            or job.get("cancel_status") == "requested"
+            for job in jobs
+        ):
+            protected.append(group)
+        else:
+            disposable.append(group)
+
+    protected_count = sum(len(group) for group in protected)
+    if protected_count > INSTALL_JOB_LIMIT:
+        raise InstallHistoryLimitError(
+            "活动安装及其重试链超过历史保留上限，未发布新回执或启动进程。"
+        )
+
+    retained_ids = set().union(*protected) if protected else set()
+    for group in sorted(disposable, key=group_key, reverse=True):
+        if len(retained_ids) + len(group) <= INSTALL_JOB_LIMIT:
+            retained_ids.update(group)
+
+    ordered = sorted(
+        ((install_id, data[install_id]) for install_id in retained_ids),
+        key=lambda pair: (str(pair[1].get("updated_at") or ""), pair[0]),
+        reverse=True,
+    )
+    return dict(ordered)
+
+
 def persist_install_job(info):
     snapshot = _snapshot(info)
     _validate(snapshot)
@@ -116,12 +186,7 @@ def persist_install_job(info):
                 previous["retried_by"] = snapshot["id"]
                 previous["updated_at"] = snapshot["updated_at"]
                 data[retry_of] = previous
-            ordered = sorted(
-                data.items(),
-                key=lambda pair: str(pair[1].get("updated_at") or ""),
-                reverse=True,
-            )
-            return dict(ordered[:INSTALL_JOB_LIMIT])
+            return _bounded_install_jobs(data)
 
         mutate_json(INSTALL_JOBS_FILE, {}, update, strict=True)
     return dict(snapshot)
@@ -173,14 +238,10 @@ def claim_install_retry(info):
             parent["updated_at"] = snapshot["updated_at"]
             data[snapshot["retry_of"]] = parent
             data[snapshot["id"]] = snapshot
-            ordered = sorted(
-                data.items(),
-                key=lambda pair: str(pair[1].get("updated_at") or ""),
-                reverse=True,
-            )
+            bounded = _bounded_install_jobs(data)
             result["claimed"] = True
             result["job"] = dict(snapshot)
-            return dict(ordered[:INSTALL_JOB_LIMIT])
+            return bounded
 
         mutate_json(INSTALL_JOBS_FILE, {}, update, strict=True)
         if result["job"] is None:
