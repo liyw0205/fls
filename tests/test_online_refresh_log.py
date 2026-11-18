@@ -12,6 +12,7 @@ from tests.test_ui_route_components import ROOT, TOKEN, isolated_app
 class OnlineRefreshLogTests(unittest.TestCase):
     def _state(self, base_dir, *, refresh_id="a" * 32, request_id="b" * 32, log_file=None):
         from fls_manager.online_scripts.constants import update_online_refresh_state
+        from fls_manager.online_scripts.source import online_script_cache_fingerprint, online_script_source_fingerprint
 
         path = Path(log_file or (base_dir / "log" / f"online-script-source-refresh-{refresh_id}.log"))
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -28,6 +29,8 @@ class OnlineRefreshLogTests(unittest.TestCase):
             task_link_failures=[],
             updated_at="now",
             log_file=str(path),
+            expected_cache_fingerprint=online_script_cache_fingerprint(),
+            source_fingerprint=online_script_source_fingerprint(),
         )
         return request_id
 
@@ -320,6 +323,82 @@ class OnlineRefreshLogTests(unittest.TestCase):
                     data={"retry_request_id": "c" * 32, "proxy_id": "", "csrf_token": csrf},
                 )
             self.assertIn(result.status_code, (302, 500))
+
+    def test_unknown_refresh_result_confirms_published_fingerprint_idempotently(self):
+        with isolated_app() as (app, base_dir):
+            request_id = self._state(base_dir)
+            from fls_manager.online_scripts.constants import update_online_refresh_state
+            from fls_manager.online_scripts.source import online_script_cache_fingerprint, online_script_source_fingerprint
+
+            fingerprint = online_script_cache_fingerprint()
+            update_online_refresh_state(
+                running=False, status="结果未知", error="回执写入失败",
+                cache_published=True, published_cache_fingerprint=fingerprint,
+                source_fingerprint=online_script_source_fingerprint(), updated_at="later",
+            )
+            client = app.test_client()
+            status_page = client.get("/online-scripts", headers={"X-Token": TOKEN})
+            self.assertIn(f"/online-scripts/refresh-confirm/{request_id}", status_page.get_data(as_text=True))
+            log_page = client.get(f"/online-scripts/refresh-log/{request_id}", headers={"X-Token": TOKEN})
+            self.assertIn("检查当前缓存结果", log_page.get_data(as_text=True))
+            confirmed = client.post(
+                f"/api/online-scripts/refresh-confirm/{request_id}", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(confirmed.status_code, 200)
+            self.assertEqual(confirmed.json["status"], "已确认发布")
+            log_payload = client.get(
+                f"/api/online-scripts/refresh-log/{request_id}", headers={"X-Token": TOKEN},
+            )
+            self.assertTrue(log_payload.json["terminal"])
+            replay = client.post(
+                f"/api/online-scripts/refresh-confirm/{request_id}", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(replay.status_code, 200)
+            self.assertTrue(replay.json["replayed"])
+            status = client.get(
+                f"/api/online-scripts/refresh-status/{request_id}", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(status.json["confirmation"], "published")
+
+    def test_unknown_refresh_confirmation_rejects_later_cache_change_without_mutation(self):
+        with isolated_app() as (app, base_dir):
+            request_id = self._state(base_dir)
+            from fls_manager.online_scripts import source
+            from fls_manager.online_scripts.constants import update_online_refresh_state
+
+            old_fingerprint = source.online_script_cache_fingerprint()
+            update_online_refresh_state(
+                running=False, status="结果未知", error="回执写入失败",
+                cache_published=True, published_cache_fingerprint=old_fingerprint,
+                updated_at="later",
+            )
+            source.save_online_script_cache([{"id": "later", "name": "Later", "type": "raw", "link": "x"}])
+            client = app.test_client()
+            response = client.post(
+                f"/api/online-scripts/refresh-confirm/{request_id}", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(client.get(
+                f"/api/online-scripts/refresh-status/{request_id}", headers={"X-Token": TOKEN},
+            ).json["status"], "结果未知")
+            self.assertEqual(source.load_online_script_cache()[0]["id"], "later")
+
+    def test_unknown_refresh_confirmation_can_confirm_not_published_baseline(self):
+        with isolated_app() as (app, base_dir):
+            request_id = self._state(base_dir)
+            from fls_manager.online_scripts.constants import update_online_refresh_state
+            from fls_manager.online_scripts.source import online_script_cache_fingerprint, online_script_source_fingerprint
+
+            update_online_refresh_state(
+                running=False, status="结果未知", error="未确认是否发布",
+                cache_published=False, expected_cache_fingerprint=online_script_cache_fingerprint(),
+                source_fingerprint=online_script_source_fingerprint(), updated_at="later",
+            )
+            response = app.test_client().post(
+                f"/api/online-scripts/refresh-confirm/{request_id}", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json["status"], "已确认未发布")
 
     @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise refresh log polling")
     def test_refresh_log_page_polls_running_state_and_stops_at_terminal(self):

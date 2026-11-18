@@ -13,7 +13,7 @@ from ...paths import LOG_DIR
 
 RECOVERY_STATUSES = {"结果未知", "失败", "超时", "已停止", "启动失败"}
 REFRESH_ID_RE = re.compile(r"^[a-f0-9]{32}$")
-REFRESH_TERMINAL_STATUSES = {"已完成", "部分完成", "失败", "结果未知", "超时", "已停止", "启动失败"}
+REFRESH_TERMINAL_STATUSES = {"已完成", "部分完成", "失败", "结果未知", "已确认发布", "已确认未发布", "超时", "已停止", "启动失败"}
 
 
 def _refresh_log_state(request_id):
@@ -135,7 +135,12 @@ def online_refresh_log(request_id):
     ),
     actions_html=(
         '<a class="btn btn-gray" href="/online-scripts#online-status">返回刷新状态</a>'
-        f'<button class="btn btn-primary" type="button" id="refreshLogRetry">重新读取日志</button>'
+        + (
+            f'<form class="inline-form" method="post" action="/online-scripts/refresh-confirm/{h(payload.get("request_id"))}">'
+            '<button class="btn btn-gray" type="submit">检查当前缓存结果</button></form>'
+            if payload.get("status") == "结果未知" else ""
+        )
+        + '<button class="btn btn-primary" type="button" id="refreshLogRetry">重新读取日志</button>'
     ),
 )}
 <div class="notice red" id="refreshLogError" role="status" hidden></div>

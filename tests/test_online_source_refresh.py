@@ -321,7 +321,7 @@ vm.runInContext(input.reader + input.script, context);
             def update(**changes):
                 nonlocal calls
                 calls += 1
-                if calls == 2:
+                if calls == 3:
                     raise OSError("state disk full")
                 return real_update(**changes)
 

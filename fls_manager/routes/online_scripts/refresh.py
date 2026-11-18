@@ -6,13 +6,14 @@ from ...online_scripts.constants import (
     ONLINE_REFRESH_LOCK,
     ONLINE_REFRESH_STATE,
     claim_online_refresh_retry,
+    confirm_online_refresh_result,
     get_online_refresh_history,
     get_online_refresh_request,
     reserve_online_refresh,
     update_online_refresh_state,
 )
 from ...online_scripts.logs import online_refresh_log_file
-from ...online_scripts.source import online_script_cache_fingerprint
+from ...online_scripts.source import online_script_cache_fingerprint, online_script_source_fingerprint
 from ...utils import now_str
 
 
@@ -36,7 +37,9 @@ def _submit_online_refresh(proxy_id, raw_request_id=""):
         return {"ok": False, "status": "代理不可读", "request_id": request_id,
                 "error": f"读取代理配置失败：{e}"}, 500
     try:
-        info = reserve_online_refresh(proxy_id, request_id)
+        cache_fingerprint = online_script_cache_fingerprint()
+        source_fingerprint = online_script_source_fingerprint()
+        info = reserve_online_refresh(proxy_id, request_id, cache_fingerprint, source_fingerprint)
     except Exception as e:
         return {
             "ok": False, "status": "启动失败",
@@ -97,8 +100,9 @@ def _submit_online_refresh_retry(original_request_id, proxy_id, raw_request_id="
     try:
         validate_proxy_id(proxy_id)
         cache_fingerprint = online_script_cache_fingerprint()
+        source_fingerprint = online_script_source_fingerprint()
         info = claim_online_refresh_retry(
-            original_request_id, proxy_id, request_id, cache_fingerprint,
+            original_request_id, proxy_id, request_id, cache_fingerprint, source_fingerprint,
         )
     except ValueError as exc:
         return {"ok": False, "status": "参数错误", "request_id": request_id, "error": str(exc)}, 400
@@ -117,6 +121,9 @@ def _submit_online_refresh_retry(original_request_id, proxy_id, raw_request_id="
     if info.get("_binding_conflict"):
         return {"ok": False, "status": "冲突", "request_id": request_id,
                 "error": "重试请求与原刷新记录或既有请求绑定不一致，请重新读取历史"}, 409
+    if info.get("_stale"):
+        return {"ok": False, "status": "缓存或源已变化", "request_id": request_id,
+                "error": "原刷新后的缓存或在线脚本源地址已变化，请明确创建新的刷新请求，不会覆盖当前内容"}, 409
     if info.get("_replay"):
         return {"ok": True, "replayed": True, "request_id": request_id,
                 "retry_of": original_request_id, "id": info.get("id", ""),
@@ -138,6 +145,24 @@ def _submit_online_refresh_retry(original_request_id, proxy_id, raw_request_id="
                 "retry_of": original_request_id, "status": "启动失败", "error": error}, 500
     return {"ok": True, "id": info["id"], "request_id": request_id,
             "retry_of": original_request_id, "status": "运行中"}, 202
+
+
+def _confirm_online_refresh_result(request_id):
+    try:
+        cache_fingerprint = online_script_cache_fingerprint()
+        source_fingerprint = online_script_source_fingerprint()
+        info = confirm_online_refresh_result(request_id, cache_fingerprint, source_fingerprint)
+    except ValueError as exc:
+        return {"ok": False, "status": "参数错误", "error": str(exc), "request_id": request_id}, 400
+    except Exception as exc:
+        return {"ok": False, "status": "确认失败", "error": f"核对刷新结果失败：{exc}", "request_id": request_id}, 500
+    if info.get("_missing"):
+        return {"ok": False, "status": "记录不存在", "error": "刷新记录不存在或已清理", "request_id": request_id}, 404
+    if info.get("_conflict"):
+        return {"ok": False, "status": "结果仍未知", "error": "当前缓存或源版本与刷新回执不一致，不能确认发布结果", "request_id": request_id}, 409
+    return {"ok": True, "request_id": request_id, "status": info.get("status"),
+            "confirmation": info.get("confirmation"), "cache_published": info.get("cache_published"),
+            "replayed": bool(info.get("_replayed"))}, 200
 
 
 @bp.route("/online-scripts/refresh", methods=["POST"])
@@ -219,6 +244,28 @@ def online_refresh_retry(request_id):
             ),
         ), status_code
     return redirect(url_for("online_scripts.online_scripts_page", msg="已提交在线脚本源明确重试，正在处理中"))
+
+
+@bp.route("/api/online-scripts/refresh-confirm/<request_id>", methods=["POST"])
+def api_online_refresh_confirm(request_id):
+    payload, status_code = _confirm_online_refresh_result(request_id)
+    return jsonify(payload), status_code
+
+
+@bp.route("/online-scripts/refresh-confirm/<request_id>", methods=["POST"])
+def online_refresh_confirm(request_id):
+    payload, status_code = _confirm_online_refresh_result(request_id)
+    if not payload.get("ok"):
+        return layout(
+            "在线脚本源结果确认",
+            "online_scripts",
+            page_header_card(
+                "刷新结果仍需核对",
+                help_html=h(payload.get("error") or "刷新结果无法确认"),
+                actions_html='<a class="btn btn-gray" href="/online-scripts#online-status">返回刷新状态</a>',
+            ),
+        ), status_code
+    return redirect(url_for("online_scripts.online_scripts_page", msg=f"在线脚本源刷新结果已确认：{payload.get('status')}"))
 
 
 @bp.route("/api/online-scripts/refresh-status/<request_id>")

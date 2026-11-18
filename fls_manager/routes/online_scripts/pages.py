@@ -85,6 +85,12 @@ def online_scripts_page():
                 )
             else:
                 rows.append(log_link)
+            if item.get("status") == "结果未知" and not item.get("confirmation"):
+                rows.append(
+                    f'<form class="inline-form fls-online-refresh-confirm-form" method="post" '
+                    f'action="/online-scripts/refresh-confirm/{h(request_id)}" data-refresh-confirm-id="{h(request_id)}">'
+                    '<button class="btn btn-gray" type="submit">检查当前缓存结果</button></form>'
+                )
         return "".join(rows) or '<span class="help">暂无可查询的刷新历史</span>'
 
     def refresh_task_link_actions(failures):
@@ -270,9 +276,16 @@ async function updateOnlineRefreshHistory(){{
             const status = escapeHtml(item.status || "-");
             const updatedAt = escapeHtml(item.updated_at || "-");
             const link = "<a class='btn btn-gray' href='/online-scripts/refresh-log/" + encodeURIComponent(requestId) + "'>查看 " + status + " 刷新（" + updatedAt + "）</a>";
-            if(["失败","部分完成","结果未知","启动失败"].indexOf(String(item.status || "")) < 0) return link;
+            let actions = link;
+            if(String(item.status || "") === "结果未知" && !item.confirmation){{
+                actions += "<" + "form class='inline-form fls-online-refresh-confirm-form' method='post' action='/online-scripts/refresh-confirm/" + requestId + "' data-refresh-confirm-id='" + requestId + "'>" +
+                    "<" + "button class='btn btn-gray' type='submit'>检查当前缓存结果</button><" + "/form>";
+            }}
+            if(["失败","部分完成","结果未知","启动失败"].indexOf(String(item.status || "")) < 0){{
+                return "<div class='fls-online-refresh-history-row'>" + actions + "</div>";
+            }}
             const proxyId = escapeHtml(item.proxy_id || "");
-            return "<div class='fls-online-refresh-history-row' data-refresh-retry-of='" + requestId + "'>" + link +
+            return "<div class='fls-online-refresh-history-row' data-refresh-retry-of='" + requestId + "'>" + actions +
                 "<" + "form class='inline-form fls-online-refresh-retry-form' method='post' action='/online-scripts/refresh-retry/" + requestId + "' data-refresh-retry-of='" + requestId + "'>" +
                 "<" + "input type='hidden' name='retry_request_id' value='" + randomOnlineRefreshRequestId() + "'>" +
                 "<" + "input type='hidden' name='proxy_id' value='" + proxyId + "'>" +
@@ -280,6 +293,7 @@ async function updateOnlineRefreshHistory(){{
         }}).filter(Boolean).join("");
         history.innerHTML = rows || "<span class='help'>暂无可查询的刷新历史</span>";
         bindOnlineRefreshRetryForms(history);
+        bindOnlineRefreshConfirmForms(history);
         if(error){{ error.hidden = true; error.textContent = ""; }}
     }}catch(e){{
         if(error){{
@@ -344,6 +358,42 @@ function bindOnlineRefreshRetryForms(root){{
         if(button.__flsOnlineRefreshRetryBound) return;
         button.__flsOnlineRefreshRetryBound = true;
         button.onclick = function(event){{ event.preventDefault(); submitOnlineRefreshRetryForm(button.form || button.closest(".fls-online-refresh-retry-form"), event); return false; }};
+    }});
+}}
+
+async function submitOnlineRefreshConfirmForm(form, event){{
+    if(event){{ event.preventDefault(); event.stopImmediatePropagation(); }}
+    const requestId = String(form.getAttribute("data-refresh-confirm-id") || "");
+    const button = form.querySelector('button[type="submit"]');
+    if(!/^[a-f0-9]{{32}}$/.test(requestId)) return;
+    if(button) button.disabled = true;
+    try{{
+        const headers = {{"X-Requested-With":"XMLHttpRequest"}};
+        const csrf = typeof flsGetCsrfToken === "function" ? flsGetCsrfToken() : "";
+        if(csrf) headers["X-CSRF-Token"] = csrf;
+        const response = await fetch(form.action.replace("/online-scripts/refresh-confirm/", "/api/online-scripts/refresh-confirm/"), {{method:"POST", body:new FormData(form), headers, credentials:"same-origin"}});
+        const json = await flsReadJsonResponse(response);
+        if(!json || json.ok !== true) throw Object.assign(new Error(json && (json.error || json.msg) || "当前结果仍未知"), {{status:response.status}});
+        const error = document.getElementById("onlineRefreshHistoryError");
+        if(error){{ error.hidden = false; error.textContent = json.status === "已确认发布" ? "已确认：当前缓存与刷新发布回执一致。" : "已确认：当前缓存仍为刷新前内容，未发现缓存发布。"; }}
+        await updateOnlineRefreshHistory();
+    }}catch(e){{
+        if(button) button.disabled = false;
+        const error = document.getElementById("onlineRefreshHistoryError");
+        const denied = e && (e.status === 401 || e.status === 403);
+        if(error){{ error.hidden = false; error.textContent = (denied ? "登录状态已失效" : "刷新结果仍未知") + "：" + (e && e.message || String(e || "请求失败")) + "。请保留原日志并重新检查。"; }}
+        const login = document.getElementById("onlineRefreshLogin");
+        if(login){{ login.hidden = !denied; if(denied) login.href = "/login?next=" + encodeURIComponent(location.pathname + location.search); }}
+    }}
+}}
+
+function bindOnlineRefreshConfirmForms(root){{
+    const scope = root || document;
+    if(!scope || !scope.querySelectorAll) return;
+    scope.querySelectorAll(".fls-online-refresh-confirm-form button[type='submit']").forEach(function(button){{
+        if(button.__flsOnlineRefreshConfirmBound) return;
+        button.__flsOnlineRefreshConfirmBound = true;
+        button.onclick = function(event){{ event.preventDefault(); submitOnlineRefreshConfirmForm(button.form || button.closest(".fls-online-refresh-confirm-form"), event); return false; }};
     }});
 }}
 
@@ -493,6 +543,7 @@ async function updateOnlineRefreshStatus(){{
 updateOnlineRefreshStatus();
 updateOnlineRefreshHistory();
 bindOnlineRefreshRetryForms(document);
+bindOnlineRefreshConfirmForms(document);
 
 async function submitOnlineRefreshForm(form, event){{
     if(event){{ event.preventDefault(); event.stopImmediatePropagation(); }}
@@ -559,6 +610,10 @@ if(document.addEventListener){{
     document.addEventListener("submit", function(event){{
         const form = event.target && event.target.closest ? event.target.closest(".fls-online-refresh-retry-form") : null;
         if(form) return submitOnlineRefreshRetryForm(form, event);
+    }}, true);
+    document.addEventListener("submit", function(event){{
+        const form = event.target && event.target.closest ? event.target.closest(".fls-online-refresh-confirm-form") : null;
+        if(form) return submitOnlineRefreshConfirmForm(form, event);
     }}, true);
 }}
 

@@ -123,6 +123,15 @@ def online_script_cache_fingerprint():
     return hashlib.sha256(ONLINE_SCRIPT_CACHE_FILE.read_bytes()).hexdigest()
 
 
+def online_script_cache_fingerprint_for_items(items):
+    payload = json.dumps(items, ensure_ascii=False, indent=2).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def online_script_source_fingerprint():
+    return hashlib.sha256(get_online_script_source().encode("utf-8")).hexdigest()
+
+
 def save_online_script_cache(items):
     with storage_transaction():
         if ONLINE_SCRIPT_CACHE_FILE.is_symlink():
@@ -449,10 +458,20 @@ def fetch_online_scripts(proxy_id="", timeout=12, publish_cache=True, task_link_
 def refresh_worker(refresh_id, proxy_id="", log_file=""):
     log_file = log_file or str(online_refresh_log_file(refresh_id))
     request_id = ""
+    retry_of = ""
+    expected_cache_fingerprint = ""
+    source_fingerprint = ""
     with ONLINE_REFRESH_LOCK:
         if ONLINE_REFRESH_STATE.get("id") == refresh_id:
             request_id = str(ONLINE_REFRESH_STATE.get("request_id") or "")
+            retry_of = str(ONLINE_REFRESH_STATE.get("retry_of") or "")
+            expected_cache_fingerprint = str(ONLINE_REFRESH_STATE.get("expected_cache_fingerprint") or "")
+            source_fingerprint = str(ONLINE_REFRESH_STATE.get("source_fingerprint") or "")
     try:
+        if source_fingerprint and online_script_source_fingerprint() != source_fingerprint:
+            raise RuntimeError("在线脚本源地址在刷新提交后已变化，未发送外部请求")
+        if retry_of and expected_cache_fingerprint and online_script_cache_fingerprint() != expected_cache_fingerprint:
+            raise RuntimeError("在线脚本源缓存在重试提交后已变化，未发送外部请求")
         update_online_refresh_state(
             id=refresh_id,
             request_id=request_id,
@@ -479,12 +498,27 @@ def refresh_worker(refresh_id, proxy_id="", log_file=""):
             publish_cache=False,
             task_link_failures=task_link_failures,
         )
-        save_online_script_cache(items)
+        if source_fingerprint and online_script_source_fingerprint() != source_fingerprint:
+            raise RuntimeError("在线脚本源地址在抓取期间已变化，未发布缓存")
+        with storage_transaction():
+            current_cache_fingerprint = online_script_cache_fingerprint()
+            if retry_of and expected_cache_fingerprint and current_cache_fingerprint != expected_cache_fingerprint:
+                raise RuntimeError("在线脚本源缓存在抓取期间已变化，未覆盖后来缓存")
+            update_online_refresh_state(
+                status="发布中",
+                message="已获取脚本源，正在原子发布本地缓存",
+                updated_at=now_str(),
+            )
+            save_online_script_cache(items)
+            published_cache_fingerprint = online_script_cache_fingerprint_for_items(items)
+            if online_script_cache_fingerprint() != published_cache_fingerprint:
+                raise RuntimeError("缓存发布后指纹与预期不一致，结果未知")
         # Cache replacement is a separate durable side effect; retain that
         # fact when the later status-file write cannot be confirmed.
         with ONLINE_REFRESH_LOCK:
             ONLINE_REFRESH_STATE["cache_published"] = True
             ONLINE_REFRESH_STATE["task_link_failures"] = list(task_link_failures)
+            ONLINE_REFRESH_STATE["published_cache_fingerprint"] = published_cache_fingerprint
         if task_link_failures:
             msg = (
                 f"同步在线脚本源部分完成，共 {len(items)} 条；"
