@@ -15,6 +15,7 @@ from .constants import (
     DEFAULT_ONLINE_SCRIPT_SOURCE,
     ONLINE_SCRIPT_CACHE_FILE,
     ONLINE_TASK_LINK_REQUESTS_FILE,
+    ONLINE_TASK_LINK_ACTIVE,
     ONLINE_REFRESH_LOCK,
     ONLINE_REFRESH_STATE,
     update_online_refresh_state,
@@ -170,21 +171,40 @@ def _validate_task_link_requests(data):
             raise RuntimeError("在线任务源同步回执标识不一致，未覆盖原文件")
         if value.get("state") not in ("prepared", "running", "failed", "unknown", "completed"):
             raise RuntimeError("在线任务源同步回执状态损坏，未覆盖原文件")
-        for field in ("script_id", "proxy_id", "expected_version", "error", "updated_at"):
+        for field in ("script_id", "proxy_id", "expected_version", "error", "updated_at", "expected_tasks_fingerprint", "published_tasks_fingerprint", "confirmation", "confirmation_fingerprint"):
             if not isinstance(value.get(field, ""), str):
                 raise RuntimeError("在线任务源同步回执字段损坏，未覆盖原文件")
+        if any(
+            value.get(field) and not re.fullmatch(r"[a-f0-9]{64}", value.get(field))
+            for field in ("expected_tasks_fingerprint", "published_tasks_fingerprint", "confirmation_fingerprint")
+        ):
+            raise RuntimeError("在线任务源同步任务指纹损坏，未覆盖原文件")
+        if value.get("confirmation") not in ("", "merged", "not_merged"):
+            raise RuntimeError("在线任务源同步确认状态损坏，未覆盖原文件")
     return data
 
 
 def _task_link_request_snapshot(info):
     fields = (
         "request_id", "script_id", "proxy_id", "expected_version", "state",
-        "added", "total", "error", "updated_at",
+        "added", "total", "error", "updated_at", "expected_tasks_fingerprint",
+        "published_tasks_fingerprint", "confirmation", "confirmation_fingerprint",
     )
     snapshot = {field: info.get(field, 0 if field in ("added", "total") else "") for field in fields}
     if type(snapshot["added"]) is not int or type(snapshot["total"]) is not int:
         raise RuntimeError("在线任务源同步回执计数损坏，未覆盖原文件")
+    for field in ("expected_tasks_fingerprint", "published_tasks_fingerprint", "confirmation_fingerprint"):
+        if snapshot[field] and not re.fullmatch(r"[a-f0-9]{64}", snapshot[field]):
+            raise RuntimeError("在线任务源同步任务指纹损坏，未覆盖原文件")
+    if snapshot["confirmation"] not in ("", "merged", "not_merged"):
+        raise RuntimeError("在线任务源同步确认状态损坏，未覆盖原文件")
     return snapshot
+
+
+def online_script_task_fingerprint(item):
+    tasks = normalize_online_task_crons((item or {}).get("task_cron"))
+    payload = json.dumps(tasks, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def get_task_link_request(request_id):
@@ -200,7 +220,16 @@ def get_task_link_request(request_id):
         except (TypeError, ValueError) as exc:
             raise RuntimeError(f"在线任务源同步回执损坏，未覆盖原文件：{exc}") from exc
         value = data.get(request_id)
-        return dict(value) if isinstance(value, dict) else None
+        if not isinstance(value, dict):
+            return None
+        value = dict(value)
+        if value.get("state") == "running" and request_id not in ONLINE_TASK_LINK_ACTIVE:
+            value["state"] = "unknown"
+            value["error"] = "面板重启或请求中断后无法确认任务是否已合并，请核对当前任务列表"
+            value["updated_at"] = now_str()
+            data[request_id] = _task_link_request_snapshot(value)
+            mutate_json(ONLINE_TASK_LINK_REQUESTS_FILE, {}, lambda _: data, strict=True)
+        return value
 
 
 def persist_task_link_request(info):

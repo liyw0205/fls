@@ -497,7 +497,7 @@ async function updateOnlineRefreshStatus(){{
                 btn.textContent = "同步成功，正在更新列表...";
             }}
 
-            setTimeout(function(){{
+            setTimeout(() => {{
                 location.href = "/online-scripts";
             }}, 800);
 
@@ -632,7 +632,7 @@ function readPending(){{
     }}catch(_error){{ return null; }}
 }}
 
-function writeMessage(text, denied, pending, allowContinue){{
+function writeMessage(text, denied, pending, allowContinue, allowConfirm){{
     if(!recovery || !pending || !/^[a-f0-9]{{32}}$/.test(String(pending.request_id || ""))) return;
     recovery.hidden = false;
     recovery.textContent = "";
@@ -650,6 +650,13 @@ function writeMessage(text, denied, pending, allowContinue){{
         login.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
         login.textContent = "重新登录";
         recovery.appendChild(login);
+    }}else if(allowConfirm){{
+        const confirmButton = document.createElement("button");
+        confirmButton.type = "button";
+        confirmButton.className = "btn btn-primary";
+        confirmButton.textContent = "检查当前任务合并";
+        confirmButton.addEventListener("click", function(){{ confirmPending(pending, confirmButton); }});
+        recovery.appendChild(confirmButton);
     }}else if(allowContinue){{
         const form = document.createElement("form");
         form.className = "fls-online-task-link-form inline-form";
@@ -687,6 +694,27 @@ function writeMessage(text, denied, pending, allowContinue){{
     }}
 }}
 
+async function confirmPending(pending, button){{
+    if(button) button.disabled = true;
+    try{{
+        const headers = {{"X-Requested-With":"XMLHttpRequest"}};
+        const csrf = typeof flsGetCsrfToken === "function" ? flsGetCsrfToken() : "";
+        if(csrf) headers["X-CSRF-Token"] = csrf;
+        const response = await fetch("/api/online-scripts/task-link-confirm/" + encodeURIComponent(pending.request_id), {{method:"POST", headers, credentials:"same-origin"}});
+        const json = await flsReadJsonResponse(response);
+        if(!json || json.ok !== true) throw Object.assign(new Error(json && json.msg || "确认未完成"), {{status: response.status}});
+        if(json.confirmation === "merged"){{
+            sessionStorage.removeItem(storageKey);
+            window.location.href = "/online-scripts?msg=" + encodeURIComponent(json.msg || "已确认任务已合并");
+            return;
+        }}
+        writeMessage(json.msg || "任务尚未合并，请继续原同步请求", false, pending, true, false);
+    }}catch(error){{
+        const denied = error && (error.status === 401 || error.status === 403);
+        writeMessage("任务合并确认失败：" + (error && error.message || String(error || "请求失败")), denied, pending, false, true);
+    }}
+}}
+
 async function queryPending(pending){{
     try{{
         const response = await fetch("/api/online-scripts/task-link-status/" + encodeURIComponent(pending.request_id), {{cache:"no-store", credentials:"same-origin"}});
@@ -697,7 +725,7 @@ async function queryPending(pending){{
             window.location.href = "/online-scripts?msg=" + encodeURIComponent("外部任务源同步完成，已刷新任务列表");
             return;
         }}
-        writeMessage("原同步请求：" + (json.error || json.state || "未知"), false, pending, json.state === "failed");
+        writeMessage("原同步请求：" + (json.error || json.state || "未知"), false, pending, json.state === "failed", json.state === "unknown");
     }}catch(error){{
         const denied = error && (error.status === 401 || error.status === 403);
         writeMessage("原同步状态读取失败：" + (error && error.message || String(error || "查询失败")), denied, pending);
