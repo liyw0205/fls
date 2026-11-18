@@ -959,7 +959,8 @@ async function flsInstallRecoverPending(){{
     const retryEl = document.getElementById("onlineInstallRecoveryRetry");
     let pending;
     try{{ pending = JSON.parse(sessionStorage.getItem("fls-online-install-request") || "null"); }}catch(_error){{ pending = null; }}
-    const installId = pending && /^[a-f0-9]{{32}}$/.test(String(pending.install_id || "")) ? String(pending.install_id) : "";
+    const pendingId = pending && (pending.install_id || pending.request_id);
+    const installId = /^[a-f0-9]{{32}}$/.test(String(pendingId || "")) ? String(pendingId) : "";
     if(!installId) return;
 
     async function read(){{

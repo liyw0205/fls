@@ -709,6 +709,11 @@ async function runCase(pending, response, expected) {
         {calls: 1, logHidden: false, retryHidden: false, loginHidden: true, status: /安装中.*downloading/, retry: true}
   );
   await runCase(
+    {request_id: installId, script_id: 'demo'},
+    {ok: true, status: 200, body: JSON.stringify({running: false, status: '结果未知', phase: 'unknown'})},
+    {calls: 1, logHidden: false, retryHidden: false, loginHidden: true, status: /结果未知/}
+  );
+  await runCase(
     {install_id: installId, script_id: 'demo'},
     {ok: false, status: 502, body: JSON.stringify({msg: '上游暂不可用'})},
     {calls: 1, logHidden: true, retryHidden: false, loginHidden: true, status: /上游暂不可用/}
