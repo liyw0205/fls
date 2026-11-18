@@ -1554,18 +1554,61 @@ def api_deps_install_log(install_id):
 @bp.route("/api/deps/install-history")
 def api_deps_install_history():
     try:
-        items = list_install_jobs(request.args.get("limit", 50), request.args.get("kind", ""), DEPS_RUNNING)
+        items = _list_install_history(request.args.get("limit", 50), request.args.get("kind", ""))
     except ValueError as exc:
         return jsonify(ok=False, msg=str(exc)), 400
     except Exception as exc:
         return jsonify(ok=False, msg=f"安装历史无法读取：{exc}"), 500
-    return jsonify(ok=True, items=items)
+    return jsonify(ok=True, items=[_install_history_payload(info) for info in items])
+
+
+def _list_install_history(limit, kind):
+    items = list_install_jobs(limit, kind, DEPS_RUNNING)
+    for info in items:
+        install_id = str(info.get("id") or "")
+        live = DEPS_RUNNING.get(install_id)
+        if not info.get("running") or not isinstance(live, dict) or live.get("process") is None:
+            continue
+        try:
+            deps_install_result(install_id)
+        except Exception as exc:
+            raise RuntimeError(f"安装 {install_id} 的进程状态无法确认：{exc}") from exc
+    return list_install_jobs(limit, kind, DEPS_RUNNING)
+
+
+def _install_history_payload(info):
+    status = str(info.get("status") or "unknown")
+    cancel_status = str(info.get("cancel_status") or "")
+    status_labels = {
+        "prepared": "准备中", "running": "安装中", "succeeded": "安装成功",
+        "failed": "安装失败", "unknown": "结果未知", "cancelled": "已取消",
+    }
+    if cancel_status == "requested" and info.get("running"):
+        cancel_status_label = "正在取消"
+    else:
+        cancel_status_label = {
+            "requested": "取消结果待确认", "cancelled": "已取消",
+            "completed": "安装已结束", "failed": "取消失败", "unknown": "取消结果未知",
+        }.get(cancel_status, "")
+    retry_available = (
+        not info.get("running")
+        and status in ("failed", "unknown", "cancelled")
+        and not info.get("retried_by")
+    )
+    return {
+        **info,
+        "status_label": status_labels.get(status, "结果未知"),
+        "cancel_status_label": cancel_status_label,
+        "diagnostic": str(info.get("cancel_error") or info.get("error") or ""),
+        "recovery_available": retry_available,
+        "log_url": url_for("deps.deps_install_log", install_id=info["id"], back="/deps"),
+    }
 
 
 @bp.route("/deps/install-history")
 def deps_install_history():
     try:
-        items = list_install_jobs(request.args.get("limit", 50), request.args.get("kind", ""), DEPS_RUNNING)
+        items = _list_install_history(request.args.get("limit", 50), request.args.get("kind", ""))
     except ValueError as exc:
         body = page_header_card(
             "依赖/运行时安装历史",
@@ -1580,24 +1623,31 @@ def deps_install_history():
             actions_html='<a class="btn btn-primary" href="/deps/install-history">重新读取</a><a class="btn btn-gray" href="/deps">返回依赖管理</a>',
         )
         return layout("安装历史", "deps", body), 500
+    items = [_install_history_payload(info) for info in items]
     rows = []
     for info in items:
         install_id = h(info.get("id") or "")
         kind = "依赖" if info.get("kind") == "dependency" else "运行时"
+        status = h(info.get("status_label") or "结果未知")
+        cancel_status = h(info.get("cancel_status_label") or "-")
+        diagnostic = h(str(info.get("diagnostic") or "")[:400] or "-")
+        log_label = "查看日志与恢复" if info.get("recovery_available") else "查看安装日志"
         rows.append(
             "<tr>"
             f"<td><code>{install_id}</code></td>"
             f"<td>{kind}</td>"
             f"<td>{h(info.get('package') or '-')}</td>"
-            f"<td>{h(info.get('status') or '-')}</td>"
+            f"<td>{status}</td>"
+            f"<td>{cancel_status}</td>"
+            f"<td>{diagnostic}</td>"
             f"<td>{h(info.get('updated_at') or '-')}</td>"
-            f'<td><a class="btn btn-blue" href="/deps/install-log/{install_id}">查看安装日志</a></td>'
+            f'<td><a class="btn btn-blue" href="{h(info.get("log_url") or "/deps/install-log/" + install_id)}">{log_label}</a></td>'
             "</tr>"
         )
     table = (
         '<div class="table-wrap"><table><thead><tr><th>安装 ID</th><th>类型</th><th>包/运行时</th>'
-        '<th>状态</th><th>更新时间</th><th>操作</th></tr></thead><tbody>'
-        + ("".join(rows) or '<tr><td colspan="6">暂无安装历史</td></tr>')
+        '<th>状态</th><th>取消状态</th><th>诊断</th><th>更新时间</th><th>操作</th></tr></thead><tbody>'
+        + ("".join(rows) or '<tr><td colspan="8">暂无安装历史</td></tr>')
         + "</tbody></table></div>"
     )
     body = page_header_card(

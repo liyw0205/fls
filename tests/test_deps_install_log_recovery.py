@@ -837,6 +837,139 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
             self.assertEqual(target.read_text(encoding="utf-8"), "{}")
             target.unlink()
 
+    def test_install_history_api_reconciles_live_process_exit_and_persists_terminal_state(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.install_records import INSTALL_JOBS_FILE
+
+            process = SimpleNamespace(
+                poll=unittest.mock.Mock(return_value=0),
+                terminate=unittest.mock.Mock(), kill=unittest.mock.Mock(),
+                wait=unittest.mock.Mock(),
+            )
+            info, fp = self.seed_running_install(base_dir, "history-exited-install", process=process)
+            response = app.test_client().get(
+                "/api/deps/install-history?kind=dependency&limit=10",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(response.status_code, 200)
+            item = next(item for item in response.json["items"] if item["id"] == info["id"])
+            self.assertEqual(item["status"], "succeeded")
+            self.assertEqual(item["status_label"], "安装成功")
+            self.assertEqual(item["returncode"], 0)
+            self.assertFalse(item["running"])
+            self.assertFalse(item["recovery_available"])
+            self.assertTrue(fp.closed)
+            process.poll.assert_called_once()
+            persisted = json.loads(INSTALL_JOBS_FILE.read_text(encoding="utf-8"))
+            self.assertFalse(persisted[info["id"]]["running"])
+            self.assertEqual(persisted[info["id"]]["status"], "succeeded")
+
+    def test_install_history_filters_are_zero_effect_and_cancel_recovery_is_visible(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.install_records import INSTALL_JOBS_FILE, persist_install_job
+
+            process = SimpleNamespace(
+                poll=unittest.mock.Mock(return_value=None),
+                terminate=unittest.mock.Mock(), kill=unittest.mock.Mock(),
+            )
+            info, _fp = self.seed_running_install(base_dir, "history-cancel-pending", process=process)
+            info.update(
+                cancel_request_id="history-cancel-request", cancel_status="failed",
+                cancel_error="fixture terminate denied",
+            )
+            persist_install_job(info)
+            client = app.test_client()
+            for query in ("?limit=bad", "?kind=invalid"):
+                invalid = client.get("/api/deps/install-history" + query, headers={"X-Token": TOKEN})
+                self.assertEqual(invalid.status_code, 400)
+            process.poll.assert_not_called()
+
+            active = client.get(
+                "/api/deps/install-history?kind=dependency", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(active.status_code, 200)
+            item = next(item for item in active.json["items"] if item["id"] == info["id"])
+            self.assertEqual(item["cancel_status_label"], "取消失败")
+            self.assertEqual(item["diagnostic"], "fixture terminate denied")
+            self.assertTrue(item["running"])
+            process.poll.assert_called_once()
+
+            terminal = dict(info)
+            terminal.update(
+                running=False, finished=True, status="cancelled", returncode=-15,
+                cancel_status="cancelled", cancel_error="", process=None, log_fp=None,
+                updated_at="2026-11-18 19:10:00",
+            )
+            persist_install_job(terminal)
+            stored = json.loads(INSTALL_JOBS_FILE.read_text(encoding="utf-8"))[info["id"]]
+            self.assertFalse(stored["running"])
+            self.assertEqual(stored["status"], "cancelled")
+            from fls_manager.state import DEPS_RUNNING
+            DEPS_RUNNING.pop(info["id"], None)
+            self.assertNotIn(info["id"], DEPS_RUNNING)
+            cancelled = client.get(
+                "/api/deps/install-history?kind=dependency", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(cancelled.status_code, 200)
+            stored = json.loads(INSTALL_JOBS_FILE.read_text(encoding="utf-8"))[info["id"]]
+            self.assertFalse(stored["running"])
+            self.assertEqual(stored["status"], "cancelled")
+            cancelled_item = next(item for item in cancelled.json["items"] if item["id"] == info["id"])
+            self.assertEqual(cancelled_item["status_label"], "已取消")
+            self.assertEqual(cancelled_item["cancel_status_label"], "已取消")
+            self.assertTrue(cancelled_item["recovery_available"])
+            page = client.get("/deps/install-history?kind=dependency", headers={"X-Token": TOKEN})
+            self.assertEqual(page.status_code, 200)
+            stored = json.loads(INSTALL_JOBS_FILE.read_text(encoding="utf-8"))[info["id"]]
+            self.assertFalse(stored["running"])
+            self.assertEqual(stored["status"], "cancelled")
+            body = page.get_data(as_text=True)
+            self.assertIn("已取消", body)
+            self.assertIn("查看日志与恢复", body)
+            self.assertIn(f"/deps/install-log/{info['id']}?back=/deps", body)
+
+    def test_install_history_poll_and_persistence_failures_never_claim_success(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.install_records import INSTALL_JOBS_FILE
+
+            process = SimpleNamespace(
+                poll=unittest.mock.Mock(side_effect=OSError("fixture poll failed")),
+                terminate=unittest.mock.Mock(), kill=unittest.mock.Mock(),
+            )
+            info, _fp = self.seed_running_install(base_dir, "history-poll-failure", process=process)
+            client = app.test_client()
+            failed = client.get("/api/deps/install-history", headers={"X-Token": TOKEN})
+            self.assertEqual(failed.status_code, 500)
+            self.assertIn("fixture poll failed", failed.json["msg"])
+            page = client.get("/deps/install-history", headers={"X-Token": TOKEN})
+            self.assertEqual(page.status_code, 500)
+            self.assertIn("fixture poll failed", page.get_data(as_text=True))
+            persisted = json.loads(INSTALL_JOBS_FILE.read_text(encoding="utf-8"))
+            self.assertTrue(persisted[info["id"]]["running"])
+
+        with isolated_app() as (app, base_dir):
+            from fls_manager.install_records import INSTALL_JOBS_FILE
+
+            process = SimpleNamespace(
+                poll=unittest.mock.Mock(return_value=0),
+                terminate=unittest.mock.Mock(), kill=unittest.mock.Mock(),
+            )
+            info, _fp = self.seed_running_install(base_dir, "history-save-failure", process=process)
+            with patch(
+                "fls_manager.routes.deps.persist_install_job",
+                side_effect=OSError("fixture receipt read-only"),
+            ):
+                response = app.test_client().get(
+                    "/api/deps/install-history", headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(response.status_code, 200)
+            item = next(item for item in response.json["items"] if item["id"] == info["id"])
+            self.assertEqual(item["status"], "unknown")
+            self.assertFalse(item["running"])
+            self.assertIn("fixture receipt read-only", item["diagnostic"])
+            persisted = json.loads(INSTALL_JOBS_FILE.read_text(encoding="utf-8"))
+            self.assertTrue(persisted[info["id"]]["running"])
+
     def test_install_log_rejects_outside_and_symlink_paths_without_reading_them(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.install_records import INSTALL_JOBS_FILE

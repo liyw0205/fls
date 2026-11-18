@@ -295,6 +295,17 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    assert.notEqual(await failedCancelForm.locator('[name="request_id"]').inputValue(),failedRequestId);
    assert.equal(failedCancelPosts,2);
    assert.equal(await page.locator('#installCancelAgain').isHidden(),true);
+   await page.goto(base+'/deps/install-history?kind=dependency');
+   const historyRow=page.locator('tr').filter({hasText:failedCancelId});
+   await historyRow.waitFor();
+   assert.equal((await historyRow.locator('td').nth(3).textContent()).trim(),'已取消');
+   assert.equal((await historyRow.locator('td').nth(4).textContent()).trim(),'已取消');
+   const historyRecovery=historyRow.getByRole('link',{name:'查看日志与恢复',exact:true});
+   assert.match(await historyRecovery.getAttribute('href'),new RegExp('/deps/install-log/'+failedCancelId+'\\?back=/deps$'));
+   await historyRecovery.click();
+   await page.waitForURL('**/deps/install-log/'+failedCancelId+'?back=/deps');
+   await page.locator('.install-retry-form button[type="submit"]').waitFor();
+   assert.ok(await page.locator('.install-retry-form [name="request_id"]').inputValue());
    assert.equal((await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)),true);
    assert.deepEqual(errors,[]);await context.close();console.log('install log recovery passed '+viewport.width);
   }
