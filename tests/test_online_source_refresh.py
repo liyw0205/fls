@@ -201,6 +201,84 @@ setImmediate(() => {
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise refresh submission recovery")
+    def test_refresh_form_ajax_submission_keeps_request_after_response_loss(self):
+        with isolated_app() as (app, _base_dir):
+            response = app.test_client().get("/online-scripts", headers={"X-Token": TOKEN})
+            self.assertEqual(response.status_code, 200)
+            html = response.get_data(as_text=True)
+            self.assertIn('class="action-row fls-online-refresh-form"', html)
+            self.assertIn('name="request_id"', html)
+            script = next(
+                script for script in re.findall(r"<script>(.*?)</script>", html, re.S)
+                if "submitOnlineRefreshForm" in script
+            )
+            source = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+            reader = source[source.index("async function flsReadJsonResponse("):source.index("async function flsReadTextResponse(")]
+            result = subprocess.run(["node", "-e", r'''
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+const requestId = 'a'.repeat(32);
+const inputId = {value: requestId};
+const proxy = {value: 'proxy-a'};
+const button = {disabled: false};
+const form = {action: '/online-scripts/refresh', querySelector(selector) {
+  if(selector.includes('request_id')) return inputId;
+  if(selector.includes('proxy_id')) return proxy;
+  return button;
+}};
+button.form = form;
+const elements = {
+  onlineRefreshStatusCard: {style: {}},
+  onlineRefreshStatusText: {innerHTML: '', textContent: ''},
+  onlineRefreshTaskLinkFailures: {innerHTML: ''},
+  onlineRefreshBtn: button,
+  onlineRefreshLogin: {hidden: true, href: ''},
+};
+const storage = {value: null, getItem(){return this.value;}, setItem(_key, value){this.value = value;}, removeItem(){this.value = null;}};
+let calls = [];
+let statusReads = 0;
+const context = {
+  window: {location: {pathname: '/online-scripts', search: ''}},
+  location: {pathname: '/online-scripts', search: ''},
+  document: {
+    getElementById: id => elements[id],
+    querySelectorAll: selector => selector.includes('fls-online-refresh-form') ? [button] : [],
+    addEventListener: () => {},
+  },
+  sessionStorage: storage,
+  encodeURIComponent,
+  flsGetCsrfToken: () => 'csrf-refresh',
+  flsResponseErrorDiagnostic: (_response, body) => ({payload: JSON.parse(body), message: JSON.parse(body).msg || ''}),
+  FormData: class { constructor(value){this.value = value;} },
+  fetch: async (url, options) => {
+    calls.push({url, options});
+    if(url === '/api/online-scripts/refresh-status') {
+      statusReads += 1;
+      return {ok: true, status: 200, text: async () => JSON.stringify({id: 'b'.repeat(32), running: statusReads > 1, status: statusReads > 1 ? '运行中' : '', message: '', error: '', task_link_failures: []})};
+    }
+    assert.equal(url, '/api/online-scripts/refresh');
+    assert.equal(options.method, 'POST');
+    assert.equal(options.headers['X-CSRF-Token'], 'csrf-refresh');
+    return {ok: true, status: 202, text: async () => JSON.stringify({ok: true, id: 'b'.repeat(32), status: '运行中'})};
+  },
+  setTimeout: () => {},
+};
+vm.createContext(context);
+vm.runInContext(input.reader + input.script, context);
+(async()=>{
+  await new Promise(resolve => setImmediate(resolve));
+  await context.submitOnlineRefreshForm(form, {preventDefault(){}, stopImmediatePropagation(){}});
+  assert.equal(calls.filter(item => item.url === '/api/online-scripts/refresh').length, 1);
+  assert.equal(button.disabled, true);
+  const pending = JSON.parse(storage.value);
+  assert.equal(pending.request_id, requestId);
+  assert.equal(pending.server_id, 'b'.repeat(32));
+})().catch(error => { console.error(error); process.exitCode = 1; });
+'''], input=json.dumps({"script": script, "reader": reader}), text=True, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_refresh_worker_persists_success_and_failure_without_losing_cache(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.online_scripts import source

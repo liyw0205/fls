@@ -100,7 +100,8 @@ def online_scripts_page():
 <div class="fls-source-code">{h(source)}</div>
         """,
         actions_html=f"""
-<form method="post" action="/online-scripts/refresh" class="action-row">
+<form method="post" action="/online-scripts/refresh" class="action-row fls-online-refresh-form">
+    <input type="hidden" name="request_id" value="{uuid.uuid4().hex}">
     <select name="proxy_id" aria-label="刷新脚本源使用的代理" style="width:auto;min-width:180px;">{proxy_options}</select>
     <button class="btn btn-primary" type="submit" id="onlineRefreshBtn">同步在线脚本源</button>
 </form>
@@ -186,6 +187,26 @@ def online_scripts_page():
 <script>
 window.__FLS_ONLINE_REFRESH_WAS_RUNNING__ = false;
 window.__FLS_ONLINE_REFRESH_RELOADED__ = false;
+const refreshStorageKey = "fls-online-refresh-request";
+
+function readOnlineRefreshPending(){{
+    try{{
+        const value = JSON.parse(sessionStorage.getItem(refreshStorageKey) || "null");
+        if(!value || !/^[a-f0-9]{{32}}$/.test(String(value.request_id || ""))) return null;
+        return value;
+    }}catch(_error){{ return null; }}
+}}
+
+function saveOnlineRefreshPending(value){{
+    try{{ sessionStorage.setItem(refreshStorageKey, JSON.stringify(value)); }}catch(_error){{}}
+}}
+
+function clearOnlineRefreshPending(){{
+    try{{ sessionStorage.removeItem(refreshStorageKey); }}catch(_error){{}}
+}}
+
+const onlineRefreshPending = readOnlineRefreshPending();
+if(onlineRefreshPending) window.__FLS_ONLINE_REFRESH_WAS_RUNNING__ = true;
 
 function escapeHtml(s){{
     return String(s).replace(/[&<>"']/g, function(c){{
@@ -197,6 +218,11 @@ async function updateOnlineRefreshStatus(){{
     try {{
         const res = await fetch("/api/online-scripts/refresh-status", {{cache:"no-store"}});
         const json = await flsReadJsonResponse(res);
+
+        if(onlineRefreshPending && json.id && !onlineRefreshPending.server_id){{
+            onlineRefreshPending.server_id = String(json.id);
+            saveOnlineRefreshPending(onlineRefreshPending);
+        }}
 
         const card = document.getElementById("onlineRefreshStatusCard");
         const text = document.getElementById("onlineRefreshStatusText");
@@ -221,7 +247,7 @@ async function updateOnlineRefreshStatus(){{
                     ? Array.from(crypto.getRandomValues(new Uint8Array(16)), function(value){{return value.toString(16).padStart(2, "0");}}).join("")
                     : Array.from({{length:32}}, function(){{return Math.floor(Math.random() * 16).toString(16);}}).join("");
                 return "<div class='help' style='margin-top:6px;'>" + name + "：" + detail +
-                    " <" + "form class='inline-form' method='post' action='" + escapeHtml(href) + "'>" +
+                    " <" + "form class='inline-form fls-online-task-link-form' data-script-id='" + escapeHtml(id) + "' method='post' action='" + escapeHtml(href) + "'>" +
                     "<input type='hidden' name='csrf_token' value='" + csrf + "'>" +
                     "<input type='hidden' name='request_id' value='" + requestId + "'>" +
                     "<input type='hidden' name='proxy_id' value='" + proxy + "'>" +
@@ -231,6 +257,11 @@ async function updateOnlineRefreshStatus(){{
 
         if(json.running){{
             window.__FLS_ONLINE_REFRESH_WAS_RUNNING__ = true;
+        }}
+
+        if(onlineRefreshPending && !json.running && json.id &&
+            onlineRefreshPending.server_id === String(json.id) && json.status === "已完成"){{
+            clearOnlineRefreshPending();
         }}
 
         if(json.running || json.message || json.error || taskFailures.length){{
@@ -311,6 +342,66 @@ async function updateOnlineRefreshStatus(){{
 }}
 
 updateOnlineRefreshStatus();
+
+async function submitOnlineRefreshForm(form, event){{
+    if(event){{ event.preventDefault(); event.stopImmediatePropagation(); }}
+    const requestInput = form.querySelector('input[name="request_id"]');
+    const proxyInput = form.querySelector('[name="proxy_id"]');
+    const button = form.querySelector('button[type="submit"]');
+    const requestId = requestInput && requestInput.value || "";
+    const proxyId = proxyInput && proxyInput.value || "";
+    if(!/^[a-f0-9]{{32}}$/.test(requestId)){{
+        const text = document.getElementById("onlineRefreshStatusText");
+        if(text) text.textContent = "刷新请求标识无效，请刷新页面后重试";
+        return;
+    }}
+    const pending = {{request_id: requestId, proxy_id: proxyId, server_id: ""}};
+    saveOnlineRefreshPending(pending);
+    window.__FLS_ONLINE_REFRESH_WAS_RUNNING__ = true;
+    if(button) button.disabled = true;
+    try{{
+        const headers = {{"X-Requested-With":"XMLHttpRequest"}};
+        const csrf = typeof flsGetCsrfToken === "function" ? flsGetCsrfToken() : "";
+        if(csrf) headers["X-CSRF-Token"] = csrf;
+        const response = await fetch(form.action.replace("/online-scripts/refresh", "/api/online-scripts/refresh"), {{
+            method: "POST", body: new FormData(form), headers, credentials: "same-origin"
+        }});
+        const json = await flsReadJsonResponse(response);
+        if(!json || json.ok !== true) throw Object.assign(new Error(json && (json.error || json.msg) || "刷新未启动"), {{status: response.status}});
+        pending.server_id = String(json.id || "");
+        saveOnlineRefreshPending(pending);
+        await updateOnlineRefreshStatus();
+    }}catch(error){{
+        if(button) button.disabled = false;
+        const card = document.getElementById("onlineRefreshStatusCard");
+        const text = document.getElementById("onlineRefreshStatusText");
+        const login = document.getElementById("onlineRefreshLogin");
+        const denied = error && (error.status === 401 || error.status === 403);
+        if(card) card.style.display = "block";
+        if(text) text.textContent = "刷新请求失败：" + (error && error.message || String(error || "请求失败")) + "。请查询状态后重试。";
+        if(login){{
+            login.hidden = !denied;
+            if(denied) login.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
+        }}
+    }}
+}}
+
+if(document.querySelectorAll){{
+    document.querySelectorAll(".fls-online-refresh-form button[type='submit']").forEach(function(button){{
+        button.onclick = function(event){{
+            event.preventDefault();
+            const form = button.form || (button.closest ? button.closest(".fls-online-refresh-form") : null);
+            if(form) submitOnlineRefreshForm(form, event);
+            return false;
+        }};
+    }});
+}}
+if(document.addEventListener){{
+    document.addEventListener("submit", function(event){{
+        const form = event.target && event.target.closest ? event.target.closest(".fls-online-refresh-form") : null;
+        if(form) return submitOnlineRefreshForm(form, event);
+    }}, true);
+}}
 
 (function(){{
 const recovery = document.getElementById("onlineTaskLinkRecovery");
