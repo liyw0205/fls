@@ -664,7 +664,11 @@ def install_worker(
                 return
             info.update({
                 "running": False,
-                "phase": "stopped" if stopped else ("timeout" if isinstance(e, InstallTimeout) else "failed"),
+                "phase": (
+                    info.get("phase") if not stopped and not isinstance(e, InstallTimeout)
+                    and info.get("phase") == "importing_tasks"
+                    else "stopped" if stopped else ("timeout" if isinstance(e, InstallTimeout) else "failed")
+                ),
                 "status": "已停止" if stopped else ("超时" if isinstance(e, InstallTimeout) else "失败"),
                 "returncode": getattr(e, "returncode", None),
                 "error": "；".join(dict.fromkeys(filter(None, (

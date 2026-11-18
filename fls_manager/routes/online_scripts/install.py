@@ -2,6 +2,7 @@ from ._common import *
 import re
 
 from ...utils import now_str
+from ...models import TaskSchedulerReloadError
 from ...scheduler import reload_scheduler
 from ...online_scripts.constants import (
     ONLINE_INSTALL_LOCK,
@@ -11,6 +12,7 @@ from ...online_scripts.constants import (
     get_online_install_job,
     persist_online_install,
 )
+from ...online_scripts.install import capture_install_outputs, _persist_install_state
 
 
 def _install_request_id(raw):
@@ -595,6 +597,123 @@ def _install_scheduler_reload_form(install_id):
         f'action="/online-scripts/install-reload/{h(quote(install_id, safe=""))}">'
         '<button class="btn btn-primary" type="submit">重新加载调度器</button></form>'
     )
+
+
+def _retry_install_tasks(install_id):
+    """Retry only the task import after a script download already succeeded."""
+    with ONLINE_INSTALL_LOCK:
+        try:
+            info = get_online_install_job(install_id)
+        except Exception as exc:
+            return {"ok": False, "request_id": install_id, "msg": f"安装记录无法读取：{exc}"}, 500
+        if not info:
+            return {"ok": False, "request_id": install_id, "msg": "安装记录不存在。"}, 404
+        if info.get("running") or install_id in ONLINE_INSTALL_RETRYING:
+            return {"ok": False, "request_id": install_id, "msg": "安装或恢复仍在进行，请稍后重试。"}, 409
+        if not info.get("import_task") or info.get("phase") != "importing_tasks":
+            return {"ok": False, "request_id": install_id, "msg": "当前安装没有可单独恢复的任务导入阶段。"}, 409
+        consistency = verify_install_outputs(info)
+        if consistency.get("target") != "unchanged":
+            return {
+                "ok": False,
+                "request_id": install_id,
+                "msg": "脚本目标已被后来修改或无法确认，请重新选择安装选项，未覆盖现有文件。",
+                "consistency": consistency,
+            }, 409
+        try:
+            item = get_online_script(str(info.get("script_id") or ""))
+            selected = validated_install_retry_task_indexes(item, info) if item else None
+        except Exception as exc:
+            return {"ok": False, "request_id": install_id, "msg": f"原任务选择已失效：{exc}"}, 409
+        if not item or not selected:
+            return {"ok": False, "request_id": install_id, "msg": "脚本源或原任务选择已失效，请重新选择。"}, 409
+        updated = dict(info)
+        updated.update(running=True, status="运行中", phase="importing_tasks", error="", updated_at=now_str())
+        try:
+            persist_online_install(updated)
+        except Exception as exc:
+            return {"ok": False, "request_id": install_id, "msg": f"任务恢复未启动，安装回执无法保存：{exc}"}, 500
+        ONLINE_INSTALL_RUNNING[install_id] = updated
+        ONLINE_INSTALL_RETRYING.add(install_id)
+
+    try:
+        try:
+            import_task_if_needed(
+                item,
+                log_file=updated.get("log_file"),
+                enable_task=bool(updated.get("enable_task")),
+                selected_task_indexes=selected,
+                raise_on_reload_error=True,
+            )
+        except TaskSchedulerReloadError as exc:
+            updated.update(
+                running=False,
+                status="部分完成",
+                phase="scheduler_reload_pending",
+                returncode=0,
+                scheduler_reload_pending=True,
+                scheduler_reload_error=f"任务已保存，但调度器重载失败：{exc}",
+                updated_at=now_str(),
+            )
+            _persist_install_state(updated)
+            return {
+                "ok": False,
+                "request_id": install_id,
+                "status": updated["status"],
+                "phase": updated["phase"],
+                "scheduler_reload_required": True,
+                "reload_url": url_for("online_scripts.api_online_scripts_install_reload", install_id=install_id),
+                "msg": updated["scheduler_reload_error"],
+            }, 503
+        capture_install_outputs(updated, updated.get("target_path"))
+        updated.update(
+            running=False,
+            status="已完成",
+            phase="completed",
+            returncode=0,
+            error="",
+            scheduler_reload_pending=False,
+            scheduler_reload_error="",
+            updated_at=now_str(),
+        )
+        _persist_install_state(updated)
+        return {
+            "ok": True,
+            "request_id": install_id,
+            "status": "已完成",
+            "phase": "completed",
+            "msg": "任务导入已恢复，未重复下载安装",
+        }, 200
+    except Exception as exc:
+        updated.update(
+            running=False,
+            status="失败",
+            phase="importing_tasks",
+            error=f"任务导入恢复失败：{exc}",
+            updated_at=now_str(),
+        )
+        _persist_install_state(updated)
+        return {"ok": False, "request_id": install_id, "status": "失败", "phase": "importing_tasks", "msg": updated["error"]}, 500
+    finally:
+        with ONLINE_INSTALL_LOCK:
+            ONLINE_INSTALL_RETRYING.discard(install_id)
+
+
+@bp.route("/online-scripts/install-task-retry/<install_id>", methods=["POST"])
+def online_scripts_install_task_retry(install_id):
+    payload, status = _retry_install_tasks(install_id)
+    if payload.get("ok"):
+        return redirect(url_for("online_scripts.online_install_log", install_id=install_id))
+    actions = _install_scheduler_reload_form(install_id) if payload.get("scheduler_reload_required") else ""
+    return _install_retry_error(install_id, "任务导入恢复失败", payload.get("msg") or "任务导入恢复失败", status, actions_html=actions)
+
+
+@bp.route("/api/online-scripts/install-task-retry/<install_id>", methods=["POST"])
+def api_online_scripts_install_task_retry(install_id):
+    if not re.fullmatch(r"[a-f0-9]{32}", install_id or ""):
+        return jsonify(ok=False, request_id=install_id, msg="在线脚本安装请求标识无效"), 400
+    payload, status = _retry_install_tasks(install_id)
+    return jsonify(payload), status
 
 
 def _reload_install_scheduler(install_id):

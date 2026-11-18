@@ -44,7 +44,30 @@ def _install_recovery(info):
             "label": "重新加载调度器",
         }
     if status not in RECOVERY_STATUSES:
+        if (info or {}).get("phase") == "importing_tasks" and (info or {}).get("import_task"):
+            consistency = verify_install_outputs(info)
+            if consistency.get("changed"):
+                return {
+                    "available": False,
+                    "reason": "安装后的脚本或任务已被后来修改，未自动恢复任务导入，请明确重新选择。",
+                    "script_id": info.get("script_id"),
+                }
+            return {
+                "available": True,
+                "action": url_for("online_scripts.online_scripts_install_task_retry", install_id=info.get("id")),
+                "api_action": url_for("online_scripts.api_online_scripts_install_task_retry", install_id=info.get("id")),
+                "label": "仅恢复任务导入",
+            }
         return {"available": False}
+
+    if (info or {}).get("phase") == "importing_tasks" and (info or {}).get("import_task"):
+        consistency = verify_install_outputs(info)
+        if consistency.get("changed"):
+            return {
+                "available": False,
+                "reason": "安装后的脚本或任务已被后来修改，未自动恢复任务导入，请明确重新选择。",
+                "script_id": info.get("script_id"),
+            }
 
     retry_id = str((info or {}).get("retried_by") or "")
     if retry_id:

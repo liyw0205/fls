@@ -513,6 +513,76 @@ class OnlineInstallRecoveryTests(unittest.TestCase):
                 self.assertEqual(expired.status_code, 401)
                 start.assert_not_called()
 
+    def test_api_task_retry_reuses_downloaded_target_without_reinstalling(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import get_online_install_job, persist_online_install
+            from fls_manager.online_scripts.install import _fingerprint_path
+
+            item, info = self.prepare(base_dir)
+            info["id"] = "a" * 32
+            target = base_dir / "scripts" / "demo.sh"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("downloaded", encoding="utf-8")
+            info.update(
+                running=False,
+                status="失败",
+                phase="importing_tasks",
+                target_path=str(target),
+                target_fingerprint=_fingerprint_path(target),
+                error="任务导入失败",
+            )
+            persist_online_install(info)
+            client = app.test_client()
+            with patch("fls_manager.routes.online_scripts.install.import_task_if_needed", return_value=(True, "recovered")) as importer, patch(
+                "fls_manager.online_scripts.install.download_online_script_logged"
+            ) as download:
+                recovered = client.post(
+                    "/api/online-scripts/install-task-retry/" + info["id"],
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(recovered.status_code, 200)
+                self.assertTrue(recovered.get_json()["ok"])
+                self.assertEqual(recovered.get_json()["phase"], "completed")
+                importer.assert_called_once()
+                download.assert_not_called()
+                repeated = client.post(
+                    "/api/online-scripts/install-task-retry/" + info["id"],
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(repeated.status_code, 409)
+                importer.assert_called_once()
+            self.assertEqual(get_online_install_job(info["id"])["status"], "已完成")
+
+    def test_api_task_retry_refuses_later_target_changes_and_requires_csrf(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import persist_online_install
+            from fls_manager.online_scripts.install import _fingerprint_path
+
+            _item, info = self.prepare(base_dir)
+            info["id"] = "b" * 32
+            target = base_dir / "scripts" / "demo.sh"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("downloaded", encoding="utf-8")
+            info.update(running=False, status="失败", phase="importing_tasks", target_path=str(target), target_fingerprint=_fingerprint_path(target))
+            persist_online_install(info)
+            client = app.test_client()
+            denied = client.post("/api/online-scripts/install-task-retry/" + info["id"])
+            self.assertEqual(denied.status_code, 400)
+            target.write_text("edited later", encoding="utf-8")
+            with patch("fls_manager.routes.online_scripts.install.import_task_if_needed") as importer:
+                changed = client.post(
+                    "/api/online-scripts/install-task-retry/" + info["id"],
+                    headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(changed.status_code, 409)
+            self.assertIn("后来修改", changed.get_json()["msg"])
+            importer.assert_not_called()
+            payload = client.get(
+                "/api/online-scripts/log/" + info["id"], headers={"X-Token": TOKEN},
+            ).get_json()
+            self.assertFalse(payload["recovery"]["available"])
+            self.assertIn("后来修改", payload["recovery"]["reason"])
+
     @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise log polling")
     def test_polling_preserves_logs_and_stops_on_permission_or_missing_errors(self):
         with isolated_app() as (app, base_dir):
