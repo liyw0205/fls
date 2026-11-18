@@ -176,6 +176,7 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    await page.goto(base+'/online-scripts/refresh-log/'+'d'.repeat(32));
    assert.match(await page.locator('#refreshLogText').textContent(),/refresh running|refresh failed/);
    await page.goto(base+'/online-scripts');
+   await page.locator('#onlineRefreshHistory a[href="/online-scripts/refresh-log/'+'d'.repeat(32)+'"]').waitFor();
    await page.evaluate(()=>sessionStorage.setItem('fls-online-refresh-request',JSON.stringify({request_id:'d'.repeat(32),proxy_id:'',server_id:'e'.repeat(32)})));
    await page.locator('#onlineRefreshBtn').click();
    await page.waitForTimeout(1000);

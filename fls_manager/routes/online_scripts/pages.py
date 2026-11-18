@@ -1,6 +1,7 @@
 import re
 
 from ._common import *
+from ...online_scripts.constants import get_online_refresh_history
 
 
 @bp.route("/online-scripts")
@@ -54,6 +55,26 @@ def online_scripts_page():
         if re.fullmatch(r"[a-f0-9]{32}", refresh_request_id) else ""
     )
     refresh_task_link_failures = refresh_state.get("task_link_failures") or []
+    try:
+        refresh_history = get_online_refresh_history(limit=8)
+        refresh_history_error = ""
+    except Exception as exc:
+        refresh_history = []
+        refresh_history_error = f"在线脚本源刷新历史无法读取，未覆盖当前状态：{exc}"
+
+    def refresh_history_html(items):
+        rows = []
+        for item in items:
+            request_id = str(item.get("request_id") or "").strip()
+            if not re.fullmatch(r"[a-f0-9]{32}", request_id):
+                continue
+            status = h(item.get("status") or "-")
+            updated_at = h(item.get("updated_at") or "-")
+            rows.append(
+                f'<a class="btn btn-gray" href="/online-scripts/refresh-log/{quote(request_id, safe="")}">'
+                f'查看 {status} 刷新（{updated_at}）</a>'
+            )
+        return "".join(rows) or '<span class="help">暂无可查询的刷新历史</span>'
 
     def refresh_task_link_actions(failures):
         if not failures:
@@ -176,6 +197,8 @@ def online_scripts_page():
     <div id="onlineRefreshTaskLinkFailures">{refresh_task_link_actions(refresh_task_link_failures)}</div>
     <a id="onlineRefreshLogLink" class="btn btn-blue" href="{h(refresh_log_href)}"{' hidden' if not refresh_log_href else ''}>查看刷新日志</a>
     <a id="onlineRefreshLogin" class="btn btn-gray" href="/login?next=%2Fonline-scripts" hidden>重新登录</a>
+    <div id="onlineRefreshHistory" class="action-row" style="margin-top:8px;">{refresh_history_html(refresh_history)}</div>
+    <div id="onlineRefreshHistoryError" class="notice red" role="status"{' hidden' if not refresh_history_error else ''}>{h(refresh_history_error)}</div>
 </div>
 </section>
 
@@ -220,6 +243,32 @@ function escapeHtml(s){{
     return String(s).replace(/[&<>"']/g, function(c){{
         return {{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}}[c];
     }});
+}}
+
+async function updateOnlineRefreshHistory(){{
+    const history = document.getElementById("onlineRefreshHistory");
+    const error = document.getElementById("onlineRefreshHistoryError");
+    if(!history) return;
+    try{{
+        const response = await fetch("/api/online-scripts/refresh-history?limit=8", {{cache:"no-store", credentials:"same-origin"}});
+        const json = await flsReadJsonResponse(response);
+        if(!json || !Array.isArray(json.items)) throw new Error("刷新历史响应无效");
+        const rows = json.items.map(function(item){{
+            const requestId = String(item && item.request_id || "");
+            if(!/^[a-f0-9]{{32}}$/.test(requestId)) return "";
+            const status = escapeHtml(item.status || "-");
+            const updatedAt = escapeHtml(item.updated_at || "-");
+            return "<a class='btn btn-gray' href='/online-scripts/refresh-log/" + encodeURIComponent(requestId) + "'>查看 " + status + " 刷新（" + updatedAt + "）</a>";
+        }}).filter(Boolean).join("");
+        history.innerHTML = rows || "<span class='help'>暂无可查询的刷新历史</span>";
+        if(error){{ error.hidden = true; error.textContent = ""; }}
+    }}catch(e){{
+        if(error){{
+            const status = e && e.status ? "HTTP " + e.status : "请求失败";
+            error.hidden = false;
+            error.textContent = "刷新历史读取失败（" + status + "）：" + (e && e.message || String(e || "未知错误")) + "。当前已显示的历史未清除。";
+        }}
+    }}
 }}
 
 async function updateOnlineRefreshStatus(){{
@@ -366,6 +415,7 @@ async function updateOnlineRefreshStatus(){{
 }}
 
 updateOnlineRefreshStatus();
+updateOnlineRefreshHistory();
 
 async function submitOnlineRefreshForm(form, event){{
     if(event){{ event.preventDefault(); event.stopImmediatePropagation(); }}

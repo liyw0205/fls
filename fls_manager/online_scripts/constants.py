@@ -296,6 +296,24 @@ def get_online_refresh_request(request_id):
         return dict(value) if isinstance(value, dict) else None
 
 
+def get_online_refresh_history(limit=50):
+    try:
+        limit = max(1, min(int(limit), 200))
+    except (TypeError, ValueError):
+        raise ValueError("刷新历史条数必须为整数")
+    with ONLINE_REFRESH_LOCK, storage_transaction():
+        history = _read_online_refresh_history_file()
+        current = _read_online_refresh_file()
+        if current.get("request_id") and current["request_id"] not in history:
+            history[current["request_id"]] = current
+        ordered = sorted(
+            history.values(),
+            key=lambda value: str(value.get("updated_at") or ""),
+            reverse=True,
+        )
+        return [dict(value) for value in ordered[:limit]]
+
+
 def reserve_online_refresh(proxy_id="", request_id=""):
     with ONLINE_REFRESH_LOCK:
         current = get_online_refresh_state()

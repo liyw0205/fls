@@ -170,6 +170,39 @@ class OnlineRefreshLogTests(unittest.TestCase):
             )
             self.assertEqual(current.status_code, 200)
             self.assertEqual(current.json["id"], "c" * 32)
+            history = client.get(
+                "/api/online-scripts/refresh-history?limit=10", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(history.status_code, 200)
+            self.assertTrue(history.json["ok"])
+            history_ids = {item["request_id"] for item in history.json["items"]}
+            self.assertIn(old_request, history_ids)
+            self.assertIn("d" * 32, history_ids)
+            status_page = client.get("/online-scripts", headers={"X-Token": TOKEN})
+            self.assertEqual(status_page.status_code, 200)
+            status_html = status_page.get_data(as_text=True)
+            self.assertIn('id="onlineRefreshHistory"', status_html)
+            self.assertIn(f"/online-scripts/refresh-log/{old_request}", status_html)
+            invalid_limit = client.get(
+                "/api/online-scripts/refresh-history?limit=bad", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(invalid_limit.status_code, 400)
+            with patch(
+                "fls_manager.routes.online_scripts.refresh.get_online_refresh_history",
+                side_effect=RuntimeError("history disk unavailable"),
+            ):
+                failed_api = client.get(
+                    "/api/online-scripts/refresh-history", headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(failed_api.status_code, 500)
+            self.assertEqual(failed_api.json["items"], [])
+            with patch(
+                "fls_manager.routes.online_scripts.pages.get_online_refresh_history",
+                side_effect=RuntimeError("history disk unavailable"),
+            ):
+                failed_page = client.get("/online-scripts", headers={"X-Token": TOKEN})
+            self.assertEqual(failed_page.status_code, 200)
+            self.assertIn("历史无法读取", failed_page.get_data(as_text=True))
 
     def test_corrupt_refresh_history_is_reported_without_falling_back_to_new_log(self):
         with isolated_app() as (app, base_dir):

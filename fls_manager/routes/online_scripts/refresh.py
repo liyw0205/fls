@@ -5,6 +5,7 @@ from ._common import *
 from ...online_scripts.constants import (
     ONLINE_REFRESH_LOCK,
     ONLINE_REFRESH_STATE,
+    get_online_refresh_history,
     get_online_refresh_request,
     reserve_online_refresh,
     update_online_refresh_state,
@@ -121,6 +122,19 @@ def api_online_refresh_status():
         return jsonify(get_online_refresh_state())
     except Exception as e:
         return jsonify({"ok": False, "error": f"读取在线脚本源同步状态失败：{e}"}), 500
+
+
+@bp.route("/api/online-scripts/refresh-history")
+def api_online_refresh_history():
+    try:
+        limit = int(request.args.get("limit", "50"))
+    except (TypeError, ValueError):
+        return jsonify(ok=False, error="limit 必须为整数", items=[]), 400
+    try:
+        items = get_online_refresh_history(limit)
+    except Exception as e:
+        return jsonify(ok=False, error=f"读取在线脚本源刷新历史失败：{e}", items=[]), 500
+    return jsonify(ok=True, items=items), 200
 
 
 @bp.route("/api/online-scripts/refresh-status/<request_id>")
