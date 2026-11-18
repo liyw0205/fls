@@ -453,6 +453,91 @@ vm.runInContext(input.handler, context);
                 text=True, capture_output=True, timeout=5)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise task-link recovery")
+    def test_task_link_page_ajax_submission_and_refresh_recovery(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import source
+
+            source.save_online_script_cache([self.item()])
+            response = app.test_client().get("/online-scripts", headers={"X-Token": TOKEN})
+            self.assertEqual(response.status_code, 200)
+            html = response.get_data(as_text=True)
+            self.assertIn('class="fls-online-task-link-form"', html)
+            self.assertIn('data-script-id="demo"', html)
+            scripts = [script for script in __import__("re").findall(r"<script>(.*?)</script>", html, __import__("re").S)]
+            script = next(script for script in scripts if "queryPending(pending)" in script)
+            script = script[script.index("(function(){", script.index("updateOnlineRefreshStatus();")):]
+            static = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+            reader = static[static.index("async function flsReadJsonResponse("):static.index("async function flsReadTextResponse(")]
+            result = subprocess.run(["node", "-e", r"""
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+const requestId = 'a'.repeat(32);
+
+function makeElement(tag='div') {
+  return {tagName:tag.toUpperCase(), hidden:true, disabled:false, textContent:'', href:'', value:'',
+    children:[], listeners:{}, className:'', type:'', appendChild(child){this.children.push(child);},
+    addEventListener(name, fn){this.listeners[name]=fn;},
+        querySelector(selector){
+          if(selector.includes('request_id')) return this.requestInput || null;
+          if(selector.includes('proxy_id')) return this.proxyInput || null;
+          if(selector.includes('submit')) return this.button || null;
+          return null;
+        },
+        closest(selector){return selector === '.fls-online-task-link-form' ? this : null;},
+        getAttribute(name){return this.attrs && this.attrs[name] || '';},
+        setAttribute(name, value){(this.attrs || (this.attrs = {}))[name] = String(value);},
+  };
+}
+
+async function runLoad(response, expected) {
+  const recovery = makeElement();
+  const storage = {value: JSON.stringify({request_id:requestId, script_id:'demo', proxy_id:''}),
+    getItem(){return this.value;}, removeItem(){this.value=null;}, setItem(_key,v){this.value=v;}};
+  const context = {
+    window:{__FLS_TASK_LINK_RECOVERY_BOUND__:false, location:{pathname:'/online-scripts', search:''}},
+    location:{pathname:'/online-scripts', search:''}, sessionStorage:storage,
+        document:{getElementById:id=>id==='onlineTaskLinkRecovery'?recovery:null,
+          createElement:tag=>makeElement(tag), querySelectorAll:()=>[], addEventListener(){}},
+    encodeURIComponent,
+    flsResponseErrorDiagnostic:(_response, body)=>{let payload=null;try{payload=JSON.parse(body);}catch(_){}return {payload,message:payload&&(payload.msg||payload.error)||''};},
+    flsReadJsonResponse: null,
+    fetch: async (url, options)=>{assert.equal(url, '/api/online-scripts/task-link-status/'+requestId); assert.equal(options.credentials,'same-origin'); return {ok:response.ok,status:response.status,text:async()=>response.body};},
+  };
+  vm.createContext(context); vm.runInContext(input.reader + input.script, context);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(storage.value, expected.storage);
+  assert.equal(recovery.hidden, expected.hidden);
+  if(expected.text) assert.match(recovery.children[0].textContent, expected.text);
+  if(expected.href) assert.equal(recovery.children[1].href, expected.href);
+}
+
+(async()=>{
+  await runLoad({ok:true,status:200,body:JSON.stringify({ok:true,request_id:requestId,state:'completed'})},{storage:null,hidden:true});
+  await runLoad({ok:false,status:502,body:JSON.stringify({msg:'gateway timeout'})},{storage:JSON.stringify({request_id:requestId,script_id:'demo',proxy_id:''}),hidden:false,text:/gateway timeout/,href:'/online-scripts/task-link-status/'+requestId});
+  await runLoad({ok:true,status:200,body:'<html>bad gateway</html>'},{storage:JSON.stringify({request_id:requestId,script_id:'demo',proxy_id:''}),hidden:false,text:/响应解析失败/,href:'/online-scripts/task-link-status/'+requestId});
+  await runLoad({ok:false,status:403,body:JSON.stringify({msg:'登录已过期'})},{storage:JSON.stringify({request_id:requestId,script_id:'demo',proxy_id:''}),hidden:false,text:/登录已过期/,href:'/online-scripts/task-link-status/'+requestId});
+
+  const recovery=makeElement(), button=makeElement('button'), form=makeElement('form');
+  form.attrs={'data-script-id':'demo'}; form.action='/online-scripts/task-link/demo';
+  form.requestInput=Object.assign(makeElement('input'),{value:requestId});
+  form.proxyInput=Object.assign(makeElement('select'),{value:'proxy'}); form.button=button;
+  const storage={value:null,getItem(){return this.value;},setItem(_key,v){this.value=v;},removeItem(){this.value=null;}};
+  let submitHandler;
+  const context={window:{__FLS_TASK_LINK_RECOVERY_BOUND__:false,location:{pathname:'/online-scripts',search:''}},location:{pathname:'/online-scripts',search:''},sessionStorage:storage,
+    document:{getElementById:id=>id==='onlineTaskLinkRecovery'?recovery:null,createElement:tag=>makeElement(tag),querySelectorAll:()=>[],addEventListener:(name,fn)=>{submitHandler=fn;}},encodeURIComponent,
+    flsGetCsrfToken:()=> 'csrf',FormData:class{constructor(){this.form=form;}},
+    flsReadJsonResponse:async response=>{if(!response.ok){const error=new Error('save failed');error.status=response.status;throw error;}return {ok:true};},
+    fetch:async(url,options)=>{assert.equal(url,'/api/online-scripts/task-link/demo');assert.equal(options.method,'POST');assert.equal(options.headers['X-CSRF-Token'],'csrf');return {ok:false,status:500,text:async()=>JSON.stringify({msg:'save failed'})};},
+  };
+  vm.createContext(context); vm.runInContext(input.script, context);
+  await submitHandler({target:form,preventDefault(){},stopImmediatePropagation(){}});
+  assert.equal(button.disabled,false); assert.match(recovery.children[0].textContent,/save failed/); assert.ok(storage.value);
+})().catch(error=>{console.error(error);process.exitCode=1;});
+"""], input=json.dumps({"script":script,"reader":reader}), text=True, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

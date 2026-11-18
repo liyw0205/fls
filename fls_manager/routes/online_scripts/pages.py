@@ -154,6 +154,7 @@ def online_scripts_page():
 {message_card(msg, "success", strong=True)}
 {message_card(err, "error", strong=True)}
 {message_card(cache_error, "error", strong=True)}
+<div class="notice red" id="onlineTaskLinkRecovery" role="status" hidden></div>
 {f'<div class="section"><a class="btn btn-orange" href="/online-scripts/source">检查在线脚本源数据</a></div>' if cache_error else ''}
 
 <section class="section fls-section" id="online-status">
@@ -310,6 +311,145 @@ async function updateOnlineRefreshStatus(){{
 }}
 
 updateOnlineRefreshStatus();
+
+(function(){{
+const recovery = document.getElementById("onlineTaskLinkRecovery");
+const storageKey = "fls-online-task-link-request";
+
+function readPending(){{
+    let raw = null;
+    try{{ raw = sessionStorage.getItem(storageKey); }}catch(_error){{ return null; }}
+    if(!raw) return null;
+    try{{
+        const value = JSON.parse(raw);
+        if(!value || !/^[a-f0-9]{{32}}$/.test(String(value.request_id || "")) || !value.script_id) return null;
+        return value;
+    }}catch(_error){{ return null; }}
+}}
+
+function writeMessage(text, denied, pending, allowContinue){{
+    if(!recovery || !pending || !/^[a-f0-9]{{32}}$/.test(String(pending.request_id || ""))) return;
+    recovery.hidden = false;
+    recovery.textContent = "";
+    const message = document.createElement("span");
+    message.textContent = String(text || "外部任务源同步未完成");
+    recovery.appendChild(message);
+    const status = document.createElement("a");
+    status.className = "btn btn-blue";
+    status.href = "/online-scripts/task-link-status/" + encodeURIComponent(pending.request_id);
+    status.textContent = "查询原同步请求";
+    recovery.appendChild(status);
+    if(denied){{
+        const login = document.createElement("a");
+        login.className = "btn btn-primary";
+        login.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
+        login.textContent = "重新登录";
+        recovery.appendChild(login);
+    }}else if(allowContinue){{
+        const form = document.createElement("form");
+        form.className = "fls-online-task-link-form inline-form";
+        form.method = "post";
+        form.action = "/online-scripts/task-link/" + encodeURIComponent(pending.script_id);
+        form.setAttribute("data-script-id", pending.script_id);
+        const requestInput = document.createElement("input");
+        requestInput.type = "hidden";
+        requestInput.name = "request_id";
+        requestInput.value = pending.request_id;
+        form.appendChild(requestInput);
+        const proxyInput = document.createElement("input");
+        proxyInput.type = "hidden";
+        proxyInput.name = "proxy_id";
+        proxyInput.value = pending.proxy_id || "";
+        form.appendChild(proxyInput);
+        const continueButton = document.createElement("button");
+        continueButton.type = "submit";
+        continueButton.className = "btn btn-primary";
+        continueButton.textContent = "继续原同步请求";
+        continueButton.onclick = function(event){{
+            event.preventDefault();
+            submitTaskLinkForm(form, event);
+            return false;
+        }};
+        form.appendChild(continueButton);
+        recovery.appendChild(form);
+    }}else{{
+        const retry = document.createElement("button");
+        retry.type = "button";
+        retry.className = "btn btn-gray";
+        retry.textContent = "重新读取同步状态";
+        retry.addEventListener("click", function(){{ queryPending(pending); }});
+        recovery.appendChild(retry);
+    }}
+}}
+
+async function queryPending(pending){{
+    try{{
+        const response = await fetch("/api/online-scripts/task-link-status/" + encodeURIComponent(pending.request_id), {{cache:"no-store", credentials:"same-origin"}});
+        const json = await flsReadJsonResponse(response);
+        if(!json || json.request_id !== pending.request_id) throw new Error("同步状态响应无效");
+        if(json.state === "completed"){{
+            sessionStorage.removeItem(storageKey);
+            window.location.href = "/online-scripts?msg=" + encodeURIComponent("外部任务源同步完成，已刷新任务列表");
+            return;
+        }}
+        writeMessage("原同步请求：" + (json.error || json.state || "未知"), false, pending, json.state === "failed");
+    }}catch(error){{
+        const denied = error && (error.status === 401 || error.status === 403);
+        writeMessage("原同步状态读取失败：" + (error && error.message || String(error || "查询失败")), denied, pending);
+    }}
+}}
+
+async function submitTaskLinkForm(form, event){{
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        const requestInput = form.querySelector('input[name="request_id"]');
+        const button = form.querySelector('button[type="submit"]');
+        const requestId = requestInput && requestInput.value || "";
+        const scriptId = form.getAttribute("data-script-id") || "";
+        const proxyInput = form.querySelector('[name="proxy_id"]');
+        const proxyId = proxyInput && proxyInput.value || "";
+        const pending = {{request_id: requestId, script_id: scriptId, proxy_id: proxyId}};
+        if(!/^[a-f0-9]{{32}}$/.test(requestId) || !scriptId){{
+            writeMessage("同步请求标识无效，请刷新页面后重试", false, pending);
+            return;
+        }}
+        try{{ sessionStorage.setItem(storageKey, JSON.stringify(pending)); }}catch(_error){{}}
+        if(button) button.disabled = true;
+        try{{
+            const headers = {{"X-Requested-With":"XMLHttpRequest"}};
+            const csrf = typeof flsGetCsrfToken === "function" ? flsGetCsrfToken() : "";
+            if(csrf) headers["X-CSRF-Token"] = csrf;
+            const response = await fetch(form.action.replace("/online-scripts/task-link/", "/api/online-scripts/task-link/"), {{method:"POST", body:new FormData(form), headers, credentials:"same-origin"}});
+            const json = await flsReadJsonResponse(response);
+            if(!json || json.ok !== true) throw Object.assign(new Error(json && json.msg || "同步未完成"), {{status: response.status}});
+            sessionStorage.removeItem(storageKey);
+            window.location.href = "/online-scripts?msg=" + encodeURIComponent(json.msg || "外部任务源同步完成");
+        }}catch(error){{
+            if(button) button.disabled = false;
+            const denied = error && (error.status === 401 || error.status === 403);
+            writeMessage("外部任务源同步失败：" + (error && error.message || String(error || "请求失败")), denied, pending, true);
+        }}
+}}
+
+if(!window.__FLS_TASK_LINK_RECOVERY_BOUND__ && document.addEventListener){{
+    window.__FLS_TASK_LINK_RECOVERY_BOUND__ = true;
+    document.addEventListener("submit", function(event){{
+        const form = event.target && event.target.closest ? event.target.closest(".fls-online-task-link-form") : null;
+        if(form) return submitTaskLinkForm(form, event);
+    }}, true);
+    document.querySelectorAll(".fls-online-task-link-form button[type='submit']").forEach(function(button){{
+        button.onclick = function(event){{
+            event.preventDefault();
+            const form = button.form || (button.closest ? button.closest(".fls-online-task-link-form") : null);
+            if(form) submitTaskLinkForm(form, event);
+            return false;
+        }};
+    }});
+}}
+
+const pending = readPending();
+if(pending) queryPending(pending);
+}})();
 </script>
 """
 

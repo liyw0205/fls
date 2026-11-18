@@ -139,7 +139,7 @@ def render_online_script_rows(items):
 
         if task_link_unloaded:
             task_link_form_html = f"""
-<form method="post" action="/online-scripts/task-link/{h(item_id)}">
+<form class="fls-online-task-link-form" method="post" action="/online-scripts/task-link/{h(item_id)}" data-script-id="{h(item_id)}">
     <input type="hidden" name="request_id" value="{uuid.uuid4().hex}">
     <div class="fls-action-line">
         <select name="proxy_id" aria-label="外部任务源代理">{proxy_options}</select>
