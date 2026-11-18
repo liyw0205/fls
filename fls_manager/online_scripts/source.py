@@ -232,6 +232,43 @@ def get_task_link_request(request_id):
         return value
 
 
+def list_task_link_requests(limit=50, script_id=""):
+    """Return bounded, newest-first task-link receipts without creating records."""
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("在线任务源历史数量无效") from exc
+    if not 1 <= limit <= 100:
+        raise ValueError("在线任务源历史数量必须在 1 到 100 之间")
+    script_id = str(script_id or "").strip()
+    with storage_transaction():
+        try:
+            raw = ONLINE_TASK_LINK_REQUESTS_FILE.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return []
+        try:
+            records = _validate_task_link_requests(json.loads(raw))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"在线任务源同步回执损坏，未覆盖原文件：{exc}") from exc
+        changed = False
+        for request_id, value in records.items():
+            if value.get("state") == "running" and request_id not in ONLINE_TASK_LINK_ACTIVE:
+                value = dict(value)
+                value["state"] = "unknown"
+                value["error"] = "面板重启或请求中断后无法确认任务是否已合并，请核对当前任务列表"
+                value["updated_at"] = now_str()
+                records[request_id] = _task_link_request_snapshot(value)
+                changed = True
+        if changed:
+            mutate_json(ONLINE_TASK_LINK_REQUESTS_FILE, {}, lambda _: records, strict=True)
+        items = [dict(value) for value in records.values() if not script_id or value.get("script_id") == script_id]
+        items.sort(key=lambda value: str(value.get("updated_at") or ""), reverse=True)
+        result = []
+        for value in items[:limit]:
+            result.append(value)
+        return result
+
+
 def persist_task_link_request(info):
     snapshot = _task_link_request_snapshot(info)
     request_id = snapshot["request_id"]

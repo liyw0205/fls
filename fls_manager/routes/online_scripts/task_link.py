@@ -10,6 +10,7 @@ from ...online_scripts.source import (
     online_task_link_version,
     online_script_task_fingerprint,
     load_online_script_cache,
+    list_task_link_requests,
     persist_task_link_request,
 )
 from ...online_scripts.constants import ONLINE_TASK_LINK_ACTIVE
@@ -409,6 +410,20 @@ def api_online_scripts_task_link_status(request_id):
     return jsonify(ok=True, **record)
 
 
+@bp.route("/api/online-scripts/task-link-history")
+def api_online_scripts_task_link_history():
+    try:
+        items = list_task_link_requests(
+            request.args.get("limit", 50),
+            request.args.get("script_id", ""),
+        )
+    except ValueError as exc:
+        return jsonify(ok=False, msg=str(exc)), 400
+    except Exception as exc:
+        return jsonify(ok=False, msg=f"同步历史无法读取：{exc}"), 500
+    return jsonify(ok=True, items=items)
+
+
 @bp.route("/api/online-scripts/task-link-confirm/<request_id>", methods=["POST"])
 def api_online_scripts_task_link_confirm(request_id):
     payload, status_code = _confirm_task_link(request_id)
@@ -487,7 +502,7 @@ def online_scripts_task_link_status(request_id):
 <a class="btn btn-blue" href="/online-scripts/task-link-status/{h(request_id)}">刷新查询</a>'''
     elif state in ("prepared", "running"):
         action_html = f'<a class="btn btn-blue" href="/online-scripts/task-link-status/{h(request_id)}">刷新查询</a>'
-    action_html += '<a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>'
+    action_html += '<a class="btn btn-gray" href="/online-scripts/task-link-history">同步历史</a><a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>'
     details = f'''
 <section class="section">
     <div class="card">
@@ -508,3 +523,61 @@ def online_scripts_task_link_status(request_id):
         actions_html=action_html,
     ) + details
     return layout("外部任务源同步状态", "online_scripts", body)
+
+
+@bp.route("/online-scripts/task-link-history")
+def online_scripts_task_link_history():
+    script_id = str(request.args.get("script_id") or "").strip()
+    try:
+        items = list_task_link_requests(request.args.get("limit", 50), script_id)
+    except ValueError as exc:
+        body = page_header_card(
+            "外部任务源同步历史",
+            help_html=h(exc),
+            actions_html='<a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>',
+        )
+        return layout("外部任务源同步历史", "online_scripts", body), 400
+    except Exception as exc:
+        body = page_header_card(
+            "外部任务源同步历史",
+            help_html=f"同步历史无法读取：{h(exc)}。请修复回执存储后重试。",
+            actions_html='<a class="btn btn-blue" href="/online-scripts/task-link-history">重新读取</a><a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>',
+        )
+        return layout("外部任务源同步历史", "online_scripts", body), 500
+
+    labels = {
+        "prepared": "已准备",
+        "running": "运行中",
+        "failed": "失败，可重试",
+        "unknown": "结果未知",
+        "completed": "已完成",
+    }
+    rows = []
+    for record in items:
+        request_id = str(record.get("request_id") or "")
+        state = str(record.get("state") or "unknown")
+        actions = f'<a class="btn btn-blue" href="/online-scripts/task-link-status/{h(request_id)}">查看状态</a>'
+        if state == "completed" or record.get("confirmation") == "merged":
+            actions += f'<a class="btn btn-gray" href="/online-scripts/install-select/{h(quote(str(record.get("script_id") or ""), safe=""))}">选择已同步任务</a>'
+        rows.append(
+            "<tr>"
+            f"<td><code>{h(request_id)}</code></td>"
+            f"<td>{h(record.get('script_id') or '-')}</td>"
+            f"<td>{h(labels.get(state, state))}</td>"
+            f"<td>{h(record.get('total', 0))}（新增 {h(record.get('added', 0))}）</td>"
+            f"<td>{h(record.get('updated_at') or '-')}</td>"
+            f"<td>{actions}</td>"
+            "</tr>"
+        )
+    table = (
+        '<div class="table-wrap"><table><thead><tr><th>请求标识</th><th>脚本</th><th>状态</th>'
+        '<th>任务数</th><th>更新时间</th><th>操作</th></tr></thead><tbody>'
+        + ("".join(rows) or '<tr><td colspan="6">暂无同步历史</td></tr>')
+        + "</tbody></table></div>"
+    )
+    body = page_header_card(
+        "外部任务源同步历史",
+        help_html="历史只读取已保存回执，不会发起外部任务源请求；未知状态请进入详情检查当前任务合并。",
+        actions_html='<a class="btn btn-blue" href="/online-scripts">返回在线脚本</a>',
+    ) + f'<section class="section"><div class="card">{table}</div></section>'
+    return layout("外部任务源同步历史", "online_scripts", body)

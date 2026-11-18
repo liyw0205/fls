@@ -296,6 +296,74 @@ class OnlineTaskLinkTests(unittest.TestCase):
             persist.assert_not_called()
             self.assertFalse(source.ONLINE_TASK_LINK_REQUESTS_FILE.exists())
 
+    def test_task_link_history_api_is_bounded_filtered_and_marks_stale_running_unknown(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import source
+
+            item = self.item()
+            source.save_online_script_cache([item])
+            first = self._unknown_record(source, "5" * 32, item, state="running")
+            second = self._unknown_record(source, "6" * 32, item, state="failed")
+            second["updated_at"] = "2999-01-01 00:00:00"
+            source.persist_task_link_request(first)
+            source.persist_task_link_request(second)
+            response = app.test_client().get(
+                "/api/online-scripts/task-link-history?limit=1&script_id=demo",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(len(response.json["items"]), 1)
+            self.assertEqual(response.json["items"][0]["request_id"], "6" * 32)
+            stale = app.test_client().get(
+                "/api/online-scripts/task-link-status/" + "5" * 32,
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(stale.json["state"], "unknown")
+            history = app.test_client().get(
+                "/online-scripts/task-link-history?script_id=demo",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(history.status_code, 200)
+            self.assertIn("外部任务源同步历史", history.get_data(as_text=True))
+
+    def test_task_link_history_rejects_invalid_limit_and_corrupt_storage_without_overwrite(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import source
+
+            client = app.test_client()
+            invalid = client.get(
+                "/api/online-scripts/task-link-history?limit=0",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(invalid.status_code, 400)
+            source.ONLINE_TASK_LINK_REQUESTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            source.ONLINE_TASK_LINK_REQUESTS_FILE.write_text("not-json", encoding="utf-8")
+            original = source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes()
+            failed = client.get("/api/online-scripts/task-link-history", headers={"X-Token": TOKEN})
+            self.assertEqual(failed.status_code, 500)
+            page = client.get("/online-scripts/task-link-history", headers={"X-Token": TOKEN})
+            self.assertEqual(page.status_code, 500)
+            self.assertIn("无法读取", page.get_data(as_text=True))
+            self.assertEqual(source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes(), original)
+
+    def test_task_link_history_completed_entry_links_to_task_selection(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import source
+
+            item = self.item(tasks=[self.task("ready")])
+            source.save_online_script_cache([item])
+            request_id = "7" * 32
+            record = self._unknown_record(
+                source, request_id, item,
+                published=source.online_script_task_fingerprint(source.load_online_script_cache()[0]),
+                state="completed",
+            )
+            source.persist_task_link_request(record)
+            page = app.test_client().get("/online-scripts/task-link-history", headers={"X-Token": TOKEN})
+            html = page.get_data(as_text=True)
+            self.assertIn("/online-scripts/task-link-status/" + request_id, html)
+            self.assertIn("/online-scripts/install-select/demo", html)
+
     def test_completed_receipt_write_failure_is_confirmed_without_replaying_fetch(self):
         with isolated_app() as (app, _base_dir):
             from fls_manager.online_scripts import source
