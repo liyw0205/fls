@@ -1,3 +1,5 @@
+import hashlib
+import json
 import uuid
 from pathlib import PureWindowsPath
 
@@ -6,6 +8,11 @@ from ..paths import SCRIPT_DIR
 from ..scheduler import reload_scheduler, cron_to_trigger
 from ..utils import now_str
 from .logs import append_log
+
+
+def online_task_import_version(item):
+    payload = json.dumps(item or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 def normalize_online_task_crons(data):
     """

@@ -146,7 +146,7 @@ class OnlineTaskImportConcurrencyTests(unittest.TestCase):
             with patch("fls_manager.models.mutate_json", side_effect=OSError("task store is read-only")):
                 response = app.test_client().post(
                     "/online-scripts/import-tasks/demo",
-                    data={"task_indexes": "1"},
+                    data={"task_indexes": "1", "request_id": "f" * 32},
                     headers={"X-Token": TOKEN},
                 )
 
@@ -154,6 +154,12 @@ class OnlineTaskImportConcurrencyTests(unittest.TestCase):
             self.assertNotIn("Location", response.headers)
             self.assertIn("task store is read-only", response.get_data(as_text=True))
             self.assertIn('/online-scripts/install-select/demo', response.get_data(as_text=True))
+            status = app.test_client().get(
+                "/online-scripts/import-tasks-status/" + "f" * 32,
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(status.status_code, 200)
+            self.assertIn("继续原导入请求", status.get_data(as_text=True))
 
     def test_import_route_rejects_invalid_selection_without_task_or_scheduler_mutation(self):
         for indexes in ([], ["bad"], ["0"], ["2"], ["1", "bad"]):
@@ -206,6 +212,119 @@ class OnlineTaskImportConcurrencyTests(unittest.TestCase):
             self.assertEqual(recovered.headers["Location"], "/tasks")
             reload_scheduler.assert_called_once()
             self.assertEqual(len(load_tasks()), 1)
+
+    def test_stable_import_replay_does_not_write_or_reload_twice(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.models import load_tasks
+            from fls_manager.online_scripts.source import save_online_script_cache
+
+            save_online_script_cache([self.task_item("demo", "Daily")])
+            request_id = "a" * 32
+            client = app.test_client()
+            with patch("fls_manager.online_scripts.tasks.reload_scheduler") as reload_scheduler:
+                first = client.post(
+                    "/api/online-scripts/import-tasks/demo",
+                    json={"request_id": request_id, "task_indexes": ["1"]},
+                    headers={"X-Token": TOKEN},
+                )
+                repeated = client.post(
+                    "/api/online-scripts/import-tasks/demo",
+                    json={"request_id": request_id, "task_indexes": ["1"]},
+                    headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(first.status_code, 200)
+            self.assertEqual(repeated.status_code, 200)
+            self.assertTrue(repeated.json["replayed"])
+            reload_scheduler.assert_called_once()
+            self.assertEqual(len(load_tasks()), 1)
+            status = client.get(
+                "/api/online-scripts/import-tasks-status/" + request_id,
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(status.status_code, 200)
+            self.assertEqual(status.json["state"], "completed")
+            page = client.get(
+                "/online-scripts/import-tasks-status/" + request_id,
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(page.status_code, 200)
+            self.assertIn("任务导入已完成", page.get_data(as_text=True))
+
+    def test_scheduler_pending_has_query_only_replay_and_dedicated_reload(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.models import load_tasks
+            from fls_manager.online_scripts.source import save_online_script_cache
+
+            save_online_script_cache([self.task_item("demo", "Daily")])
+            request_id = "b" * 32
+            client = app.test_client()
+            with patch("fls_manager.online_scripts.tasks.reload_scheduler", side_effect=RuntimeError("scheduler down")) as reload_scheduler:
+                failed = client.post(
+                    "/api/online-scripts/import-tasks/demo",
+                    json={"request_id": request_id, "task_indexes": ["1"]},
+                    headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(failed.status_code, 503)
+            self.assertTrue(failed.json["scheduler_reload_required"])
+            self.assertEqual(len(load_tasks()), 1)
+            with patch("fls_manager.online_scripts.tasks.reload_scheduler") as reload_again:
+                repeated = client.post(
+                    "/api/online-scripts/import-tasks/demo",
+                    json={"request_id": request_id, "task_indexes": ["1"]},
+                    headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(repeated.status_code, 503)
+            reload_again.assert_not_called()
+            with patch("fls_manager.routes.online_scripts.install_select.reload_scheduler") as reload_scheduler:
+                recovered = client.post(
+                    "/api/online-scripts/import-tasks-reload/" + request_id,
+                    headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(recovered.status_code, 200)
+            reload_scheduler.assert_called_once()
+            self.assertEqual(client.get("/api/online-scripts/import-tasks-status/" + request_id, headers={"X-Token": TOKEN}).json["state"], "completed")
+
+    def test_invalid_import_request_id_has_zero_task_and_scheduler_side_effects(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.models import load_tasks
+            from fls_manager.online_scripts.source import save_online_script_cache
+
+            save_online_script_cache([self.task_item("demo", "Daily")])
+            with patch("fls_manager.online_scripts.tasks.reload_scheduler") as reload_scheduler:
+                response = app.test_client().post(
+                    "/api/online-scripts/import-tasks/demo",
+                    json={"request_id": "../bad", "task_indexes": ["1"]},
+                    headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(response.status_code, 400)
+            reload_scheduler.assert_not_called()
+            self.assertEqual(load_tasks(), [])
+
+    def test_source_change_after_claim_rejects_before_task_write(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.models import load_tasks
+            from fls_manager.online_scripts import source
+
+            item = self.task_item("demo", "Daily")
+            source.save_online_script_cache([item])
+            replacement = self.task_item("demo", "Changed")
+
+            def claim(record):
+                source.save_online_script_cache([replacement])
+                return None
+
+            with patch("fls_manager.routes.online_scripts.install_select.claim_online_task_import_request", side_effect=claim), patch(
+                "fls_manager.online_scripts.tasks.reload_scheduler",
+            ) as reload_scheduler:
+                response = app.test_client().post(
+                    "/api/online-scripts/import-tasks/demo",
+                    json={"request_id": "e" * 32, "task_indexes": ["1"]},
+                    headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(response.status_code, 409)
+            self.assertIn("脚本源已更新或删除", response.json["msg"])
+            self.assertEqual(load_tasks(), [])
+            reload_scheduler.assert_not_called()
 
     def test_import_and_install_forms_reject_invalid_exclusions_or_selection_mode(self):
         for route in ("import-tasks", "install"):

@@ -1,4 +1,5 @@
 import json
+import re
 import threading
 import os
 
@@ -9,6 +10,7 @@ from ..utils import now_str
 DEFAULT_ONLINE_SCRIPT_SOURCE = "https://cdn.jsdelivr.net/gh/liyw0205/fls-scripts@main/index.json"
 ONLINE_SCRIPT_CACHE_FILE = DATA_DIR / "online_scripts_cache.json"
 ONLINE_TASK_LINK_REQUESTS_FILE = DATA_DIR / "online_task_link_requests.json"
+ONLINE_TASK_IMPORT_REQUESTS_FILE = DATA_DIR / "online_task_import_requests.json"
 
 ONLINE_INSTALL_RUNNING = {}
 ONLINE_INSTALL_STOPPING = set()
@@ -19,6 +21,106 @@ ONLINE_INSTALL_LIMIT = 100
 ONLINE_INSTALL_TIMEOUT_SECONDS = 1800
 ONLINE_REFRESH_STATE_FILE = DATA_DIR / "online_script_refresh.json"
 ONLINE_REFRESH_LOCK = threading.RLock()
+ONLINE_TASK_IMPORT_LOCK = threading.RLock()
+
+
+def _task_import_snapshot(info):
+    fields = (
+        "request_id", "script_id", "expected_version", "selected_task_indexes",
+        "enable_task", "state", "message", "scheduler_reload_error", "updated_at",
+    )
+    snapshot = {field: info.get(field, "") for field in fields}
+    selected = snapshot["selected_task_indexes"]
+    if (
+        not isinstance(snapshot["request_id"], str)
+        or not re.fullmatch(r"[a-f0-9]{32}", snapshot["request_id"])
+        or not isinstance(snapshot["script_id"], str)
+        or not isinstance(snapshot["expected_version"], str)
+        or not isinstance(selected, list)
+        or any(not isinstance(value, str) for value in selected)
+        or type(snapshot["enable_task"]) is not bool
+        or snapshot["state"] not in ("prepared", "running", "failed", "scheduler_pending", "completed", "unknown")
+        or any(not isinstance(snapshot[field], str) for field in ("message", "scheduler_reload_error", "updated_at"))
+    ):
+        raise RuntimeError("在线任务导入回执损坏，未覆盖原文件")
+    return snapshot
+
+
+def _read_task_import_requests():
+    try:
+        raw = ONLINE_TASK_IMPORT_REQUESTS_FILE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"在线任务导入回执损坏，未覆盖原文件：{exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError("在线任务导入回执损坏，未覆盖原文件")
+    for request_id, value in data.items():
+        if request_id != str(request_id) or not isinstance(value, dict) or value.get("request_id") != request_id:
+            raise RuntimeError("在线任务导入回执标识损坏，未覆盖原文件")
+        _task_import_snapshot(value)
+    return data
+
+
+def get_online_task_import_request(request_id):
+    if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
+        return None
+    with ONLINE_TASK_IMPORT_LOCK, storage_transaction():
+        return dict(_read_task_import_requests().get(request_id) or {}) or None
+
+
+def persist_online_task_import_request(info):
+    snapshot = _task_import_snapshot(info)
+    with ONLINE_TASK_IMPORT_LOCK, storage_transaction():
+        if ONLINE_TASK_IMPORT_REQUESTS_FILE.is_symlink():
+            raise RuntimeError("在线任务导入回执不能是符号链接，未覆盖原文件")
+
+        def update(data):
+            if not isinstance(data, dict):
+                raise RuntimeError("在线任务导入回执损坏，未覆盖原文件")
+            for request_id, value in data.items():
+                if not isinstance(request_id, str) or not isinstance(value, dict) or value.get("request_id") != request_id:
+                    raise RuntimeError("在线任务导入回执标识损坏，未覆盖原文件")
+                _task_import_snapshot(value)
+            data[snapshot["request_id"]] = snapshot
+            ordered = sorted(data.items(), key=lambda pair: str(pair[1].get("updated_at") or ""), reverse=True)
+            return dict(ordered[:200])
+
+        mutate_json(ONLINE_TASK_IMPORT_REQUESTS_FILE, {}, update, strict=True)
+
+
+def claim_online_task_import_request(info):
+    """Reserve an import request; only failed requests may be explicitly retried."""
+    snapshot = _task_import_snapshot(info)
+    observed = {}
+    with ONLINE_TASK_IMPORT_LOCK, storage_transaction():
+        if ONLINE_TASK_IMPORT_REQUESTS_FILE.is_symlink():
+            raise RuntimeError("在线任务导入回执不能是符号链接，未覆盖原文件")
+
+        def update(data):
+            data = dict(data) if isinstance(data, dict) else data
+            if not isinstance(data, dict):
+                raise RuntimeError("在线任务导入回执损坏，未覆盖原文件")
+            for request_id, value in data.items():
+                if not isinstance(request_id, str) or not isinstance(value, dict) or value.get("request_id") != request_id:
+                    raise RuntimeError("在线任务导入回执标识损坏，未覆盖原文件")
+                _task_import_snapshot(value)
+            current = data.get(snapshot["request_id"])
+            if current and current.get("state") != "failed":
+                observed["value"] = dict(current)
+                return data
+            if current and any(current.get(field) != snapshot.get(field) for field in ("script_id", "expected_version", "selected_task_indexes", "enable_task")):
+                observed["value"] = dict(current)
+                return data
+            data[snapshot["request_id"]] = snapshot
+            observed["value"] = None
+            ordered = sorted(data.items(), key=lambda pair: str(pair[1].get("updated_at") or ""), reverse=True)
+            return dict(ordered[:200])
+
+        mutate_json(ONLINE_TASK_IMPORT_REQUESTS_FILE, {}, update, strict=True)
+    return observed.get("value")
 
 ONLINE_REFRESH_STATE = {
     "id": "",

@@ -1,18 +1,50 @@
 from ._common import *
+import re
+import uuid
+
 from ...models import TaskSchedulerReloadError
+from ...scheduler import reload_scheduler
+from ...online_scripts.constants import (
+    claim_online_task_import_request,
+    get_online_task_import_request,
+    persist_online_task_import_request,
+    ONLINE_TASK_IMPORT_LOCK,
+)
+from ...online_scripts.tasks import online_task_import_version
+from ...utils import now_str
 
 
-def _task_import_error(script_id, message, status_code, persisted=False):
+def _task_import_error(script_id, message, status_code, persisted=False, request_id="", selected_task_indexes=None, enable_task=False):
     scheduler_action = ""
     if persisted:
+        reload_url = f"/online-scripts/import-tasks-reload/{h(request_id)}" if request_id else "/scheduler/reload?back=/tasks"
         scheduler_action = '''
-<form class="inline-form" method="post" action="/scheduler/reload?back=/tasks">
+<form class="inline-form" method="post" action="RELOAD_URL">
     <button class="btn btn-primary" type="submit">重新加载调度器</button>
+        </form>'''.replace("RELOAD_URL", h(reload_url))
+        if request_id:
+            scheduler_action += '''
+<form class="inline-form" method="post" action="/scheduler/reload?back=/tasks">
+    <button class="btn btn-gray" type="submit">通用重载调度器</button>
 </form>'''
+    status_link = (
+        f'<a class="btn btn-blue" href="/online-scripts/import-tasks-status/{h(request_id)}">查询原导入请求</a>'
+        if request_id else ""
+    )
+    retry_form = ""
+    if request_id and selected_task_indexes and not persisted:
+        fields = f'<input type="hidden" name="request_id" value="{h(request_id)}">'
+        fields += "".join(f'<input type="hidden" name="task_indexes" value="{h(index)}">' for index in selected_task_indexes)
+        if enable_task:
+            fields += '<input type="hidden" name="enable_task" value="1">'
+        retry_form = f'<form class="inline-form" method="post" action="/online-scripts/import-tasks/{h(script_id)}">{fields}<button class="btn btn-orange" type="submit">继续原导入请求</button></form>'
     body = page_header_card(
         "在线任务导入未完成",
         help_html=h(message),
         actions_html=(
+            retry_form
+            + status_link
+            +
             f'<a class="btn btn-gray" href="/online-scripts/install-select/{h(script_id)}">重新选择任务</a>'
             '<a class="btn btn-blue" href="/tasks">查看已保存任务</a>'
             '<a class="btn btn-orange" href="/online-scripts/source">检查脚本源数据</a>'
@@ -22,62 +54,316 @@ def _task_import_error(script_id, message, status_code, persisted=False):
     return layout("在线任务导入", "online_scripts", body), status_code
 
 
-@bp.route("/online-scripts/import-tasks/<script_id>", methods=["POST"])
-def online_scripts_import_tasks_only(script_id):
+def _import_request_id(raw):
+    value = str(raw or "").strip() or uuid.uuid4().hex
+    if not re.fullmatch(r"[a-f0-9]{32}", value):
+        raise ValueError("在线任务导入请求标识无效，请刷新选择页后重试")
+    return value
+
+
+def _data_values(data, key):
+    if hasattr(data, "getlist"):
+        return data.getlist(key)
+    value = data.get(key)
+    if isinstance(value, list):
+        return value
+    return [] if value is None else [value]
+
+
+def _selected_indexes_from_data(item, data):
+    select_mode = str(data.get("select_mode", "") or "").strip()
+    excluded_raw = str(data.get("excluded_task_indexes", "") or "").strip()
+    if select_mode == "all":
+        excluded = set()
+        for value in excluded_raw.replace("，", ",").split(","):
+            value = value.strip()
+            if not value:
+                continue
+            if not value.isdecimal():
+                raise ValueError("任务排除项必须为整数")
+            excluded.add(int(value))
+        if any(index < 1 or index > len(online_script_task_crons(item)) for index in excluded):
+            raise ValueError("任务排除项已失效")
+        return [str(index) for index in range(1, len(online_script_task_crons(item)) + 1) if index not in excluded]
+    if select_mode:
+        raise ValueError("任务选择模式无效")
+    return [str(value) for value in _data_values(data, "task_indexes")]
+
+
+def _import_record_update(record, state, message="", scheduler_reload_error=""):
+    record.update({
+        "state": state,
+        "message": str(message or ""),
+        "scheduler_reload_error": str(scheduler_reload_error or ""),
+        "updated_at": now_str(),
+    })
+    return record
+
+
+def _import_failure(record, message, status_code, *, state="failed", persisted=False):
+    _import_record_update(record, state, message, message if state == "scheduler_pending" else "")
+    try:
+        persist_online_task_import_request(record)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "request_id": record["request_id"],
+            "msg": f"{message}；导入回执无法保存，请查询任务文件和调度器状态：{exc}",
+            "resolved": False,
+            "scheduler_reload_required": persisted,
+        }, 503
+    return {
+        "ok": False,
+        "request_id": record["request_id"],
+        "msg": message,
+        "resolved": True,
+        "scheduler_reload_required": persisted,
+    }, status_code
+
+
+def _submit_online_task_import(script_id, data):
+    try:
+        request_id = _import_request_id(data.get("request_id"))
+    except ValueError as exc:
+        return {"ok": False, "request_id": "", "msg": str(exc), "retry_allowed": False}, 400
     try:
         item = get_online_script(script_id)
     except Exception as exc:
-        return online_script_cache_error("在线任务导入未完成", exc)
+        return {"ok": False, "request_id": request_id, "msg": f"在线脚本源缓存无法读取，未覆盖原文件：{exc}", "retry_allowed": False}, 500
 
     if not item:
-        return _task_import_error(
-            script_id, "脚本已不在本地缓存中，请同步在线脚本源后重试。", 404,
-        )
+        return {"ok": False, "request_id": request_id, "msg": "脚本已不在本地缓存中，请同步在线脚本源后重试。", "retry_allowed": False}, 404
 
     if not script_has_task(item):
-        return _task_import_error(script_id, "该脚本没有可导入的任务，请检查在线脚本源。", 400)
+        return {"ok": False, "request_id": request_id, "msg": "该脚本没有可导入的任务，请检查在线脚本源。", "retry_allowed": False}, 400
 
-    enable_task = request.form.get("enable_task") == "1"
+    enable_task = data.get("enable_task") in (True, 1, "1", "true", "True")
 
     try:
-        selected_task_indexes = selected_task_indexes_from_form(item)
+        selected_task_indexes = _selected_indexes_from_data(item, data)
         selected_task_indexes = validated_install_task_indexes(item, selected_task_indexes)
         validate_online_task_import(item, selected_task_indexes)
-    except ValueError as e:
-        return _task_import_error(script_id, f"{e}。请重新选择任务后重试。", 400)
-    except Exception as e:
-        return _task_import_error(script_id, f"任务校验失败：{e}。请检查服务状态后重试。", 500)
+    except ValueError as exc:
+        return {"ok": False, "request_id": request_id, "msg": f"{exc}。请重新选择任务后重试。", "retry_allowed": False}, 400
+    except Exception as exc:
+        return {"ok": False, "request_id": request_id, "msg": f"任务校验失败：{exc}。请检查服务状态后重试。", "retry_allowed": False}, 500
+
+    expected_version = online_task_import_version(item)
+    try:
+        previous = get_online_task_import_request(request_id)
+    except Exception as exc:
+        return {"ok": False, "request_id": request_id, "msg": f"导入回执无法读取，未写入任务：{exc}", "retry_allowed": False}, 500
+    if previous:
+        if (previous.get("script_id") != script_id
+                or previous.get("expected_version") != expected_version
+                or previous.get("selected_task_indexes") != selected_task_indexes
+                or previous.get("enable_task") != enable_task):
+            return {"ok": False, "request_id": request_id, "msg": "导入请求已绑定其他脚本、版本或任务选择，请重新选择。", "retry_allowed": False}, 409
+        if previous.get("state") == "completed":
+            return {"ok": True, "request_id": request_id, "msg": previous.get("message") or "任务导入已完成，未重复写入", "replayed": True}, 200
+        if previous.get("state") == "scheduler_pending":
+            return {"ok": False, "request_id": request_id, "msg": previous.get("message") or "任务已保存，但调度器尚未恢复", "scheduler_reload_required": True, "reload_url": f"/api/online-scripts/import-tasks-reload/{request_id}"}, 503
+        if previous.get("state") in ("running", "prepared", "unknown"):
+            return {"ok": False, "request_id": request_id, "msg": "原导入请求仍在处理中或结果未知，请先查询原请求。", "retry_allowed": False}, 409
+
+    record = {
+        "request_id": request_id,
+        "script_id": script_id,
+        "expected_version": expected_version,
+        "selected_task_indexes": list(selected_task_indexes),
+        "enable_task": bool(enable_task),
+        "state": "prepared",
+        "message": "",
+        "scheduler_reload_error": "",
+        "updated_at": now_str(),
+    }
+    try:
+        claimed_previous = claim_online_task_import_request(record)
+    except Exception as exc:
+        return {"ok": False, "request_id": request_id, "msg": f"导入请求无法保存，未写入任务：{exc}", "retry_allowed": True}, 500
+    if claimed_previous:
+        if (claimed_previous.get("script_id") != script_id
+                or claimed_previous.get("expected_version") != expected_version
+                or claimed_previous.get("selected_task_indexes") != selected_task_indexes
+                or claimed_previous.get("enable_task") != enable_task):
+            return {"ok": False, "request_id": request_id, "msg": "导入请求已绑定其他脚本、版本或任务选择，请重新选择。", "retry_allowed": False}, 409
+        if claimed_previous.get("state") == "completed":
+            return {"ok": True, "request_id": request_id, "msg": claimed_previous.get("message") or "任务导入已完成，未重复写入", "replayed": True}, 200
+        if claimed_previous.get("state") == "scheduler_pending":
+            return {"ok": False, "request_id": request_id, "msg": claimed_previous.get("message") or "任务已保存，但调度器尚未恢复", "scheduler_reload_required": True, "reload_url": f"/api/online-scripts/import-tasks-reload/{request_id}"}, 503
+        return {"ok": False, "request_id": request_id, "msg": "原导入请求仍在处理中或结果未知，请先查询原请求。", "retry_allowed": False}, 409
 
     try:
-        ok, msg = import_task_if_needed(
+        latest_item = get_online_script(script_id)
+    except Exception as exc:
+        return _import_failure(record, f"脚本源版本无法确认，未写入任务：{exc}", 500)
+    if not latest_item or online_task_import_version(latest_item) != expected_version:
+        return _import_failure(record, "脚本源已更新或删除，未写入旧页面选择的任务。请重新选择后重试。", 409)
+
+    try:
+        _import_record_update(record, "running")
+        persist_online_task_import_request(record)
+        ok, message = import_task_if_needed(
             item,
             log_file=None,
             enable_task=enable_task,
             selected_task_indexes=selected_task_indexes,
             raise_on_reload_error=True,
         )
-
-        if not ok:
-            return _task_import_error(script_id, msg, 409)
-
-        return redirect(
-            url_for(
-                "online_scripts.online_scripts_page",
-                msg=msg,
-            )
+    except TaskSchedulerReloadError as exc:
+        return _import_failure(
+            record,
+            f"任务已持久化，但调度器重载失败：{exc}。请重新加载调度器，无需重复导入。",
+            503,
+            state="scheduler_pending",
+            persisted=True,
         )
+    except OnlineTaskValidationError as exc:
+        return _import_failure(record, str(exc), 400)
+    except Exception as exc:
+        return _import_failure(record, f"任务导入失败：{exc}。请检查文件权限和磁盘空间后重试。", 500)
 
-    except OnlineTaskValidationError as e:
-        return _task_import_error(script_id, str(e), 400)
-    except TaskSchedulerReloadError as e:
-        return _task_import_error(
-            script_id, f"任务已持久化，但调度器重载失败：{e}。请重新加载调度器，无需重复导入。",
-            503, persisted=True,
-        )
-    except Exception as e:
-        return _task_import_error(
-            script_id, f"任务导入失败：{e}。请检查文件权限和磁盘空间后重试。", 500,
-        )
+    message = message or "任务导入已完成"
+    _import_record_update(record, "completed", message)
+    try:
+        persist_online_task_import_request(record)
+    except Exception as exc:
+        actual = None
+        try:
+            actual = get_online_task_import_request(request_id)
+        except Exception:
+            pass
+        if not actual or actual.get("state") != "completed":
+            return {"ok": False, "request_id": request_id, "msg": f"任务已导入，但完成回执无法确认：{exc}，请查询原请求。", "retry_allowed": False}, 503
+    if not ok:
+        return {"ok": False, "request_id": request_id, "msg": message, "retry_allowed": False}, 409
+    return {"ok": True, "request_id": request_id, "msg": message}, 200
+
+
+def _render_import_result(script_id, payload, status_code, data):
+    if payload.get("ok"):
+        return redirect(url_for("online_scripts.online_scripts_page", msg=payload.get("msg") or "任务导入已完成"))
+    selected = _data_values(data, "task_indexes")
+    if str(data.get("select_mode", "") or "").strip() == "all":
+        try:
+            selected = _selected_indexes_from_data(get_online_script(script_id) or {}, data)
+        except Exception:
+            selected = []
+    return _task_import_error(
+        script_id,
+        payload.get("msg") or "任务导入未完成",
+        status_code,
+        persisted=bool(payload.get("scheduler_reload_required")),
+        request_id=payload.get("request_id", ""),
+        selected_task_indexes=selected,
+        enable_task=data.get("enable_task") in (True, 1, "1", "true", "True"),
+    )
+
+
+@bp.route("/online-scripts/import-tasks/<script_id>", methods=["POST"])
+def online_scripts_import_tasks_only(script_id):
+    payload, status_code = _submit_online_task_import(script_id, request.form)
+    return _render_import_result(script_id, payload, status_code, request.form)
+
+
+@bp.route("/api/online-scripts/import-tasks/<script_id>", methods=["POST"])
+def api_online_scripts_import_tasks_only(script_id):
+    data = request.get_json(silent=True) if request.is_json else request.form
+    data = data or {}
+    payload, status_code = _submit_online_task_import(script_id, data)
+    return jsonify(payload), status_code
+
+
+@bp.route("/api/online-scripts/import-tasks-status/<request_id>")
+def api_online_scripts_import_tasks_status(request_id):
+    if not re.fullmatch(r"[a-f0-9]{32}", request_id or ""):
+        return jsonify(ok=False, msg="在线任务导入请求标识无效"), 400
+    try:
+        record = get_online_task_import_request(request_id)
+    except Exception as exc:
+        return jsonify(ok=False, msg=f"导入回执无法读取：{exc}"), 500
+    if not record:
+        return jsonify(ok=False, msg="导入请求不存在"), 404
+    return jsonify(ok=True, **record)
+
+
+@bp.route("/api/online-scripts/import-tasks-reload/<request_id>", methods=["POST"])
+def api_online_scripts_import_tasks_reload(request_id):
+    payload, status_code = _reload_import_scheduler(request_id)
+    return jsonify(payload), status_code
+
+
+def _reload_import_scheduler(request_id):
+    if not re.fullmatch(r"[a-f0-9]{32}", request_id or ""):
+        return {"ok": False, "msg": "在线任务导入请求标识无效"}, 400
+    with ONLINE_TASK_IMPORT_LOCK:
+        try:
+            record = get_online_task_import_request(request_id)
+        except Exception as exc:
+            return {"ok": False, "msg": f"导入回执无法读取：{exc}"}, 500
+        if not record:
+            return {"ok": False, "msg": "导入请求不存在"}, 404
+        if record.get("state") == "completed":
+            return {"ok": True, "request_id": request_id, "script_id": record.get("script_id", ""), "msg": "调度器已恢复，未重复导入", "replayed": True}, 200
+        if record.get("state") != "scheduler_pending":
+            return {"ok": False, "request_id": request_id, "script_id": record.get("script_id", ""), "msg": "当前导入没有待恢复的调度器状态"}, 409
+        try:
+            reload_scheduler()
+        except Exception as exc:
+            return {"ok": False, "request_id": request_id, "script_id": record.get("script_id", ""), "msg": f"调度器重载失败：{exc}，任务文件保持已保存状态"}, 503
+        _import_record_update(record, "completed", "任务已保存，调度器已恢复")
+        try:
+            persist_online_task_import_request(record)
+        except Exception as exc:
+            return {"ok": False, "request_id": request_id, "script_id": record.get("script_id", ""), "msg": f"调度器已恢复，但导入回执无法保存：{exc}"}, 503
+    return {"ok": True, "request_id": request_id, "script_id": record.get("script_id", ""), "msg": "任务已保存，调度器已恢复"}, 200
+
+
+@bp.route("/online-scripts/import-tasks-reload/<request_id>", methods=["POST"])
+def online_scripts_import_tasks_reload(request_id):
+    payload, status_code = _reload_import_scheduler(request_id)
+    if payload.get("ok"):
+        return redirect(url_for("online_scripts.online_scripts_page", msg=payload.get("msg")))
+    return _task_import_error(payload.get("script_id", ""), payload.get("msg", "导入恢复失败"), status_code, persisted=True, request_id=request_id)
+
+
+@bp.route("/online-scripts/import-tasks-status/<request_id>")
+def online_scripts_import_tasks_status(request_id):
+    if not re.fullmatch(r"[a-f0-9]{32}", request_id or ""):
+        return _task_import_error("", "在线任务导入请求标识无效", 400)
+    try:
+        record = get_online_task_import_request(request_id)
+    except Exception as exc:
+        return _task_import_error("", f"导入回执无法读取：{exc}", 500)
+    if not record:
+        return _task_import_error("", "导入请求不存在", 404)
+    state = record.get("state") or "unknown"
+    labels = {
+        "prepared": "已准备，尚未确认写入",
+        "running": "正在导入任务",
+        "failed": "导入失败，可继续原请求",
+        "scheduler_pending": "任务已保存，调度器待恢复",
+        "unknown": "导入结果未知，请勿重复写入",
+        "completed": "任务导入已完成",
+    }
+    actions = '<a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>'
+    if state == "failed":
+        fields = f'<input type="hidden" name="request_id" value="{h(request_id)}">'
+        fields += "".join(f'<input type="hidden" name="task_indexes" value="{h(index)}">' for index in record.get("selected_task_indexes", []))
+        if record.get("enable_task"):
+            fields += '<input type="hidden" name="enable_task" value="1">'
+        actions = f'<form class="inline-form" method="post" action="/online-scripts/import-tasks/{h(record.get("script_id", ""))}">{fields}<button class="btn btn-primary" type="submit">继续原导入请求</button></form>' + actions
+    elif state == "scheduler_pending":
+        actions = f'<form class="inline-form" method="post" action="/online-scripts/import-tasks-reload/{h(request_id)}"><button class="btn btn-primary" type="submit">仅重新加载调度器</button></form>' + actions
+    elif state in ("prepared", "running", "unknown"):
+        actions = f'<a class="btn btn-blue" href="/online-scripts/import-tasks-status/{h(request_id)}">刷新查询</a>' + actions
+    body = page_header_card(
+        "在线任务导入状态",
+        help_html="该页面只读取导入回执，不会重复写入任务。调度器待恢复时仅执行重载，不会再次导入。",
+        actions_html=actions,
+    )
+    body += f'''<section class="section"><div class="card"><h2 class="section-title">{h(labels.get(state, state))}</h2><p>请求标识：<code>{h(request_id)}</code></p><p>脚本：{h(record.get("script_id"))}</p><p>更新时间：{h(record.get("updated_at"))}</p><p>{h(record.get("message") or record.get("scheduler_reload_error") or "-")}</p></div></section>'''
+    return layout("在线任务导入状态", "online_scripts", body)
 
 
 @bp.route("/online-scripts/install-select/<script_id>")
@@ -347,6 +633,7 @@ def online_scripts_install_select(script_id):
 </style>
 
 <form method="post" action="/online-scripts/install/{h(script_id)}" id="onlineInstallSelectForm">
+<input type="hidden" name="request_id" value="{uuid.uuid4().hex}">
 <input type="hidden" name="select_mode" value="all">
 <input type="hidden" name="excluded_task_indexes" id="excludedTaskIndexes" value="{h(excluded_text)}">
 
