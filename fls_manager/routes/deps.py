@@ -6,6 +6,7 @@ import importlib
 import importlib.metadata
 import os
 import re
+import stat
 from pathlib import Path
 
 from flask import Blueprint, request, redirect, url_for, jsonify
@@ -14,6 +15,7 @@ from ..paths import BASE_DIR, LOG_DIR
 from ..state import DEPS_RUNNING
 from ..utils import h, now_str, safe_name, get_back_url, prune_completed_records
 from ..logs import tail_file
+from ..install_records import get_install_job, list_install_jobs, persist_install_job
 from ..ui.layout import layout
 from ..ui.components import page_header_card, page_header, table_card, empty_table_row
 
@@ -104,6 +106,57 @@ def deps_log_file(install_id, package_name):
     return LOG_DIR / f"deps-install-{safe_pkg}-{install_id}.log"
 
 
+def safe_install_log_file(info, install_id):
+    raw_path = info.get("log_file") if isinstance(info, dict) else ""
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return None, ("日志缺失", "安装记录没有日志路径，未读取未知文件。", 404)
+    candidate = Path(raw_path)
+    try:
+        log_dir = Path(LOG_DIR).resolve()
+        if (
+            not candidate.is_absolute()
+            or candidate.is_symlink()
+            or candidate.parent.resolve(strict=False) != candidate.parent
+        ):
+            return None, ("日志边界错误", "安装日志路径不在受控日志目录内，未读取该文件。", 500)
+        actual = candidate.resolve(strict=False)
+        if actual.parent != log_dir or str(install_id) not in actual.name:
+            return None, ("日志边界错误", "安装日志路径不在受控日志目录内，未读取该文件。", 500)
+        if not actual.exists():
+            return None, ("日志不存在", "安装日志尚未生成或已被清理，请返回安装历史后重试。", 404)
+        if not stat.S_ISREG(actual.stat().st_mode):
+            return None, ("日志类型错误", "安装日志不是普通文件，未读取该路径。", 500)
+        with actual.open("rb") as handle:
+            handle.read(1)
+    except FileNotFoundError:
+        return None, ("日志不存在", "安装日志尚未生成或已被清理，请返回安装历史后重试。", 404)
+    except OSError as exc:
+        return None, ("日志不可读", f"安装日志无法读取：{exc}。请修复日志权限后重试。", 500)
+    return actual, None
+
+
+def install_request_id(raw):
+    value = str(raw or "").strip() or uuid.uuid4().hex
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", value):
+        raise ValueError("安装请求标识无效，请刷新页面后重试")
+    return value
+
+
+def _persist_dependency_state(info):
+    if not info.get("id") or info.get("kind") not in ("dependency", "runtime"):
+        return
+    info["updated_at"] = now_str()
+    try:
+        persist_install_job(info)
+    except Exception as exc:
+        info["running"] = False
+        info["finished"] = True
+        info["status"] = "unknown"
+        info["error"] = "；".join(filter(None, (
+            info.get("error"), f"安装状态保存失败：{exc}",
+        )))
+
+
 def is_deps_install_running(install_id):
     info = DEPS_RUNNING.get(install_id)
 
@@ -139,6 +192,8 @@ def is_deps_install_running(install_id):
     info["process"] = None
     info["log_fp"] = None
     info["returncode"] = returncode
+    info["status"] = "succeeded" if returncode == 0 else "failed" if returncode is not None else "unknown"
+    _persist_dependency_state(info)
 
     return False
 
@@ -146,6 +201,8 @@ def is_deps_install_running(install_id):
 def deps_install_result(install_id):
     running = is_deps_install_running(install_id)
     info = DEPS_RUNNING.get(install_id)
+    if not info:
+        info = get_install_job(install_id)
     returncode = info.get("returncode") if info else None
     error = info.get("error", "") if info else ""
 
@@ -161,6 +218,12 @@ def deps_install_result(install_id):
             error = "安装记录不存在或面板已重启，请到日志管理查看 deps-install-*.log / system-install-*.log。"
     elif running:
         status, label = "running", "安装中"
+    elif info and info.get("status") == "unknown":
+        status, label = "unknown", "结果未知"
+        error = error or "无法取得安装进程的退出码，请查看安装日志并明确重试。"
+    elif info and info.get("status") == "failed" and returncode is not None:
+        status, label = "failed", "安装失败"
+        error = error or f"安装进程退出码为 {returncode}，请查看日志中的错误信息。"
     elif error:
         status, label = "start_failed", "启动失败"
     elif returncode == 0:
@@ -179,6 +242,17 @@ def deps_install_result(install_id):
         "status_label": label,
         "returncode": returncode,
         "error": error,
+    }
+
+
+def install_api_payload(install_id, log_url):
+    result = deps_install_result(install_id)
+    return {
+        "ok": True,
+        "request_id": install_id,
+        "install_id": install_id,
+        "log_url": log_url,
+        **result,
     }
 
 
@@ -279,6 +353,7 @@ def deps_page():
 <div class="card">
     <h2 class="section-title">安装依赖</h2>
     <form method="post" action="/deps/install">
+        <input type="hidden" name="request_id" value="{uuid.uuid4().hex}">
         <input name="name" value="{h(package)}" placeholder="例如：requests 或 PySocks" aria-label="依赖名">
         <br><br>
         <button class="btn btn-primary" type="submit">安装并查看日志</button>
@@ -290,6 +365,7 @@ def deps_page():
         安装依赖会进入实时日志页面。<br>
         如果安装失败，可以到日志管理查看 deps-install-*.log。
     </div>
+    <a class="btn btn-gray" href="/deps/install-history">安装历史</a>
 </div>
 </section>
 
@@ -304,14 +380,43 @@ def deps_page():
 def deps_install():
     import sys
 
-    name = request.form.get("name", "").strip()
+    data = request.get_json(silent=True) if request.is_json else request.form
+    data = data if isinstance(data, dict) else request.form
+    name = str(data.get("name", "") or "").strip()
 
     if not name:
         return "依赖名不能为空。下一步：填写包名后重试", 400
 
-    install_id = uuid.uuid4().hex
+    try:
+        install_id = install_request_id(data.get("request_id"))
+    except ValueError as exc:
+        return str(exc), 400
+
+    try:
+        previous = get_install_job(install_id, DEPS_RUNNING)
+    except Exception as exc:
+        return f"安装回执无法读取，未启动安装：{exc}", 500
+    if previous:
+        if previous.get("kind") != "dependency" or previous.get("package") != name:
+            return "安装请求标识已绑定其他依赖，请重新打开依赖页面后重试", 409
+        return redirect(url_for("deps.deps_install_log", install_id=install_id, back="/deps"))
+
     log_file = deps_log_file(install_id, name)
-    log_fp = open(log_file, "ab", buffering=0)
+    try:
+        log_fp = open(log_file, "ab", buffering=0)
+    except Exception as exc:
+        info = {
+            "id": install_id, "request_id": install_id, "kind": "dependency", "package": name,
+            "log_file": str(log_file), "running": False, "finished": True,
+            "status": "failed", "returncode": None,
+            "error": f"打开安装日志失败：{exc}", "updated_at": now_str(),
+        }
+        try:
+            persist_install_job(info)
+        except Exception as persist_error:
+            info["error"] += f"；保存失败：{persist_error}"
+        DEPS_RUNNING[install_id] = info
+        return redirect(url_for("deps.deps_install_log", install_id=install_id, back="/deps"))
 
     header = (
         f"===== 安装依赖: {name} =====\n"
@@ -325,6 +430,8 @@ def deps_install():
 
     prune_completed_records(DEPS_RUNNING, finished_key="finished")
     info = {
+        "id": install_id,
+        "request_id": install_id,
         "kind": "dependency",
         "process": None,
         "package": name,
@@ -332,9 +439,25 @@ def deps_install():
         "log_fp": log_fp,
         "start_time": time.time(),
         "finished": False,
+        "running": True,
+        "status": "prepared",
         "returncode": None,
+        "updated_at": now_str(),
     }
     DEPS_RUNNING[install_id] = info
+    try:
+        persist_install_job(info)
+    except Exception as exc:
+        info.update(
+            running=False,
+            finished=True,
+            status="unknown",
+            error=f"安装已准备但状态保存失败：{exc}",
+            updated_at=now_str(),
+        )
+        log_fp.write((info["error"] + "\n").encode("utf-8", errors="replace"))
+        log_fp.close()
+        return redirect(url_for("deps.deps_install_log", install_id=install_id, back="/deps"))
 
     try:
         info["process"] = subprocess.Popen(
@@ -350,16 +473,52 @@ def deps_install():
         info.update(
             finished=True,
             log_fp=None,
+            running=False,
+            status="failed",
             error=f"启动安装失败：{e}。请检查 Python、pip 和日志目录权限后重试。",
+            updated_at=now_str(),
         )
+        _persist_dependency_state(info)
+
+    if info.get("process") is not None:
+        info["status"] = "running"
+        try:
+            persist_install_job(info)
+        except Exception as exc:
+            info["error"] = f"安装进程已启动但状态保存失败：{exc}"
 
     return redirect(url_for("deps.deps_install_log", install_id=install_id, back="/deps"))
+
+
+@bp.route("/api/deps/install", methods=["POST"])
+def api_deps_install():
+    request_id = ""
+    data = request.get_json(silent=True) if request.is_json else request.form
+    if isinstance(data, dict):
+        request_id = str(data.get("request_id") or "").strip()
+    try:
+        result = deps_install()
+    except Exception as exc:
+        return jsonify(ok=False, request_id=request_id, msg=f"安装提交失败：{exc}"), 500
+    if getattr(result, "status_code", 0) in (301, 302, 303, 307, 308):
+        location = result.headers.get("Location", "")
+        install_id = location.split("/deps/install-log/", 1)[-1].split("?", 1)[0]
+        return jsonify(install_api_payload(install_id, location)), 200
+    if isinstance(result, tuple):
+        body, status = result
+        return jsonify(ok=False, request_id=request_id, msg=str(body)), status
+    return jsonify(ok=False, request_id=request_id, msg="安装提交响应无效"), 500
 
 
 @bp.route("/deps/install-log/<install_id>")
 def deps_install_log(install_id):
     back_url = get_back_url("/deps")
     info = DEPS_RUNNING.get(install_id)
+    if not info:
+        try:
+            info = get_install_job(install_id)
+        except Exception:
+            info = None
     context = find_install_log_context(install_id) if not info else None
     package = info.get("package") if info else (context or {}).get("package", "未知")
     log_file = info.get("log_file") if info else (context or {}).get("log_file", "")
@@ -375,6 +534,15 @@ def deps_install_log(install_id):
                 "package": package,
             }
         )
+
+    log_path, log_failure = safe_install_log_file(info, install_id) if info else (None, None)
+    log_notice = ""
+    if log_failure:
+        _title, message, _status = log_failure
+        log_notice = f'<div class="notice red" role="alert">{h(message)}</div>'
+        log_file = ""
+    elif log_path:
+        log_file = str(log_path)
 
     header_card = page_header_card(
         f"安装日志：{package}",
@@ -395,6 +563,7 @@ def deps_install_log(install_id):
 
     body = f"""
 {header_card}
+{log_notice}
 
 <pre class="log" id="log">加载中...</pre>
 <div id="installPollError" class="help" role="status" aria-live="polite" hidden></div>
@@ -495,6 +664,19 @@ loadLog();
 @bp.route("/api/deps/install-log/<install_id>")
 def api_deps_install_log(install_id):
     info = DEPS_RUNNING.get(install_id)
+    if not info:
+        try:
+            info = get_install_job(install_id)
+        except Exception as exc:
+            return jsonify(
+                ok=False,
+                running=False,
+                status="unreadable",
+                status_label="记录不可读",
+                returncode=None,
+                error=f"安装回执无法读取，未覆盖原文件：{exc}",
+                log="",
+            ), 500
     context = find_install_log_context(install_id) if not info else None
 
     if not info:
@@ -535,12 +717,91 @@ def api_deps_install_log(install_id):
         }), 400
 
     result = deps_install_result(install_id)
-    log_file = info.get("log_file", "")
+    log_file, log_failure = safe_install_log_file(info, install_id)
+    if log_failure:
+        _title, message, failure_status = log_failure
+        payload = {
+            **result,
+            "ok": False,
+            "log": "",
+            "error": "；".join(filter(None, (result.get("error"), message))),
+            "log_status": failure_status,
+            "recovery_url": "/deps/install-history",
+        }
+        return jsonify(payload), failure_status
+
+    log_file = str(log_file)
+    log = tail_file(log_file, lines)
+    if str(log).startswith("读取日志失败:"):
+        return jsonify({
+            **result,
+            "ok": False,
+            "log": "",
+            "error": str(log),
+            "recovery_url": "/deps/install-history",
+        }), 500
 
     return jsonify({
         **result,
-        "log": tail_file(log_file, lines),
+        "log": log,
     })
+
+
+@bp.route("/api/deps/install-history")
+def api_deps_install_history():
+    try:
+        items = list_install_jobs(request.args.get("limit", 50), request.args.get("kind", ""))
+    except ValueError as exc:
+        return jsonify(ok=False, msg=str(exc)), 400
+    except Exception as exc:
+        return jsonify(ok=False, msg=f"安装历史无法读取：{exc}"), 500
+    return jsonify(ok=True, items=items)
+
+
+@bp.route("/deps/install-history")
+def deps_install_history():
+    try:
+        items = list_install_jobs(request.args.get("limit", 50), request.args.get("kind", ""))
+    except ValueError as exc:
+        body = page_header_card(
+            "依赖/运行时安装历史",
+            help_html=h(exc),
+            actions_html='<a class="btn btn-gray" href="/deps">返回依赖管理</a>',
+        )
+        return layout("安装历史", "deps", body), 400
+    except Exception as exc:
+        body = page_header_card(
+            "依赖/运行时安装历史",
+            help_html=f"安装历史无法读取：{h(exc)}。请修复回执文件后重试。",
+            actions_html='<a class="btn btn-primary" href="/deps/install-history">重新读取</a><a class="btn btn-gray" href="/deps">返回依赖管理</a>',
+        )
+        return layout("安装历史", "deps", body), 500
+    rows = []
+    for info in items:
+        install_id = h(info.get("id") or "")
+        kind = "依赖" if info.get("kind") == "dependency" else "运行时"
+        rows.append(
+            "<tr>"
+            f"<td><code>{install_id}</code></td>"
+            f"<td>{kind}</td>"
+            f"<td>{h(info.get('package') or '-')}</td>"
+            f"<td>{h(info.get('status') or '-')}</td>"
+            f"<td>{h(info.get('updated_at') or '-')}</td>"
+            f'<td><a class="btn btn-blue" href="/deps/install-log/{install_id}">查看安装日志</a></td>'
+            "</tr>"
+        )
+    table = (
+        '<div class="table-wrap"><table><thead><tr><th>安装 ID</th><th>类型</th><th>包/运行时</th>'
+        '<th>状态</th><th>更新时间</th><th>操作</th></tr></thead><tbody>'
+        + ("".join(rows) or '<tr><td colspan="6">暂无安装历史</td></tr>')
+        + "</tbody></table></div>"
+    )
+    body = page_header_card(
+        "依赖/运行时安装历史",
+        help_html="历史只读取受控安装回执；结果未知或失败请进入原日志确认后再明确重试。",
+        actions_html='<a class="btn btn-gray" href="/deps">返回依赖管理</a>',
+    ) + f'<section class="section"><div class="card">{table}</div></section>'
+    return layout("安装历史", "deps", body)
 
 
 @bp.route("/deps/refresh", methods=["GET", "POST"])

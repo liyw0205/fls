@@ -4,11 +4,224 @@ import shutil
 import subprocess
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from tests.test_ui_route_components import ROOT, TOKEN, isolated_app
 
 
 class DependencyInstallLogRecoveryTests(unittest.TestCase):
+    def test_install_request_replay_is_idempotent_for_dependency_and_runtime(self):
+        for runtime in (False, True):
+            with self.subTest(runtime=runtime), isolated_app() as (app, base_dir):
+                from fls_manager.state import DEPS_RUNNING
+
+                proc = SimpleNamespace(poll=lambda: None)
+                endpoint = "/install/runtime/node" if runtime else "/deps/install"
+                data = {"request_id": "replay-install-1", "name": "demo-package"}
+                if runtime:
+                    data = {"request_id": "replay-runtime-1"}
+                module = "runtime" if runtime else "deps"
+                with patch(
+                    f"fls_manager.routes.{module}.subprocess.Popen", return_value=proc,
+                ) as popen, patch(
+                    "fls_manager.routes.runtime.runtime_install_command",
+                    return_value="echo runtime",
+                ):
+                    first = app.test_client().post(endpoint, data=data, headers={"X-Token": TOKEN})
+                    second = app.test_client().post(endpoint, data=data, headers={"X-Token": TOKEN})
+                self.assertEqual(first.status_code, 302)
+                self.assertEqual(second.status_code, 302)
+                self.assertEqual(first.headers["Location"], second.headers["Location"])
+                self.assertEqual(popen.call_count, 1)
+                install_id = first.headers["Location"].split("/deps/install-log/", 1)[1].split("?", 1)[0]
+                self.assertIn(install_id, DEPS_RUNNING)
+                self.assertEqual(DEPS_RUNNING[install_id]["request_id"], install_id)
+
+    def test_dependency_install_json_api_returns_stable_replay_state(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.state import DEPS_RUNNING
+
+            proc = SimpleNamespace(poll=lambda: None)
+            with patch("fls_manager.routes.deps.subprocess.Popen", return_value=proc) as popen:
+                first = app.test_client().post(
+                    "/api/deps/install",
+                    json={"request_id": "api-install-1", "name": "demo-package"},
+                    headers={"X-Token": TOKEN},
+                )
+                replay = app.test_client().post(
+                    "/api/deps/install",
+                    json={"request_id": "api-install-1", "name": "demo-package"},
+                    headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(first.status_code, 200)
+            self.assertTrue(first.json["ok"])
+            self.assertEqual(first.json["request_id"], "api-install-1")
+            self.assertEqual(replay.status_code, 200)
+            self.assertTrue(replay.json["ok"])
+            self.assertEqual(replay.json["request_id"], first.json["request_id"])
+            self.assertEqual(popen.call_count, 1)
+            self.assertIn("api-install-1", DEPS_RUNNING)
+
+    def test_runtime_install_json_api_replays_without_starting_second_process(self):
+        with isolated_app() as (app, _base_dir):
+            proc = SimpleNamespace(poll=lambda: None)
+            with patch("fls_manager.routes.runtime.runtime_install_command", return_value="echo runtime"), patch(
+                "fls_manager.routes.runtime.subprocess.Popen", return_value=proc,
+            ) as popen:
+                first = app.test_client().post(
+                    "/api/install/runtime/node",
+                    json={"request_id": "api-runtime-1"},
+                    headers={"X-Token": TOKEN},
+                )
+                replay = app.test_client().post(
+                    "/api/install/runtime/node",
+                    json={"request_id": "api-runtime-1"},
+                    headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(first.status_code, 200)
+            self.assertEqual(replay.status_code, 200)
+            self.assertEqual(replay.json["request_id"], "api-runtime-1")
+            self.assertEqual(popen.call_count, 1)
+
+    def test_json_replay_reports_persisted_terminal_state(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.install_records import persist_install_job
+
+            persist_install_job({
+                "id": "finished-install", "request_id": "finished-install",
+                "kind": "dependency", "package": "demo-package", "log_file": str(_base_dir / "log" / "deps-install-demo-finished-install.log"),
+                "running": False, "finished": True, "status": "succeeded",
+                "returncode": 0, "error": "", "start_time": 1,
+                "updated_at": "2026-11-18 17:00:00",
+            })
+            persist_install_job({
+                "id": "failed-runtime", "request_id": "failed-runtime",
+                "kind": "runtime", "package": "node", "log_file": str(_base_dir / "log" / "system-install-node-failed-runtime.log"),
+                "running": False, "finished": True, "status": "failed",
+                "returncode": 7, "error": "package manager failed", "start_time": 1,
+                "updated_at": "2026-11-18 17:01:00",
+            })
+            client = app.test_client()
+            with patch("fls_manager.routes.deps.subprocess.Popen") as dep_popen, patch(
+                "fls_manager.routes.runtime.subprocess.Popen"
+            ) as runtime_popen:
+                succeeded = client.post(
+                    "/api/deps/install", json={"request_id": "finished-install", "name": "demo-package"},
+                    headers={"X-Token": TOKEN},
+                )
+                failed = client.post(
+                    "/api/install/runtime/node", json={"request_id": "failed-runtime"},
+                    headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(succeeded.status_code, 200)
+            self.assertEqual(succeeded.json["status"], "succeeded")
+            self.assertFalse(succeeded.json["running"])
+            self.assertEqual(succeeded.json["returncode"], 0)
+            self.assertEqual(failed.status_code, 200)
+            self.assertEqual(failed.json["status"], "failed")
+            self.assertFalse(failed.json["running"])
+            self.assertEqual(failed.json["returncode"], 7)
+            dep_popen.assert_not_called()
+            runtime_popen.assert_not_called()
+
+    def test_restart_running_install_becomes_unknown_and_history_is_queryable(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.install_records import INSTALL_JOBS_FILE, persist_install_job
+            from fls_manager.state import DEPS_RUNNING
+
+            install_id = "restart-dependency"
+            log_file = base_dir / "log" / f"deps-install-demo-{install_id}.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_file.write_text("install output\n", encoding="utf-8")
+            persist_install_job({
+                "id": install_id, "request_id": install_id, "kind": "dependency",
+                "package": "demo", "log_file": str(log_file), "running": True,
+                "status": "running", "returncode": None, "error": "",
+                "start_time": 1, "updated_at": "2026-11-18 15:00:00",
+            })
+            DEPS_RUNNING.clear()
+            client = app.test_client()
+            self.assertEqual(client.get("/api/deps/install-history").status_code, 401)
+            invalid_kind = client.get(
+                "/api/deps/install-history?kind=other", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(invalid_kind.status_code, 400)
+            result = client.get(
+                f"/api/deps/install-log/{install_id}", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(result.status_code, 200)
+            self.assertEqual(result.json["status"], "unknown")
+            self.assertFalse(result.json["running"])
+            self.assertIn("install output", result.json["log"])
+            history = client.get(
+                "/api/deps/install-history?kind=dependency&limit=10",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(history.status_code, 200)
+            self.assertEqual(history.json["items"][0]["id"], install_id)
+            self.assertEqual(history.json["items"][0]["status"], "unknown")
+            page = client.get("/deps/install-history?kind=dependency", headers={"X-Token": TOKEN})
+            self.assertEqual(page.status_code, 200)
+            self.assertIn(f"/deps/install-log/{install_id}", page.get_data(as_text=True))
+            self.assertTrue(INSTALL_JOBS_FILE.exists())
+
+    def test_install_history_rejects_corrupt_or_symlink_receipt_without_overwrite(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.install_records import INSTALL_JOBS_FILE
+
+            client = app.test_client()
+            INSTALL_JOBS_FILE.write_text("not-json", encoding="utf-8")
+            original = INSTALL_JOBS_FILE.read_bytes()
+            bad = client.get("/api/deps/install-history", headers={"X-Token": TOKEN})
+            self.assertEqual(bad.status_code, 500)
+            self.assertEqual(INSTALL_JOBS_FILE.read_bytes(), original)
+
+            target = base_dir.parent / f"{base_dir.name}-install-record-target.json"
+            target.write_text("{}", encoding="utf-8")
+            INSTALL_JOBS_FILE.unlink()
+            INSTALL_JOBS_FILE.symlink_to(target)
+            linked = client.get("/api/deps/install-history", headers={"X-Token": TOKEN})
+            self.assertEqual(linked.status_code, 500)
+            self.assertIn("符号链接", linked.json["msg"])
+            self.assertEqual(target.read_text(encoding="utf-8"), "{}")
+            target.unlink()
+
+    def test_install_log_rejects_outside_and_symlink_paths_without_reading_them(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.install_records import INSTALL_JOBS_FILE
+
+            outside = base_dir.parent / f"{base_dir.name}-outside-deps.log"
+            outside.write_text("outside dependency secret\n", encoding="utf-8")
+            record = {
+                "id": "unsafe-dependency", "request_id": "unsafe-dependency",
+                "kind": "dependency", "package": "demo", "log_file": str(outside),
+                "start_time": 1, "running": False, "status": "failed",
+                "returncode": 1, "error": "failed", "updated_at": "2026-11-18 16:00:00",
+                "retry_of": "", "retried_by": "",
+            }
+            INSTALL_JOBS_FILE.write_text(json.dumps({record["id"]: record}), encoding="utf-8")
+            client = app.test_client()
+            response = client.get(
+                "/api/deps/install-log/unsafe-dependency", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(response.status_code, 500)
+            self.assertIn("受控日志目录", response.json["error"])
+            self.assertEqual(outside.read_text(encoding="utf-8"), "outside dependency secret\n")
+
+            target = base_dir / "real-dependency.log"
+            target.write_text("target\n", encoding="utf-8")
+            link = base_dir / "log" / "deps-install-demo-unsafe-dependency.log"
+            link.symlink_to(target)
+            record["log_file"] = str(link)
+            INSTALL_JOBS_FILE.write_text(json.dumps({record["id"]: record}), encoding="utf-8")
+            linked = client.get(
+                "/api/deps/install-log/unsafe-dependency", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(linked.status_code, 500)
+            self.assertIn("受控日志目录", linked.json["error"])
+            self.assertEqual(target.read_text(encoding="utf-8"), "target\n")
+            outside.unlink()
+
     def test_install_log_api_keeps_auth_boundary_and_running_state(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.state import DEPS_RUNNING

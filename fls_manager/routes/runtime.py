@@ -6,11 +6,13 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from flask import Blueprint, redirect, url_for
+from flask import Blueprint, redirect, request, url_for
 
 from ..paths import BASE_DIR, LOG_DIR
 from ..state import DEPS_RUNNING
 from ..utils import now_str, safe_name, prune_completed_records
+from ..install_records import get_install_job, persist_install_job
+from .deps import install_api_payload, install_request_id, _persist_dependency_state
 
 bp = Blueprint("runtime", __name__)
 
@@ -167,12 +169,43 @@ def install_runtime(runtime):
     if os.name == "nt":
         return redirect(runtime_windows_url(runtime))
 
-    install_id = uuid.uuid4().hex
+    request_data = request.get_json(silent=True) if request.is_json else request.values
+    request_data = request_data if isinstance(request_data, dict) else request.values
+    try:
+        install_id = install_request_id(request_data.get("request_id"))
+    except ValueError as exc:
+        return str(exc), 400
+
+    try:
+        previous = get_install_job(install_id, DEPS_RUNNING)
+    except Exception as exc:
+        return f"安装回执无法读取，未启动安装：{exc}", 500
+    if previous:
+        if previous.get("kind") != "runtime" or previous.get("package") != runtime:
+            return "安装请求标识已绑定其他运行时，请重新打开运行器页面后重试", 409
+        return redirect(url_for("deps.deps_install_log", install_id=install_id, back="/panel/status"))
+
     log_file = install_log_file(install_id, runtime)
-    log_fp = open(log_file, "ab", buffering=0)
+    try:
+        log_fp = open(log_file, "ab", buffering=0)
+    except Exception as exc:
+        info = {
+            "id": install_id, "request_id": install_id, "kind": "runtime", "package": runtime,
+            "log_file": str(log_file), "running": False, "finished": True,
+            "status": "failed", "returncode": None,
+            "error": f"打开安装日志失败：{exc}", "updated_at": now_str(),
+        }
+        try:
+            persist_install_job(info)
+        except Exception as persist_error:
+            info["error"] += f"；保存失败：{persist_error}"
+        DEPS_RUNNING[install_id] = info
+        return redirect(url_for("deps.deps_install_log", install_id=install_id, back="/panel/status"))
 
     prune_completed_records(DEPS_RUNNING, finished_key="finished")
     info = {
+        "id": install_id,
+        "request_id": install_id,
         "kind": "runtime",
         "process": None,
         "package": runtime,
@@ -180,9 +213,25 @@ def install_runtime(runtime):
         "log_fp": log_fp,
         "start_time": time.time(),
         "finished": False,
+        "running": True,
+        "status": "prepared",
         "returncode": None,
+        "updated_at": now_str(),
     }
     DEPS_RUNNING[install_id] = info
+    try:
+        persist_install_job(info)
+    except Exception as exc:
+        info.update(
+            running=False,
+            finished=True,
+            status="unknown",
+            error=f"安装已准备但状态保存失败：{exc}",
+            updated_at=now_str(),
+        )
+        log_fp.write((info["error"] + "\n").encode("utf-8", errors="replace"))
+        log_fp.close()
+        return redirect(url_for("deps.deps_install_log", install_id=install_id, back="/panel/status"))
 
     try:
         cmd_text = runtime_install_command(runtime)
@@ -190,7 +239,11 @@ def install_runtime(runtime):
         log_fp.write(f"生成安装命令失败: {e}\n".encode("utf-8"))
         log_fp.close()
 
-        info.update(finished=True, log_fp=None, error=f"生成安装命令失败：{e}")
+        info.update(
+            finished=True, log_fp=None, running=False, status="failed",
+            error=f"生成安装命令失败：{e}", updated_at=now_str(),
+        )
+        _persist_dependency_state(info)
 
         return redirect(url_for("deps.deps_install_log", install_id=install_id, back="/panel/status"))
 
@@ -215,9 +268,38 @@ def install_runtime(runtime):
     except Exception as e:
         log_fp.write(f"启动安装失败: {e}\n".encode("utf-8"))
         log_fp.close()
-        info.update(finished=True, log_fp=None, error=f"启动安装失败：{e}")
+        info.update(
+            finished=True, log_fp=None, running=False, status="failed",
+            error=f"启动安装失败：{e}", updated_at=now_str(),
+        )
+        _persist_dependency_state(info)
+
+    if info.get("process") is not None:
+        info["status"] = "running"
+        try:
+            persist_install_job(info)
+        except Exception as exc:
+            info["error"] = f"安装进程已启动但状态保存失败：{exc}"
 
     return redirect(url_for("deps.deps_install_log", install_id=install_id, back="/panel/status"))
+
+
+@bp.route("/api/install/runtime/<runtime>", methods=["POST"])
+def api_install_runtime(runtime):
+    data = request.get_json(silent=True) if request.is_json else request.form
+    request_id = str(data.get("request_id") or "").strip() if isinstance(data, dict) else ""
+    try:
+        result = install_runtime(runtime)
+    except Exception as exc:
+        return {"ok": False, "request_id": request_id, "msg": f"运行时安装提交失败：{exc}"}, 500
+    if getattr(result, "status_code", 0) in (301, 302, 303, 307, 308):
+        location = result.headers.get("Location", "")
+        install_id = location.split("/deps/install-log/", 1)[-1].split("?", 1)[0]
+        return install_api_payload(install_id, location), 200
+    if isinstance(result, tuple):
+        body, status = result
+        return {"ok": False, "request_id": request_id, "msg": str(body)}, status
+    return {"ok": False, "request_id": request_id, "msg": "安装提交响应无效"}, 500
 
 
 @bp.route("/install/node", methods=["GET", "POST"])
