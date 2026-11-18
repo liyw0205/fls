@@ -22,6 +22,7 @@ def main():
         from fls_manager import scheduler
         from fls_manager.online_scripts import source
         from fls_manager.online_scripts.constants import update_online_refresh_state
+        from fls_manager.online_scripts.logs import online_refresh_log_file
         from fls_manager.routes.online_scripts import task_link
 
         item = {
@@ -73,7 +74,7 @@ def main():
                 )
                 return jsonify(ok=True)
             update_online_refresh_state(
-                id="browser-refresh",
+                id="e" * 32,
                 request_id="d" * 32,
                 proxy_id="",
                 running=False,
@@ -89,8 +90,9 @@ def main():
                     "error": "fixture refresh task source unavailable",
                 }],
                 updated_at="now",
-                log_file="/tmp/browser-refresh.log",
+                log_file=str(online_refresh_log_file("e" * 32)),
             )
+            online_refresh_log_file("e" * 32).write_text("fixture refresh log\nrefresh failed: upstream timeout\n", encoding="utf-8")
             return jsonify(ok=True)
 
         server = make_server("127.0.0.1", 0, app, threaded=True)
@@ -148,13 +150,17 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    await page.goto(base+'/online-scripts');
    const refreshFixture=await page.request.post(base+'/api/fixture/online-refresh',{headers,data:{}});
    assert.equal(refreshFixture.status(),200);
-   await page.evaluate(()=>sessionStorage.setItem('fls-online-refresh-request',JSON.stringify({request_id:'d'.repeat(32),proxy_id:'',server_id:'browser-refresh'})));
+   await page.evaluate(()=>sessionStorage.setItem('fls-online-refresh-request',JSON.stringify({request_id:'d'.repeat(32),proxy_id:'',server_id:'e'.repeat(32)})));
    await page.goto(base+'/online-scripts');
-   await page.waitForFunction(()=>document.body.textContent.includes('同步在线脚本源部分完成'));
+   await page.locator('#onlineRefreshLogLink').waitFor({state:'visible'});
    const originalStatus=await page.request.get(base+'/api/online-scripts/refresh-status/'+'d'.repeat(32),{headers});
    assert.equal(originalStatus.status(),200);
    assert.equal((await originalStatus.json()).request_id,'d'.repeat(32));
-   await page.evaluate(()=>sessionStorage.setItem('fls-online-refresh-request',JSON.stringify({request_id:'d'.repeat(32),proxy_id:'',server_id:'browser-refresh'})));
+   await page.locator('#onlineRefreshLogLink').click();
+   await page.waitForSelector('#refreshLogText');
+   assert.match(await page.locator('#refreshLogText').textContent(),/fixture refresh log/);
+   await page.goto(base+'/online-scripts');
+   await page.evaluate(()=>sessionStorage.setItem('fls-online-refresh-request',JSON.stringify({request_id:'d'.repeat(32),proxy_id:'',server_id:'e'.repeat(32)})));
    await page.locator('#onlineRefreshBtn').click();
    await page.waitForTimeout(1000);
    assert.match(await page.locator('.content').textContent(),/同步在线脚本源部分完成/);

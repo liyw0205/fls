@@ -1,3 +1,5 @@
+import re
+
 from ._common import *
 
 
@@ -46,6 +48,11 @@ def online_scripts_page():
     refresh_error = refresh_state.get("error", "")
     refresh_updated_at = refresh_state.get("updated_at", "")
     refresh_log = refresh_state.get("log_file", "")
+    refresh_request_id = str(refresh_state.get("request_id") or "").strip()
+    refresh_log_href = (
+        f"/online-scripts/refresh-log/{quote(refresh_request_id, safe='')}"
+        if re.fullmatch(r"[a-f0-9]{32}", refresh_request_id) else ""
+    )
     refresh_task_link_failures = refresh_state.get("task_link_failures") or []
 
     def refresh_task_link_actions(failures):
@@ -164,9 +171,10 @@ def online_scripts_page():
     <div class="help" id="onlineRefreshStatusText">
         {refresh_status_text}<br>
         更新时间：{h(refresh_updated_at or "-")}<br>
-        日志：{h(refresh_log or "-")}
+        日志：{h(refresh_log or "-")} {f'<a class="btn btn-blue" href="{h(refresh_log_href)}">查看刷新日志</a>' if refresh_log_href else ''}
     </div>
     <div id="onlineRefreshTaskLinkFailures">{refresh_task_link_actions(refresh_task_link_failures)}</div>
+    <a id="onlineRefreshLogLink" class="btn btn-blue" href="{h(refresh_log_href)}"{' hidden' if not refresh_log_href else ''}>查看刷新日志</a>
     <a id="onlineRefreshLogin" class="btn btn-gray" href="/login?next=%2Fonline-scripts" hidden>重新登录</a>
 </div>
 </section>
@@ -232,10 +240,15 @@ async function updateOnlineRefreshStatus(){{
         const text = document.getElementById("onlineRefreshStatusText");
         const btn = document.getElementById("onlineRefreshBtn");
         const login = document.getElementById("onlineRefreshLogin");
+        const logLink = document.getElementById("onlineRefreshLogLink");
         const failures = document.getElementById("onlineRefreshTaskLinkFailures");
 
         if(!card || !text) return;
         if(login) login.hidden = true;
+        if(logLink && json.request_id && /^[a-f0-9]{32}$/.test(String(json.request_id))){{
+            logLink.href = "/online-scripts/refresh-log/" + encodeURIComponent(String(json.request_id));
+            logLink.hidden = false;
+        }}
 
         const taskFailures = Array.isArray(json.task_link_failures) ? json.task_link_failures : [];
         if(failures) {{
@@ -326,6 +339,7 @@ async function updateOnlineRefreshStatus(){{
         const text = document.getElementById("onlineRefreshStatusText");
         const btn = document.getElementById("onlineRefreshBtn");
         const login = document.getElementById("onlineRefreshLogin");
+        const logLink = document.getElementById("onlineRefreshLogLink");
         const status = e && e.status ? "HTTP " + e.status : "请求失败";
         const detail = e && e.message ? e.message : String(e || "未知错误");
         const denied = e && (e.status === 401 || e.status === 403);
@@ -333,6 +347,7 @@ async function updateOnlineRefreshStatus(){{
             ? "登录状态已失效，请重新登录后重试"
             : "确认面板服务和网络后点击重新同步";
         if(card) card.style.display = "block";
+        if(logLink) logLink.hidden = true;
         const failures = document.getElementById("onlineRefreshTaskLinkFailures");
         if(failures) failures.innerHTML = "";
         if(text) text.innerHTML =
