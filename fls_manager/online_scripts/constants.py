@@ -2,6 +2,7 @@ import json
 import re
 import threading
 import os
+import uuid
 
 from ..paths import DATA_DIR
 from ..storage import mutate_json, storage_transaction
@@ -135,14 +136,15 @@ ONLINE_REFRESH_STATE = {
     "task_link_failures": [],
     "updated_at": "",
     "log_file": "",
+    "retry_of": "",
+    "expected_cache_fingerprint": "",
 }
 
 
 def _refresh_snapshot(info):
     fields = (
         "id", "request_id", "proxy_id", "running", "status", "message", "error", "cache_published",
-        "task_link_failures",
-        "updated_at", "log_file",
+        "task_link_failures", "updated_at", "log_file", "retry_of", "expected_cache_fingerprint",
     )
     defaults = {
         "request_id": "",
@@ -150,6 +152,8 @@ def _refresh_snapshot(info):
         "running": False,
         "cache_published": False,
         "task_link_failures": [],
+        "retry_of": "",
+        "expected_cache_fingerprint": "",
     }
     return {
         field: info.get(field, defaults.get(field, ""))
@@ -162,8 +166,10 @@ def _validate_refresh_snapshot(info):
     if (
         type(snapshot["running"]) is not bool
         or type(snapshot["cache_published"]) is not bool
-        or any(not isinstance(snapshot[field], str) for field in ("id", "request_id", "proxy_id", "status", "message", "error", "updated_at", "log_file"))
+        or any(not isinstance(snapshot[field], str) for field in ("id", "request_id", "proxy_id", "status", "message", "error", "updated_at", "log_file", "retry_of", "expected_cache_fingerprint"))
         or (snapshot["request_id"] and not re.fullmatch(r"[a-f0-9]{32}", snapshot["request_id"]))
+        or (snapshot["retry_of"] and not re.fullmatch(r"[a-f0-9]{32}", snapshot["retry_of"]))
+        or (snapshot["expected_cache_fingerprint"] and not re.fullmatch(r"[a-f0-9]{64}", snapshot["expected_cache_fingerprint"]))
     ):
         raise RuntimeError("在线脚本源同步状态损坏，未覆盖原文件")
     if len(snapshot["proxy_id"]) > 200:
@@ -312,6 +318,52 @@ def get_online_refresh_history(limit=50):
             reverse=True,
         )
         return [dict(value) for value in ordered[:limit]]
+
+
+def claim_online_refresh_retry(original_request_id, proxy_id="", request_id="", cache_fingerprint=""):
+    """Atomically create one explicit retry for a failed refresh history record."""
+    if not isinstance(original_request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", original_request_id):
+        raise ValueError("原刷新请求标识无效")
+    if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
+        raise ValueError("新的刷新请求标识无效")
+    if cache_fingerprint and not re.fullmatch(r"[a-f0-9]{64}", str(cache_fingerprint)):
+        raise ValueError("刷新缓存指纹无效")
+    with ONLINE_REFRESH_LOCK, storage_transaction():
+        history = _read_online_refresh_history_file()
+        original = history.get(original_request_id)
+        if not original:
+            return {"_missing": True}
+        if original.get("status") not in ("失败", "部分完成", "结果未知", "启动失败"):
+            return {"_not_retryable": True, **dict(original)}
+        if str(original.get("proxy_id") or "") != str(proxy_id or ""):
+            return {"_binding_conflict": True, **dict(original)}
+        existing = history.get(request_id)
+        if existing:
+            if existing.get("retry_of") != original_request_id:
+                return {"_binding_conflict": True, **dict(existing)}
+            return {"_replay": True, **dict(existing)}
+        current = dict(ONLINE_REFRESH_STATE)
+        if current.get("running"):
+            return None
+        info = {
+            "id": uuid.uuid4().hex,
+            "request_id": request_id,
+            "proxy_id": str(proxy_id or ""),
+            "running": True,
+            "status": "运行中",
+            "message": "正在重试在线脚本源同步，请稍候...",
+            "error": "",
+            "cache_published": False,
+            "task_link_failures": [],
+            "updated_at": now_str(),
+            "log_file": "",
+            "retry_of": original_request_id,
+            "expected_cache_fingerprint": str(cache_fingerprint or ""),
+        }
+        persist_online_refresh(info)
+        ONLINE_REFRESH_STATE.clear()
+        ONLINE_REFRESH_STATE.update(info)
+        return dict(info)
 
 
 def reserve_online_refresh(proxy_id="", request_id=""):

@@ -114,6 +114,15 @@ def load_online_script_cache():
         raise RuntimeError(f"在线脚本源缓存损坏或无法读取，未覆盖原文件：{exc}") from exc
 
 
+def online_script_cache_fingerprint():
+    """Return the exact current cache bytes used to bind an explicit retry."""
+    if not ONLINE_SCRIPT_CACHE_FILE.exists():
+        return hashlib.sha256(b"").hexdigest()
+    if ONLINE_SCRIPT_CACHE_FILE.is_symlink():
+        raise RuntimeError("在线脚本源缓存不能是符号链接，无法确认重试指纹")
+    return hashlib.sha256(ONLINE_SCRIPT_CACHE_FILE.read_bytes()).hexdigest()
+
+
 def save_online_script_cache(items):
     with storage_transaction():
         if ONLINE_SCRIPT_CACHE_FILE.is_symlink():

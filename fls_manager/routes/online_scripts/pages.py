@@ -70,10 +70,21 @@ def online_scripts_page():
                 continue
             status = h(item.get("status") or "-")
             updated_at = h(item.get("updated_at") or "-")
-            rows.append(
+            log_link = (
                 f'<a class="btn btn-gray" href="/online-scripts/refresh-log/{quote(request_id, safe="")}">'
                 f'查看 {status} 刷新（{updated_at}）</a>'
             )
+            if item.get("status") in ("失败", "部分完成", "结果未知", "启动失败"):
+                rows.append(
+                    f'<div class="fls-online-refresh-history-row" data-refresh-retry-of="{h(request_id)}">'
+                    f'{log_link}<form class="inline-form fls-online-refresh-retry-form" method="post" '
+                    f'action="/online-scripts/refresh-retry/{h(request_id)}" data-refresh-retry-of="{h(request_id)}">'
+                    f'<input type="hidden" name="retry_request_id" value="{uuid.uuid4().hex}">'
+                    f'<input type="hidden" name="proxy_id" value="{h(item.get("proxy_id") or "")}">'
+                    '<button class="btn btn-orange" type="submit">明确重新同步</button></form></div>'
+                )
+            else:
+                rows.append(log_link)
         return "".join(rows) or '<span class="help">暂无可查询的刷新历史</span>'
 
     def refresh_task_link_actions(failures):
@@ -258,9 +269,17 @@ async function updateOnlineRefreshHistory(){{
             if(!/^[a-f0-9]{{32}}$/.test(requestId)) return "";
             const status = escapeHtml(item.status || "-");
             const updatedAt = escapeHtml(item.updated_at || "-");
-            return "<a class='btn btn-gray' href='/online-scripts/refresh-log/" + encodeURIComponent(requestId) + "'>查看 " + status + " 刷新（" + updatedAt + "）</a>";
+            const link = "<a class='btn btn-gray' href='/online-scripts/refresh-log/" + encodeURIComponent(requestId) + "'>查看 " + status + " 刷新（" + updatedAt + "）</a>";
+            if(["失败","部分完成","结果未知","启动失败"].indexOf(String(item.status || "")) < 0) return link;
+            const proxyId = escapeHtml(item.proxy_id || "");
+            return "<div class='fls-online-refresh-history-row' data-refresh-retry-of='" + requestId + "'>" + link +
+                "<" + "form class='inline-form fls-online-refresh-retry-form' method='post' action='/online-scripts/refresh-retry/" + requestId + "' data-refresh-retry-of='" + requestId + "'>" +
+                "<" + "input type='hidden' name='retry_request_id' value='" + randomOnlineRefreshRequestId() + "'>" +
+                "<" + "input type='hidden' name='proxy_id' value='" + proxyId + "'>" +
+                "<" + "button class='btn btn-orange' type='submit'>明确重新同步</button><" + "/form></div>";
         }}).filter(Boolean).join("");
         history.innerHTML = rows || "<span class='help'>暂无可查询的刷新历史</span>";
+        bindOnlineRefreshRetryForms(history);
         if(error){{ error.hidden = true; error.textContent = ""; }}
     }}catch(e){{
         if(error){{
@@ -269,6 +288,63 @@ async function updateOnlineRefreshHistory(){{
             error.textContent = "刷新历史读取失败（" + status + "）：" + (e && e.message || String(e || "未知错误")) + "。当前已显示的历史未清除。";
         }}
     }}
+}}
+
+function randomOnlineRefreshRequestId(){{
+    if(typeof crypto !== "undefined" && crypto.getRandomValues) return Array.from(crypto.getRandomValues(new Uint8Array(16)), function(value){{return value.toString(16).padStart(2, "0");}}).join("");
+    return Array.from({{length:32}}, function(){{return Math.floor(Math.random() * 16).toString(16);}}).join("");
+}}
+
+function onlineRefreshRetryStorageKey(original){{ return "fls-online-refresh-retry:" + original; }}
+function readOnlineRefreshRetry(original){{
+    try{{ const value = JSON.parse(sessionStorage.getItem(onlineRefreshRetryStorageKey(original)) || "null");
+        return value && /^[a-f0-9]{{32}}$/.test(String(value.request_id || "")) ? value : null;
+    }}catch(_error){{ return null; }}
+}}
+function saveOnlineRefreshRetry(original, value){{ try{{ sessionStorage.setItem(onlineRefreshRetryStorageKey(original), JSON.stringify(value)); }}catch(_error){{}} }}
+
+async function submitOnlineRefreshRetryForm(form, event){{
+    if(event){{ event.preventDefault(); event.stopImmediatePropagation(); }}
+    const original = String(form.getAttribute("data-refresh-retry-of") || "");
+    const input = form.querySelector('[name="retry_request_id"]');
+    const proxy = form.querySelector('[name="proxy_id"]');
+    const button = form.querySelector('button[type="submit"]');
+    if(!/^[a-f0-9]{{32}}$/.test(original)) return;
+    const saved = readOnlineRefreshRetry(original);
+    const retryId = saved && saved.proxy_id === (proxy && proxy.value || "") ? saved.request_id : (input && input.value || randomOnlineRefreshRequestId());
+    if(input) input.value = retryId;
+    const pending = {{request_id: retryId, proxy_id: proxy && proxy.value || "", original_request_id: original}};
+    saveOnlineRefreshRetry(original, pending);
+    if(button) button.disabled = true;
+    try{{
+        const headers = {{"X-Requested-With":"XMLHttpRequest"}};
+        const csrf = typeof flsGetCsrfToken === "function" ? flsGetCsrfToken() : "";
+        if(csrf) headers["X-CSRF-Token"] = csrf;
+        const response = await fetch(form.action.replace("/online-scripts/refresh-retry/", "/api/online-scripts/refresh-retry/"), {{method:"POST", body:new FormData(form), headers, credentials:"same-origin"}});
+        const json = await flsReadJsonResponse(response);
+        if(!json || json.ok !== true) throw Object.assign(new Error(json && (json.error || json.msg) || "重试未启动"), {{status: response.status}});
+        pending.server_id = String(json.id || "");
+        saveOnlineRefreshPending(pending);
+        await updateOnlineRefreshStatus();
+        await updateOnlineRefreshHistory();
+    }}catch(error){{
+        if(button) button.disabled = false;
+        const errorEl = document.getElementById("onlineRefreshHistoryError");
+        const denied = error && (error.status === 401 || error.status === 403);
+        if(errorEl){{ errorEl.hidden = false; errorEl.textContent = (denied ? "登录状态已失效" : "在线脚本源重试失败") + "：" + (error && error.message || String(error || "请求失败")) + "。原历史未覆盖，可继续明确重试。"; }}
+        const login = document.getElementById("onlineRefreshLogin");
+        if(login){{ login.hidden = !denied; if(denied) login.href = "/login?next=" + encodeURIComponent(location.pathname + location.search); }}
+    }}
+}}
+
+function bindOnlineRefreshRetryForms(root){{
+    const scope = root || document;
+    if(!scope || !scope.querySelectorAll) return;
+    scope.querySelectorAll(".fls-online-refresh-retry-form button[type='submit']").forEach(function(button){{
+        if(button.__flsOnlineRefreshRetryBound) return;
+        button.__flsOnlineRefreshRetryBound = true;
+        button.onclick = function(event){{ event.preventDefault(); submitOnlineRefreshRetryForm(button.form || button.closest(".fls-online-refresh-retry-form"), event); return false; }};
+    }});
 }}
 
 async function updateOnlineRefreshStatus(){{
@@ -416,6 +492,7 @@ async function updateOnlineRefreshStatus(){{
 
 updateOnlineRefreshStatus();
 updateOnlineRefreshHistory();
+bindOnlineRefreshRetryForms(document);
 
 async function submitOnlineRefreshForm(form, event){{
     if(event){{ event.preventDefault(); event.stopImmediatePropagation(); }}
@@ -478,6 +555,10 @@ if(document.addEventListener){{
     document.addEventListener("submit", function(event){{
         const form = event.target && event.target.closest ? event.target.closest(".fls-online-refresh-form") : null;
         if(form) return submitOnlineRefreshForm(form, event);
+    }}, true);
+    document.addEventListener("submit", function(event){{
+        const form = event.target && event.target.closest ? event.target.closest(".fls-online-refresh-retry-form") : null;
+        if(form) return submitOnlineRefreshRetryForm(form, event);
     }}, true);
 }}
 

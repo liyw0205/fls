@@ -218,6 +218,109 @@ class OnlineRefreshLogTests(unittest.TestCase):
             self.assertIn("历史无法读取", response.json["error"])
             self.assertNotIn("refresh failed", response.json["log"])
 
+    def test_failed_refresh_history_has_explicit_idempotent_retry(self):
+        with isolated_app() as (app, base_dir):
+            original = self._state(base_dir, refresh_id="a" * 32, request_id="b" * 32)
+            from fls_manager.online_scripts.constants import update_online_refresh_state
+            import fls_manager.routes.online_scripts.refresh as refresh
+
+            update_online_refresh_state(
+                running=False, status="失败", error="upstream timeout",
+                cache_published=False, updated_at="now",
+            )
+            retry_request = "c" * 32
+            client = app.test_client()
+            with patch.object(refresh, "start_refresh_thread") as start:
+                first = client.post(
+                    f"/api/online-scripts/refresh-retry/{original}",
+                    json={"retry_request_id": retry_request, "proxy_id": ""},
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(first.status_code, 202)
+                self.assertEqual(first.json["retry_of"], original)
+                replay = client.post(
+                    f"/api/online-scripts/refresh-retry/{original}",
+                    json={"retry_request_id": retry_request, "proxy_id": ""},
+                    headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(replay.status_code, 200)
+            self.assertTrue(replay.json["replayed"])
+            self.assertEqual(start.call_count, 1)
+            retry_status = client.get(
+                f"/api/online-scripts/refresh-status/{retry_request}",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(retry_status.status_code, 200)
+            self.assertEqual(retry_status.json["retry_of"], original)
+            page = client.get("/online-scripts", headers={"X-Token": TOKEN})
+            html = page.get_data(as_text=True)
+            self.assertIn(f"/online-scripts/refresh-retry/{original}", html)
+            self.assertIn("明确重新同步", html)
+
+    def test_refresh_retry_rejects_terminal_or_bound_conflicts_without_starting(self):
+        with isolated_app() as (app, base_dir):
+            original = self._state(base_dir, refresh_id="a" * 32, request_id="b" * 32)
+            from fls_manager.online_scripts.constants import update_online_refresh_state
+            import fls_manager.routes.online_scripts.refresh as refresh
+            client = app.test_client()
+            update_online_refresh_state(
+                running=False, status="已完成", error="", cache_published=True,
+                updated_at="now",
+            )
+            with patch.object(refresh, "start_refresh_thread") as start:
+                completed = client.post(
+                    f"/api/online-scripts/refresh-retry/{original}",
+                    json={"retry_request_id": "c" * 32, "proxy_id": ""},
+                    headers={"X-Token": TOKEN},
+                )
+                invalid = client.post(
+                    "/api/online-scripts/refresh-retry/" + "d" * 32,
+                    json={"retry_request_id": "e" * 32, "proxy_id": ""},
+                    headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(completed.status_code, 409)
+            self.assertEqual(invalid.status_code, 404)
+            self.assertEqual(start.call_count, 0)
+            update_online_refresh_state(
+                running=False, status="失败", error="retryable",
+                cache_published=False, updated_at="later",
+            )
+            with patch.object(refresh, "start_refresh_thread") as start:
+                conflict = client.post(
+                    f"/api/online-scripts/refresh-retry/{original}",
+                    json={"retry_request_id": "f" * 32, "proxy_id": "missing"},
+                    headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(conflict.status_code, 400)
+            self.assertEqual(start.call_count, 0)
+
+    def test_refresh_retry_form_requires_csrf_and_returns_recoverable_error(self):
+        with isolated_app() as (app, base_dir):
+            original = self._state(base_dir)
+            from fls_manager.online_scripts.constants import update_online_refresh_state
+
+            update_online_refresh_state(
+                running=False, status="失败", error="upstream timeout",
+                cache_published=False, updated_at="now",
+            )
+            client = app.test_client()
+            with client.session_transaction() as session:
+                session.update(token=TOKEN, token_expire_at=4102444800, security_verified=True, csrf_token="retry-csrf")
+            denied = client.post(
+                f"/online-scripts/refresh-retry/{original}",
+                data={"retry_request_id": "c" * 32, "proxy_id": ""},
+            )
+            self.assertIn(denied.status_code, (400, 403))
+            html = denied.get_data(as_text=True)
+            self.assertIn("CSRF", html)
+            csrf = "retry-csrf"
+            with patch("fls_manager.routes.online_scripts.refresh.start_refresh_thread"):
+                result = client.post(
+                    f"/online-scripts/refresh-retry/{original}",
+                    data={"retry_request_id": "c" * 32, "proxy_id": "", "csrf_token": csrf},
+                )
+            self.assertIn(result.status_code, (302, 500))
+
     @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise refresh log polling")
     def test_refresh_log_page_polls_running_state_and_stops_at_terminal(self):
         with isolated_app() as (app, base_dir):

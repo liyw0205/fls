@@ -5,12 +5,14 @@ from ._common import *
 from ...online_scripts.constants import (
     ONLINE_REFRESH_LOCK,
     ONLINE_REFRESH_STATE,
+    claim_online_refresh_retry,
     get_online_refresh_history,
     get_online_refresh_request,
     reserve_online_refresh,
     update_online_refresh_state,
 )
 from ...online_scripts.logs import online_refresh_log_file
+from ...online_scripts.source import online_script_cache_fingerprint
 from ...utils import now_str
 
 
@@ -87,6 +89,57 @@ def _submit_online_refresh(proxy_id, raw_request_id=""):
             "status": "运行中"}, 202
 
 
+def _submit_online_refresh_retry(original_request_id, proxy_id, raw_request_id=""):
+    try:
+        request_id = _refresh_request_id(raw_request_id)
+    except ValueError as exc:
+        return {"ok": False, "status": "参数错误", "error": str(exc), "request_id": ""}, 400
+    try:
+        validate_proxy_id(proxy_id)
+        cache_fingerprint = online_script_cache_fingerprint()
+        info = claim_online_refresh_retry(
+            original_request_id, proxy_id, request_id, cache_fingerprint,
+        )
+    except ValueError as exc:
+        return {"ok": False, "status": "参数错误", "request_id": request_id, "error": str(exc)}, 400
+    except Exception as exc:
+        return {"ok": False, "status": "重试准备失败", "request_id": request_id,
+                "error": f"准备在线脚本源重试失败：{exc}"}, 500
+    if info is None:
+        return {"ok": False, "status": "冲突", "request_id": request_id,
+                "error": "已有在线脚本源同步正在运行，请等待结束后再明确重试"}, 409
+    if info.get("_missing"):
+        return {"ok": False, "status": "记录不存在", "request_id": request_id,
+                "error": "原刷新记录不存在或已被清理，请从最新历史重新选择"}, 404
+    if info.get("_not_retryable"):
+        return {"ok": False, "status": "不可重试", "request_id": request_id,
+                "error": "该刷新已完成或仍在运行，请查询原记录，不会重复抓取"}, 409
+    if info.get("_binding_conflict"):
+        return {"ok": False, "status": "冲突", "request_id": request_id,
+                "error": "重试请求与原刷新记录或既有请求绑定不一致，请重新读取历史"}, 409
+    if info.get("_replay"):
+        return {"ok": True, "replayed": True, "request_id": request_id,
+                "retry_of": original_request_id, "id": info.get("id", ""),
+                "status": info.get("status", "运行中")}, 200
+    log_file = ""
+    try:
+        log_file = str(online_refresh_log_file(info["id"]))
+        start_refresh_thread(info["id"], info.get("proxy_id", ""), log_file)
+    except Exception as exc:
+        error = f"启动在线脚本源重试线程失败：{exc}"
+        try:
+            update_online_refresh_state(
+                running=False, status="启动失败", message="", error=error,
+                updated_at=now_str(), log_file=log_file,
+            )
+        except Exception as state_error:
+            error += f"；同步状态保存失败：{state_error}"
+        return {"ok": False, "id": info["id"], "request_id": request_id,
+                "retry_of": original_request_id, "status": "启动失败", "error": error}, 500
+    return {"ok": True, "id": info["id"], "request_id": request_id,
+            "retry_of": original_request_id, "status": "运行中"}, 202
+
+
 @bp.route("/online-scripts/refresh", methods=["POST"])
 def online_scripts_refresh():
     proxy_id = request.form.get("proxy_id", "").strip()
@@ -135,6 +188,37 @@ def api_online_refresh_history():
     except Exception as e:
         return jsonify(ok=False, error=f"读取在线脚本源刷新历史失败：{e}", items=[]), 500
     return jsonify(ok=True, items=items), 200
+
+
+@bp.route("/api/online-scripts/refresh-retry/<request_id>", methods=["POST"])
+def api_online_refresh_retry(request_id):
+    data = request.get_json(silent=True) if request.is_json else request.form
+    data = data or {}
+    payload, status_code = _submit_online_refresh_retry(
+        request_id,
+        str(data.get("proxy_id", "") or "").strip(),
+        data.get("retry_request_id") or data.get("request_id", ""),
+    )
+    return jsonify(payload), status_code
+
+
+@bp.route("/online-scripts/refresh-retry/<request_id>", methods=["POST"])
+def online_refresh_retry(request_id):
+    proxy_id = request.form.get("proxy_id", "").strip()
+    payload, status_code = _submit_online_refresh_retry(
+        request_id, proxy_id, request.form.get("retry_request_id") or request.form.get("request_id", ""),
+    )
+    if not payload.get("ok"):
+        return layout(
+            "在线脚本源重试",
+            "online_scripts",
+            page_header_card(
+                "在线脚本源重试未启动",
+                help_html=h(payload.get("error") or "重试失败"),
+                actions_html='<a class="btn btn-gray" href="/online-scripts#online-status">返回刷新状态</a>',
+            ),
+        ), status_code
+    return redirect(url_for("online_scripts.online_scripts_page", msg="已提交在线脚本源明确重试，正在处理中"))
 
 
 @bp.route("/api/online-scripts/refresh-status/<request_id>")
