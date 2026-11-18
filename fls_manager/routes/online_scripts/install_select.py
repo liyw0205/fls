@@ -711,6 +711,9 @@ def online_scripts_install_select(script_id):
 
 {page_links_html}
 
+<div class="notice red" id="onlineInstallApiError" role="status" hidden></div>
+<a class="btn btn-primary" id="onlineInstallApiLogin" href="/login" hidden>重新登录</a>
+
 <section class="section fls-form-section fls-save-section">
     <div class="row-actions" aria-label="在线脚本导入操作">
         <div class="row-actions-primary">
@@ -870,6 +873,10 @@ function flsInstallGoTaskPage(page){{
 document.getElementById("onlineInstallSelectForm").addEventListener("submit", function(e){{
     flsSyncVisibleCheckboxesToExcluded();
 
+    const submitter = e.submitter;
+    const action = (submitter && submitter.getAttribute("formaction")) || this.getAttribute("action") || "";
+    if(action.indexOf("/online-scripts/install/") < 0 || action.indexOf("/import-tasks/") >= 0) return;
+
     var importTask = document.querySelector('#onlineInstallSelectForm input[name="import_task"]');
     var excluded = flsParseExcluded();
 
@@ -878,7 +885,69 @@ document.getElementById("onlineInstallSelectForm").addEventListener("submit", fu
         alert("已勾选导入任务，但没有选择任何任务");
         return false;
     }}
+
+    e.preventDefault();
+    flsInstallSubmitApi(action, this, submitter);
 }});
+
+async function flsInstallSubmitApi(action, form, submitter){{
+    const errorEl = document.getElementById("onlineInstallApiError");
+    const loginEl = document.getElementById("onlineInstallApiLogin");
+    const csrf = typeof flsGetCsrfToken === "function" ? flsGetCsrfToken() : "";
+    const button = submitter || form.querySelector('button[type="submit"]');
+    if(button) button.disabled = true;
+    if(errorEl){{ errorEl.hidden = true; errorEl.textContent = "正在提交安装请求..."; }}
+    if(loginEl) loginEl.hidden = true;
+
+    const requestIdInput = form.querySelector('input[name="request_id"]');
+    const requestId = requestIdInput ? requestIdInput.value : "";
+    if(requestId) sessionStorage.setItem("fls-online-install-request", JSON.stringify({{
+        request_id: requestId, script_id: window.FLS_INSTALL_SCRIPT_ID, action: action
+    }}));
+    const data = new FormData(form);
+    data.delete("visible_task_indexes");
+    const apiAction = action.replace("/online-scripts/install/", "/api/online-scripts/install/");
+    const headers = {{"X-Requested-With": "XMLHttpRequest"}};
+    if(csrf) headers["X-CSRF-Token"] = csrf;
+    try{{
+        let response = await fetch(apiAction, {{method:"POST", body:data, headers, credentials:"same-origin"}});
+        let json;
+        try{{
+            json = await flsReadJsonResponse(response);
+        }}catch(readError){{
+            if(response.status === 409 && readError && readError.payload) json = readError.payload;
+            else throw readError;
+        }}
+        if(response.status === 409 && json && json.confirm_required){{
+            if(!window.confirm("目标文件已存在，确定覆盖并继续安装吗？")){{
+                if(button) button.disabled = false;
+                if(errorEl){{ errorEl.hidden = false; errorEl.textContent = "已取消覆盖，未启动安装。"; }}
+                return;
+            }}
+            data.set("force", "1");
+            response = await fetch(apiAction, {{method:"POST", body:data, headers, credentials:"same-origin"}});
+            json = await flsReadJsonResponse(response);
+        }}
+        if(!json || json.ok !== true) throw Object.assign(new Error(json && json.msg || "安装请求未完成"), {{status:response.status, payload:json}});
+        if(json.install_id) sessionStorage.setItem("fls-online-install-request", JSON.stringify({{
+            request_id: json.request_id || requestId, install_id: json.install_id,
+            script_id: window.FLS_INSTALL_SCRIPT_ID
+        }}));
+        window.location.href = "/online-scripts/log/" + encodeURIComponent(json.install_id || json.request_id);
+    }}catch(error){{
+        const denied = error && (error.status === 401 || error.status === 403);
+        const message = error && error.message ? error.message : String(error || "安装请求失败");
+        if(errorEl){{
+            errorEl.textContent = "安装请求失败：" + message + (denied ? "。请重新登录后查询原安装请求。" : "。请保留当前请求标识后重试或查看安装日志。");
+            errorEl.hidden = false;
+        }}
+        if(loginEl){{
+            loginEl.hidden = !denied;
+            if(denied) loginEl.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
+        }}
+        if(button) button.disabled = false;
+    }}
+}}
 
 flsApplyExcludedToVisible();
 </script>

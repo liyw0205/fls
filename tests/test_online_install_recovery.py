@@ -583,6 +583,37 @@ class OnlineInstallRecoveryTests(unittest.TestCase):
             self.assertFalse(payload["recovery"]["available"])
             self.assertIn("后来修改", payload["recovery"]["reason"])
 
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise install selection AJAX")
+    def test_install_selection_ajax_handles_confirmation_and_redirects_to_original_log(self):
+        with isolated_app() as (app, base_dir):
+            self.prepare(base_dir)
+            client = app.test_client()
+            html = client.get("/online-scripts/install-select/demo", headers={"X-Token": TOKEN}).get_data(as_text=True)
+            script = next(script for script in re.findall(r"<script>(.*?)</script>", html, re.S) if "flsInstallSubmitApi" in script)
+            source = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+            reader = source[source.index("async function flsReadJsonResponse("):source.index("async function flsReadTextResponse(")]
+            result = subprocess.run(["node", "-e", r"""
+const vm=require('node:vm');const assert=require('node:assert/strict');
+const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const request={value:'a'.repeat(32)}; const importInput={checked:true};
+const form={dataset:{},listeners:{},querySelector:s=>s.includes('request_id')?request:s.includes('import_task')?importInput:null,
+ getAttribute:()=>'/online-scripts/install/demo', querySelectorAll:()=>[], addEventListener(n,f){this.listeners[n]=f;}};
+const status={hidden:true,textContent:''},login={hidden:true,href:''}; let calls=[];
+class FormDataMock{constructor(){this.values={request_id:request.value};}delete(k){delete this.values[k];}set(k,v){this.values[k]=v;}}
+    const context={window:{FLS_INSTALL_SCRIPT_ID:'demo',confirm:()=>true,location:{pathname:'/online-scripts/install-select/demo',search:''}},
+ document:{getElementById:id=>id==='onlineInstallSelectForm'?form:id==='onlineInstallApiError'?status:login,
+  querySelector:()=>null,querySelectorAll:()=>[]},
+     FormData:FormDataMock,sessionStorage:{setItem(){}},confirm:()=>true,
+ flsGetCsrfToken:()=> 'install-csrf', flsReadJsonResponse:async r=>{if(!r.ok){const e=new Error(r.jsonData.msg);e.status=r.status;e.payload=r.jsonData;throw e;}return r.jsonData;},
+ fetch:async(url,opts)=>{calls.push({url,opts});const value=calls.length===1?{confirm_required:true,msg:'target exists'}:{ok:true,install_id:'a'.repeat(32)};return {ok:calls.length!==1,status:calls.length===1?409:200,json:async()=>value};},
+ encodeURIComponent,alert:()=>{}
+    };vm.createContext(context);vm.runInContext(input.reader+input.script,context);
+(async()=>{await context.flsInstallSubmitApi('/online-scripts/install/demo',form,{disabled:false});
+ assert.equal(calls.length,2);assert.equal(calls[0].url,'/api/online-scripts/install/demo');assert.equal(calls[1].opts.body.values.force,'1');
+ assert.equal(calls[0].opts.headers['X-CSRF-Token'],'install-csrf');assert.equal(context.window.location.href,'/online-scripts/log/'+ 'a'.repeat(32));})().catch(e=>{console.error(e);process.exitCode=1;});
+"""], input=json.dumps({"script":script,"reader":reader}), capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise log polling")
     def test_polling_preserves_logs_and_stops_on_permission_or_missing_errors(self):
         with isolated_app() as (app, base_dir):
