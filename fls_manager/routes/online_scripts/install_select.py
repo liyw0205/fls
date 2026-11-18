@@ -7,6 +7,7 @@ from ...scheduler import reload_scheduler
 from ...online_scripts.constants import (
     claim_online_task_import_request,
     get_online_task_import_request,
+    list_online_task_import_requests,
     persist_online_task_import_request,
     ONLINE_TASK_IMPORT_LOCK,
 )
@@ -288,6 +289,20 @@ def api_online_scripts_import_tasks_status(request_id):
     return jsonify(ok=True, **record)
 
 
+@bp.route("/api/online-scripts/import-tasks-history")
+def api_online_scripts_import_tasks_history():
+    try:
+        items = list_online_task_import_requests(
+            request.args.get("limit", 50),
+            request.args.get("script_id", ""),
+        )
+    except ValueError as exc:
+        return jsonify(ok=False, msg=str(exc)), 400
+    except Exception as exc:
+        return jsonify(ok=False, msg=f"导入历史无法读取：{exc}"), 500
+    return jsonify(ok=True, items=items)
+
+
 @bp.route("/api/online-scripts/import-tasks-reload/<request_id>", methods=["POST"])
 def api_online_scripts_import_tasks_reload(request_id):
     payload, status_code = _reload_import_scheduler(request_id)
@@ -347,7 +362,7 @@ def online_scripts_import_tasks_status(request_id):
         "unknown": "导入结果未知，请勿重复写入",
         "completed": "任务导入已完成",
     }
-    actions = '<a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>'
+    actions = '<a class="btn btn-gray" href="/online-scripts/import-tasks-history">导入历史</a><a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>'
     if state == "failed":
         fields = f'<input type="hidden" name="request_id" value="{h(request_id)}">'
         fields += "".join(f'<input type="hidden" name="task_indexes" value="{h(index)}">' for index in record.get("selected_task_indexes", []))
@@ -365,6 +380,71 @@ def online_scripts_import_tasks_status(request_id):
     )
     body += f'''<section class="section"><div class="card"><h2 class="section-title">{h(labels.get(state, state))}</h2><p>请求标识：<code>{h(request_id)}</code></p><p>脚本：{h(record.get("script_id"))}</p><p>更新时间：{h(record.get("updated_at"))}</p><p>{h(record.get("message") or record.get("scheduler_reload_error") or "-")}</p></div></section>'''
     return layout("在线任务导入状态", "online_scripts", body)
+
+
+@bp.route("/online-scripts/import-tasks-history")
+def online_scripts_import_tasks_history():
+    script_id = str(request.args.get("script_id") or "").strip()
+    try:
+        items = list_online_task_import_requests(request.args.get("limit", 50), script_id)
+    except ValueError as exc:
+        body = page_header_card(
+            "在线任务导入历史",
+            help_html=h(exc),
+            actions_html='<a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>',
+        )
+        return layout("在线任务导入历史", "online_scripts", body), 400
+    except Exception as exc:
+        body = page_header_card(
+            "在线任务导入历史",
+            help_html=f"导入历史无法读取：{h(exc)}。请修复回执存储后重试。",
+            actions_html='<a class="btn btn-blue" href="/online-scripts/import-tasks-history">重新读取</a><a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>',
+        )
+        return layout("在线任务导入历史", "online_scripts", body), 500
+
+    labels = {
+        "prepared": "已准备",
+        "running": "运行中",
+        "failed": "失败，可重试",
+        "scheduler_pending": "调度器待恢复",
+        "unknown": "结果未知",
+        "completed": "已完成",
+    }
+    rows = []
+    for record in items:
+        request_id = str(record.get("request_id") or "")
+        state = str(record.get("state") or "unknown")
+        actions = f'<a class="btn btn-blue" href="/online-scripts/import-tasks-status/{h(request_id)}">查看状态</a>'
+        if state == "scheduler_pending":
+            actions += f'<form class="inline-form" method="post" action="/online-scripts/import-tasks-reload/{h(request_id)}"><button class="btn btn-primary" type="submit">仅重载调度器</button></form>'
+        elif state == "failed":
+            fields = f'<input type="hidden" name="request_id" value="{h(request_id)}">'
+            fields += "".join(f'<input type="hidden" name="task_indexes" value="{h(index)}">' for index in record.get("selected_task_indexes", []))
+            if record.get("enable_task"):
+                fields += '<input type="hidden" name="enable_task" value="1">'
+            actions += f'<form class="inline-form" method="post" action="/online-scripts/import-tasks/{h(record.get("script_id") or "")}">{fields}<button class="btn btn-orange" type="submit">继续原导入请求</button></form>'
+        rows.append(
+            "<tr>"
+            f"<td><code>{h(request_id)}</code></td>"
+            f"<td>{h(record.get('script_id') or '-')}</td>"
+            f"<td>{h(labels.get(state, state))}</td>"
+            f"<td>{h(','.join(record.get('selected_task_indexes') or []) or '-')}</td>"
+            f"<td>{h(record.get('updated_at') or '-')}</td>"
+            f"<td>{actions}</td>"
+            "</tr>"
+        )
+    table = (
+        '<div class="table-wrap"><table><thead><tr><th>请求标识</th><th>脚本</th><th>状态</th>'
+        '<th>任务序号</th><th>更新时间</th><th>操作</th></tr></thead><tbody>'
+        + ("".join(rows) or '<tr><td colspan="6">暂无导入历史</td></tr>')
+        + "</tbody></table></div>"
+    )
+    body = page_header_card(
+        "在线任务导入历史",
+        help_html="历史只读取已保存回执，不会重复写入任务；调度器待恢复时只执行重载。",
+        actions_html='<a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>',
+    ) + f'<section class="section"><div class="card">{table}</div></section>'
+    return layout("在线任务导入历史", "online_scripts", body)
 
 
 @bp.route("/online-scripts/install-select/<script_id>")

@@ -74,6 +74,21 @@ def get_online_task_import_request(request_id):
         return dict(_read_task_import_requests().get(request_id) or {}) or None
 
 
+def list_online_task_import_requests(limit=50, script_id=""):
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("在线任务导入历史数量无效") from exc
+    if not 1 <= limit <= 100:
+        raise ValueError("在线任务导入历史数量必须在 1 到 100 之间")
+    script_id = str(script_id or "").strip()
+    with ONLINE_TASK_IMPORT_LOCK, storage_transaction():
+        records = _read_task_import_requests()
+        items = [dict(value) for value in records.values() if not script_id or value.get("script_id") == script_id]
+        items.sort(key=lambda value: str(value.get("updated_at") or ""), reverse=True)
+        return items[:limit]
+
+
 def persist_online_task_import_request(info):
     snapshot = _task_import_snapshot(info)
     with ONLINE_TASK_IMPORT_LOCK, storage_transaction():

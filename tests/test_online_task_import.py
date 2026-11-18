@@ -250,6 +250,68 @@ class OnlineTaskImportConcurrencyTests(unittest.TestCase):
             self.assertEqual(page.status_code, 200)
             self.assertIn("任务导入已完成", page.get_data(as_text=True))
 
+    def test_import_history_api_and_page_expose_scheduler_recovery_without_reimport(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import constants, source, tasks
+
+            source.save_online_script_cache([self.task_item("demo", "Daily")])
+            item = source.load_online_script_cache()[0]
+            expected_version = tasks.online_task_import_version(item)
+            constants.persist_online_task_import_request({
+                "request_id": "9" * 32, "script_id": "demo", "expected_version": expected_version,
+                "selected_task_indexes": ["1"], "enable_task": True, "state": "completed",
+                "message": "任务已保存，调度器已恢复", "scheduler_reload_error": "",
+                "updated_at": "2026-11-18 10:00:00",
+            })
+            constants.persist_online_task_import_request({
+                "request_id": "a" * 32, "script_id": "demo", "expected_version": expected_version,
+                "selected_task_indexes": ["1"], "enable_task": False, "state": "scheduler_pending",
+                "message": "任务已保存，调度器待恢复", "scheduler_reload_error": "scheduler down",
+                "updated_at": "2026-11-18 11:00:00",
+            })
+            client = app.test_client()
+            history = client.get(
+                "/api/online-scripts/import-tasks-history?limit=1&script_id=demo",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(history.status_code, 200)
+            self.assertEqual(history.json["items"][0]["request_id"], "a" * 32)
+            page = client.get("/online-scripts/import-tasks-history?script_id=demo", headers={"X-Token": TOKEN})
+            html = page.get_data(as_text=True)
+            self.assertIn("仅重载调度器", html)
+            self.assertIn("/online-scripts/import-tasks-status/" + "9" * 32, html)
+            with patch("fls_manager.routes.online_scripts.install_select.reload_scheduler") as reload_scheduler:
+                response = client.post(
+                    "/api/online-scripts/import-tasks-reload/" + "a" * 32,
+                    headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(response.status_code, 200)
+            reload_scheduler.assert_called_once()
+            self.assertEqual(client.get(
+                "/api/online-scripts/import-tasks-status/" + "a" * 32,
+                headers={"X-Token": TOKEN},
+            ).json["state"], "completed")
+
+    def test_import_history_rejects_invalid_limit_and_corrupt_receipt_without_overwrite(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import constants
+
+            client = app.test_client()
+            invalid = client.get(
+                "/api/online-scripts/import-tasks-history?limit=0",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(invalid.status_code, 400)
+            constants.ONLINE_TASK_IMPORT_REQUESTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            constants.ONLINE_TASK_IMPORT_REQUESTS_FILE.write_text("not-json", encoding="utf-8")
+            original = constants.ONLINE_TASK_IMPORT_REQUESTS_FILE.read_bytes()
+            failed = client.get("/api/online-scripts/import-tasks-history", headers={"X-Token": TOKEN})
+            self.assertEqual(failed.status_code, 500)
+            page = client.get("/online-scripts/import-tasks-history", headers={"X-Token": TOKEN})
+            self.assertEqual(page.status_code, 500)
+            self.assertIn("无法读取", page.get_data(as_text=True))
+            self.assertEqual(constants.ONLINE_TASK_IMPORT_REQUESTS_FILE.read_bytes(), original)
+
     def test_scheduler_pending_has_query_only_replay_and_dedicated_reload(self):
         with isolated_app() as (app, _base_dir):
             from fls_manager.models import load_tasks
