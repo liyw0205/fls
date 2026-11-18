@@ -1,4 +1,6 @@
 from ._common import *
+import re
+
 from ...utils import now_str
 from ...scheduler import reload_scheduler
 from ...online_scripts.constants import (
@@ -11,6 +13,24 @@ from ...online_scripts.constants import (
 )
 
 
+def _install_request_id(raw):
+    value = str(raw or "").strip() or uuid.uuid4().hex
+    if not re.fullmatch(r"[a-f0-9]{32}", value):
+        raise ValueError("在线脚本安装请求标识无效，请刷新选择页后重试")
+    return value
+
+
+def _install_request_matches(info, script_id, proxy_id, import_task, enable_task, force, selected_task_indexes):
+    return (
+        info.get("script_id") == script_id
+        and str(info.get("proxy_id") or "") == proxy_id
+        and bool(info.get("import_task")) == bool(import_task)
+        and bool(info.get("enable_task")) == bool(enable_task)
+        and bool(info.get("force")) == bool(force)
+        and list(info.get("selected_task_indexes") or []) == list(selected_task_indexes or [])
+    )
+
+
 def _start_install_job(
     script_id,
     item,
@@ -20,6 +40,7 @@ def _start_install_job(
     enable_task=False,
     selected_task_indexes=None,
     retry_of="",
+    request_id="",
 ):
     """Register and launch one install, keeping startup failures durable."""
     try:
@@ -43,7 +64,7 @@ def _start_install_job(
                 action=url_for("online_scripts.online_scripts_install_retry", install_id=retry_of),
             )
 
-    install_id = uuid.uuid4().hex
+    install_id = request_id if request_id and not retry_of else uuid.uuid4().hex
     log_file = online_install_log_file(
         install_id,
         item.get("name") or item.get("id"),
@@ -52,6 +73,21 @@ def _start_install_job(
     task_crons = online_script_task_crons(item)
 
     with ONLINE_INSTALL_LOCK:
+        if not retry_of and request_id:
+            try:
+                previous = get_online_install_job(request_id)
+            except Exception as exc:
+                return _install_retry_error(
+                    request_id, "无法查询原在线安装", f"安装记录无法读取：{exc}", 500,
+                )
+            if previous:
+                if not _install_request_matches(
+                    previous, script_id, proxy_id, import_task, enable_task, force, selected_task_indexes,
+                ):
+                    return _install_retry_error(
+                        request_id, "在线安装请求冲突", "该请求标识已绑定其他安装选项，请重新打开任务选择页。", 409,
+                    )
+                return redirect(url_for("online_scripts.online_install_log", install_id=request_id, back="/online-scripts"))
         if retry_of:
             try:
                 previous = get_online_install_job(retry_of)
@@ -159,15 +195,11 @@ def online_scripts_install(script_id):
     if not item:
         abort(404)
 
-    with ONLINE_INSTALL_LOCK:
-        active_id, _ = active_online_install_for_script(script_id)
-        if active_id:
-            return redirect(
-                url_for(
-                    "online_scripts.online_scripts_page",
-                    msg="该脚本正在安装中",
-                )
-            )
+    raw_request_id = request.form.get("request_id", "")
+    try:
+        request_id = _install_request_id(raw_request_id) if str(raw_request_id).strip() else ""
+    except ValueError as exc:
+        return _install_retry_error(script_id, "在线脚本安装请求无效", str(exc), 400)
 
     proxy_id = request.form.get("proxy_id", "").strip()
     try:
@@ -214,6 +246,31 @@ def online_scripts_install(script_id):
             )
             return layout("在线脚本安装失败", "online_scripts", body), 500
 
+    if request_id:
+        try:
+            previous = get_online_install_job(request_id)
+        except Exception as exc:
+            return _install_retry_error(request_id, "无法查询原在线安装", f"安装记录无法读取：{exc}", 500)
+        if previous:
+            if not _install_request_matches(
+                previous, script_id, proxy_id, import_task, enable_task,
+                request.form.get("force") == "1", selected_task_indexes,
+            ):
+                return _install_retry_error(
+                    request_id, "在线安装请求冲突", "该请求标识已绑定其他安装选项，请重新打开任务选择页。", 409,
+                )
+            return redirect(url_for("online_scripts.online_install_log", install_id=request_id, back="/online-scripts"))
+
+    with ONLINE_INSTALL_LOCK:
+        active_id, _ = active_online_install_for_script(script_id)
+        if active_id:
+            return redirect(
+                url_for(
+                    "online_scripts.online_scripts_page",
+                    msg="该脚本正在安装中",
+                )
+            )
+
     try:
         target = online_script_target(item)
     except Exception as e:
@@ -228,6 +285,7 @@ def online_scripts_install(script_id):
         return _install_confirmation(
             script_id, item, target, proxy_id, import_task, enable_task, selected_task_indexes,
             select_mode=select_mode, excluded_task_indexes=excluded_task_indexes,
+            request_id=request_id,
         )
 
     return _start_install_job(
@@ -238,12 +296,13 @@ def online_scripts_install(script_id):
         force=force,
         enable_task=enable_task,
         selected_task_indexes=selected_task_indexes,
+        request_id=request_id,
     )
 
 
 def _install_confirmation(
     script_id, item, target, proxy_id, import_task, enable_task, selected_task_indexes,
-    select_mode="", excluded_task_indexes="", action="",
+    select_mode="", excluded_task_indexes="", action="", request_id="",
 ):
     selected_task_hidden = ""
 
@@ -292,6 +351,7 @@ def _install_confirmation(
 <section class="section fls-form-section">
     <h2 class="section-title">覆盖确认</h2>
         <input type="hidden" name="force" value="1">
+        {f'<input type="hidden" name="request_id" value="{h(request_id)}">' if request_id else ''}
         {install_option_hidden}
         {select_mode_hidden}
         {selected_task_hidden}

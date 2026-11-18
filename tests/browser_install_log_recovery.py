@@ -132,9 +132,14 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    await fixture({reset:true});await page.goto(base+'/login');await login();
    const before=(await state()).downloads;
    const csrf=await page.evaluate(()=>flsGetCsrfToken());
+   const installRequestId=require('node:crypto').randomBytes(16).toString('hex');
+   const installForm={request_id:installRequestId};
    const start=await page.request.post(base+'/online-scripts/install/browser-recovery',{
-     headers:{'X-CSRF-Token':csrf,'X-Requested-With':'XMLHttpRequest'},form:{},maxRedirects:0});
+     headers:{'X-CSRF-Token':csrf,'X-Requested-With':'XMLHttpRequest'},form:installForm,maxRedirects:0});
    assert.equal(start.status(),302);const onlinePath=start.headers().location;
+   const replay=await page.request.post(base+'/online-scripts/install/browser-recovery',{
+     headers:{'X-CSRF-Token':csrf,'X-Requested-With':'XMLHttpRequest'},form:installForm,maxRedirects:0});
+   assert.equal(replay.status(),302);assert.equal(replay.headers().location,onlinePath);
    const paths=[onlinePath,'/deps/install-log/browser-deps?back=%2Fonline-scripts'];
    for(const path of paths){
     await page.goto(base+path);

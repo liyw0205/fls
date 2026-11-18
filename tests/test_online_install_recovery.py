@@ -279,6 +279,78 @@ class OnlineInstallRecoveryTests(unittest.TestCase):
                 start.assert_called_once()
             self.assertEqual([response.status_code for response in responses], [302])
 
+    def test_stable_install_request_replay_returns_original_log_without_starting_twice(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import get_online_install_job
+            from fls_manager.online_scripts.source import save_online_script_cache
+
+            item, _ = self.prepare(base_dir)
+            save_online_script_cache([item])
+            request_id = "a" * 32
+            client = app.test_client()
+            with patch("fls_manager.routes.online_scripts.install.start_install_thread") as start:
+                first = client.post(
+                    "/online-scripts/install/demo",
+                    data={"request_id": request_id, "proxy_id": "", "import_task": "1", "task_indexes": "1"},
+                    headers={"X-Token": TOKEN},
+                )
+                repeated = client.post(
+                    "/online-scripts/install/demo",
+                    data={"request_id": request_id, "proxy_id": "", "import_task": "1", "task_indexes": "1"},
+                    headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(first.status_code, 302)
+            self.assertEqual(repeated.status_code, 302)
+            self.assertEqual(start.call_count, 1)
+            self.assertEqual(first.headers["Location"], repeated.headers["Location"])
+            self.assertEqual(get_online_install_job(request_id)["id"], request_id)
+
+    def test_stable_install_request_option_conflict_has_zero_start_side_effect(self):
+        with isolated_app() as (app, base_dir):
+            item, _ = self.prepare(base_dir)
+            from fls_manager.online_scripts.source import save_online_script_cache
+            save_online_script_cache([item])
+            request_id = "b" * 32
+            client = app.test_client()
+            with patch("fls_manager.routes.online_scripts.install.start_install_thread") as start:
+                first = client.post(
+                    "/online-scripts/install/demo",
+                    data={"request_id": request_id, "proxy_id": "", "import_task": "1", "task_indexes": "1"},
+                    headers={"X-Token": TOKEN},
+                )
+                conflict = client.post(
+                    "/online-scripts/install/demo",
+                    data={"request_id": request_id, "proxy_id": "", "import_task": "1", "task_indexes": "2"},
+                    headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(first.status_code, 302)
+            self.assertEqual(conflict.status_code, 409)
+            self.assertEqual(start.call_count, 1)
+
+    def test_stable_install_request_thread_start_failure_is_queryable_without_retrying(self):
+        with isolated_app() as (app, base_dir):
+            item, _ = self.prepare(base_dir)
+            from fls_manager.online_scripts.source import save_online_script_cache
+            from fls_manager.online_scripts.constants import get_online_install_job
+            save_online_script_cache([item])
+            request_id = "c" * 32
+            client = app.test_client()
+            with patch("fls_manager.routes.online_scripts.install.start_install_thread", side_effect=RuntimeError("thread unavailable")) as start:
+                first = client.post(
+                    "/online-scripts/install/demo",
+                    data={"request_id": request_id, "proxy_id": ""},
+                    headers={"X-Token": TOKEN},
+                )
+                repeated = client.post(
+                    "/online-scripts/install/demo",
+                    data={"request_id": request_id, "proxy_id": ""},
+                    headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(first.status_code, 500)
+            self.assertEqual(repeated.status_code, 302)
+            self.assertEqual(start.call_count, 1)
+            self.assertEqual(get_online_install_job(request_id)["status"], "启动失败")
+
     @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise log polling")
     def test_polling_preserves_logs_and_stops_on_permission_or_missing_errors(self):
         with isolated_app() as (app, base_dir):
