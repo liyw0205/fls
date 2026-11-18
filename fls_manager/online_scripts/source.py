@@ -439,9 +439,15 @@ def fetch_online_scripts(proxy_id="", timeout=12, publish_cache=True, task_link_
 
 def refresh_worker(refresh_id, proxy_id="", log_file=""):
     log_file = log_file or str(online_refresh_log_file(refresh_id))
+    request_id = ""
+    with ONLINE_REFRESH_LOCK:
+        if ONLINE_REFRESH_STATE.get("id") == refresh_id:
+            request_id = str(ONLINE_REFRESH_STATE.get("request_id") or "")
     try:
         update_online_refresh_state(
             id=refresh_id,
+            request_id=request_id,
+            proxy_id=str(proxy_id or ""),
             running=True,
             status="运行中",
             message="正在后台同步在线脚本源，请稍候...",

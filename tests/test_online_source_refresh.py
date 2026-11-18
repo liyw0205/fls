@@ -261,7 +261,7 @@ const context = {
   FormData: class { constructor(value){this.value = value;} },
   fetch: async (url, options) => {
     calls.push({url, options});
-    if(url === '/api/online-scripts/refresh-status') {
+    if(url === '/api/online-scripts/refresh-status' || url.startsWith('/api/online-scripts/refresh-status/')) {
       statusReads += 1;
       return {ok: true, status: 200, text: async () => JSON.stringify({id: 'b'.repeat(32), running: statusReads > 1, status: statusReads > 1 ? '运行中' : '', message: '', error: '', task_link_failures: []})};
     }
@@ -282,6 +282,7 @@ vm.runInContext(input.reader + input.script, context);
   const pending = JSON.parse(storage.value);
   assert.equal(pending.request_id, requestId);
   assert.equal(pending.server_id, 'b'.repeat(32));
+  assert.ok(calls.some(item => item.url === '/api/online-scripts/refresh-status/' + 'a'.repeat(32)));
 })().catch(error => { console.error(error); process.exitCode = 1; });
 '''], input=json.dumps({"script": script, "reader": reader}), text=True, capture_output=True, timeout=5)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -400,6 +401,98 @@ vm.runInContext(input.reader + input.script, context);
             self.assertIn("thread quota exhausted", result.json["error"])
             self.assertEqual(app.test_client().get("/api/online-scripts/refresh-status", headers={"X-Token": TOKEN}).json["status"], "启动失败")
 
+    def test_refresh_request_id_replays_terminal_job_and_queries_original_state(self):
+        with isolated_app() as (app, _base_dir):
+            import fls_manager.routes.online_scripts.refresh as refresh
+            from fls_manager.online_scripts.constants import update_online_refresh_state
+
+            request_id = "a" * 32
+            client = app.test_client()
+            with patch.object(refresh, "start_refresh_thread") as start:
+                first = client.post(
+                    "/api/online-scripts/refresh",
+                    data={"request_id": request_id}, headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(first.status_code, 202)
+                self.assertEqual(first.json["request_id"], request_id)
+                update_online_refresh_state(
+                    running=False, status="部分完成",
+                    message="同步在线脚本源部分完成", error="", cache_published=True,
+                    task_link_failures=[], updated_at="now", log_file="",
+                )
+                replay = client.post(
+                    "/api/online-scripts/refresh",
+                    data={"request_id": request_id}, headers={"X-Token": TOKEN},
+                )
+                status = client.get(
+                    "/api/online-scripts/refresh-status/" + request_id,
+                    headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(replay.status_code, 200)
+            self.assertTrue(replay.json["replayed"])
+            self.assertEqual(replay.json["id"], first.json["id"])
+            self.assertEqual(status.status_code, 200)
+            self.assertEqual(status.json["request_id"], request_id)
+            self.assertEqual(status.json["status"], "部分完成")
+            start.assert_called_once()
+
+    def test_refresh_request_id_unknown_and_binding_conflict_do_not_start_worker(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.models import save_proxies
+            from fls_manager.online_scripts.constants import update_online_refresh_state
+            import fls_manager.routes.online_scripts.refresh as refresh
+
+            save_proxies([{"id": "chosen", "name": "Chosen", "type": "http",
+                           "host": "127.0.0.1", "port": "8080", "enabled": True}])
+            request_id = "b" * 32
+            client = app.test_client()
+            with patch.object(refresh, "start_refresh_thread") as start:
+                first = client.post(
+                    "/api/online-scripts/refresh",
+                    data={"request_id": request_id, "proxy_id": "chosen"},
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(first.status_code, 202)
+                update_online_refresh_state(
+                    running=False, status="结果未知", message="", error="缓存已发布但回执未知",
+                    cache_published=True, task_link_failures=[], updated_at="now", log_file="",
+                )
+                unknown = client.post(
+                    "/api/online-scripts/refresh",
+                    data={"request_id": request_id, "proxy_id": "chosen"},
+                    headers={"X-Token": TOKEN},
+                )
+                conflict = client.post(
+                    "/api/online-scripts/refresh",
+                    data={"request_id": request_id}, headers={"X-Token": TOKEN},
+                )
+                invalid = client.post(
+                    "/api/online-scripts/refresh",
+                    data={"request_id": "bad"}, headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(unknown.status_code, 409)
+            self.assertIn("缓存已发布", unknown.json["error"])
+            self.assertEqual(conflict.status_code, 409)
+            self.assertIn("绑定", conflict.json["error"])
+            self.assertEqual(invalid.status_code, 400)
+            self.assertEqual(invalid.json["request_id"], "")
+            start.assert_called_once()
+
+    def test_refresh_request_status_rejects_unknown_or_replaced_identifiers(self):
+        with isolated_app() as (app, _base_dir):
+            client = app.test_client()
+            invalid = client.get(
+                "/api/online-scripts/refresh-status/not-a-request",
+                headers={"X-Token": TOKEN},
+            )
+            missing = client.get(
+                "/api/online-scripts/refresh-status/" + "c" * 32,
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(invalid.status_code, 400)
+            self.assertEqual(missing.status_code, 404)
+            self.assertIn("不存在", missing.json["error"])
+
     def test_form_and_api_start_failures_remain_retryable_even_when_state_write_fails(self):
         for path, success_status in (("/online-scripts/refresh", 302), ("/api/online-scripts/refresh", 202)):
             for failure in ("reserve", "thread", "thread-and-state"):
@@ -492,6 +585,7 @@ vm.runInContext(input.reader + input.script, context);
             self.assertEqual(failed.status_code, 500)
             html = failed.get_data(as_text=True)
             self.assertIn('<option value="chosen" selected>', html)
+            self.assertRegex(html, r'name="request_id" value="[a-f0-9]{32}"')
             csrf = re.search(r'name="csrf_token" value="([^"]+)"', html).group(1)
             with patch.object(refresh, "start_refresh_thread") as start:
                 recovered = client.post(

@@ -124,6 +124,8 @@ def claim_online_task_import_request(info):
 
 ONLINE_REFRESH_STATE = {
     "id": "",
+    "request_id": "",
+    "proxy_id": "",
     "running": False,
     "status": "",
     "message": "",
@@ -137,11 +139,13 @@ ONLINE_REFRESH_STATE = {
 
 def _refresh_snapshot(info):
     fields = (
-        "id", "running", "status", "message", "error", "cache_published",
+        "id", "request_id", "proxy_id", "running", "status", "message", "error", "cache_published",
         "task_link_failures",
         "updated_at", "log_file",
     )
     defaults = {
+        "request_id": "",
+        "proxy_id": "",
         "running": False,
         "cache_published": False,
         "task_link_failures": [],
@@ -157,8 +161,11 @@ def _validate_refresh_snapshot(info):
     if (
         type(snapshot["running"]) is not bool
         or type(snapshot["cache_published"]) is not bool
-        or any(not isinstance(snapshot[field], str) for field in ("id", "status", "message", "error", "updated_at", "log_file"))
+        or any(not isinstance(snapshot[field], str) for field in ("id", "request_id", "proxy_id", "status", "message", "error", "updated_at", "log_file"))
+        or (snapshot["request_id"] and not re.fullmatch(r"[a-f0-9]{32}", snapshot["request_id"]))
     ):
+        raise RuntimeError("在线脚本源同步状态损坏，未覆盖原文件")
+    if len(snapshot["proxy_id"]) > 200:
         raise RuntimeError("在线脚本源同步状态损坏，未覆盖原文件")
     failures = snapshot["task_link_failures"]
     if len(failures) > 100 or any(
@@ -242,15 +249,27 @@ def get_online_refresh_state():
         return current
 
 
-def reserve_online_refresh(proxy_id=""):
+def reserve_online_refresh(proxy_id="", request_id=""):
     with ONLINE_REFRESH_LOCK:
         current = get_online_refresh_state()
         if current.get("running"):
             return None
         import uuid
+        request_id = str(request_id or uuid.uuid4().hex)
+        if not re.fullmatch(r"[a-f0-9]{32}", request_id):
+            raise ValueError("在线脚本源刷新请求标识无效，请刷新页面后重试")
+        if current.get("request_id") == request_id:
+            if str(current.get("proxy_id") or "") != str(proxy_id or ""):
+                return {"_binding_conflict": True, **dict(current)}
+            if current.get("status") in ("已完成", "部分完成"):
+                return {"_replay": True, **dict(current)}
+            if current.get("status") == "结果未知" or current.get("cache_published"):
+                return {"_unknown": True, **dict(current)}
         previous = dict(ONLINE_REFRESH_STATE)
         info = {
             "id": uuid.uuid4().hex,
+            "request_id": request_id,
+            "proxy_id": str(proxy_id or ""),
             "running": True,
             "status": "运行中",
             "message": "正在后台同步在线脚本源，请稍候...",

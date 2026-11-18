@@ -60,6 +60,8 @@ def main():
             if data.get("clear"):
                 update_online_refresh_state(
                     id="",
+                    request_id="",
+                    proxy_id="",
                     running=False,
                     status="",
                     message="",
@@ -72,6 +74,8 @@ def main():
                 return jsonify(ok=True)
             update_online_refresh_state(
                 id="browser-refresh",
+                request_id="d" * 32,
+                proxy_id="",
                 running=False,
                 status="部分完成",
                 message="同步在线脚本源部分完成，请逐项重试",
@@ -144,6 +148,16 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    await page.goto(base+'/online-scripts');
    const refreshFixture=await page.request.post(base+'/api/fixture/online-refresh',{headers,data:{}});
    assert.equal(refreshFixture.status(),200);
+   await page.evaluate(()=>sessionStorage.setItem('fls-online-refresh-request',JSON.stringify({request_id:'d'.repeat(32),proxy_id:'',server_id:'browser-refresh'})));
+   await page.goto(base+'/online-scripts');
+   await page.waitForFunction(()=>document.body.textContent.includes('同步在线脚本源部分完成'));
+   const originalStatus=await page.request.get(base+'/api/online-scripts/refresh-status/'+'d'.repeat(32),{headers});
+   assert.equal(originalStatus.status(),200);
+   assert.equal((await originalStatus.json()).request_id,'d'.repeat(32));
+   await page.evaluate(()=>sessionStorage.setItem('fls-online-refresh-request',JSON.stringify({request_id:'d'.repeat(32),proxy_id:'',server_id:'browser-refresh'})));
+   await page.locator('#onlineRefreshBtn').click();
+   await page.waitForTimeout(1000);
+   assert.match(await page.locator('.content').textContent(),/同步在线脚本源部分完成/);
    await page.evaluate(async()=>{await updateOnlineRefreshStatus();});
    const dynamicForm=page.locator('#onlineRefreshTaskLinkFailures form.fls-online-task-link-form');
    assert.equal(await dynamicForm.count(),1);

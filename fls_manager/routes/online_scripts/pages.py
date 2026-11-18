@@ -216,12 +216,16 @@ function escapeHtml(s){{
 
 async function updateOnlineRefreshStatus(){{
     try {{
-        const res = await fetch("/api/online-scripts/refresh-status", {{cache:"no-store"}});
+        const currentPending = readOnlineRefreshPending() || onlineRefreshPending;
+        const statusUrl = currentPending && currentPending.request_id
+            ? "/api/online-scripts/refresh-status/" + encodeURIComponent(currentPending.request_id)
+            : "/api/online-scripts/refresh-status";
+        const res = await fetch(statusUrl, {{cache:"no-store", credentials:"same-origin"}});
         const json = await flsReadJsonResponse(res);
 
-        if(onlineRefreshPending && json.id && !onlineRefreshPending.server_id){{
-            onlineRefreshPending.server_id = String(json.id);
-            saveOnlineRefreshPending(onlineRefreshPending);
+        if(currentPending && json.id && !currentPending.server_id){{
+            currentPending.server_id = String(json.id);
+            saveOnlineRefreshPending(currentPending);
         }}
 
         const card = document.getElementById("onlineRefreshStatusCard");
@@ -262,8 +266,9 @@ async function updateOnlineRefreshStatus(){{
             window.__FLS_ONLINE_REFRESH_WAS_RUNNING__ = true;
         }}
 
-        if(onlineRefreshPending && !json.running && json.id &&
-            onlineRefreshPending.server_id === String(json.id) && json.status === "已完成"){{
+        if(currentPending && !json.running && json.id &&
+            currentPending.server_id === String(json.id) &&
+            (json.status === "已完成" || json.status === "部分完成")){{
             clearOnlineRefreshPending();
         }}
 
@@ -316,6 +321,7 @@ async function updateOnlineRefreshStatus(){{
         }}
 
     }} catch(e) {{
+        if(e && e.status === 404 && (readOnlineRefreshPending() || onlineRefreshPending)) clearOnlineRefreshPending();
         const card = document.getElementById("onlineRefreshStatusCard");
         const text = document.getElementById("onlineRefreshStatusText");
         const btn = document.getElementById("onlineRefreshBtn");
@@ -351,14 +357,18 @@ async function submitOnlineRefreshForm(form, event){{
     const requestInput = form.querySelector('input[name="request_id"]');
     const proxyInput = form.querySelector('[name="proxy_id"]');
     const button = form.querySelector('button[type="submit"]');
-    const requestId = requestInput && requestInput.value || "";
     const proxyId = proxyInput && proxyInput.value || "";
+    const savedPending = readOnlineRefreshPending();
+    const requestId = savedPending && savedPending.proxy_id === proxyId
+        ? savedPending.request_id
+        : (requestInput && requestInput.value || "");
     if(!/^[a-f0-9]{{32}}$/.test(requestId)){{
         const text = document.getElementById("onlineRefreshStatusText");
         if(text) text.textContent = "刷新请求标识无效，请刷新页面后重试";
         return;
     }}
-    const pending = {{request_id: requestId, proxy_id: proxyId, server_id: ""}};
+    if(requestInput) requestInput.value = requestId;
+    const pending = {{request_id: requestId, proxy_id: proxyId, server_id: savedPending && savedPending.proxy_id === proxyId ? (savedPending.server_id || "") : ""}};
     saveOnlineRefreshPending(pending);
     window.__FLS_ONLINE_REFRESH_WAS_RUNNING__ = true;
     if(button) button.disabled = true;
