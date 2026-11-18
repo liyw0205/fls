@@ -65,7 +65,10 @@ def _start_install_job(
             return _install_confirmation(
                 script_id, item, target, proxy_id, import_task, enable_task,
                 selected_task_indexes or [],
-                action=url_for("online_scripts.online_scripts_install_retry", install_id=retry_of),
+                action=url_for(
+                    "online_scripts.online_scripts_install_retry", install_id=retry_of,
+                    back=get_back_url("/online-scripts"),
+                ),
             )
 
     install_id = request_id if request_id and not retry_of else uuid.uuid4().hex
@@ -216,7 +219,7 @@ def _start_install_job(
         url_for(
             "online_scripts.online_install_log",
             install_id=install_id,
-            back="/online-scripts",
+            back=get_back_url("/online-scripts") if retry_of else "/online-scripts",
         )
     )
 

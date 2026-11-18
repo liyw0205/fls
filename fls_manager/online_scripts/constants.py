@@ -1,4 +1,5 @@
 import json
+import math
 import re
 import threading
 import os
@@ -21,6 +22,10 @@ ONLINE_INSTALL_RETRYING = set()
 ONLINE_INSTALL_JOBS_FILE = DATA_DIR / "online_install_jobs.json"
 ONLINE_INSTALL_LOCK = threading.RLock()
 ONLINE_INSTALL_LIMIT = 100
+ONLINE_INSTALL_STATUSES = (
+    "准备中", "运行中", "停止中", "停止失败", "超时（停止失败）", "部分完成", "已完成", "失败",
+    "超时", "已停止", "启动失败", "结果未知",
+)
 ONLINE_INSTALL_TIMEOUT_SECONDS = 1800
 ONLINE_INSTALL_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 ONLINE_REFRESH_STATE_FILE = DATA_DIR / "online_script_refresh.json"
@@ -902,18 +907,30 @@ def latest_online_install_for_script(script_id):
         return install_id, result
 
 
-def list_online_install_jobs(limit=50, script_id=""):
-    try:
-        limit = int(limit)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("在线脚本安装历史数量无效") from exc
-    if not 1 <= limit <= 100:
-        raise ValueError("在线脚本安装历史数量必须在 1 到 100 之间")
+def _install_history_integer(value, label, minimum, maximum):
+    raw = "" if value is None else str(value)
+    if isinstance(value, bool) or not re.fullmatch(r"[0-9]+", raw):
+        raise ValueError(f"在线脚本安装历史{label}无效")
+    number = int(raw)
+    if not minimum <= number <= maximum:
+        raise ValueError(f"在线脚本安装历史{label}必须在 {minimum} 到 {maximum} 之间")
+    return number
+
+
+def list_online_install_jobs(limit=50, script_id="", status="", offset=0):
+    limit = _install_history_integer(limit, "数量", 1, ONLINE_INSTALL_LIMIT)
+    offset = _install_history_integer(offset, "偏移", 0, ONLINE_INSTALL_LIMIT)
     script_id = str(script_id or "").strip()
+    if len(script_id) > 200 or any(ord(char) < 32 for char in script_id):
+        raise ValueError("在线脚本安装历史脚本 ID 无效")
+    status = str(status or "").strip()
+    if status and status not in ONLINE_INSTALL_STATUSES:
+        raise ValueError("在线脚本安装历史状态无效")
     with ONLINE_INSTALL_LOCK:
         jobs = _load_persisted_online_installs()
         for install_id, info in ONLINE_INSTALL_RUNNING.items():
-            if isinstance(info, dict):
+            # In-memory terminal records can outlive their retained receipts.
+            if install_id in jobs and isinstance(info, dict):
                 jobs[str(install_id)] = _install_snapshot(info)
         for install_id, info in list(jobs.items()):
             if info.get("running") and install_id not in ONLINE_INSTALL_RUNNING:
@@ -921,18 +938,20 @@ def list_online_install_jobs(limit=50, script_id=""):
         items = [
             _install_snapshot(info)
             for info in jobs.values()
-            if not script_id or info.get("script_id") == script_id
+            if (not script_id or info.get("script_id") == script_id)
+            and (not status or info.get("status") == status)
         ]
 
         def order(info):
             try:
                 started = float(info.get("start_time") or 0)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 started = 0
-            return started, str(info.get("updated_at") or "")
+            return started if math.isfinite(started) else 0, str(info.get("id") or "")
 
         items.sort(key=order, reverse=True)
-        selected = items[:limit]
+        total = len(items)
+        selected = items[offset:offset + limit]
         for info in selected:
             info.update(online_install_retry_relation(info, jobs))
-        return selected
+        return selected, total

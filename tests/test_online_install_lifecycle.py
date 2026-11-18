@@ -788,6 +788,114 @@ setImmediate(() => {
             self.assertEqual(page.status_code, 200)
             self.assertIn("/online-scripts/log/history-running", page.get_data(as_text=True))
 
+    def test_install_history_filters_pages_and_preserves_log_return_context(self):
+        from urllib.parse import parse_qs, unquote, urlparse
+
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE
+
+            jobs = {}
+            for index in range(5):
+                install_id = f"page-{index}"
+                jobs[install_id] = {
+                    "id": install_id, "script_id": "demo" if index < 4 else "other",
+                    "script_name": "Demo", "log_file": str(base_dir / f"{install_id}.log"),
+                    "running": False, "status": "失败" if index < 3 else "已完成",
+                    "phase": "failed", "start_time": 1, "returncode": 1,
+                    "error": "fixture", "updated_at": f"2026-11-19 00:00:0{index}",
+                    "retry_of": "", "retried_by": "",
+                }
+            jobs["page-4"]["status"] = "停止失败"
+            jobs["page-2"]["retry_of"] = "page-0"
+            jobs["page-0"]["retried_by"] = "page-2"
+            ONLINE_INSTALL_JOBS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            ONLINE_INSTALL_JOBS_FILE.write_text(json.dumps(jobs), encoding="utf-8")
+            client = app.test_client()
+
+            unauthorized = client.get("/api/online-scripts/install-history")
+            self.assertEqual(unauthorized.status_code, 401)
+            unauthorized_page = client.get("/online-scripts/install-history")
+            self.assertEqual(unauthorized_page.status_code, 302)
+
+            first = client.get(
+                "/api/online-scripts/install-history?script_id=demo&status=%E5%A4%B1%E8%B4%A5&limit=2&offset=0",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(first.status_code, 200)
+            self.assertEqual((first.json["total"], first.json["offset"], first.json["limit"]), (3, 0, 2))
+            self.assertTrue(first.json["has_more"])
+            self.assertEqual([item["id"] for item in first.json["items"]], ["page-2", "page-1"])
+            self.assertEqual(first.json["items"][0]["retry_parent_id"], "page-0")
+
+            second = client.get(
+                "/api/online-scripts/install-history?script_id=demo&status=%E5%A4%B1%E8%B4%A5&limit=2&offset=2",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(second.status_code, 200)
+            self.assertEqual(second.json["total"], 3)
+            self.assertEqual([item["id"] for item in second.json["items"]], ["page-0"])
+            self.assertEqual(second.json["items"][0]["retry_child_id"], "page-2")
+            self.assertFalse(second.json["has_more"])
+
+            stop_failed = client.get(
+                "/api/online-scripts/install-history", query_string={"status": "停止失败"},
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(stop_failed.status_code, 200)
+            self.assertEqual([item["id"] for item in stop_failed.json["items"]], ["page-4"])
+
+            page = client.get(
+                "/online-scripts/install-history?script_id=demo&status=%E5%A4%B1%E8%B4%A5&limit=2&offset=2",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(page.status_code, 200)
+            html = page.get_data(as_text=True)
+            self.assertIn('value="demo"', html)
+            self.assertIn('value="失败" selected', html)
+            self.assertIn('value="2" selected', html)
+            self.assertIn("当前显示 3–3 / 3 条", html)
+            self.assertNotIn("offset=", html)
+            log_href = re.search(r'href="([^\"]*online-scripts/log/page-0[^\"]*)"', html).group(1)
+            return_url = unquote(parse_qs(urlparse(log_href).query)["back"][0])
+            self.assertEqual(
+                return_url,
+                "/online-scripts/install-history?script_id=demo&status=失败&limit=2&offset=2",
+            )
+
+            empty = client.get(
+                "/api/online-scripts/install-history?script_id=missing", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual((empty.status_code, empty.json["total"], empty.json["items"]), (200, 0, []))
+            empty_page = client.get(
+                "/online-scripts/install-history?script_id=missing", headers={"X-Token": TOKEN},
+            )
+            self.assertIn("暂无安装历史", empty_page.get_data(as_text=True))
+
+    def test_install_history_rejects_invalid_pagination_filters_without_writing(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE
+
+            ONLINE_INSTALL_JOBS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            ONLINE_INSTALL_JOBS_FILE.write_text("{}", encoding="utf-8")
+            original = ONLINE_INSTALL_JOBS_FILE.read_bytes()
+            client = app.test_client()
+            for query in (
+                "limit=0", "limit=101", "limit=1.5", "offset=-1", "offset=101",
+                "offset=1.5", "status=not-a-status", "script_id=" + ("x" * 201),
+            ):
+                with self.subTest(query=query):
+                    response = client.get(
+                        "/api/online-scripts/install-history?" + query, headers={"X-Token": TOKEN},
+                    )
+                    self.assertEqual(response.status_code, 400)
+                    self.assertFalse(response.json["ok"])
+                    page = client.get(
+                        "/online-scripts/install-history?" + query, headers={"X-Token": TOKEN},
+                    )
+                    self.assertEqual(page.status_code, 400)
+                    self.assertIn("install-history-script", page.get_data(as_text=True))
+            self.assertEqual(ONLINE_INSTALL_JOBS_FILE.read_bytes(), original)
+
     def test_install_history_rejects_invalid_limit_and_corrupt_record_without_overwrite(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE
@@ -800,14 +908,24 @@ setImmediate(() => {
             original = ONLINE_INSTALL_JOBS_FILE.read_bytes()
             failed = client.get("/api/online-scripts/install-history", headers={"X-Token": TOKEN})
             self.assertEqual(failed.status_code, 500)
-            page = client.get("/online-scripts/install-history", headers={"X-Token": TOKEN})
+            page = client.get(
+                "/online-scripts/install-history?script_id=demo&status=失败&limit=25&offset=25",
+                headers={"X-Token": TOKEN},
+            )
             self.assertEqual(page.status_code, 500)
-            self.assertIn("无法读取", page.get_data(as_text=True))
+            html = page.get_data(as_text=True)
+            self.assertIn("无法读取", html)
+            self.assertIn('value="demo"', html)
+            self.assertIn('value="失败" selected', html)
+            self.assertIn('value="25" selected', html)
+            self.assertIn('offset=25">重新读取', html)
             self.assertEqual(ONLINE_INSTALL_JOBS_FILE.read_bytes(), original)
 
     def test_install_history_clips_whole_retry_chains_and_exposes_recursive_recovery_navigation(self):
         with isolated_app() as (app, base_dir):
-            from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE, persist_online_install
+            from fls_manager.online_scripts.constants import (
+                ONLINE_INSTALL_JOBS_FILE, ONLINE_INSTALL_RUNNING, persist_online_install,
+            )
             from fls_manager.online_scripts.source import save_online_script_cache
 
             save_online_script_cache([self.item()])
@@ -837,6 +955,7 @@ setImmediate(() => {
                 record("latest-final", started=202, updated="2026-11-18 20:02:00", retry_of="latest-retry"),
             ]
             jobs.update((item["id"], item) for item in old + latest)
+            ONLINE_INSTALL_RUNNING.update((item["id"], dict(item)) for item in old)
             for index in range(95):
                 item = record(f"filler-{index:03d}", started=10 + index, updated="2026-11-10 00:00:00")
                 jobs[item["id"]] = item
@@ -859,6 +978,7 @@ setImmediate(() => {
             by_id = {item["id"]: item for item in history.json["items"]}
             self.assertNotIn("old-attempt", by_id)
             self.assertNotIn("old-retry", by_id)
+            self.assertEqual(history.json["total"], len(stored))
             self.assertEqual(by_id["latest-attempt"]["retry_child_id"], "latest-retry")
             self.assertEqual(by_id["latest-retry"]["retry_parent_id"], "latest-attempt")
             self.assertEqual(by_id["latest-retry"]["retry_child_id"], "latest-final")

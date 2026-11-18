@@ -2,11 +2,14 @@ from ._common import *
 import re
 import stat
 from pathlib import Path
+from urllib.parse import urlencode
 
 from ...online_scripts.constants import (
+    ONLINE_INSTALL_LIMIT,
     get_online_install_job,
     list_online_install_jobs,
     online_install_retry_relation,
+    ONLINE_INSTALL_STATUSES,
     get_online_refresh_request,
     get_online_refresh_state,
 )
@@ -386,18 +389,70 @@ def _install_recovery_html(recovery):
     return html
 
 
+def _online_install_history_url(script_id="", status="", limit=50, offset=0):
+    query = {}
+    if script_id:
+        query["script_id"] = script_id
+    if status:
+        query["status"] = status
+    if limit != 50:
+        query["limit"] = limit
+    if offset:
+        query["offset"] = offset
+    path = url_for("online_scripts.online_install_history")
+    return f"{path}?{urlencode(query)}" if query else path
+
+
+def _install_history_filter_form(script_id="", status="", limit=50):
+    try:
+        limit = int(limit)
+        if not 1 <= limit <= ONLINE_INSTALL_LIMIT:
+            limit = 50
+    except (TypeError, ValueError):
+        limit = 50
+    status_options = ['<option value="">全部状态</option>']
+    for value in ONLINE_INSTALL_STATUSES:
+        selected = " selected" if value == status else ""
+        status_options.append(f'<option value="{h(value)}"{selected}>{h(value)}</option>')
+    limit_values = sorted({1, 25, 50, 100, limit})
+    limit_options = "".join(
+        f'<option value="{value}"{" selected" if limit == value else ""}>{value} 条</option>'
+        for value in limit_values
+    )
+    return f"""
+<form method="get" action="/online-scripts/install-history">
+<section class="section fls-form-section">
+    <div class="form-grid">
+        <div class="form-item"><label for="install-history-script">脚本 ID</label><input id="install-history-script" name="script_id" value="{h(script_id)}" maxlength="200"></div>
+        <div class="form-item"><label for="install-history-status">安装状态</label><select id="install-history-status" name="status">{"".join(status_options)}</select></div>
+        <div class="form-item"><label for="install-history-limit">每页条数</label><select id="install-history-limit" name="limit">{limit_options}</select></div>
+    </div>
+    <br><button class="btn btn-primary" type="submit">筛选历史</button>
+    <a class="btn btn-gray" href="/online-scripts/install-history">重置</a>
+</section>
+</form>
+"""
+
+
 @bp.route("/api/online-scripts/install-history")
 def api_online_install_history():
     try:
-        items = list_online_install_jobs(
+        items, total = list_online_install_jobs(
             request.args.get("limit", 50),
             request.args.get("script_id", ""),
+            request.args.get("status", ""),
+            request.args.get("offset", 0),
         )
     except ValueError as exc:
         return jsonify(ok=False, msg=str(exc)), 400
     except Exception as exc:
         return jsonify(ok=False, msg=f"安装历史无法读取：{exc}"), 500
-    return jsonify(ok=True, items=items)
+    limit = int(request.args.get("limit", 50))
+    offset = int(request.args.get("offset", 0))
+    return jsonify(
+        ok=True, items=items, total=total, offset=offset, limit=limit,
+        has_more=offset + len(items) < total,
+    )
 
 
 @bp.route("/api/online-scripts/log/<install_id>")
@@ -499,6 +554,8 @@ def api_online_install_log(install_id):
 @bp.route("/online-scripts/log/<install_id>")
 def online_install_log(install_id):
     back_url = get_back_url("/online-scripts")
+    history_path = "/online-scripts/install-history"
+    history_url = back_url if back_url == history_path or back_url.startswith(history_path + "?") else history_path
     try:
         info = get_online_install_job(install_id)
     except Exception as exc:
@@ -537,6 +594,8 @@ def online_install_log(install_id):
         info = dict(info)
         info["log_file"] = str(log_path)
     recovery = _install_recovery(info)
+    if recovery.get("action") and back_url != "/online-scripts":
+        recovery["action"] += "?back=" + quote(back_url, safe="")
     recovery_html = _install_recovery_html(recovery)
     retry_relation = online_install_retry_relation(info)
     retry_navigation_html = ""
@@ -547,14 +606,14 @@ def online_install_log(install_id):
             parent_url = url_for(
                 "online_scripts.online_install_log",
                 install_id=retry_relation["retry_parent_id"],
-                back="/online-scripts/install-history",
+                back=history_url,
             )
             retry_navigation_html += f'<a class="btn btn-gray" href="{h(parent_url)}">查看原安装</a>'
         if retry_relation.get("retry_child_id"):
             child_url = url_for(
                 "online_scripts.online_install_log",
                 install_id=retry_relation["retry_child_id"],
-                back="/online-scripts/install-history",
+                back=history_url,
             )
             retry_navigation_html += f'<a class="btn btn-blue" href="{h(child_url)}">查看后续重试</a>'
     consistency = verify_install_outputs(info)
@@ -708,8 +767,14 @@ async function loadLog(){{
                 const csrf = typeof flsGetCsrfToken === "function" ? flsGetCsrfToken() : "";
                 const csrfInput = csrf ?
                     "<" + "input type=\\"hidden\\" name=\\"csrf_token\\" value=\\"" + escapeHtml(csrf) + "\\">" : "";
+                let recoveryAction = recovery.action || "";
+                const historyBack = typeof location !== "undefined" && typeof URLSearchParams !== "undefined"
+                    ? new URLSearchParams(location.search).get("back") || "" : "";
+                if(historyBack === "/online-scripts/install-history" || historyBack.startsWith("/online-scripts/install-history?")){{
+                    recoveryAction += (recoveryAction.includes("?") ? "&" : "?") + "back=" + encodeURIComponent(historyBack);
+                }}
                 recoveryEl.innerHTML =
-                    "<" + "form class='inline-form' method='post' action='" + escapeHtml(recovery.action || "") + "' data-api-action='" + escapeHtml(recovery.api_action || "") + "'>" +
+                    "<" + "form class='inline-form' method='post' action='" + escapeHtml(recoveryAction) + "' data-api-action='" + escapeHtml(recovery.api_action || "") + "'>" +
                     csrfInput +
                     "<button class='btn btn-primary' type='submit'>" +
                     escapeHtml(recovery.label || "重试安装") + "</button><" + "/form>";
@@ -806,21 +871,27 @@ loadLog();
 @bp.route("/online-scripts/install-history")
 def online_install_history():
     script_id = str(request.args.get("script_id") or "").strip()
+    status = str(request.args.get("status") or "").strip()
+    raw_limit = request.args.get("limit", "50")
+    raw_offset = request.args.get("offset", "0")
     try:
-        items = list_online_install_jobs(request.args.get("limit", 50), script_id)
+        items, total = list_online_install_jobs(raw_limit, script_id, status, raw_offset)
+        limit = int(raw_limit)
+        offset = int(raw_offset)
+        history_url = _online_install_history_url(script_id, status, limit, offset)
     except ValueError as exc:
         body = page_header_card(
             "在线脚本安装历史",
             help_html=h(exc),
             actions_html='<a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>',
-        )
+        ) + _install_history_filter_form(script_id, status if status in ONLINE_INSTALL_STATUSES else "", raw_limit)
         return layout("在线脚本安装历史", "online_scripts", body), 400
     except Exception as exc:
         body = page_header_card(
             "在线脚本安装历史",
             help_html=f"安装历史无法读取：{h(exc)}。请修复安装回执存储后重试。",
-            actions_html='<a class="btn btn-blue" href="/online-scripts/install-history">重新读取</a><a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>',
-        )
+            actions_html=f'<a class="btn btn-blue" href="{h(request.full_path.rstrip("?"))}">重新读取</a><a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>',
+        ) + _install_history_filter_form(script_id, status if status in ONLINE_INSTALL_STATUSES else "", raw_limit)
         return layout("在线脚本安装历史", "online_scripts", body), 500
     labels = {"结果未知": "结果未知", "失败": "失败，可重试", "已完成": "已完成", "停止中": "停止中"}
     rows = []
@@ -832,14 +903,14 @@ def online_install_history():
             parent_url = url_for(
                 "online_scripts.online_install_log",
                 install_id=info["retry_parent_id"],
-                back="/online-scripts/install-history",
+                back=history_url,
             )
             relation_html += f'<a href="{h(parent_url)}">原安装</a> '
         if not relation_error and info.get("retry_child_id"):
             child_url = url_for(
                 "online_scripts.online_install_log",
                 install_id=info["retry_child_id"],
-                back="/online-scripts/install-history",
+                back=history_url,
             )
             relation_html += f'<a href="{h(child_url)}">后续重试</a>'
         if not relation_html:
@@ -852,18 +923,28 @@ def online_install_history():
             f"<td>{h(info.get('phase') or '-')}</td>"
             f"<td>{h(info.get('updated_at') or '-')}</td>"
             f"<td>{relation_html}</td>"
-            f'<td><a class="btn btn-blue" href="/online-scripts/log/{h(install_id)}">查看安装日志</a></td>'
+            f'<td><a class="btn btn-blue" href="{h(url_for("online_scripts.online_install_log", install_id=install_id, back=history_url))}">查看安装日志</a></td>'
             "</tr>"
         )
+    empty_message = "当前页没有记录，请返回上一页或重新筛选。" if total else "暂无安装历史"
     table = (
         '<div class="table-wrap"><table><thead><tr><th>安装 ID</th><th>脚本</th><th>状态</th>'
         '<th>阶段</th><th>更新时间</th><th>重试关系</th><th>操作</th></tr></thead><tbody>'
-        + ("".join(rows) or '<tr><td colspan="7">暂无安装历史</td></tr>')
+        + ("".join(rows) or f'<tr><td colspan="7">{empty_message}</td></tr>')
         + "</tbody></table></div>"
     )
+    displayed = f"{offset + 1}–{offset + len(items)}" if items else "0"
     body = page_header_card(
         "在线脚本安装历史",
-        help_html="历史只读取持久化安装回执，不会启动安装；结果未知或失败请进入原日志确认后再明确重试。",
+        help_html=f"当前显示 {displayed} / {total} 条。",
         actions_html='<a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>',
-    ) + f'<section class="section"><div class="card">{table}</div></section>'
+    ) + _install_history_filter_form(script_id, status, limit) + f'<section class="section"><div class="card">{table}</div></section>'
+    if offset > 0 or offset + len(items) < total:
+        last_offset = ((total - 1) // limit) * limit if total else 0
+        previous = _online_install_history_url(script_id, status, limit, max(0, min(offset - limit, last_offset)))
+        next_page = _online_install_history_url(script_id, status, limit, offset + len(items))
+        body += '<div class="section row-actions" aria-label="安装历史分页">'
+        body += f'<a class="btn btn-gray" href="{h(previous)}">上一页</a>' if offset > 0 else ""
+        body += f'<a class="btn btn-primary" href="{h(next_page)}">下一页</a>' if offset + len(items) < total else ""
+        body += '</div>'
     return layout("在线脚本安装历史", "online_scripts", body)
