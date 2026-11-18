@@ -351,6 +351,168 @@ class OnlineInstallRecoveryTests(unittest.TestCase):
             self.assertEqual(start.call_count, 1)
             self.assertEqual(get_online_install_job(request_id)["status"], "启动失败")
 
+    def test_api_install_assigns_id_and_replays_without_starting_twice(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import get_online_install_job
+
+            self.prepare(base_dir)
+            client = app.test_client()
+            body = {"proxy_id": "", "import_task": True, "task_indexes": ["1"]}
+            with patch("fls_manager.routes.online_scripts.install.start_install_thread") as start:
+                first = client.post(
+                    "/api/online-scripts/install/demo", json=body,
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(first.status_code, 200)
+                payload = first.get_json()
+                self.assertTrue(payload["ok"])
+                self.assertRegex(payload["request_id"], r"^[a-f0-9]{32}$")
+                self.assertEqual(payload["install_id"], payload["request_id"])
+
+                repeated = client.post(
+                    "/api/online-scripts/install/demo",
+                    json={**body, "request_id": payload["request_id"]},
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(repeated.status_code, 200)
+                self.assertTrue(repeated.get_json()["replayed"])
+                self.assertEqual(repeated.get_json()["log_url"], payload["log_url"])
+                start.assert_called_once()
+            self.assertEqual(get_online_install_job(payload["install_id"])["selected_task_indexes"], ["1"])
+
+    def test_api_install_option_conflict_and_invalid_selection_have_zero_side_effect(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import get_online_install_job
+
+            self.prepare(base_dir)
+            client = app.test_client()
+            request_id = "d" * 32
+            with patch("fls_manager.routes.online_scripts.install.start_install_thread") as start:
+                first = client.post(
+                    "/api/online-scripts/install/demo", json={
+                        "request_id": request_id, "import_task": True, "task_indexes": ["1"],
+                    }, headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(first.status_code, 200)
+                conflict = client.post(
+                    "/api/online-scripts/install/demo", json={
+                        "request_id": request_id, "import_task": True, "task_indexes": ["2"],
+                    }, headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(conflict.status_code, 409)
+                invalid_id = "e" * 32
+                invalid = client.post(
+                    "/api/online-scripts/install/demo", json={
+                        "request_id": invalid_id, "import_task": True, "task_indexes": ["9"],
+                    }, headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(invalid.status_code, 400)
+                excluded = client.post(
+                    "/api/online-scripts/install/demo", json={
+                        "request_id": "f" * 32, "import_task": True,
+                        "select_mode": "all", "excluded_task_indexes": ["9"],
+                    }, headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(excluded.status_code, 400)
+                mixed = client.post(
+                    "/api/online-scripts/install/demo", json={
+                        "request_id": "a" * 32, "task_indexes": ["1"],
+                    }, headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(mixed.status_code, 400)
+                start.assert_called_once()
+            self.assertIsNone(get_online_install_job(invalid_id))
+            self.assertIsNone(get_online_install_job("f" * 32))
+            self.assertIsNone(get_online_install_job("a" * 32))
+
+    def test_api_install_existing_target_requires_confirmation_then_force_uses_same_id(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import get_online_install_job
+
+            self.prepare(base_dir)
+            target = base_dir / "scripts" / "demo.sh"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("original", encoding="utf-8")
+            client = app.test_client()
+            request_id = "1" * 32
+            with patch("fls_manager.routes.online_scripts.install.start_install_thread") as start:
+                confirmation = client.post(
+                    "/api/online-scripts/install/demo", json={"request_id": request_id},
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(confirmation.status_code, 409)
+                self.assertTrue(confirmation.get_json()["confirm_required"])
+                self.assertIsNone(get_online_install_job(request_id))
+                forced = client.post(
+                    "/api/online-scripts/install/demo",
+                    json={"request_id": request_id, "force": True},
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(forced.status_code, 200)
+                self.assertEqual(forced.get_json()["request_id"], request_id)
+                start.assert_called_once()
+            self.assertEqual(get_online_install_job(request_id)["force"], True)
+            self.assertEqual(target.read_text(encoding="utf-8"), "original")
+
+    def test_api_install_start_failure_is_queryable_without_retrying(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import get_online_install_job
+
+            self.prepare(base_dir)
+            client = app.test_client()
+            request_id = "2" * 32
+            with patch(
+                "fls_manager.routes.online_scripts.install.start_install_thread",
+                side_effect=RuntimeError("thread unavailable"),
+            ) as start:
+                first = client.post(
+                    "/api/online-scripts/install/demo",
+                    json={"request_id": request_id}, headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(first.status_code, 500)
+                self.assertEqual(first.get_json()["status"], "启动失败")
+                self.assertIn("thread unavailable", first.get_json()["msg"])
+                repeated = client.post(
+                    "/api/online-scripts/install/demo",
+                    json={"request_id": request_id}, headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(repeated.status_code, 200)
+                self.assertTrue(repeated.get_json()["replayed"])
+                start.assert_called_once()
+            self.assertEqual(get_online_install_job(request_id)["status"], "启动失败")
+
+    def test_api_install_requires_csrf_and_live_session_without_mutating_state(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import get_online_install_job
+
+            self.prepare(base_dir)
+            client = app.test_client()
+            with client.session_transaction() as session:
+                session.update(token=TOKEN, token_expire_at=int(time.time()) + 3600,
+                               security_verified=True, csrf_token="api-install-csrf")
+            with patch("fls_manager.routes.online_scripts.install.start_install_thread") as start:
+                denied = client.post(
+                    "/api/online-scripts/install/demo", json={"request_id": "3" * 32},
+                )
+                self.assertEqual(denied.status_code, 400)
+                self.assertIn("CSRF", denied.get_json()["msg"])
+                self.assertIsNone(get_online_install_job("3" * 32))
+                forbidden = client.post(
+                    "/api/online-scripts/install/demo?token=wrong",
+                    json={"request_id": "4" * 32},
+                    headers={"X-CSRF-Token": "api-install-csrf"},
+                )
+                self.assertEqual(forbidden.status_code, 403)
+                self.assertIsNone(get_online_install_job("4" * 32))
+                with client.session_transaction() as session:
+                    session["token_expire_at"] = 1
+                expired = client.post(
+                    "/api/online-scripts/install/demo", json={"request_id": "5" * 32},
+                    headers={"X-CSRF-Token": "api-install-csrf"},
+                )
+                self.assertEqual(expired.status_code, 401)
+                start.assert_not_called()
+
     @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise log polling")
     def test_polling_preserves_logs_and_stops_on_permission_or_missing_errors(self):
         with isolated_app() as (app, base_dir):

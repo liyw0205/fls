@@ -300,6 +300,172 @@ def online_scripts_install(script_id):
     )
 
 
+def _api_values(data, key):
+    """Read repeated form fields while keeping JSON lists intact."""
+    if hasattr(data, "getlist"):
+        return list(data.getlist(key))
+    value = data.get(key, [])
+    if isinstance(value, list):
+        return list(value)
+    return [value] if value not in (None, "") else []
+
+
+def _api_flag(data, key):
+    value = data.get(key)
+    if value in (None, "", False, 0, "0", "false", "False"):
+        return False
+    if value in (True, 1, "1", "true", "True"):
+        return True
+    raise ValueError(f"{key} 必须为布尔值")
+
+
+def _api_install_start_result(result, install_id):
+    """Turn the HTML launch helper's failure tuple into a stable JSON result."""
+    if isinstance(result, tuple) and len(result) == 2:
+        _body, status = result
+        try:
+            info = get_online_install_job(install_id) or {}
+        except Exception as exc:
+            return jsonify(
+                ok=False,
+                request_id=install_id,
+                install_id=install_id,
+                msg=f"安装状态无法读取：{exc}",
+                retry_allowed=False,
+            ), 500
+        message = info.get("error") or "在线脚本安装未启动，请查看安装记录后重试"
+        return jsonify(
+            ok=False,
+            request_id=install_id,
+            install_id=install_id,
+            status=info.get("status") or "启动失败",
+            running=bool(info.get("running")),
+            msg=message,
+            retry_allowed=status >= 500,
+        ), status
+    return result
+
+
+@bp.route("/api/online-scripts/install/<script_id>", methods=["POST"])
+def api_online_scripts_install(script_id):
+    if request.is_json:
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify(ok=False, msg="请求 JSON 必须为对象", retry_allowed=False), 400
+    else:
+        data = request.form
+    raw_request_id = data.get("request_id", "")
+    try:
+        # Always return a stable ID, including for the first request without one.
+        request_id = _install_request_id(raw_request_id)
+    except ValueError as exc:
+        return jsonify(ok=False, msg=str(exc), retry_allowed=False), 400
+    try:
+        item = get_online_script(script_id)
+    except Exception as exc:
+        return jsonify(ok=False, request_id=request_id,
+                       msg=f"在线脚本源缓存无法读取，未覆盖原文件：{exc}"), 500
+    if not item:
+        return jsonify(ok=False, request_id=request_id,
+                       msg="脚本已不在本地缓存中，请同步在线脚本源后重试"), 404
+
+    proxy_id = str(data.get("proxy_id", "") or "").strip()
+    try:
+        validate_proxy_id(proxy_id)
+        import_task = _api_flag(data, "import_task")
+        enable_task = _api_flag(data, "enable_task")
+        force = _api_flag(data, "force")
+    except ValueError as exc:
+        return jsonify(ok=False, request_id=request_id, msg=str(exc), retry_allowed=True), 400
+    except Exception as exc:
+        return jsonify(ok=False, request_id=request_id, msg=f"读取代理配置失败：{exc}"), 500
+
+    selected_task_indexes = []
+    if import_task:
+        try:
+            select_mode = str(data.get("select_mode", "") or "").strip()
+            if select_mode == "all":
+                excluded_values = []
+                for value in _api_values(data, "excluded_task_indexes"):
+                    excluded_values.extend(str(value or "").replace("，", ",").split(","))
+                excluded_values = [value.strip() for value in excluded_values if value.strip()]
+                excluded = set()
+                if excluded_values:
+                    excluded = {int(value) for value in validated_install_task_indexes(item, excluded_values)}
+                selected_task_indexes = [
+                    str(index) for index in range(1, len(online_script_task_crons(item)) + 1)
+                    if index not in excluded
+                ]
+            elif select_mode:
+                raise ValueError("任务选择模式无效")
+            else:
+                selected_task_indexes = [str(value) for value in _api_values(data, "task_indexes")]
+            selected_task_indexes = validated_install_task_indexes(item, selected_task_indexes)
+            validate_online_task_import(item, selected_task_indexes)
+        except ValueError as exc:
+            return jsonify(ok=False, request_id=request_id,
+                           msg=f"{exc}。请重新选择任务后重试", retry_allowed=False), 400
+        except Exception as exc:
+            return jsonify(ok=False, request_id=request_id, msg=f"任务校验失败：{exc}"), 500
+    else:
+        if enable_task or _api_values(data, "task_indexes") or _api_values(data, "excluded_task_indexes"):
+            return jsonify(ok=False, request_id=request_id,
+                           msg="未启用任务导入时不能提交任务选择", retry_allowed=False), 400
+        if str(data.get("select_mode", "") or "").strip():
+            return jsonify(ok=False, request_id=request_id,
+                           msg="未启用任务导入时不能提交任务选择模式", retry_allowed=False), 400
+        enable_task = False
+
+    try:
+        previous = get_online_install_job(request_id)
+    except Exception as exc:
+        return jsonify(ok=False, request_id=request_id, msg=f"安装记录无法读取：{exc}"), 500
+    if previous:
+        if not _install_request_matches(
+            previous, script_id, proxy_id, import_task, enable_task, force, selected_task_indexes,
+        ):
+            return jsonify(ok=False, request_id=request_id,
+                           msg="安装请求已绑定其他选项，请重新打开安装页面"), 409
+        return jsonify(ok=True, request_id=request_id, install_id=request_id,
+                       status=previous.get("status"), running=bool(previous.get("running")),
+                       replayed=True,
+                       log_url=url_for("online_scripts.api_online_install_log", install_id=request_id)), 200
+
+    try:
+        target = online_script_target(item)
+    except Exception as exc:
+        return jsonify(ok=False, request_id=request_id, msg=f"脚本目标路径非法：{exc}"), 400
+    if target.exists() and not force:
+        return jsonify(ok=False, request_id=request_id, confirm_required=True,
+                       target=str(target), msg="目标已存在，请确认覆盖后重试"), 409
+
+    active_id, active_info = active_online_install_for_script(script_id)
+    if active_id:
+        return jsonify(
+            ok=False, request_id=request_id, install_id=active_id,
+            status=(active_info or {}).get("status") or "运行中", running=True,
+            msg="该脚本正在安装中，请先查看当前安装记录",
+            log_url=url_for("online_scripts.api_online_install_log", install_id=active_id),
+        ), 409
+
+    result = _start_install_job(
+        script_id=script_id, item=item, proxy_id=proxy_id, import_task=import_task,
+        force=force, enable_task=enable_task, selected_task_indexes=selected_task_indexes,
+        request_id=request_id,
+    )
+    result = _api_install_start_result(result, request_id)
+    if isinstance(result, tuple):
+        return result
+    info = get_online_install_job(request_id)
+    if not info:
+        return jsonify(ok=False, request_id=request_id, install_id=request_id,
+                       msg="安装已提交但状态无法读取，请查询安装日志后重试",
+                       retry_allowed=False), 500
+    return jsonify(ok=True, request_id=request_id, install_id=request_id,
+                   status=info.get("status", "准备中"), running=bool(info.get("running")),
+                   log_url=url_for("online_scripts.api_online_install_log", install_id=request_id)), 200
+
+
 def _install_confirmation(
     script_id, item, target, proxy_id, import_task, enable_task, selected_task_indexes,
     select_mode="", excluded_task_indexes="", action="", request_id="",
