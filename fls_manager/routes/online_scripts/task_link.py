@@ -558,7 +558,7 @@ def online_scripts_task_link_history():
         state = str(record.get("state") or "unknown")
         actions = f'<a class="btn btn-blue" href="/online-scripts/task-link-status/{h(request_id)}">查看状态</a>'
         if state == "completed" or record.get("confirmation") == "merged":
-            actions += f'<a class="btn btn-gray" href="/online-scripts/install-select/{h(quote(str(record.get("script_id") or ""), safe=""))}">选择已同步任务</a>'
+            actions += f'<a class="btn btn-gray" href="/online-scripts/install-select/{h(quote(str(record.get("script_id") or ""), safe=""))}?task_link_request_id={h(request_id)}">选择已同步任务</a>'
         rows.append(
             "<tr>"
             f"<td><code>{h(request_id)}</code></td>"

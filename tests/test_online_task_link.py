@@ -363,6 +363,47 @@ class OnlineTaskLinkTests(unittest.TestCase):
             html = page.get_data(as_text=True)
             self.assertIn("/online-scripts/task-link-status/" + request_id, html)
             self.assertIn("/online-scripts/install-select/demo", html)
+            selected = app.test_client().get(
+                "/online-scripts/install-select/demo?task_link_request_id=" + request_id,
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(selected.status_code, 200)
+            selected_html = selected.get_data(as_text=True)
+            self.assertIn('name="task_link_request_id" value="' + request_id + '"', selected_html)
+            self.assertIn("外部任务源同步已确认完成", selected_html)
+            self.assertIn("task_link_request_id", selected_html)
+
+    def test_task_link_selection_rejects_unknown_or_changed_receipt_without_rendering_old_tasks(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import source
+
+            item = self.item(tasks=[self.task("ready")])
+            source.save_online_script_cache([item])
+            request_id = "8" * 32
+            source.persist_task_link_request(self._unknown_record(source, request_id, item, state="unknown"))
+            client = app.test_client()
+            unknown = client.get(
+                "/online-scripts/install-select/demo?task_link_request_id=" + request_id,
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(unknown.status_code, 409)
+            self.assertIn("尚未确认完成", unknown.get_data(as_text=True))
+            changed = self.item(tasks=[self.task("changed")])
+            source.save_online_script_cache([changed])
+            completed = self._unknown_record(
+                source, request_id, changed,
+                published=source.online_script_task_fingerprint(source.load_online_script_cache()[0]),
+                state="completed",
+            )
+            source.persist_task_link_request(completed)
+            changed["link"] = "https://example.invalid/changed.sh"
+            source.save_online_script_cache([changed])
+            conflict = client.get(
+                "/online-scripts/install-select/demo?task_link_request_id=" + request_id,
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(conflict.status_code, 409)
+            self.assertIn("脚本源已变化", conflict.get_data(as_text=True))
 
     def test_completed_receipt_write_failure_is_confirmed_without_replaying_fetch(self):
         with isolated_app() as (app, _base_dir):

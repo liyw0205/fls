@@ -11,6 +11,7 @@ from ...online_scripts.constants import (
     ONLINE_TASK_IMPORT_LOCK,
 )
 from ...online_scripts.tasks import online_task_import_version
+from ...online_scripts.source import get_task_link_request, online_task_link_version
 from ...utils import now_str
 
 
@@ -376,6 +377,41 @@ def online_scripts_install_select(script_id):
     if not item:
         abort(404)
 
+    task_link_request_id = str(request.args.get("task_link_request_id") or "").strip()
+    task_link_record = None
+    if task_link_request_id:
+        if not re.fullmatch(r"[a-f0-9]{32}", task_link_request_id):
+            return online_script_cache_error(
+                "在线任务选择无法打开",
+                "外部任务源同步请求标识无效，请从同步历史重新选择任务",
+                back_url="/online-scripts/task-link-history",
+            )[0], 400
+        try:
+            task_link_record = get_task_link_request(task_link_request_id)
+        except Exception as exc:
+            return online_script_cache_error(
+                "在线任务选择无法打开",
+                f"外部任务源同步回执无法读取：{exc}",
+                back_url=f"/online-scripts/task-link-status/{h(task_link_request_id)}",
+            )
+        if not task_link_record:
+            return online_script_cache_error(
+                "在线任务选择无法打开",
+                "外部任务源同步请求不存在或已被清理，请从同步历史重新选择",
+                back_url="/online-scripts/task-link-history",
+            )[0], 404
+        if (
+            task_link_record.get("script_id") != script_id
+            or task_link_record.get("state") != "completed"
+            or task_link_record.get("confirmation") not in ("", "merged")
+            or online_task_link_version(item) != task_link_record.get("expected_version")
+        ):
+            return online_script_cache_error(
+                "在线任务选择无法打开",
+                "外部任务源同步尚未确认完成，或脚本源已变化；请先查询原同步请求后重新选择",
+                back_url=f"/online-scripts/task-link-status/{h(task_link_request_id)}",
+            )[0], 409
+
     task_crons = online_script_task_crons(item)
     has_task = script_has_task(item)
 
@@ -530,9 +566,16 @@ def online_scripts_install_select(script_id):
     display_start = start + 1 if filtered_total else 0
     display_end = min(end, filtered_total)
 
+    task_link_notice = ""
+    if task_link_record:
+        task_link_notice = (
+            f'外部任务源同步已确认完成，请求 <code>{h(task_link_request_id)}</code>；'
+            f'<a href="/online-scripts/task-link-status/{h(task_link_request_id)}">查看同步回执</a>。<br>'
+        )
     header_card = page_header_card(
         f'选择任务并安装：{item.get("name") or script_id}',
         help_html=f"""
+                {task_link_notice}
                 脚本 ID：{h(item.get("id"))}<br>
                 脚本类型：{h(item.get("type"))}<br>
                 保存名：{h(item.get("link_name"))}<br>
@@ -634,6 +677,7 @@ def online_scripts_install_select(script_id):
 
 <form method="post" action="/online-scripts/install/{h(script_id)}" id="onlineInstallSelectForm">
 <input type="hidden" name="request_id" value="{uuid.uuid4().hex}">
+<input type="hidden" name="task_link_request_id" value="{h(task_link_request_id)}">
 <input type="hidden" name="select_mode" value="all">
 <input type="hidden" name="excluded_task_indexes" id="excludedTaskIndexes" value="{h(excluded_text)}">
 
@@ -841,6 +885,11 @@ function flsInstallBuildUrl(page){{
         url.searchParams.set("excluded", excluded);
     }}
 
+    const taskLinkInput = document.querySelector('input[name="task_link_request_id"]');
+    if(taskLinkInput && taskLinkInput.value){{
+        url.searchParams.set("task_link_request_id", taskLinkInput.value);
+    }}
+
     return url.toString();
 }}
 
@@ -860,6 +909,11 @@ function flsInstallClearSearch(){{
 
     if(excluded){{
         url.searchParams.set("excluded", excluded);
+    }}
+
+    const taskLinkInput = document.querySelector('input[name="task_link_request_id"]');
+    if(taskLinkInput && taskLinkInput.value){{
+        url.searchParams.set("task_link_request_id", taskLinkInput.value);
     }}
 
     window.location.href = url.toString();
