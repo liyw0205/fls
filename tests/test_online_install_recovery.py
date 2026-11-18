@@ -752,6 +752,35 @@ async function runCase(pending, response, expected) {
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise import recovery")
+    def test_install_selection_refresh_recovers_original_import_request_without_reimport(self):
+        with isolated_app() as (app, base_dir):
+            self.prepare(base_dir)
+            html = app.test_client().get(
+                "/online-scripts/install-select/demo", headers={"X-Token": TOKEN},
+            ).get_data(as_text=True)
+            script = next(
+                script for script in re.findall(r"<script>(.*?)</script>", html, re.S)
+                if "flsInstallRecoverPending" in script
+            )
+            source = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+            reader = source[source.index("async function flsReadJsonResponse("):source.index("async function flsReadTextResponse(")]
+            result = subprocess.run(
+                ["node", "-e", r"""
+const vm=require('node:vm'); const assert=require('node:assert/strict');
+const input=JSON.parse(require('node:fs').readFileSync(0,'utf8')); const id='b'.repeat(32);
+const elements=Object.fromEntries(['onlineInstallRecoveryStatus','onlineInstallRecoveryLog','onlineInstallRecoveryStatusLink','onlineInstallRecoveryReload','onlineInstallRecoveryRetry','onlineInstallApiLogin'].map(name=>[name,{hidden:true,disabled:false,textContent:'',href:'',onclick:null}]));
+const storage={value:JSON.stringify({request_id:id,script_id:'demo',action:'/online-scripts/import-tasks/demo'}),getItem(){return this.value;},setItem(_k,v){this.value=v;},removeItem(){this.value=null;}};
+const form={addEventListener(){},querySelector(){return null;},querySelectorAll(){return[];}}; let calls=0;
+const responses=[{ok:true,status:200,body:JSON.stringify({request_id:id,state:'scheduler_pending',message:'任务已保存，调度器待恢复'})},{ok:true,status:200,body:JSON.stringify({ok:true,request_id:id,state:'completed',message:'任务已保存，调度器已恢复'})}];
+const context={window:{FLS_INSTALL_SCRIPT_ID:'demo',location:{pathname:'/online-scripts/install-select/demo',search:''}},location:{pathname:'/online-scripts/install-select/demo',search:''},document:{getElementById:name=>name==='onlineInstallSelectForm'?form:elements[name],querySelectorAll(){return[];},querySelector(){return null;}},sessionStorage:storage,flsGetCsrfToken:()=> 'csrf',flsApplyExcludedToVisible(){},setTimeout,encodeURIComponent,fetch:async(url,options)=>{calls++;assert.equal(url,(calls===1||calls===3)?'/api/online-scripts/import-tasks-status/'+id:'/api/online-scripts/import-tasks-reload/'+id);assert.equal(options.credentials,'same-origin');const value=calls===1?responses[0]:responses[1]; return {...value,text:async()=>value.body};},flsResponseErrorDiagnostic:()=>({payload:null,message:''})};
+context.flsReadJsonResponse=async response=>JSON.parse(await response.text());
+vm.createContext(context); vm.runInContext(input.reader+input.script,context);
+(async()=>{await new Promise(resolve=>setImmediate(resolve)); assert.equal(calls,1); assert.equal(elements.onlineInstallRecoveryStatusLink.hidden,false); assert.equal(elements.onlineInstallRecoveryStatusLink.href,'/online-scripts/import-tasks-status/'+id); assert.equal(elements.onlineInstallRecoveryReload.hidden,false); await elements.onlineInstallRecoveryReload.onclick(); await new Promise(resolve=>setImmediate(resolve)); assert.equal(calls,3); assert.equal(storage.value,null);})().catch(error=>{console.error(error);process.exitCode=1;});
+"""], input=json.dumps({"script": script, "reader": reader}), capture_output=True, text=True, timeout=5,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise log polling")
     def test_polling_preserves_logs_and_stops_on_permission_or_missing_errors(self):
         with isolated_app() as (app, base_dir):

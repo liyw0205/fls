@@ -848,6 +848,8 @@ def online_scripts_install_select(script_id):
 <a class="btn btn-primary" id="onlineInstallApiLogin" href="/login" hidden>重新登录</a>
 <div class="notice blue" id="onlineInstallRecoveryStatus" role="status" hidden></div>
 <a class="btn btn-orange" id="onlineInstallRecoveryLog" href="#" hidden>查看原安装日志</a>
+<a class="btn btn-blue" id="onlineInstallRecoveryStatusLink" href="#" hidden>查询原导入请求</a>
+<button class="btn btn-primary" id="onlineInstallRecoveryReload" type="button" hidden>仅重新加载调度器</button>
 <button class="btn btn-gray" id="onlineInstallRecoveryRetry" type="button" hidden>重新读取安装状态</button>
 
 <section class="section fls-form-section fls-save-section">
@@ -1099,20 +1101,59 @@ async function flsInstallRecoverPending(){{
     const statusEl = document.getElementById("onlineInstallRecoveryStatus");
     const loginEl = document.getElementById("onlineInstallApiLogin");
     const logEl = document.getElementById("onlineInstallRecoveryLog");
+    const importStatusEl = document.getElementById("onlineInstallRecoveryStatusLink");
+    const reloadSchedulerEl = document.getElementById("onlineInstallRecoveryReload");
     const retryEl = document.getElementById("onlineInstallRecoveryRetry");
     let pending;
     try{{ pending = JSON.parse(sessionStorage.getItem("fls-online-install-request") || "null"); }}catch(_error){{ pending = null; }}
     const pendingId = pending && (pending.install_id || pending.request_id);
     const installId = /^[a-f0-9]{{32}}$/.test(String(pendingId || "")) ? String(pendingId) : "";
     if(!installId) return;
+    const importMode = !!(pending && String(pending.action || "").indexOf("/import-tasks/") >= 0);
 
     async function read(){{
         if(retryEl) retryEl.disabled = true;
         if(statusEl){{ statusEl.hidden = false; statusEl.textContent = "正在读取原安装状态..."; }}
         if(loginEl) loginEl.hidden = true;
+        if(reloadSchedulerEl) reloadSchedulerEl.hidden = true;
         try{{
-            const response = await fetch("/api/online-scripts/log/" + encodeURIComponent(installId) + "?lines=80", {{cache:"no-store", credentials:"same-origin"}});
+            const response = await fetch(
+                importMode
+                    ? "/api/online-scripts/import-tasks-status/" + encodeURIComponent(installId)
+                    : "/api/online-scripts/log/" + encodeURIComponent(installId) + "?lines=80",
+                {{cache:"no-store", credentials:"same-origin"}}
+            );
             const json = await flsReadJsonResponse(response);
+            if(importMode){{
+                if(!json || !json.state) throw new Error("导入状态响应无效");
+                if(importStatusEl){{ importStatusEl.hidden = false; importStatusEl.href = "/online-scripts/import-tasks-status/" + encodeURIComponent(installId); }}
+                if(json.state === "completed"){{
+                    try{{ sessionStorage.removeItem("fls-online-install-request"); }}catch(_error){{}}
+                    if(statusEl) statusEl.textContent = json.message || "原任务导入已完成，未重复写入";
+                    window.location.href = "/online-scripts?msg=" + encodeURIComponent(json.message || "任务导入已完成");
+                    return;
+                }}
+                if(statusEl) statusEl.textContent = "原任务导入请求：" + (json.message || json.state || "未知");
+                if(reloadSchedulerEl && json.state === "scheduler_pending"){{
+                    reloadSchedulerEl.hidden = false;
+                    reloadSchedulerEl.onclick = async function(){{
+                        reloadSchedulerEl.disabled = true;
+                        try{{
+                            const csrf = typeof flsGetCsrfToken === "function" ? flsGetCsrfToken() : "";
+                            const headers = {{"X-Requested-With":"XMLHttpRequest"}};
+                            if(csrf) headers["X-CSRF-Token"] = csrf;
+                            const reloadResponse = await fetch("/api/online-scripts/import-tasks-reload/" + encodeURIComponent(installId), {{method:"POST", headers, credentials:"same-origin"}});
+                            const reloadJson = await flsReadJsonResponse(reloadResponse);
+                            if(!reloadJson || reloadJson.ok !== true) throw Object.assign(new Error(reloadJson && reloadJson.msg || "调度器重载未完成"), {{status: reloadResponse.status}});
+                            await read();
+                        }}catch(error){{
+                            if(statusEl) statusEl.textContent = "调度器重载失败：" + (error && error.message || String(error || "请求失败")) + "。任务文件保持已保存。";
+                            reloadSchedulerEl.disabled = false;
+                        }}
+                    }};
+                }}
+                return;
+            }}
             if(!json || typeof json.running !== "boolean") throw new Error("安装状态响应无效");
             if(statusEl) statusEl.textContent = "原安装请求：" + (json.status || "未知") + (json.phase ? "（" + json.phase + "）" : "");
             if(logEl){{ logEl.hidden = false; logEl.href = "/online-scripts/log/" + encodeURIComponent(installId); }}
