@@ -131,6 +131,7 @@ def _start_install_job(
             "retry_of": retry_of,
             "running": True,
             "status": "准备中",
+            "phase": "prepared",
             "start_time": time.time(),
             "returncode": None,
             "error": "",
@@ -146,6 +147,7 @@ def _start_install_job(
             info.update(
                 running=False,
                 status="启动失败",
+                phase="startup_failed",
                 error=f"保存安装状态失败：{e}",
                 updated_at=now_str(),
             )
@@ -167,6 +169,7 @@ def _start_install_job(
             info.update(
                 running=False,
                 status="启动失败",
+                phase="startup_failed",
                 error=f"启动安装线程失败：{e}",
                 updated_at=now_str(),
             )
@@ -339,6 +342,7 @@ def _api_install_start_result(result, install_id):
             request_id=install_id,
             install_id=install_id,
             status=info.get("status") or "启动失败",
+            phase=info.get("phase") or "unknown",
             running=bool(info.get("running")),
             msg=message,
             retry_allowed=status >= 500,
@@ -427,7 +431,8 @@ def api_online_scripts_install(script_id):
             return jsonify(ok=False, request_id=request_id,
                            msg="安装请求已绑定其他选项，请重新打开安装页面"), 409
         return jsonify(ok=True, request_id=request_id, install_id=request_id,
-                       status=previous.get("status"), running=bool(previous.get("running")),
+                       status=previous.get("status"), phase=previous.get("phase") or "unknown",
+                       running=bool(previous.get("running")),
                        replayed=True,
                        log_url=url_for("online_scripts.api_online_install_log", install_id=request_id)), 200
 
@@ -463,6 +468,7 @@ def api_online_scripts_install(script_id):
                        retry_allowed=False), 500
     return jsonify(ok=True, request_id=request_id, install_id=request_id,
                    status=info.get("status", "准备中"), running=bool(info.get("running")),
+                   phase=info.get("phase") or "unknown",
                    log_url=url_for("online_scripts.api_online_install_log", install_id=request_id)), 200
 
 
@@ -617,6 +623,7 @@ def _reload_install_scheduler(install_id):
             return {
                 "ok": False,
                 "request_id": install_id,
+                "phase": "scheduler_reload_pending",
                 "msg": f"任务保持已保存，调度器重载失败：{exc}",
                 "scheduler_reload_required": True,
                 "reload_url": url_for("online_scripts.api_online_scripts_install_reload", install_id=install_id),
@@ -624,7 +631,12 @@ def _reload_install_scheduler(install_id):
 
         with ONLINE_INSTALL_LOCK:
             updated = dict(info)
-            updated.update(scheduler_reload_pending=False, scheduler_reload_error="", updated_at=now_str())
+            updated.update(
+                phase="completed" if updated.get("status") == "部分完成" else updated.get("phase") or "unknown",
+                scheduler_reload_pending=False,
+                scheduler_reload_error="",
+                updated_at=now_str(),
+            )
             if updated.get("status") == "部分完成":
                 updated.update(status="已完成", error="", persistence_error="")
             try:
@@ -633,6 +645,7 @@ def _reload_install_scheduler(install_id):
                 return {
                     "ok": False,
                     "request_id": install_id,
+                    "phase": "scheduler_reload_pending",
                     "msg": f"调度器已重新加载，但保存恢复结果失败：{exc}。请修复文件权限或磁盘空间后重新加载以保存状态。",
                     "scheduler_reload_required": True,
                     "reload_url": url_for("online_scripts.api_online_scripts_install_reload", install_id=install_id),
@@ -643,6 +656,7 @@ def _reload_install_scheduler(install_id):
         return {
             "ok": True,
             "request_id": install_id,
+            "phase": updated.get("phase") or "completed",
             "status": updated.get("status") or "已完成",
             "msg": "调度器已恢复，未重复安装或导入任务",
         }, 200

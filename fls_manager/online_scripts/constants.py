@@ -287,6 +287,7 @@ def _install_snapshot(info):
         "retried_by",
         "running",
         "status",
+        "phase",
         "start_time",
         "returncode",
         "error",

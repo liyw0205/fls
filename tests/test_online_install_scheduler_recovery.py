@@ -38,6 +38,7 @@ class OnlineInstallSchedulerRecoveryTests(unittest.TestCase):
         info = get_online_install_job(install_id)
         self.assertFalse(info["running"])
         self.assertTrue(info["scheduler_reload_pending"])
+        self.assertEqual(info["phase"], "failed" if command_failure else "scheduler_reload_pending")
         self.assertEqual(info["status"], "失败" if command_failure else "部分完成")
         self.assertEqual(info["returncode"], 17 if command_failure else 0)
         self.assertEqual([task["name"] for task in load_tasks()], ["Daily"])
@@ -56,6 +57,7 @@ class OnlineInstallSchedulerRecoveryTests(unittest.TestCase):
             headers = {"X-Token": TOKEN}
             payload = client.get(f"/api/online-scripts/log/{install_id}", headers=headers).json
             self.assertEqual(payload["status"], "部分完成")
+            self.assertEqual(payload["phase"], "scheduler_reload_pending")
             self.assertTrue(payload["scheduler_reload_pending"])
             self.assertIn("scheduler unavailable", payload["error"])
             self.assertEqual(payload["recovery"]["label"], "重新加载调度器")
@@ -141,6 +143,7 @@ class OnlineInstallSchedulerRecoveryTests(unittest.TestCase):
                 payload = failed.get_json()
                 self.assertFalse(payload["ok"])
                 self.assertTrue(payload["scheduler_reload_required"])
+                self.assertEqual(payload["phase"], "scheduler_reload_pending")
                 self.assertIn("scheduler unavailable", payload["msg"])
                 self.assertEqual(payload["reload_url"], f"/api/online-scripts/install-reload/{install_id}")
                 reload_scheduler.assert_called_once()

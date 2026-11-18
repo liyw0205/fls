@@ -5,6 +5,27 @@ from ...online_scripts.constants import get_online_install_job
 RECOVERY_STATUSES = {"结果未知", "失败", "超时", "已停止", "启动失败"}
 
 
+def _install_phase(info):
+    phase = str((info or {}).get("phase") or "").strip()
+    if phase:
+        return phase
+    if (info or {}).get("scheduler_reload_pending"):
+        return "scheduler_reload_pending"
+    if (info or {}).get("running"):
+        return "running"
+    return {
+        "准备中": "prepared",
+        "运行中": "running",
+        "部分完成": "scheduler_reload_pending",
+        "已完成": "completed",
+        "失败": "failed",
+        "超时": "timeout",
+        "已停止": "stopped",
+        "启动失败": "startup_failed",
+        "结果未知": "unknown",
+    }.get(str((info or {}).get("status") or ""), "unknown")
+
+
 def _install_error(info):
     errors = [info.get("error") or ""]
     pending_error = info.get("scheduler_reload_error") or ""
@@ -143,6 +164,7 @@ def api_online_install_log(install_id):
     payload = {
         "running": bool(info.get("running")),
         "status": info.get("status") or "-",
+        "phase": _install_phase(info),
         "returncode": info.get("returncode"),
         "error": _install_error(info),
         "log_file": log_file,

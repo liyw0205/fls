@@ -59,6 +59,13 @@ def _persist_install_state(info):
         return False
 
 
+def _set_install_phase(info, phase, *, persist=True):
+    """Persist a coarse stage before the next irreversible install action."""
+    info["phase"] = phase
+    info["updated_at"] = now_str()
+    return _persist_install_state(info) if persist else True
+
+
 def get_running_install_by_script_id(script_id):
     return active_online_install_for_script(script_id)
 
@@ -419,7 +426,7 @@ def install_worker(
         with ONLINE_INSTALL_LOCK:
             if online_install_should_stop(install_id):
                 raise InstallStopped("安装已停止")
-            info.update(running=True, status="运行中", error="", updated_at=now_str())
+            info.update(running=True, status="运行中", phase="starting", error="", updated_at=now_str())
             persist_online_install(info)
 
         append_log(log_file, "===== 在线脚本下载安装 =====")
@@ -438,8 +445,10 @@ def install_worker(
         append_log(log_file, "============================================================")
 
         if import_task:
+            _set_install_phase(info, "validating_tasks")
             validate_online_task_import(item, selected_task_indexes)
 
+        _set_install_phase(info, "downloading")
         download_online_script_logged(
             item=item,
             proxy_id=proxy_id,
@@ -452,6 +461,7 @@ def install_worker(
             raise InstallStopped("安装已停止")
 
         if import_task:
+            _set_install_phase(info, "importing_tasks")
             append_log(log_file, "")
             append_log(log_file, "===== 导入任务 =====")
             try:
@@ -465,6 +475,7 @@ def install_worker(
             except TaskSchedulerReloadError as e:
                 with ONLINE_INSTALL_LOCK:
                     info.update(
+                        phase="scheduler_reload_pending",
                         scheduler_reload_pending=True,
                         scheduler_reload_error=f"任务已保存，但调度器重载失败：{e}",
                         updated_at=now_str(),
@@ -477,6 +488,7 @@ def install_worker(
         install_cmd = str(item.get("install") or "").strip()
 
         if install_cmd:
+            _set_install_phase(info, "running_command")
             append_log(log_file, "")
             append_log(log_file, "===== 执行安装命令 =====")
             append_log(log_file, f"安装命令: {install_cmd}")
@@ -505,6 +517,7 @@ def install_worker(
                 return
             info.update({
                 "running": False,
+                "phase": "completed" if not info.get("scheduler_reload_pending") else "scheduler_reload_pending",
                 "status": "部分完成" if info.get("scheduler_reload_pending") else "已完成",
                 "returncode": 0,
                 "error": "；".join(filter(None, (
@@ -547,6 +560,7 @@ def install_worker(
                 return
             info.update({
                 "running": False,
+                "phase": "stopped" if stopped else ("timeout" if isinstance(e, InstallTimeout) else "failed"),
                 "status": "已停止" if stopped else ("超时" if isinstance(e, InstallTimeout) else "失败"),
                 "returncode": getattr(e, "returncode", None),
                 "error": "；".join(dict.fromkeys(filter(None, (
@@ -558,6 +572,7 @@ def install_worker(
             persisted = _persist_install_state(info)
             if not persisted:
                 info.update(
+                    phase="unknown",
                     status="结果未知",
                     returncode=None,
                     error="；".join(filter(None, (

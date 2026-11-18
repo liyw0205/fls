@@ -78,6 +78,31 @@ class OnlineInstallLifecycleTests(unittest.TestCase):
                             "/online-scripts/log/install", headers={"X-Token": TOKEN},
                         ).get_data(as_text=True))
 
+    def test_install_persists_download_and_command_phases_before_side_effects(self):
+        with isolated_app() as (_app, base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE, get_online_install_job
+            from fls_manager.online_scripts.install import install_worker
+
+            info = self.register(base_dir)
+            phases = []
+
+            def download(**_kwargs):
+                phases.append(get_online_install_job("install")["phase"])
+                return base_dir / "scripts" / "demo.sh"
+
+            def command(*_args, **_kwargs):
+                phases.append(get_online_install_job("install")["phase"])
+
+            with patch("fls_manager.online_scripts.install.download_online_script_logged", side_effect=download), patch(
+                "fls_manager.online_scripts.install.run_logged_command", side_effect=command,
+            ):
+                install_worker("install", self.item("fixture install"))
+
+            self.assertEqual(phases, ["downloading", "running_command"])
+            persisted = json.loads(ONLINE_INSTALL_JOBS_FILE.read_text(encoding="utf-8"))["install"]
+            self.assertEqual(persisted["phase"], "completed")
+            self.assertEqual(info["status"], "已完成")
+
     @unittest.skipIf(os.name == "nt", "Installation commands use sh")
     def test_real_stop_worker_finishes_while_stop_request_waits(self):
         with isolated_app() as (app, base_dir):
@@ -365,7 +390,7 @@ class OnlineInstallLifecycleTests(unittest.TestCase):
             def persist(value):
                 nonlocal calls
                 calls += 1
-                if calls == 2:
+                if value.get("running") is False and value.get("status") == "已完成":
                     raise OSError("state disk full")
                 return real_persist(value)
 
