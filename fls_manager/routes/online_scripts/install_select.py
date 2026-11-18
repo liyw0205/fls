@@ -10,6 +10,7 @@ from ...online_scripts.constants import (
     list_online_task_import_requests,
     persist_online_task_import_request,
     ONLINE_TASK_IMPORT_LOCK,
+    ONLINE_TASK_IMPORT_ACTIVE,
 )
 from ...online_scripts.tasks import online_task_import_version
 from ...online_scripts.source import get_task_link_request, online_task_link_version
@@ -123,6 +124,51 @@ def _import_failure(record, message, status_code, *, state="failed", persisted=F
     }, status_code
 
 
+def _run_online_task_import(record, item, enable_task, selected_task_indexes, request_id):
+    ONLINE_TASK_IMPORT_ACTIVE.add(request_id)
+    try:
+        try:
+            _import_record_update(record, "running")
+            persist_online_task_import_request(record)
+            ok, message = import_task_if_needed(
+                item,
+                log_file=None,
+                enable_task=enable_task,
+                selected_task_indexes=selected_task_indexes,
+                raise_on_reload_error=True,
+            )
+        except TaskSchedulerReloadError as exc:
+            return _import_failure(
+                record,
+                f"任务已持久化，但调度器重载失败：{exc}。请重新加载调度器，无需重复导入。",
+                503,
+                state="scheduler_pending",
+                persisted=True,
+            )
+        except OnlineTaskValidationError as exc:
+            return _import_failure(record, str(exc), 400)
+        except Exception as exc:
+            return _import_failure(record, f"任务导入失败：{exc}。请检查文件权限和磁盘空间后重试。", 500)
+
+        message = message or "任务导入已完成"
+        _import_record_update(record, "completed", message)
+        try:
+            persist_online_task_import_request(record)
+        except Exception as exc:
+            actual = None
+            try:
+                actual = get_online_task_import_request(request_id)
+            except Exception:
+                pass
+            if not actual or actual.get("state") != "completed":
+                return {"ok": False, "request_id": request_id, "msg": f"任务已导入，但完成回执无法确认：{exc}，请查询原请求。", "retry_allowed": False}, 503
+        if not ok:
+            return {"ok": False, "request_id": request_id, "msg": message, "retry_allowed": False}, 409
+        return {"ok": True, "request_id": request_id, "msg": message}, 200
+    finally:
+        ONLINE_TASK_IMPORT_ACTIVE.discard(request_id)
+
+
 def _submit_online_task_import(script_id, data):
     try:
         request_id = _import_request_id(data.get("request_id"))
@@ -202,44 +248,7 @@ def _submit_online_task_import(script_id, data):
     if not latest_item or online_task_import_version(latest_item) != expected_version:
         return _import_failure(record, "脚本源已更新或删除，未写入旧页面选择的任务。请重新选择后重试。", 409)
 
-    try:
-        _import_record_update(record, "running")
-        persist_online_task_import_request(record)
-        ok, message = import_task_if_needed(
-            item,
-            log_file=None,
-            enable_task=enable_task,
-            selected_task_indexes=selected_task_indexes,
-            raise_on_reload_error=True,
-        )
-    except TaskSchedulerReloadError as exc:
-        return _import_failure(
-            record,
-            f"任务已持久化，但调度器重载失败：{exc}。请重新加载调度器，无需重复导入。",
-            503,
-            state="scheduler_pending",
-            persisted=True,
-        )
-    except OnlineTaskValidationError as exc:
-        return _import_failure(record, str(exc), 400)
-    except Exception as exc:
-        return _import_failure(record, f"任务导入失败：{exc}。请检查文件权限和磁盘空间后重试。", 500)
-
-    message = message or "任务导入已完成"
-    _import_record_update(record, "completed", message)
-    try:
-        persist_online_task_import_request(record)
-    except Exception as exc:
-        actual = None
-        try:
-            actual = get_online_task_import_request(request_id)
-        except Exception:
-            pass
-        if not actual or actual.get("state") != "completed":
-            return {"ok": False, "request_id": request_id, "msg": f"任务已导入，但完成回执无法确认：{exc}，请查询原请求。", "retry_allowed": False}, 503
-    if not ok:
-        return {"ok": False, "request_id": request_id, "msg": message, "retry_allowed": False}, 409
-    return {"ok": True, "request_id": request_id, "msg": message}, 200
+    return _run_online_task_import(record, item, enable_task, selected_task_indexes, request_id)
 
 
 def _render_import_result(script_id, payload, status_code, data):

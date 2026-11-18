@@ -13,6 +13,7 @@ ONLINE_SCRIPT_CACHE_FILE = DATA_DIR / "online_scripts_cache.json"
 ONLINE_TASK_LINK_REQUESTS_FILE = DATA_DIR / "online_task_link_requests.json"
 ONLINE_TASK_LINK_ACTIVE = set()
 ONLINE_TASK_IMPORT_REQUESTS_FILE = DATA_DIR / "online_task_import_requests.json"
+ONLINE_TASK_IMPORT_ACTIVE = set()
 
 ONLINE_INSTALL_RUNNING = {}
 ONLINE_INSTALL_STOPPING = set()
@@ -67,11 +68,27 @@ def _read_task_import_requests():
     return data
 
 
+def _recover_stale_task_imports(data):
+    changed = False
+    for request_id, value in data.items():
+        if value.get("state") == "running" and request_id not in ONLINE_TASK_IMPORT_ACTIVE:
+            value = dict(value)
+            value["state"] = "unknown"
+            value["message"] = "面板重启或请求中断后无法确认任务是否已导入，请查询任务列表"
+            value["updated_at"] = now_str()
+            data[request_id] = _task_import_snapshot(value)
+            changed = True
+    return changed
+
+
 def get_online_task_import_request(request_id):
     if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
         return None
     with ONLINE_TASK_IMPORT_LOCK, storage_transaction():
-        return dict(_read_task_import_requests().get(request_id) or {}) or None
+        data = _read_task_import_requests()
+        if _recover_stale_task_imports(data):
+            mutate_json(ONLINE_TASK_IMPORT_REQUESTS_FILE, {}, lambda _: data, strict=True)
+        return dict(data.get(request_id) or {}) or None
 
 
 def list_online_task_import_requests(limit=50, script_id=""):
@@ -84,6 +101,8 @@ def list_online_task_import_requests(limit=50, script_id=""):
     script_id = str(script_id or "").strip()
     with ONLINE_TASK_IMPORT_LOCK, storage_transaction():
         records = _read_task_import_requests()
+        if _recover_stale_task_imports(records):
+            mutate_json(ONLINE_TASK_IMPORT_REQUESTS_FILE, {}, lambda _: records, strict=True)
         items = [dict(value) for value in records.values() if not script_id or value.get("script_id") == script_id]
         items.sort(key=lambda value: str(value.get("updated_at") or ""), reverse=True)
         return items[:limit]

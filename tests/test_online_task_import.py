@@ -312,6 +312,29 @@ class OnlineTaskImportConcurrencyTests(unittest.TestCase):
             self.assertIn("无法读取", page.get_data(as_text=True))
             self.assertEqual(constants.ONLINE_TASK_IMPORT_REQUESTS_FILE.read_bytes(), original)
 
+    def test_stale_running_import_becomes_unknown_after_restart_and_releases_active_marker(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import constants, source, tasks
+
+            source.save_online_script_cache([self.task_item("demo", "Daily")])
+            item = source.load_online_script_cache()[0]
+            request_id = "b" * 32
+            constants.persist_online_task_import_request({
+                "request_id": request_id, "script_id": "demo",
+                "expected_version": tasks.online_task_import_version(item),
+                "selected_task_indexes": ["1"], "enable_task": False,
+                "state": "running", "message": "", "scheduler_reload_error": "",
+                "updated_at": "2026-11-18 12:00:00",
+            })
+            self.assertNotIn(request_id, constants.ONLINE_TASK_IMPORT_ACTIVE)
+            status = app.test_client().get(
+                "/api/online-scripts/import-tasks-status/" + request_id,
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(status.status_code, 200)
+            self.assertEqual(status.json["state"], "unknown")
+            self.assertIn("面板重启", status.json["message"])
+
     def test_scheduler_pending_has_query_only_replay_and_dedicated_reload(self):
         with isolated_app() as (app, _base_dir):
             from fls_manager.models import load_tasks
