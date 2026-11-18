@@ -437,6 +437,61 @@ vm.runInContext(input.modal, context);
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise AJAX navigation recovery")
+    def test_ajax_navigation_keeps_page_and_exposes_http_retry_or_login(self):
+        js = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+        start = js.index("    function flsRenderAjaxLoadError")
+        end = js.index('    document.addEventListener("click"', start)
+        navigation = js[start:end]
+        result = subprocess.run(
+            ["node", "-e", r"""
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+class Node {
+  constructor(tag){ this.tagName=tag.toUpperCase(); this.children=[]; this.textContent=''; this.className=''; this.dataset={}; this.href=''; this.style={}; }
+  append(...items){ this.children.push(...items); }
+  appendChild(item){ this.children.push(item); return item; }
+  prepend(item){ this.children.unshift(item); }
+  replaceChildren(...items){ this.children = items; }
+  setAttribute(name, value){ if(name === 'data-fls-ajax-load-error') this.dataset.flsAjaxLoadError = value; }
+  addEventListener(name, handler){ if(name === 'click') this.onclick = handler; }
+  querySelector(selector){ return selector === '[data-fls-ajax-load-error]' ? this.children.find(item => item.dataset && item.dataset.flsAjaxLoadError) || null : null; }
+}
+const content = new Node('main');
+let status = 503;
+let navigated = '';
+const context = {
+  document: {querySelector: selector => selector === '.content' ? content : null, createElement: tag => new Node(tag)},
+  location: {pathname:'/tasks', search:'', href:''},
+  flsIsCacheablePage: () => false,
+  setLoading: () => {},
+  flsMarkButtonBusy: () => true,
+  flsRestoreButton: () => {},
+  flsReadTextResponse: async response => { const e = new Error('gateway diagnostic'); e.status = response.status; throw e; },
+  fetch: async () => ({ok:false, status}),
+};
+vm.createContext(context);
+vm.runInContext(input.navigation, context);
+(async () => {
+  await context.ajaxLoad('/tasks', true);
+  assert.equal(navigated, '');
+  assert.match(content.children[0].children[0].textContent, /HTTP 503/);
+  assert.equal(content.children[0].children[1].children[0].textContent, '重新加载页面');
+  status = 401;
+  await context.ajaxLoad('/tasks', true);
+  assert.equal(content.children[0].children[1].children[0].textContent, '重新登录');
+  assert.match(content.children[0].children[1].children[0].href, /\/login\?next=/);
+  console.log('ajax navigation recovery passed');
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"""],
+            input=json.dumps({"navigation": navigation}),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_update_info_waits_for_the_current_cache_refresh_once(self):
         with isolated_app() as app:
             with patch("fls_manager.routes.about.version.update_log_state") as update_state:

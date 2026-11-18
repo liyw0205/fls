@@ -2256,6 +2256,50 @@ if (document.readyState === "loading") {
         flsToast(flsActionFailure(message, nextStep), "error", 6000);
     }
 
+    function flsRenderAjaxLoadError(url, error){
+        const content = document.querySelector(".content");
+        if(!content) return;
+
+        let block = content.querySelector("[data-fls-ajax-load-error]");
+        if(!block){
+            block = document.createElement("section");
+            block.className = "section fls-ajax-load-error";
+            block.setAttribute("data-fls-ajax-load-error", "1");
+            block.setAttribute("role", "alert");
+            content.prepend(block);
+        }
+        block.replaceChildren();
+
+        const status = Number(error && error.status || 0);
+        const detail = String(error && error.message || "页面请求失败").slice(0, 600);
+        const message = document.createElement("p");
+        message.textContent = "页面加载失败" + (status ? "（HTTP " + status + "）" : "") + "：" + detail;
+        block.appendChild(message);
+
+        const actions = document.createElement("div");
+        actions.className = "action-row";
+        if(status === 401 || status === 403){
+            const login = document.createElement("a");
+            login.className = "btn btn-gray";
+            login.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
+            login.textContent = "重新登录";
+            actions.appendChild(login);
+        } else {
+            const retry = document.createElement("button");
+            retry.type = "button";
+            retry.className = "btn btn-primary";
+            retry.textContent = "重新加载页面";
+            retry.addEventListener("click", function(){
+                if(!flsMarkButtonBusy(retry)) return;
+                ajaxLoad(url, true, {force:true}).finally(function(){
+                    flsRestoreButton(retry);
+                });
+            });
+            actions.appendChild(retry);
+        }
+        block.appendChild(actions);
+    }
+
     async function ajaxLoad(url, push, options){
         options = options || {};
         const canCache = flsIsCacheablePage(url);
@@ -2302,8 +2346,14 @@ if (document.readyState === "loading") {
             });
 
             if (!res.ok) {
+                let error;
+                try {
+                    await flsReadTextResponse(res);
+                } catch(e) {
+                    error = e;
+                }
                 setLoading(false);
-                location.href = url;
+                flsRenderAjaxLoadError(url, error || {status:res.status, message:"请求失败"});
                 return;
             }
 
@@ -2317,7 +2367,7 @@ if (document.readyState === "loading") {
             setLoading(false);
         } catch(e) {
             setLoading(false);
-            location.href = url;
+            flsRenderAjaxLoadError(url, e);
         }
     }
 
