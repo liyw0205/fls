@@ -591,34 +591,36 @@ def _install_scheduler_reload_form(install_id):
     )
 
 
-@bp.route("/online-scripts/install-reload/<install_id>", methods=["POST"])
-def online_scripts_install_reload(install_id):
+def _reload_install_scheduler(install_id):
+    """Reload saved task imports without repeating the installation side effects."""
     with ONLINE_INSTALL_LOCK:
         try:
             info = get_online_install_job(install_id)
         except Exception as exc:
-            return _install_retry_error(
-                install_id,
-                "无法恢复任务调度",
-                f"安装记录无法读取，未覆盖原文件：{exc}。修复记录文件后重试。",
-                500,
-            )
+            return {
+                "ok": False,
+                "request_id": install_id,
+                "msg": f"安装记录无法读取，未覆盖原文件：{exc}",
+            }, 500
         if not info:
-            return _install_retry_error(install_id, "无法恢复任务调度", "安装记录不存在。", 404)
+            return {"ok": False, "request_id": install_id, "msg": "安装记录不存在。"}, 404
         if info.get("running") or install_id in ONLINE_INSTALL_RETRYING:
-            return _install_retry_error(install_id, "无法恢复任务调度", "安装或恢复仍在进行，请稍后重试。", 409)
+            return {"ok": False, "request_id": install_id, "msg": "安装或恢复仍在进行，请稍后重试。"}, 409
         if not info.get("scheduler_reload_pending"):
-            return _install_retry_error(install_id, "无需恢复任务调度", "该安装没有待恢复的调度器重载。", 409)
+            return {"ok": False, "request_id": install_id, "msg": "该安装没有待恢复的调度器重载。"}, 409
         ONLINE_INSTALL_RETRYING.add(install_id)
 
     try:
         try:
             reload_scheduler()
-        except Exception as e:
-            return _install_retry_error(
-                install_id, "任务调度尚未恢复", f"任务保持已保存，调度器重载失败：{e}", 503,
-                actions_html=_install_scheduler_reload_form(install_id),
-            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "request_id": install_id,
+                "msg": f"任务保持已保存，调度器重载失败：{exc}",
+                "scheduler_reload_required": True,
+                "reload_url": url_for("online_scripts.api_online_scripts_install_reload", install_id=install_id),
+            }, 503
 
         with ONLINE_INSTALL_LOCK:
             updated = dict(info)
@@ -627,19 +629,49 @@ def online_scripts_install_reload(install_id):
                 updated.update(status="已完成", error="", persistence_error="")
             try:
                 persist_online_install(updated)
-            except Exception as e:
-                return _install_retry_error(
-                    install_id, "恢复结果尚未保存",
-                    f"调度器已重新加载，但保存恢复结果失败：{e}。请修复文件权限或磁盘空间后重新加载以保存状态。",
-                    500, actions_html=_install_scheduler_reload_form(install_id),
-                )
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "request_id": install_id,
+                    "msg": f"调度器已重新加载，但保存恢复结果失败：{exc}。请修复文件权限或磁盘空间后重新加载以保存状态。",
+                    "scheduler_reload_required": True,
+                    "reload_url": url_for("online_scripts.api_online_scripts_install_reload", install_id=install_id),
+                }, 500
             live = ONLINE_INSTALL_RUNNING.get(install_id)
             if isinstance(live, dict):
                 live.update(updated)
-        return redirect(url_for("online_scripts.online_install_log", install_id=install_id))
+        return {
+            "ok": True,
+            "request_id": install_id,
+            "status": updated.get("status") or "已完成",
+            "msg": "调度器已恢复，未重复安装或导入任务",
+        }, 200
     finally:
         with ONLINE_INSTALL_LOCK:
             ONLINE_INSTALL_RETRYING.discard(install_id)
+
+
+@bp.route("/online-scripts/install-reload/<install_id>", methods=["POST"])
+def online_scripts_install_reload(install_id):
+    payload, status = _reload_install_scheduler(install_id)
+    if not payload.get("ok"):
+        actions = _install_scheduler_reload_form(install_id) if payload.get("scheduler_reload_required") else ""
+        return _install_retry_error(
+            install_id,
+            "任务调度尚未恢复" if status == 503 else "无法恢复任务调度",
+            payload.get("msg") or "任务调度恢复失败",
+            status,
+            actions_html=actions,
+        )
+    return redirect(url_for("online_scripts.online_install_log", install_id=install_id))
+
+
+@bp.route("/api/online-scripts/install-reload/<install_id>", methods=["POST"])
+def api_online_scripts_install_reload(install_id):
+    if not re.fullmatch(r"[a-f0-9]{32}", install_id or ""):
+        return jsonify(ok=False, request_id=install_id, msg="在线脚本安装请求标识无效"), 400
+    payload, status = _reload_install_scheduler(install_id)
+    return jsonify(payload), status
 
 
 @bp.route("/online-scripts/install-retry/<install_id>", methods=["POST"])

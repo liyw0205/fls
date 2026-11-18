@@ -118,6 +118,82 @@ class OnlineInstallSchedulerRecoveryTests(unittest.TestCase):
                 self.assertEqual(recovered.status_code, 302)
                 self.assertEqual(get_online_install_job(install_id)["status"], "已完成")
 
+    def test_api_reload_reports_failure_then_recovers_without_reinstalling(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.models import load_tasks
+            from fls_manager.online_scripts.constants import get_online_install_job
+
+            install_id = self.partial_install(app, base_dir)
+            client = app.test_client()
+            with patch(
+                "fls_manager.routes.online_scripts.install.reload_scheduler",
+                side_effect=RuntimeError("scheduler unavailable"),
+            ) as reload_scheduler, patch(
+                "fls_manager.online_scripts.install.download_online_script_logged"
+            ) as download, patch(
+                "fls_manager.online_scripts.install.import_task_if_needed"
+            ) as importer:
+                failed = client.post(
+                    f"/api/online-scripts/install-reload/{install_id}",
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(failed.status_code, 503)
+                payload = failed.get_json()
+                self.assertFalse(payload["ok"])
+                self.assertTrue(payload["scheduler_reload_required"])
+                self.assertIn("scheduler unavailable", payload["msg"])
+                self.assertEqual(payload["reload_url"], f"/api/online-scripts/install-reload/{install_id}")
+                reload_scheduler.assert_called_once()
+                download.assert_not_called()
+                importer.assert_not_called()
+                self.assertTrue(get_online_install_job(install_id)["scheduler_reload_pending"])
+
+            with patch("fls_manager.routes.online_scripts.install.reload_scheduler") as reload_scheduler, patch(
+                "fls_manager.online_scripts.install.download_online_script_logged"
+            ) as download, patch("fls_manager.online_scripts.install.import_task_if_needed") as importer:
+                recovered = client.post(
+                    f"/api/online-scripts/install-reload/{install_id}",
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(recovered.status_code, 200)
+                self.assertTrue(recovered.get_json()["ok"])
+                reload_scheduler.assert_called_once()
+                download.assert_not_called()
+                importer.assert_not_called()
+                repeated = client.post(
+                    f"/api/online-scripts/install-reload/{install_id}",
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(repeated.status_code, 409)
+                self.assertFalse(repeated.get_json()["ok"])
+                reload_scheduler.assert_called_once()
+            self.assertFalse(get_online_install_job(install_id)["scheduler_reload_pending"])
+            self.assertEqual([task["name"] for task in load_tasks()], ["Daily"])
+
+    def test_api_reload_requires_csrf_and_rejects_invalid_or_running_records(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING
+
+            install_id = self.partial_install(app, base_dir)
+            client = app.test_client()
+            with client.session_transaction() as session:
+                session.update(token=TOKEN, token_expire_at=int(time.time()) + 3600,
+                               security_verified=True, csrf_token="api-reload-csrf")
+            with patch("fls_manager.routes.online_scripts.install.reload_scheduler") as reload_scheduler:
+                invalid = client.post(
+                    "/api/online-scripts/install-reload/not-an-id", headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(invalid.status_code, 400)
+                denied = client.post(f"/api/online-scripts/install-reload/{install_id}")
+                self.assertEqual(denied.status_code, 400)
+                ONLINE_INSTALL_RUNNING[install_id]["running"] = True
+                running = client.post(
+                    f"/api/online-scripts/install-reload/{install_id}",
+                    headers={"X-CSRF-Token": "api-reload-csrf"},
+                )
+                self.assertEqual(running.status_code, 409)
+                reload_scheduler.assert_not_called()
+
     def test_recovery_loads_saved_task_into_the_real_scheduler(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.models import load_tasks
@@ -296,6 +372,59 @@ setImmediate(() => {
  assert.doesNotMatch(elements.installRecoveryAction.innerHTML, /重试安装/);
  assert.equal(context.window.__FLS_ACTIVE_LOG_INTERVAL__, null);
 });
+"""], input=json.dumps({"script": script, "reader": reader, "payload": payload}), capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise recovery AJAX")
+    def test_polling_recovery_button_posts_json_reload_and_refreshes_status(self):
+        with isolated_app() as (app, base_dir):
+            install_id = self.partial_install(app, base_dir)
+            client = app.test_client()
+            headers = {"X-Token": TOKEN}
+            html = client.get(f"/online-scripts/log/{install_id}", headers=headers).get_data(as_text=True)
+            payload = client.get(f"/api/online-scripts/log/{install_id}", headers=headers).json
+            script = next(script for script in re.findall(r"<script>(.*?)</script>", html, re.S) if "async function loadLog()" in script)
+            source = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+            reader = source[source.index("async function flsReadJsonResponse("):source.index("async function flsReadTextResponse(")]
+            result = subprocess.run(["node", "-e", r"""
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+const button = {disabled: false};
+const form = {listeners: {}, querySelector: selector => selector === 'button' ? button : null,
+  addEventListener(name, handler) { this.listeners[name] = handler; }};
+const elements = Object.fromEntries(['installStatus', 'installError', 'installReturncode',
+ 'installStopAction', 'installPollError', 'log', 'flsLogNewTip']
+ .map(id => [id, {textContent: '', hidden: false, dataset: {}, style: {}}]));
+elements.installRecoveryAction = {textContent: '', hidden: false, dataset: {}, style: {}, innerHTML: '',
+  querySelector: selector => selector === 'form[data-api-action]' ? form : null};
+let calls = [];
+let responses = [input.payload, {ok: true, request_id: input.payload.request_id, status: '已完成'},
+  {running: false, status: '已完成', log: 'reloaded'}];
+const context = {
+ window: {innerHeight: 800, scrollY: 0, addEventListener() {}, scrollTo() {}},
+ document: {documentElement: {scrollHeight: 800}, getElementById: id => elements[id]},
+ fetch: async (url, options) => {
+   calls.push({url, options});
+   const value = responses.shift();
+   return {ok: true, status: 200, json: async () => value};
+ },
+ setInterval: () => 1, clearInterval() {}, flsGetCsrfToken: () => 'reload-csrf',
+};
+vm.createContext(context);
+vm.runInContext(input.reader + input.script, context);
+(async () => {
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(form.listeners.submit, 'recovery form should use the JSON action');
+  let prevented = false;
+  await form.listeners.submit({preventDefault: () => { prevented = true; }});
+  assert.equal(prevented, true);
+  assert.equal(calls[1].url, input.payload.recovery.api_action);
+  assert.equal(calls[1].options.method, 'POST');
+  assert.equal(calls[1].options.headers['X-CSRF-Token'], 'reload-csrf');
+  assert.equal(calls.length, 3);
+  assert.equal(elements.log.textContent, 'reloaded');
+})().catch(error => { console.error(error); process.exitCode = 1; });
 """], input=json.dumps({"script": script, "reader": reader, "payload": payload}), capture_output=True, text=True, timeout=5)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 

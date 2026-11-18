@@ -19,6 +19,7 @@ def _install_recovery(info):
         return {
             "available": True,
             "action": url_for("online_scripts.online_scripts_install_reload", install_id=info.get("id")),
+            "api_action": url_for("online_scripts.api_online_scripts_install_reload", install_id=info.get("id")),
             "label": "重新加载调度器",
         }
     if status not in RECOVERY_STATUSES:
@@ -319,11 +320,37 @@ async function loadLog(){{
                 const csrfInput = csrf ?
                     "<" + "input type=\\"hidden\\" name=\\"csrf_token\\" value=\\"" + escapeHtml(csrf) + "\\">" : "";
                 recoveryEl.innerHTML =
-                    "<" + "form class='inline-form' method='post' action='" + escapeHtml(recovery.action || "") + "'>" +
+                    "<" + "form class='inline-form' method='post' action='" + escapeHtml(recovery.action || "") + "' data-api-action='" + escapeHtml(recovery.api_action || "") + "'>" +
                     csrfInput +
                     "<button class='btn btn-primary' type='submit'>" +
                     escapeHtml(recovery.label || "重试安装") + "</button><" + "/form>";
                 recoveryEl.dataset.ready = "1";
+                const recoveryForm = typeof recoveryEl.querySelector === "function"
+                    ? recoveryEl.querySelector("form[data-api-action]") : null;
+                if(recoveryForm && recovery.api_action){{
+                    recoveryForm.addEventListener("submit", async function(event){{
+                        event.preventDefault();
+                        const button = recoveryForm.querySelector("button");
+                        if(button) button.disabled = true;
+                        try{{
+                            const headers = {{"X-Requested-With": "XMLHttpRequest"}};
+                            if(csrf) headers["X-CSRF-Token"] = csrf;
+                            const response = await fetch(recovery.api_action, {{
+                                method: "POST", headers, credentials: "same-origin",
+                            }});
+                            const result = await flsReadJsonResponse(response);
+                            if(!result || result.ok !== true) throw new Error(result && result.msg || "调度器恢复失败");
+                            await loadLog();
+                        }}catch(error){{
+                            const message = error && error.message ? error.message : String(error || "调度器恢复失败");
+                            if(pollError){{
+                                pollError.textContent = "调度器恢复失败：" + message + "。请稍后重试。";
+                                pollError.hidden = false;
+                            }}
+                            if(button) button.disabled = false;
+                        }}
+                    }});
+                }}
             }}else if(recoveryEl && !recovery.available){{
                 let html = recovery.reason ?
                     "<span class='help' style='color:#dc2626;'>" + escapeHtml(recovery.reason) + "</span>" : "";
