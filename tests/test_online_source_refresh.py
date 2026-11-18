@@ -147,6 +147,8 @@ class OnlineSourceRefreshTests(unittest.TestCase):
             ).get_data(as_text=True)
             self.assertIn("任务源暂时不可用", page)
             self.assertIn("/online-scripts/task-link/demo", page)
+            self.assertIn('class="inline-form fls-online-task-link-form"', page)
+            self.assertIn('data-script-id="demo"', page)
             self.assertIn('name="csrf_token"', page)
             self.assertIn('name="proxy_id"', page)
 
@@ -164,17 +166,20 @@ class OnlineSourceRefreshTests(unittest.TestCase):
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+const retryButton = {onclick: null, __flsOnlineTaskLinkBound: false};
+const retryForm = {querySelector: () => null, getAttribute: () => 'demo'};
+retryButton.form = retryForm;
 const elements = {
   onlineRefreshStatusCard: {style: {}},
   onlineRefreshStatusText: {innerHTML: ''},
-  onlineRefreshTaskLinkFailures: {innerHTML: ''},
+  onlineRefreshTaskLinkFailures: {innerHTML: '', querySelectorAll: () => [retryButton]},
   onlineRefreshBtn: {disabled: true, textContent: '正在同步中...'},
   onlineRefreshLogin: {hidden: true, href: ''},
 };
 const context = {
   window: {},
   location: {pathname: '/online-scripts', search: ''},
-  document: {getElementById: id => elements[id]},
+  document: {getElementById: id => elements[id], querySelectorAll: () => [], addEventListener: () => {}},
   fetch: async () => ({ok: true, status: 200, json: async () => ({
     running: false, status: '部分完成', message: '1 个外部任务源加载失败，请逐项重试', error: '',
     updated_at: 'now', log_file: '/tmp/refresh.log',
@@ -190,6 +195,8 @@ setImmediate(() => {
   assert.match(elements.onlineRefreshTaskLinkFailures.innerHTML, /task-link\/demo/);
   assert.match(elements.onlineRefreshTaskLinkFailures.innerHTML, /name='csrf_token'/);
   assert.match(elements.onlineRefreshTaskLinkFailures.innerHTML, /upstream timeout/);
+  assert.equal(typeof retryButton.onclick, 'function');
+  assert.equal(retryButton.__flsOnlineTaskLinkBound, true);
   assert.equal(elements.onlineRefreshBtn.disabled, false);
   console.log('partial refresh retry action passed');
 });

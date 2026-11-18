@@ -21,6 +21,7 @@ def main():
         import fls_manager.app as app_module
         from fls_manager import scheduler
         from fls_manager.online_scripts import source
+        from fls_manager.online_scripts.constants import update_online_refresh_state
         from fls_manager.routes.online_scripts import task_link
 
         item = {
@@ -53,6 +54,41 @@ def main():
             cached = source.load_online_script_cache()
             return jsonify(fail=fault["fail"], fetches=fault["fetches"], cached=cached)
 
+        @app.route("/api/fixture/online-refresh", methods=["POST"])
+        def refresh_fixture():
+            data = request.get_json() or {}
+            if data.get("clear"):
+                update_online_refresh_state(
+                    id="",
+                    running=False,
+                    status="",
+                    message="",
+                    error="",
+                    cache_published=False,
+                    task_link_failures=[],
+                    updated_at="",
+                    log_file="",
+                )
+                return jsonify(ok=True)
+            update_online_refresh_state(
+                id="browser-refresh",
+                running=False,
+                status="部分完成",
+                message="同步在线脚本源部分完成，请逐项重试",
+                error="",
+                cache_published=True,
+                task_link_failures=[{
+                    "script_id": item["id"],
+                    "name": item["name"],
+                    "task_link": item["task_link"],
+                    "proxy_id": "",
+                    "error": "fixture refresh task source unavailable",
+                }],
+                updated_at="now",
+                log_file="/tmp/browser-refresh.log",
+            )
+            return jsonify(ok=True)
+
         server = make_server("127.0.0.1", 0, app, threaded=True)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         try:
@@ -78,11 +114,13 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    const base=process.env.FLS_UI_BASE,headers={'X-Token':process.env.FLS_UI_TOKEN};
    const fixture=async data=>{const r=await page.request.post(base+'/api/fixture/task-link',{headers,data});assert.equal(r.status(),200);return r.json();};
    await fixture({reset:true,fail:true});
+   const clearRefresh=await page.request.post(base+'/api/fixture/online-refresh',{headers,data:{clear:true}});
+   assert.equal(clearRefresh.status(),200);
    await page.goto(base+'/login');
    await page.locator('[name="token"]').fill(process.env.FLS_UI_TOKEN);
    await page.locator('button[type="submit"]').click();
    await page.goto(base+'/online-scripts');
-   const form=page.locator('form[action="/online-scripts/task-link/browser-link"]');
+   const form=page.locator('#online-list form[action="/online-scripts/task-link/browser-link"]');
    const requestId=await form.locator('[name="request_id"]').inputValue();
    assert.match(requestId,/^[a-f0-9]{32}$/);
    await form.locator('button[type="submit"]').click();
@@ -101,6 +139,26 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    const state=await fixture({});
    assert.equal(state.fetches,2);
    assert.equal(state.cached[0].task_cron[0].name,'Browser task');
+
+   await fixture({reset:true,fail:true});
+   await page.goto(base+'/online-scripts');
+   const refreshFixture=await page.request.post(base+'/api/fixture/online-refresh',{headers,data:{}});
+   assert.equal(refreshFixture.status(),200);
+   await page.evaluate(async()=>{await updateOnlineRefreshStatus();});
+   const dynamicForm=page.locator('#onlineRefreshTaskLinkFailures form.fls-online-task-link-form');
+   assert.equal(await dynamicForm.count(),1);
+   const dynamicRequestId=await dynamicForm.locator('[name="request_id"]').inputValue();
+   assert.match(dynamicRequestId,/^[a-f0-9]{32}$/);
+   await dynamicForm.locator('button[type="submit"]').click();
+   const dynamicRetry=page.getByRole('button',{name:'继续原同步请求',exact:true});
+   await dynamicRetry.waitFor();
+   assert.equal(await dynamicRetry.locator('xpath=ancestor::form').locator('[name="request_id"]').inputValue(),dynamicRequestId);
+   assert.match(await page.locator('.content').textContent(),/fixture refresh task source unavailable/);
+   await fixture({fail:false});
+   await dynamicRetry.click();
+   await page.waitForFunction(()=>document.body.textContent.includes('外部任务源同步完成'));
+   const dynamicState=await fixture({});
+   assert.equal(dynamicState.fetches,2);
    assert.deepEqual(errors,[]);
    console.log('online task-link recovery passed '+viewport.width);
    await context.close();

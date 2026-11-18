@@ -62,7 +62,7 @@ def online_scripts_page():
             proxy_id = h(failure.get("proxy_id") or "")
             rows.append(
                 f'<div class="help" style="margin-top:6px;">{label}：{detail} '
-                f'<form class="inline-form" method="post" action="{h(action)}">'
+                f'<form class="inline-form fls-online-task-link-form" data-script-id="{h(script_id)}" method="post" action="{h(action)}">'
                 f'<input type="hidden" name="request_id" value="{uuid.uuid4().hex}">'
                 f'<input type="hidden" name="proxy_id" value="{proxy_id}">'
                 '<button class="btn btn-orange" type="submit">重新同步外部任务源</button>'
@@ -253,6 +253,9 @@ async function updateOnlineRefreshStatus(){{
                     "<input type='hidden' name='proxy_id' value='" + proxy + "'>" +
                     "<button class='btn btn-orange' type='submit'>重新同步外部任务源</button></form></div>";
             }}).join("");
+            if(window.__FLS_BIND_ONLINE_TASK_LINK_FORMS__){{
+                window.__FLS_BIND_ONLINE_TASK_LINK_FORMS__(failures);
+            }}
         }}
 
         if(json.running){{
@@ -522,13 +525,12 @@ async function submitTaskLinkForm(form, event){{
         }}
 }}
 
-if(!window.__FLS_TASK_LINK_RECOVERY_BOUND__ && document.addEventListener){{
-    window.__FLS_TASK_LINK_RECOVERY_BOUND__ = true;
-    document.addEventListener("submit", function(event){{
-        const form = event.target && event.target.closest ? event.target.closest(".fls-online-task-link-form") : null;
-        if(form) return submitTaskLinkForm(form, event);
-    }}, true);
-    document.querySelectorAll(".fls-online-task-link-form button[type='submit']").forEach(function(button){{
+function bindOnlineTaskLinkForms(root){{
+    const scope = root || document;
+    if(!scope || !scope.querySelectorAll) return;
+    scope.querySelectorAll(".fls-online-task-link-form button[type='submit']").forEach(function(button){{
+        if(button.__flsOnlineTaskLinkBound) return;
+        button.__flsOnlineTaskLinkBound = true;
         button.onclick = function(event){{
             event.preventDefault();
             const form = button.form || (button.closest ? button.closest(".fls-online-task-link-form") : null);
@@ -536,6 +538,17 @@ if(!window.__FLS_TASK_LINK_RECOVERY_BOUND__ && document.addEventListener){{
             return false;
         }};
     }});
+}}
+
+window.__FLS_BIND_ONLINE_TASK_LINK_FORMS__ = bindOnlineTaskLinkForms;
+
+if(!window.__FLS_TASK_LINK_RECOVERY_BOUND__ && document.addEventListener){{
+    window.__FLS_TASK_LINK_RECOVERY_BOUND__ = true;
+    document.addEventListener("submit", function(event){{
+        const form = event.target && event.target.closest ? event.target.closest(".fls-online-task-link-form") : null;
+        if(form) return submitTaskLinkForm(form, event);
+    }}, true);
+    bindOnlineTaskLinkForms(document);
 }}
 
 const pending = readPending();
