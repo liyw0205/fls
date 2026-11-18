@@ -376,6 +376,67 @@ const context = {
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise update log error recovery")
+    def test_update_log_modal_preserves_retry_and_login_actions_for_http_errors(self):
+        js = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+        start = js.index("async function flsOpenUpdateLogModal")
+        end = js.index("const FLS_UPDATE_NOTICE_CACHE_KEY", start)
+        modal = js[start:end]
+        result = subprocess.run(
+            ["node", "-e", r"""
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+class Node {
+  constructor(tag){ this.tagName=tag.toUpperCase(); this.children=[]; this.classList={remove(){}}; this.textContent=''; this.href=''; }
+  append(...items){ this.children.push(...items); }
+  appendChild(item){ this.children.push(item); return item; }
+  addEventListener(name, handler){ if(name === 'click') this.onclick = handler; }
+  setAttribute(){}
+}
+let opened = [];
+let retried = 0;
+const context = {
+  document: {createElement: tag => new Node(tag)},
+  location: {pathname:'/about', search:''},
+  flsOpenModalContent: (title, content, trigger) => { opened.push({title, content, trigger}); },
+  flsMarkButtonBusy: () => true,
+  flsRestoreButton: () => {},
+  flsReadTextResponse: async response => { const e = new Error('upstream diagnostic'); e.status = response.status; throw e; },
+  fetch: async () => ({status:503}),
+  DOMParser: function(){},
+};
+vm.createContext(context);
+vm.runInContext(input.modal, context);
+(async () => {
+  const openUpdateLogModal = context.flsOpenUpdateLogModal;
+  context.flsOpenUpdateLogModal = async () => { retried += 1; };
+  const trigger = new Node('button');
+  await openUpdateLogModal({currentTarget:trigger});
+  assert.equal(opened.length, 1);
+  assert.equal(opened[0].title, '更新日志不可用');
+  const content = opened[0].content;
+  assert.match(content.textContent, /HTTP 503/);
+  const actions = content.children[1];
+  assert.equal(actions.children.length, 1);
+  await actions.children[0].onclick();
+  assert.equal(retried, 1);
+
+  opened = [];
+  context.flsReadTextResponse = async response => { const e = new Error('login expired'); e.status = 401; throw e; };
+  await openUpdateLogModal({currentTarget:trigger});
+  assert.equal(opened[0].content.children[1].children[0].textContent, '重新登录');
+  assert.match(opened[0].content.children[1].children[0].href, /\/login\?next=/);
+  console.log('update log error recovery passed');
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"""],
+            input=json.dumps({"modal": modal}),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_update_info_waits_for_the_current_cache_refresh_once(self):
         with isolated_app() as app:
             with patch("fls_manager.routes.about.version.update_log_state") as update_state:

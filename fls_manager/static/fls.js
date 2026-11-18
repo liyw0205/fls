@@ -515,46 +515,78 @@ async function flsOpenUpdateLogModal(event){
             headers:{"X-Requested-With":"XMLHttpRequest"},
             credentials:"same-origin"
         });
+        const aboutHtml = await flsReadTextResponse(response);
+        const about = new DOMParser().parseFromString(aboutHtml, "text/html");
+        const versionCard = about.querySelector("#about-version");
+        const updates = about.querySelector("#about-updates");
+        if(!versionCard || !updates){
+            const error = new Error("更新日志内容不可用");
+            flsRenderUpdateLogFailure(trigger, error);
+            return;
+        }
+
+        const content = document.createElement("div");
+        content.className = "fls-update-page-modal-content";
+        const versionCopy = versionCard.cloneNode(true);
+        versionCopy.removeAttribute("id");
+        content.appendChild(versionCopy);
+
+        const updateCard = document.createElement("section");
+        updateCard.className = updates.className;
+        updateCard.classList.remove("fls-update-log-fold");
+        const summary = updates.querySelector("summary");
+        if(summary){
+            const heading = document.createElement("div");
+            heading.className = "fls-update-modal-heading";
+            while(summary.firstChild) heading.appendChild(summary.firstChild);
+            updateCard.appendChild(heading);
+        }
+        Array.from(updates.children).forEach(function(child){
+            if(child !== summary) updateCard.appendChild(child.cloneNode(true));
+        });
+        content.appendChild(updateCard);
+
+        flsOpenModalContent("当前版本 / 更新日志", content, trigger);
+        return;
     } catch(e) {
-        flsToast("无法读取更新日志", "error");
+        flsRenderUpdateLogFailure(trigger, e);
         return;
     }
+}
 
-    if(!response.ok){
-        flsToast("无法读取更新日志", "error");
-        return;
-    }
-
-    const about = new DOMParser().parseFromString(await response.text(), "text/html");
-    const versionCard = about.querySelector("#about-version");
-    const updates = about.querySelector("#about-updates");
-    if(!versionCard || !updates){
-        flsToast("更新日志内容不可用", "error");
-        return;
-    }
-
+function flsRenderUpdateLogFailure(trigger, error){
+    error = error || {};
+    const status = Number(error.status || 0);
+    const detail = String(error.message || "无法读取更新日志").slice(0, 600);
     const content = document.createElement("div");
-    content.className = "fls-update-page-modal-content";
-    const versionCopy = versionCard.cloneNode(true);
-    versionCopy.removeAttribute("id");
-    content.appendChild(versionCopy);
+    content.className = "help fls-update-log-error";
+    content.setAttribute("role", "alert");
+    content.textContent = "更新日志读取失败" + (status ? "（HTTP " + status + "）" : "") + "：" + detail;
 
-    const updateCard = document.createElement("section");
-    updateCard.className = updates.className;
-    updateCard.classList.remove("fls-update-log-fold");
-    const summary = updates.querySelector("summary");
-    if(summary){
-        const heading = document.createElement("div");
-        heading.className = "fls-update-modal-heading";
-        while(summary.firstChild) heading.appendChild(summary.firstChild);
-        updateCard.appendChild(heading);
+    const actions = document.createElement("div");
+    actions.className = "action-row";
+    if(status === 401 || status === 403){
+        const login = document.createElement("a");
+        login.className = "btn btn-gray";
+        login.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
+        login.textContent = "重新登录";
+        actions.appendChild(login);
+    } else {
+        const retry = document.createElement("button");
+        retry.type = "button";
+        retry.className = "btn btn-primary";
+        retry.textContent = "重新读取更新日志";
+        retry.addEventListener("click", function(){
+            if(!flsMarkButtonBusy(retry)) return;
+            flsOpenUpdateLogModal({currentTarget:trigger}).finally(function(){
+                flsRestoreButton(retry);
+            });
+        });
+        actions.appendChild(retry);
     }
-    Array.from(updates.children).forEach(function(child){
-        if(child !== summary) updateCard.appendChild(child.cloneNode(true));
-    });
-    content.appendChild(updateCard);
-
-    flsOpenModalContent("当前版本 / 更新日志", content, trigger);
+    content.appendChild(document.createElement("br"));
+    content.appendChild(actions);
+    flsOpenModalContent("更新日志不可用", content, trigger);
 }
 
 const FLS_UPDATE_NOTICE_CACHE_KEY = "fls-update-notice-20260919-5";
