@@ -53,6 +53,27 @@ def main():
 
         install.download_online_script_logged = download
         app = create_app()
+        retry_parent_id = "browser-retry-parent"
+        retry_child_id = "browser-retry-child"
+        retry_parent_log = base_dir / "log" / f"deps-install-demo-{retry_parent_id}.log"
+        retry_child_log = base_dir / "log" / f"deps-install-demo-{retry_child_id}.log"
+        retry_parent_log.parent.mkdir(parents=True, exist_ok=True)
+        retry_parent_log.write_text("parent attempt failed\n", encoding="utf-8")
+        retry_child_log.write_text("retry attempt failed\n", encoding="utf-8")
+        persist_install_job({
+            "id": retry_parent_id, "request_id": retry_parent_id, "kind": "dependency",
+            "package": "demo", "log_file": str(retry_parent_log), "running": False,
+            "finished": True, "status": "failed", "returncode": 1,
+            "error": "parent attempt failed", "start_time": 1,
+            "updated_at": "2026-11-18 20:10:00",
+        })
+        persist_install_job({
+            "id": retry_child_id, "request_id": retry_child_id, "kind": "dependency",
+            "retry_of": retry_parent_id, "package": "demo", "log_file": str(retry_child_log),
+            "running": False, "finished": True, "status": "failed", "returncode": 2,
+            "error": "retry attempt failed", "start_time": 2,
+            "updated_at": "2026-11-18 20:11:00",
+        })
         app_module.dispatch_frontend_open_event = lambda: None
         fault = {"status": 0}
         dependency_processes = []
@@ -172,6 +193,26 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
     }
    };
    await fixture({reset:true});await page.goto(base+'/login');await login();
+   await page.goto(base+'/deps/install-history?kind=dependency');
+   const retryParent=page.locator('tr').filter({hasText:'browser-retry-parent'});
+   assert.equal((await retryParent.locator('td').nth(7).textContent()).trim(),'1');
+   const retryLink=retryParent.getByRole('link',{name:/后续重试.*browser-retry-child/});
+   await retryLink.waitFor();
+   assert.match(await retryLink.getAttribute('href'),/browser-retry-child\?back=\/deps\/install-history$/);
+   await retryLink.click();
+   await page.waitForURL('**/deps/install-log/browser-retry-child?back=/deps/install-history');
+   await page.waitForFunction(()=>document.querySelector('#installStatus').textContent==='安装失败');
+   assert.ok((await page.locator('#log').textContent()).includes('retry attempt failed'));
+   assert.ok(await page.locator('.install-retry-form [name="request_id"]').inputValue());
+   await page.goto(base+'/deps/install-history?kind=dependency');
+   const retryChild=page.locator('tr').filter({hasText:'browser-retry-child'});
+   const parentLink=retryChild.getByRole('link',{name:/原安装.*browser-retry-parent/});
+   await parentLink.click();
+   await page.waitForURL('**/deps/install-log/browser-retry-parent?back=/deps/install-history');
+   await page.waitForFunction(()=>document.querySelector('#installStatus').textContent==='安装失败');
+   assert.equal(await page.locator('.install-retry-form').count(),0);
+   await page.getByRole('link',{name:'查看已提交重试'}).click();
+   await page.waitForURL('**/deps/install-log/browser-retry-child?back=/deps/install-history');
    const before=(await state()).downloads;
    const csrf=await page.evaluate(()=>flsGetCsrfToken());
    const installRequestId=require('node:crypto').randomBytes(16).toString('hex');

@@ -441,6 +441,31 @@ def _retry_install_info(original, retry_id):
     return info
 
 
+def _install_retry_pair_matches(parent, child):
+    return bool(
+        isinstance(parent, dict)
+        and isinstance(child, dict)
+        and parent.get("id") != child.get("id")
+        and parent.get("retried_by") == child.get("id")
+        and child.get("retry_of") == parent.get("id")
+        and parent.get("kind") == child.get("kind")
+        and parent.get("package") == child.get("package")
+    )
+
+
+def _retry_parent_diagnostic(info):
+    parent_id = str(info.get("retry_of") or "")
+    if not parent_id:
+        return ""
+    try:
+        parent = get_install_job(parent_id, DEPS_RUNNING)
+    except Exception as exc:
+        return f"原重试关联记录 {parent_id} 无法读取：{exc}"
+    if not _install_retry_pair_matches(parent, info):
+        return f"原重试关联记录 {parent_id} 缺失或不匹配，不能安全启动后续重试。"
+    return ""
+
+
 @bp.route("/deps/install-cancel/<install_id>", methods=["POST"])
 def deps_install_cancel(install_id):
     try:
@@ -496,6 +521,9 @@ def _retry_install_lookup(install_id, retry_id):
         return {"ok": False, "request_id": retry_id, "msg": "原安装记录不存在，未启动重试。"}, 404
     child_id = str(original.get("retried_by") or "")
     if not child_id:
+        relation_error = _retry_parent_diagnostic(original)
+        if relation_error:
+            return {"ok": False, "request_id": retry_id, "msg": relation_error}, 409
         if original.get("running"):
             return {
                 "ok": True, "request_id": retry_id, "original_id": install_id,
@@ -507,7 +535,7 @@ def _retry_install_lookup(install_id, retry_id):
             "retry_available": original.get("status") in ("failed", "unknown", "cancelled"),
         }, 200
     child = get_install_job(child_id, DEPS_RUNNING)
-    if not child or child.get("retry_of") != install_id:
+    if not _install_retry_pair_matches(original, child):
         return {"ok": False, "request_id": retry_id, "msg": "原安装重试回执不可用，请查看安装历史。"}, 500
     if retry_id != child_id:
         return {
@@ -546,7 +574,7 @@ def _retry_install_start(install_id, retry_id):
     linked = str(original.get("retried_by") or "")
     if linked:
         child = get_install_job(linked, DEPS_RUNNING)
-        if child and child.get("retry_of") == install_id and retry_id == linked:
+        if _install_retry_pair_matches(original, child) and retry_id == linked:
             return _retry_install_result(linked), 200
         if child and child.get("retry_of") == install_id:
             return {
@@ -554,6 +582,9 @@ def _retry_install_start(install_id, retry_id):
                 "msg": "原安装已经提交其他重试，请查询该重试记录。",
             }, 409
         return {"ok": False, "request_id": retry_id, "msg": "原安装已经提交重试，请查询原重试记录。", "install_id": linked}, 409
+    relation_error = _retry_parent_diagnostic(original)
+    if relation_error:
+        return {"ok": False, "request_id": retry_id, "msg": relation_error}, 409
     if original.get("running"):
         return {"ok": False, "request_id": retry_id, "msg": "原安装仍在运行，请等待结果后重试。"}, 409
     if original.get("status") not in ("failed", "unknown", "cancelled"):
@@ -1093,16 +1124,37 @@ def deps_install_log(install_id):
     log_file = info.get("log_file") if info else (context or {}).get("log_file", "")
     result = deps_install_result(install_id)
     recovery_action = ""
+    recovery_diagnostic = ""
     if not result.get("running") and result.get("status") in (
         "unknown", "missing", "failed", "start_failed", "cancelled"
     ):
         recovery_context = dict(context or info or {})
         if info:
             recovery_context["id"] = install_id
-        recovery_action = install_recovery_action(
-            recovery_context
-            or {"kind": info.get("kind", "dependency") if info else "", "package": package}
-        )
+            if info.get("retried_by"):
+                child_id = str(info.get("retried_by") or "")
+                try:
+                    child = get_install_job(child_id, DEPS_RUNNING)
+                except Exception as exc:
+                    child = None
+                    recovery_diagnostic = f"后续重试记录 {child_id} 无法读取：{exc}"
+                if not recovery_diagnostic:
+                    if _install_retry_pair_matches(info, child):
+                        recovery_action = (
+                            f'<a class="btn btn-orange" href="{url_for("deps.deps_install_log", install_id=child_id, back="/deps/install-history")}">'
+                            "查看已提交重试"
+                            "</a>"
+                        )
+                    else:
+                        recovery_diagnostic = f"后续重试记录 {child_id} 缺失或不匹配，不能安全恢复此重试链。"
+            else:
+                recovery_diagnostic = _retry_parent_diagnostic(info)
+        if not recovery_diagnostic:
+            if not recovery_action:
+                recovery_action = install_recovery_action(
+                    recovery_context
+                    or {"kind": info.get("kind", "dependency") if info else "", "package": package}
+                )
     cancel_action = ""
     if info and info.get("cancel_request_id"):
         cancel_action = (
@@ -1143,6 +1195,7 @@ def deps_install_log(install_id):
         状态：<b id="installStatus" role="status" aria-live="polite">{h(result["status_label"])}</b><br>
         退出码：<span id="installReturncode">{h(result["returncode"] if result["returncode"] is not None else "-")}</span><br>
         日志文件：{h(log_file or "无法定位日志")}
+        {f'<div class="notice red" role="alert">{h(recovery_diagnostic)}</div>' if recovery_diagnostic else ''}
         <div id="installError" role="status" aria-live="polite"{'' if result["error"] else ' hidden'}>{h(result["error"])}</div>
 """,
         actions_html=f"""
@@ -1559,7 +1612,7 @@ def api_deps_install_history():
         return jsonify(ok=False, msg=str(exc)), 400
     except Exception as exc:
         return jsonify(ok=False, msg=f"安装历史无法读取：{exc}"), 500
-    return jsonify(ok=True, items=[_install_history_payload(info) for info in items])
+    return jsonify(ok=True, items=_install_history_payloads(items))
 
 
 def _list_install_history(limit, kind):
@@ -1576,7 +1629,7 @@ def _list_install_history(limit, kind):
     return list_install_jobs(limit, kind, DEPS_RUNNING)
 
 
-def _install_history_payload(info):
+def _install_history_payload(info, history_by_id):
     status = str(info.get("status") or "unknown")
     cancel_status = str(info.get("cancel_status") or "")
     status_labels = {
@@ -1595,14 +1648,61 @@ def _install_history_payload(info):
         and status in ("failed", "unknown", "cancelled")
         and not info.get("retried_by")
     )
+    relations = []
+    relation_errors = []
+    for field, expected_field, label in (
+        ("retry_of", "retried_by", "原安装"),
+        ("retried_by", "retry_of", "后续重试"),
+    ):
+        linked_id = str(info.get(field) or "")
+        if not linked_id:
+            continue
+        related = history_by_id.get(linked_id)
+        if related is None:
+            try:
+                related = get_install_job(linked_id, DEPS_RUNNING)
+            except Exception as exc:
+                relation_errors.append(f"关联记录 {linked_id} 无法读取：{exc}")
+                continue
+        if (
+            not related
+            or related.get(expected_field) != info.get("id")
+            or related.get("kind") != info.get("kind")
+            or related.get("package") != info.get("package")
+        ):
+            relation_errors.append(f"关联记录 {linked_id} 缺失或不匹配，不能安全恢复此重试链。")
+            continue
+        relations.append({
+            "relation": field,
+            "label": label,
+            "id": linked_id,
+            "status": related.get("status") or "unknown",
+            "status_label": status_labels.get(related.get("status"), "结果未知"),
+            "returncode": related.get("returncode"),
+            "error": str(related.get("cancel_error") or related.get("error") or ""),
+            "log_url": url_for(
+                "deps.deps_install_log", install_id=linked_id, back="/deps/install-history",
+            ),
+        })
+    diagnostic = str(info.get("cancel_error") or info.get("error") or "")
+    relation_diagnostic = "；".join(relation_errors)
+    if relation_diagnostic:
+        diagnostic = "；".join(filter(None, (diagnostic, relation_diagnostic)))
     return {
         **info,
         "status_label": status_labels.get(status, "结果未知"),
         "cancel_status_label": cancel_status_label,
-        "diagnostic": str(info.get("cancel_error") or info.get("error") or ""),
-        "recovery_available": retry_available,
+        "diagnostic": diagnostic,
+        "recovery_available": retry_available and not relation_errors,
+        "retry_relations": relations,
+        "retry_relation_diagnostic": relation_diagnostic,
         "log_url": url_for("deps.deps_install_log", install_id=info["id"], back="/deps"),
     }
+
+
+def _install_history_payloads(items):
+    history_by_id = {str(info.get("id") or ""): info for info in items}
+    return [_install_history_payload(info, history_by_id) for info in items]
 
 
 @bp.route("/deps/install-history")
@@ -1623,7 +1723,7 @@ def deps_install_history():
             actions_html='<a class="btn btn-primary" href="/deps/install-history">重新读取</a><a class="btn btn-gray" href="/deps">返回依赖管理</a>',
         )
         return layout("安装历史", "deps", body), 500
-    items = [_install_history_payload(info) for info in items]
+    items = _install_history_payloads(items)
     rows = []
     for info in items:
         install_id = h(info.get("id") or "")
@@ -1631,7 +1731,15 @@ def deps_install_history():
         status = h(info.get("status_label") or "结果未知")
         cancel_status = h(info.get("cancel_status_label") or "-")
         diagnostic = h(str(info.get("diagnostic") or "")[:400] or "-")
+        returncode = h(info.get("returncode") if info.get("returncode") is not None else "-")
         log_label = "查看日志与恢复" if info.get("recovery_available") else "查看安装日志"
+        relation_links = []
+        for relation in info.get("retry_relations") or []:
+            relation_links.append(
+                f'<a href="{h(relation["log_url"])}">{h(relation["label"])} '
+                f'<code>{h(relation["id"])}</code>（{h(relation["status_label"])}）</a>'
+            )
+        relation_cell = "<br>".join(relation_links) or h(info.get("retry_relation_diagnostic") or "-")
         rows.append(
             "<tr>"
             f"<td><code>{install_id}</code></td>"
@@ -1639,15 +1747,17 @@ def deps_install_history():
             f"<td>{h(info.get('package') or '-')}</td>"
             f"<td>{status}</td>"
             f"<td>{cancel_status}</td>"
+            f"<td>{relation_cell}</td>"
             f"<td>{diagnostic}</td>"
+            f"<td>{returncode}</td>"
             f"<td>{h(info.get('updated_at') or '-')}</td>"
             f'<td><a class="btn btn-blue" href="{h(info.get("log_url") or "/deps/install-log/" + install_id)}">{log_label}</a></td>'
             "</tr>"
         )
     table = (
         '<div class="table-wrap"><table><thead><tr><th>安装 ID</th><th>类型</th><th>包/运行时</th>'
-        '<th>状态</th><th>取消状态</th><th>诊断</th><th>更新时间</th><th>操作</th></tr></thead><tbody>'
-        + ("".join(rows) or '<tr><td colspan="8">暂无安装历史</td></tr>')
+        '<th>状态</th><th>取消状态</th><th>重试关联</th><th>诊断</th><th>退出码</th><th>更新时间</th><th>操作</th></tr></thead><tbody>'
+        + ("".join(rows) or '<tr><td colspan="10">暂无安装历史</td></tr>')
         + "</tbody></table></div>"
     )
     body = page_header_card(

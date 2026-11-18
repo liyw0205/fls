@@ -970,6 +970,195 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
             persisted = json.loads(INSTALL_JOBS_FILE.read_text(encoding="utf-8"))
             self.assertTrue(persisted[info["id"]]["running"])
 
+    def test_install_history_exposes_verified_retry_parent_and_child_links(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.install_records import persist_install_job
+
+            parent_id = "history-retry-parent"
+            child_id = "history-retry-child"
+            parent_log = base_dir / "log" / f"deps-install-demo-{parent_id}.log"
+            child_log = base_dir / "log" / f"deps-install-demo-{child_id}.log"
+            parent_log.parent.mkdir(parents=True, exist_ok=True)
+            parent_log.write_text("parent failure\n", encoding="utf-8")
+            child_log.write_text("retry failure\n", encoding="utf-8")
+            persist_install_job({
+                "id": parent_id, "request_id": parent_id, "kind": "dependency",
+                "package": "demo", "log_file": str(parent_log), "running": False,
+                "finished": True, "status": "failed", "returncode": 1,
+                "error": "parent failed", "start_time": 1, "updated_at": "2026-11-18 20:00:00",
+            })
+            persist_install_job({
+                "id": child_id, "request_id": child_id, "kind": "dependency",
+                "retry_of": parent_id, "package": "demo", "log_file": str(child_log),
+                "running": False, "finished": True, "status": "failed", "returncode": 2,
+                "error": "retry failed", "start_time": 2, "updated_at": "2026-11-18 20:01:00",
+            })
+            client = app.test_client()
+            limited = client.get(
+                "/api/deps/install-history?kind=dependency&limit=1", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(limited.status_code, 200)
+            parent = limited.json["items"][0]
+            self.assertEqual(parent["id"], parent_id)
+            self.assertEqual(parent["retry_relations"][0]["relation"], "retried_by")
+            self.assertEqual(parent["retry_relations"][0]["id"], child_id)
+            self.assertEqual(parent["retry_relations"][0]["status_label"], "安装失败")
+            self.assertFalse(parent["recovery_available"])
+
+            complete = client.get(
+                "/api/deps/install-history?kind=dependency&limit=10", headers={"X-Token": TOKEN},
+            )
+            items = {item["id"]: item for item in complete.json["items"]}
+            parent = items[parent_id]
+            child = items[child_id]
+            self.assertEqual(parent["retry_relations"][0]["relation"], "retried_by")
+            self.assertEqual(parent["retry_relations"][0]["id"], child_id)
+            self.assertFalse(parent["recovery_available"])
+            self.assertEqual(child["retry_relations"][0]["id"], parent_id)
+            page = client.get("/deps/install-history?kind=dependency", headers={"X-Token": TOKEN})
+            body = page.get_data(as_text=True)
+            self.assertIn(f"/deps/install-log/{parent_id}?back=/deps/install-history", body)
+            self.assertIn(f"/deps/install-log/{child_id}?back=/deps/install-history", body)
+            self.assertIn("后续重试", body)
+            self.assertIn("原安装", body)
+            self.assertIn("<th>退出码</th>", body)
+            self.assertIn("<td>2</td>", body)
+            parent_log_page = client.get(
+                f"/deps/install-log/{parent_id}", headers={"X-Token": TOKEN},
+            )
+            parent_log_body = parent_log_page.get_data(as_text=True)
+            self.assertNotIn('<form class="inline-form install-retry-form"', parent_log_body)
+            self.assertIn("查看已提交重试", parent_log_body)
+            self.assertIn(f"/deps/install-log/{child_id}?back=/deps/install-history", parent_log_body)
+            child_log_page = client.get(
+                f"/deps/install-log/{child_id}", headers={"X-Token": TOKEN},
+            )
+            self.assertIn('<form class="inline-form install-retry-form"', child_log_page.get_data(as_text=True))
+
+    def test_install_history_broken_retry_links_are_diagnostic_and_not_retryable(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.install_records import INSTALL_JOBS_FILE, persist_install_job
+
+            parent_id = "history-broken-parent"
+            log_file = base_dir / "log" / f"deps-install-demo-{parent_id}.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            persist_install_job({
+                "id": parent_id, "request_id": parent_id, "kind": "dependency",
+                "package": "demo", "log_file": str(log_file), "running": False,
+                "finished": True, "status": "failed", "returncode": 1,
+                "error": "original failed", "retried_by": "missing-retry-child",
+                "start_time": 1, "updated_at": "2026-11-18 20:02:00",
+            })
+            client = app.test_client()
+            item = client.get(
+                "/api/deps/install-history", headers={"X-Token": TOKEN},
+            ).json["items"][0]
+            self.assertFalse(item["recovery_available"])
+            self.assertEqual(item["retry_relations"], [])
+            self.assertIn("缺失或不匹配", item["retry_relation_diagnostic"])
+            page = client.get("/deps/install-history", headers={"X-Token": TOKEN})
+            self.assertIn("missing-retry-child", page.get_data(as_text=True))
+
+            with patch("fls_manager.routes.deps.subprocess.Popen") as popen:
+                retry = client.post(
+                    f"/api/deps/install-retry/{parent_id}",
+                    json={"request_id": "history-repair-attempt"}, headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(retry.status_code, 409)
+            popen.assert_not_called()
+
+            records = json.loads(INSTALL_JOBS_FILE.read_text(encoding="utf-8"))
+            records["other-retry-parent"] = {
+                "id": "other-retry-parent", "request_id": "other-retry-parent",
+                "kind": "dependency", "package": "demo",
+                "log_file": str(base_dir / "log" / "other.log"), "running": False,
+                "status": "failed", "returncode": 1, "error": "other failure",
+                "updated_at": "2026-11-18 20:03:00", "retry_of": "", "retried_by": "mismatched-child",
+            }
+            records["mismatched-child"] = {
+                "id": "mismatched-child", "request_id": "mismatched-child",
+                "kind": "dependency", "package": "demo",
+                "log_file": str(base_dir / "log" / "child.log"), "running": False,
+                "status": "failed", "returncode": 2, "error": "child failure",
+                "updated_at": "2026-11-18 20:04:00", "retry_of": "other-retry-parent", "retried_by": "",
+            }
+            records[parent_id]["retried_by"] = "mismatched-child"
+            INSTALL_JOBS_FILE.write_text(json.dumps(records), encoding="utf-8")
+            mismatched = client.get(
+                "/api/deps/install-history?limit=100", headers={"X-Token": TOKEN},
+            )
+            primary = next(info for info in mismatched.json["items"] if info["id"] == parent_id)
+            self.assertEqual(primary["retry_relations"], [])
+            self.assertIn("缺失或不匹配", primary["retry_relation_diagnostic"])
+            self.assertFalse(primary["recovery_available"])
+            with patch("fls_manager.routes.deps.subprocess.Popen") as popen:
+                mismatch_retry = client.post(
+                    f"/api/deps/install-retry/{parent_id}",
+                    json={"request_id": "history-mismatch-retry"}, headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(mismatch_retry.status_code, 409)
+            popen.assert_not_called()
+
+    def test_pruned_retry_parent_blocks_history_and_log_retry_actions(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.install_records import INSTALL_JOBS_FILE
+
+            child_id = "orphaned-retry-child"
+            log_file = base_dir / "log" / f"deps-install-demo-{child_id}.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_file.write_text("orphaned retry failed\n", encoding="utf-8")
+            records = {
+                child_id: {
+                    "id": child_id, "request_id": child_id, "kind": "dependency",
+                    "package": "demo", "log_file": str(log_file), "running": False,
+                    "status": "failed", "returncode": 3, "error": "child failed",
+                    "updated_at": "2026-11-18 21:00:00", "retry_of": "pruned-retry-parent",
+                    "retried_by": "", "cancel_request_id": "", "cancel_status": "",
+                    "cancel_error": "",
+                },
+            }
+            for index in range(99):
+                install_id = f"retained-history-{index:03d}"
+                records[install_id] = {
+                    "id": install_id, "request_id": install_id, "kind": "dependency",
+                    "package": "demo", "log_file": str(base_dir / "log" / f"{install_id}.log"),
+                    "running": False, "status": "succeeded", "returncode": 0,
+                    "error": "", "updated_at": "2026-11-18 20:00:00",
+                    "retry_of": "", "retried_by": "", "cancel_request_id": "",
+                    "cancel_status": "", "cancel_error": "",
+                }
+            INSTALL_JOBS_FILE.write_text(json.dumps(records), encoding="utf-8")
+            client = app.test_client()
+            history = client.get(
+                "/api/deps/install-history?limit=100", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(history.status_code, 200)
+            orphan = next(item for item in history.json["items"] if item["id"] == child_id)
+            self.assertFalse(orphan["recovery_available"])
+            self.assertIn("pruned-retry-parent", orphan["retry_relation_diagnostic"])
+            self.assertIn("缺失或不匹配", orphan["retry_relation_diagnostic"])
+
+            log_page = client.get(
+                f"/deps/install-log/{child_id}?back=%2Fdeps%2Finstall-history",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(log_page.status_code, 200)
+            log_body = log_page.get_data(as_text=True)
+            self.assertNotIn('<form class="inline-form install-retry-form"', log_body)
+            self.assertIn("不能安全启动后续重试", log_body)
+            retry_status = client.get(
+                f"/api/deps/install-retry/{child_id}/orphan-retry-request",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(retry_status.status_code, 409)
+            with patch("fls_manager.routes.deps.subprocess.Popen") as popen:
+                retry = client.post(
+                    f"/api/deps/install-retry/{child_id}",
+                    json={"request_id": "orphan-retry-request"}, headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(retry.status_code, 409)
+            popen.assert_not_called()
+
     def test_install_log_rejects_outside_and_symlink_paths_without_reading_them(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.install_records import INSTALL_JOBS_FILE
