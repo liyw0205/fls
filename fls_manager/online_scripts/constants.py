@@ -20,6 +20,7 @@ ONLINE_INSTALL_LOCK = threading.RLock()
 ONLINE_INSTALL_LIMIT = 100
 ONLINE_INSTALL_TIMEOUT_SECONDS = 1800
 ONLINE_REFRESH_STATE_FILE = DATA_DIR / "online_script_refresh.json"
+ONLINE_REFRESH_HISTORY_FILE = DATA_DIR / "online_script_refresh_requests.json"
 ONLINE_REFRESH_LOCK = threading.RLock()
 ONLINE_TASK_IMPORT_LOCK = threading.RLock()
 
@@ -199,21 +200,59 @@ def _read_online_refresh_file():
         return _validate_refresh_snapshot(data)
 
 
+def _read_online_refresh_history_file():
+    try:
+        raw = ONLINE_REFRESH_HISTORY_FILE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"在线脚本源刷新历史损坏，未覆盖原文件：{exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError("在线脚本源刷新历史损坏，未覆盖原文件：根节点必须是对象")
+    for request_id, value in data.items():
+        if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
+            raise RuntimeError("在线脚本源刷新历史标识损坏，未覆盖原文件")
+        if not isinstance(value, dict) or value.get("request_id") != request_id:
+            raise RuntimeError("在线脚本源刷新历史标识不一致，未覆盖原文件")
+        _validate_refresh_snapshot(value)
+    return data
+
+
 def persist_online_refresh(info):
     snapshot = _validate_refresh_snapshot(info)
     with storage_transaction():
         if ONLINE_REFRESH_STATE_FILE.is_symlink():
             raise RuntimeError("在线脚本源同步状态文件不能是符号链接")
-        _read_online_refresh_file()
+        if ONLINE_REFRESH_HISTORY_FILE.is_symlink():
+            raise RuntimeError("在线脚本源刷新历史不能是符号链接")
+        previous_snapshot = _read_online_refresh_file()
+        history = _read_online_refresh_history_file()
         ONLINE_REFRESH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         temp = ONLINE_REFRESH_STATE_FILE.with_name(
             f".{ONLINE_REFRESH_STATE_FILE.name}.{threading.get_ident()}.tmp"
         )
+        history_temp = ONLINE_REFRESH_HISTORY_FILE.with_name(
+            f".{ONLINE_REFRESH_HISTORY_FILE.name}.{threading.get_ident()}.tmp"
+        )
         try:
             temp.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
             os.replace(temp, ONLINE_REFRESH_STATE_FILE)
+            for candidate in (previous_snapshot, snapshot):
+                if candidate.get("request_id"):
+                    history[candidate["request_id"]] = candidate
+            if snapshot["request_id"]:
+                history = dict(sorted(
+                    history.items(),
+                    key=lambda pair: str(pair[1].get("updated_at") or ""),
+                    reverse=True,
+                )[:200])
+            history_temp.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(history_temp, ONLINE_REFRESH_HISTORY_FILE)
         finally:
             temp.unlink(missing_ok=True)
+            history_temp.unlink(missing_ok=True)
 
 
 def update_online_refresh_state(**updates):
@@ -249,6 +288,14 @@ def get_online_refresh_state():
         return current
 
 
+def get_online_refresh_request(request_id):
+    if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
+        return None
+    with ONLINE_REFRESH_LOCK, storage_transaction():
+        value = _read_online_refresh_history_file().get(request_id)
+        return dict(value) if isinstance(value, dict) else None
+
+
 def reserve_online_refresh(proxy_id="", request_id=""):
     with ONLINE_REFRESH_LOCK:
         current = get_online_refresh_state()
@@ -265,6 +312,19 @@ def reserve_online_refresh(proxy_id="", request_id=""):
                 return {"_replay": True, **dict(current)}
             if current.get("status") == "结果未知" or current.get("cache_published"):
                 return {"_unknown": True, **dict(current)}
+        else:
+            history = _read_online_refresh_history_file()
+            previous_request = history.get(request_id)
+            if previous_request:
+                if str(previous_request.get("proxy_id") or "") != str(proxy_id or ""):
+                    return {"_binding_conflict": True, **dict(previous_request)}
+                if previous_request.get("status") in ("已完成", "部分完成"):
+                    return {"_replay": True, **dict(previous_request)}
+                return {
+                    "_unknown": True,
+                    **dict(previous_request),
+                    "error": previous_request.get("error") or "原刷新请求已有持久化记录，请先查询原日志后再创建新的刷新请求",
+                }
         previous = dict(ONLINE_REFRESH_STATE)
         info = {
             "id": uuid.uuid4().hex,

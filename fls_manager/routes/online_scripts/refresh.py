@@ -5,6 +5,7 @@ from ._common import *
 from ...online_scripts.constants import (
     ONLINE_REFRESH_LOCK,
     ONLINE_REFRESH_STATE,
+    get_online_refresh_request,
     reserve_online_refresh,
     update_online_refresh_state,
 )
@@ -133,7 +134,16 @@ def api_online_refresh_status_for_request(request_id):
     except Exception as e:
         return jsonify({"ok": False, "error": f"读取在线脚本源同步状态失败：{e}"}), 500
     if state.get("request_id") != expected:
-        return jsonify({"ok": False, "error": "刷新请求不存在或已被明确的新请求替换", "request_id": expected}), 404
+        try:
+            state = get_online_refresh_request(expected)
+        except Exception as e:
+            return jsonify({
+                "ok": False,
+                "error": f"读取在线脚本源刷新历史失败：{e}",
+                "request_id": expected,
+            }), 500
+        if not state:
+            return jsonify({"ok": False, "error": "刷新请求不存在或已被明确的新请求替换", "request_id": expected}), 404
     return jsonify(state)
 
 

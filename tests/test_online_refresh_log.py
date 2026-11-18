@@ -124,6 +124,67 @@ class OnlineRefreshLogTests(unittest.TestCase):
             self.assertTrue(terminal.json["terminal"])
             self.assertFalse(terminal.json["running"])
 
+    def test_refresh_log_keeps_old_request_after_new_refresh_replaces_current(self):
+        with isolated_app() as (app, base_dir):
+            old_request = self._state(base_dir, refresh_id="a" * 32, request_id="b" * 32)
+            from fls_manager.online_scripts.constants import update_online_refresh_state
+
+            (base_dir / "data" / "online_script_refresh_requests.json").unlink()
+            update_online_refresh_state(status="部分完成", message="old partial refresh")
+            new_log = base_dir / "log" / f"online-script-source-refresh-{'c' * 32}.log"
+            new_log.write_text("new refresh log\n", encoding="utf-8")
+            update_online_refresh_state(
+                id="c" * 32,
+                request_id="d" * 32,
+                running=False,
+                status="已完成",
+                message="new refresh complete",
+                error="",
+                cache_published=True,
+                task_link_failures=[],
+                updated_at="later",
+                log_file=str(new_log),
+            )
+            client = app.test_client()
+            old_log = client.get(
+                f"/api/online-scripts/refresh-log/{old_request}", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(old_log.status_code, 200)
+            self.assertEqual(old_log.json["id"], "a" * 32)
+            self.assertIn("refresh failed", old_log.json["log"])
+            old_status = client.get(
+                f"/api/online-scripts/refresh-status/{old_request}", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(old_status.status_code, 200)
+            self.assertEqual(old_status.json["id"], "a" * 32)
+            replayed = client.post(
+                "/api/online-scripts/refresh",
+                json={"proxy_id": "", "request_id": old_request},
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(replayed.status_code, 200)
+            self.assertTrue(replayed.json["replayed"])
+            self.assertEqual(replayed.json["id"], "a" * 32)
+            current = client.get(
+                "/api/online-scripts/refresh-status/" + "d" * 32, headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(current.status_code, 200)
+            self.assertEqual(current.json["id"], "c" * 32)
+
+    def test_corrupt_refresh_history_is_reported_without_falling_back_to_new_log(self):
+        with isolated_app() as (app, base_dir):
+            self._state(base_dir)
+            history = base_dir / "data" / "online_script_refresh_requests.json"
+            history.write_text("{not-json", encoding="utf-8")
+            client = app.test_client()
+            response = client.get(
+                "/api/online-scripts/refresh-log/" + "c" * 32,
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(response.status_code, 500)
+            self.assertIn("历史无法读取", response.json["error"])
+            self.assertNotIn("refresh failed", response.json["log"])
+
     @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise refresh log polling")
     def test_refresh_log_page_polls_running_state_and_stops_at_terminal(self):
         with isolated_app() as (app, base_dir):

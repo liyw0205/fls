@@ -2,7 +2,11 @@ from ._common import *
 import re
 from pathlib import Path
 
-from ...online_scripts.constants import get_online_install_job, get_online_refresh_state
+from ...online_scripts.constants import (
+    get_online_install_job,
+    get_online_refresh_request,
+    get_online_refresh_state,
+)
 from ...online_scripts.logs import online_refresh_log_file
 from ...paths import LOG_DIR
 
@@ -20,7 +24,12 @@ def _refresh_log_state(request_id):
     except Exception as exc:
         return None, ("状态不可读", f"在线脚本源刷新状态无法读取，未覆盖原记录：{exc}", 500)
     if state.get("request_id") != request_id:
-        return None, ("记录不存在", "刷新请求不存在或已被明确的新请求替换，请返回刷新状态后重新选择。", 404)
+        try:
+            state = get_online_refresh_request(request_id)
+        except Exception as exc:
+            return None, ("历史不可读", f"刷新历史无法读取，未覆盖原记录：{exc}", 500)
+        if not state:
+            return None, ("记录不存在", "刷新请求不存在或已被明确的新请求替换，请返回刷新状态后重新选择。", 404)
     refresh_id = str(state.get("id") or "")
     if not REFRESH_ID_RE.fullmatch(refresh_id):
         return None, ("记录损坏", "刷新记录缺少有效作业标识，未读取未知路径。", 500)

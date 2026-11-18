@@ -76,9 +76,11 @@ def main():
             running = bool(data.get("running"))
             status = "运行中" if running else "部分完成"
             message = "正在后台同步在线脚本源，请稍候..." if running else "同步在线脚本源部分完成，请逐项重试"
+            refresh_id = str(data.get("refresh_id") or "e" * 32)
+            refresh_request_id = str(data.get("request_id") or "d" * 32)
             update_online_refresh_state(
-                id="e" * 32,
-                request_id="d" * 32,
+                id=refresh_id,
+                request_id=refresh_request_id,
                 proxy_id="",
                 running=running,
                 status=status,
@@ -93,9 +95,9 @@ def main():
                     "error": "fixture refresh task source unavailable",
                 }],
                 updated_at="now",
-                log_file=str(online_refresh_log_file("e" * 32)),
+                log_file=str(online_refresh_log_file(refresh_id)),
             )
-            online_refresh_log_file("e" * 32).write_text(
+            online_refresh_log_file(refresh_id).write_text(
                 "fixture refresh log\n" + ("refresh running\n" if running else "refresh failed: upstream timeout\n"),
                 encoding="utf-8",
             )
@@ -170,6 +172,9 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    await page.waitForFunction(()=>document.body.textContent.includes('运行中'));
    await page.request.post(base+'/api/fixture/online-refresh',{headers,data:{running:false}});
    await page.waitForFunction(()=>document.body.textContent.includes('部分完成'),{timeout:6000});
+   await page.request.post(base+'/api/fixture/online-refresh',{headers,data:{request_id:'f'.repeat(32),refresh_id:'g'.repeat(32),running:false}});
+   await page.goto(base+'/online-scripts/refresh-log/'+'d'.repeat(32));
+   assert.match(await page.locator('#refreshLogText').textContent(),/refresh running|refresh failed/);
    await page.goto(base+'/online-scripts');
    await page.evaluate(()=>sessionStorage.setItem('fls-online-refresh-request',JSON.stringify({request_id:'d'.repeat(32),proxy_id:'',server_id:'e'.repeat(32)})));
    await page.locator('#onlineRefreshBtn').click();
