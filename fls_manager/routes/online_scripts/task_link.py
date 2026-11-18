@@ -1,20 +1,38 @@
+import re
+import uuid
+
 from ._common import *
-from ...online_scripts.source import merge_task_link_tasks, OnlineScriptCacheConflict
+from ...online_scripts.source import (
+    OnlineScriptCacheConflict,
+    get_task_link_request,
+    claim_task_link_request,
+    merge_task_link_tasks,
+    online_task_link_version,
+    persist_task_link_request,
+)
+from ...utils import now_str
 
 
-def _task_link_error(script_id, message, status_code, proxy_id="", retry=False):
+def _task_link_error(script_id, message, status_code, proxy_id="", request_id="", retry=False):
     retry_form = ""
     if retry:
+        hidden = f'<input type="hidden" name="request_id" value="{h(request_id)}">' if request_id else ""
         retry_form = f'''
 <form class="inline-form" method="post" action="/online-scripts/task-link/{h(quote(script_id, safe=''))}">
+    {hidden}
     <select name="proxy_id" aria-label="外部任务源代理">{proxy_select_options(proxy_id)}</select>
     <button class="btn btn-primary" type="submit">重新同步外部任务源</button>
 </form>'''
+    status_link = (
+        f'<a class="btn btn-blue" href="/online-scripts/task-link-status/{h(request_id)}">查询原同步请求</a>'
+        if request_id else ""
+    )
     body = page_header_card(
         "外部任务源同步未完成",
         help_html=h(message),
         actions_html=(
             retry_form
+            + status_link
             + '<a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>'
             + '<a class="btn btn-blue" href="/online-scripts/source">检查脚本源数据</a>'
         ),
@@ -22,62 +40,316 @@ def _task_link_error(script_id, message, status_code, proxy_id="", retry=False):
     return layout("外部任务源同步", "online_scripts", body), status_code
 
 
-@bp.route("/online-scripts/task-link/<script_id>", methods=["POST"])
-def online_scripts_pull_task_link(script_id):
+def _request_id(raw):
+    value = str(raw or "").strip() or uuid.uuid4().hex
+    if not re.fullmatch(r"[a-f0-9]{32}", value):
+        raise ValueError("在线任务源同步请求标识无效，请刷新页面后重试")
+    return value
+
+
+def _record_update(record, state, *, error="", added=0, total=0):
+    record.update({
+        "state": state,
+        "error": str(error or ""),
+        "added": int(added),
+        "total": int(total),
+        "updated_at": now_str(),
+    })
+    return record
+
+
+def _persist_failure(record, message, status_code, *, retry=True, state="failed"):
+    _record_update(record, state, error=message, added=record.get("added", 0), total=record.get("total", 0))
+    try:
+        persist_task_link_request(record)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "request_id": record["request_id"],
+            "msg": f"{message}；同步结果回执无法保存，请查询原请求后再重试：{exc}",
+            "retry_allowed": False,
+            "resolved": False,
+        }, 503
+    return {
+        "ok": False,
+        "request_id": record["request_id"],
+        "msg": message,
+        "retry_allowed": retry,
+        "resolved": True,
+    }, status_code
+
+
+def _submit_task_link(script_id, proxy_id, raw_request_id):
+    try:
+        request_id = _request_id(raw_request_id)
+    except ValueError as exc:
+        return {"ok": False, "msg": str(exc), "request_id": "", "retry_allowed": False}, 400
+
     try:
         item = get_online_script(script_id)
-    except Exception as e:
-        return _task_link_error(
-            script_id,
-            f"在线脚本源缓存无法读取，未覆盖原文件：{e}。请检查源数据后重试。",
-            500,
-        )
+    except Exception as exc:
+        return {"ok": False, "request_id": request_id,
+                "msg": f"在线脚本源缓存无法读取，未覆盖原文件：{exc}。请检查源数据后重试。",
+                "retry_allowed": False}, 500
     if not item:
-        return _task_link_error(script_id, "脚本已不在本地缓存中，请刷新在线脚本列表。", 404)
+        return {"ok": False, "request_id": request_id,
+                "msg": "脚本已不在本地缓存中，请刷新在线脚本列表。", "retry_allowed": False}, 404
 
     task_link = str(item.get("task_link") or "").strip()
-
     if not task_link:
-        return _task_link_error(script_id, "该脚本没有配置外部任务源 task_link，请检查脚本源数据。", 400)
+        return {"ok": False, "request_id": request_id,
+                "msg": "该脚本没有配置外部任务源 task_link，请检查脚本源数据。", "retry_allowed": False}, 400
 
-    proxy_id = request.form.get("proxy_id", "").strip()
     try:
         validate_proxy_id(proxy_id)
-    except ValueError as e:
-        return _task_link_error(script_id, str(e), 400, proxy_id=proxy_id, retry=True)
-    except Exception as e:
-        return _task_link_error(script_id, f"读取代理配置失败：{e}", 500, proxy_id=proxy_id, retry=True)
+    except ValueError as exc:
+        return {"ok": False, "request_id": request_id, "msg": str(exc), "retry_allowed": True}, 400
+    except Exception as exc:
+        return {"ok": False, "request_id": request_id,
+                "msg": f"读取代理配置失败：{exc}", "retry_allowed": True}, 500
+
+    expected_version = online_task_link_version(item)
+    try:
+        previous = get_task_link_request(request_id)
+    except Exception as exc:
+        return {"ok": False, "request_id": request_id,
+                "msg": f"同步回执无法读取，未发起外部请求：{exc}", "retry_allowed": False}, 500
+    if previous:
+        if (previous.get("script_id") != script_id
+                or previous.get("proxy_id") != proxy_id
+                or previous.get("expected_version") != expected_version):
+            return {"ok": False, "request_id": request_id,
+                    "msg": "同步请求已绑定其他脚本、代理或旧版本，请刷新页面后重新选择。",
+                    "retry_allowed": False}, 409
+        if previous.get("state") == "completed":
+            return {
+                "ok": True,
+                "request_id": request_id,
+                "added": previous.get("added", 0),
+                "total": previous.get("total", 0),
+                "msg": "外部任务源同步已完成，未重复请求",
+                "replayed": True,
+            }, 200
+        if previous.get("state") == "running":
+            return {"ok": False, "request_id": request_id,
+                    "msg": "该同步请求仍在处理中，请查询原请求后再重试。",
+                    "retry_allowed": False}, 409
+        if previous.get("state") == "unknown":
+            return {"ok": False, "request_id": request_id,
+                    "msg": "该同步请求的发布结果未知，请先查询原同步请求和当前缓存，确认后再创建新的同步请求。",
+                    "retry_allowed": False}, 409
+
+    record = {
+        "request_id": request_id,
+        "script_id": script_id,
+        "proxy_id": proxy_id,
+        "expected_version": expected_version,
+        "state": "prepared",
+        "added": 0,
+        "total": 0,
+        "error": "",
+        "updated_at": now_str(),
+    }
+    try:
+        claimed_previous = claim_task_link_request(record)
+    except Exception as exc:
+        return {"ok": False, "request_id": request_id,
+                "msg": f"同步请求无法保存，未发起外部请求：{exc}", "retry_allowed": True}, 500
+    if claimed_previous:
+        if (claimed_previous.get("script_id") != script_id
+                or claimed_previous.get("proxy_id") != proxy_id
+                or claimed_previous.get("expected_version") != expected_version):
+            return {"ok": False, "request_id": request_id,
+                    "msg": "同步请求已绑定其他脚本、代理或旧版本，请刷新页面后重新选择。",
+                    "retry_allowed": False}, 409
+        if claimed_previous.get("state") == "completed":
+            return {
+                "ok": True, "request_id": request_id,
+                "added": claimed_previous.get("added", 0),
+                "total": claimed_previous.get("total", 0),
+                "msg": "外部任务源同步已完成，未重复请求", "replayed": True,
+            }, 200
+        if claimed_previous.get("state") == "unknown":
+            return {"ok": False, "request_id": request_id,
+                    "msg": "该同步请求的发布结果未知，请先查询原同步请求和当前缓存，确认后再创建新的同步请求。",
+                    "retry_allowed": False}, 409
+        return {"ok": False, "request_id": request_id,
+                "msg": "该同步请求仍在处理中，请查询原请求后再重试。",
+                "retry_allowed": False}, 409
 
     try:
-        linked_tasks = fetch_task_link_tasks(
-            item,
-            proxy_id=proxy_id,
-            timeout=20,
-        )
+        _record_update(record, "running")
+        persist_task_link_request(record)
+    except Exception as exc:
+        return {"ok": False, "request_id": request_id,
+                "msg": f"同步请求无法保存，未发起外部请求：{exc}", "retry_allowed": True}, 500
 
-    except Exception as e:
-        return _task_link_error(
-            script_id, f"外部任务源请求失败：{e}。请检查任务源地址、代理和网络后重试。",
-            502, proxy_id=proxy_id, retry=True,
-        )
+    try:
+        linked_tasks = fetch_task_link_tasks(item, proxy_id=proxy_id, timeout=20)
+    except Exception as exc:
+        message = f"外部任务源请求失败：{exc}。请检查任务源地址、代理和网络后重试。"
+        return _persist_failure(record, message, 502)
 
     if not linked_tasks:
-        return _task_link_error(
-            script_id, "外部任务源没有可用任务，请检查任务字段后重新同步。",
-            422, proxy_id=proxy_id, retry=True,
+        return _persist_failure(
+            record,
+            "外部任务源没有可用任务，请检查任务字段后重新同步。",
+            422,
         )
 
     try:
         added, total = merge_task_link_tasks(item, linked_tasks)
-    except OnlineScriptCacheConflict as e:
-        return _task_link_error(script_id, str(e), 409)
-    except Exception as e:
-        return _task_link_error(
-            script_id, f"外部任务源未保存：{e}。请检查缓存文件权限和磁盘空间后重试。",
-            500, proxy_id=proxy_id, retry=True,
-        )
+    except OnlineScriptCacheConflict as exc:
+        return _persist_failure(record, str(exc), 409, retry=False)
+    except Exception as exc:
+        message = f"外部任务源发布结果无法确认：{exc}。请查询同步回执和当前缓存后再重试。"
+        return _persist_failure(record, message, 503, retry=False, state="unknown")
 
-    return redirect(url_for(
-        "online_scripts.online_scripts_page",
-        msg=f"外部任务源同步完成，新增 {added} 个任务，当前共 {total} 个任务",
-    ))
+    _record_update(record, "completed", added=added, total=total)
+    try:
+        persist_task_link_request(record)
+    except Exception as exc:
+        try:
+            actual = get_task_link_request(request_id)
+        except Exception as read_exc:
+            return {
+                "ok": False, "request_id": request_id,
+                "msg": f"外部任务源已发布，但同步回执无法确认：{exc}；{read_exc}",
+                "retry_allowed": False, "resolved": False,
+            }, 503
+        if not actual or actual.get("state") != "completed":
+            return {
+                "ok": False, "request_id": request_id,
+                "msg": f"外部任务源发布结果无法确认：{exc}，请查询当前缓存后再决定是否重试。",
+                "retry_allowed": False, "resolved": False,
+            }, 503
+        return {
+            "ok": True, "request_id": request_id, "added": added, "total": total,
+            "msg": f"外部任务源同步完成，新增 {added} 个任务，当前共 {total} 个任务；回执确认异常，请查询原请求",
+            "diagnostic": f"同步已完成，但回执确认异常：{exc}",
+        }, 200
+    return {
+        "ok": True,
+        "request_id": request_id,
+        "added": added,
+        "total": total,
+        "msg": f"外部任务源同步完成，新增 {added} 个任务，当前共 {total} 个任务",
+    }, 200
+
+
+def _render_task_link_result(script_id, payload, status_code, proxy_id):
+    if payload.get("ok"):
+        return redirect(url_for(
+            "online_scripts.online_scripts_page",
+            msg=payload.get("msg") or "外部任务源同步完成",
+        ))
+    return _task_link_error(
+        script_id,
+        payload.get("msg") or "外部任务源同步未完成",
+        status_code,
+        proxy_id=proxy_id,
+        request_id=payload.get("request_id", ""),
+        retry=bool(payload.get("retry_allowed")),
+    )
+
+
+@bp.route("/online-scripts/task-link/<script_id>", methods=["POST"])
+def online_scripts_pull_task_link(script_id):
+    proxy_id = request.form.get("proxy_id", "").strip()
+    payload, status_code = _submit_task_link(script_id, proxy_id, request.form.get("request_id"))
+    return _render_task_link_result(script_id, payload, status_code, proxy_id)
+
+
+@bp.route("/api/online-scripts/task-link/<script_id>", methods=["POST"])
+def api_online_scripts_pull_task_link(script_id):
+    data = request.get_json(silent=True) if request.is_json else request.form
+    data = data or {}
+    payload, status_code = _submit_task_link(
+        script_id,
+        str(data.get("proxy_id", "") or "").strip(),
+        data.get("request_id"),
+    )
+    return jsonify(payload), status_code
+
+
+@bp.route("/api/online-scripts/task-link-status/<request_id>")
+def api_online_scripts_task_link_status(request_id):
+    if not re.fullmatch(r"[a-f0-9]{32}", request_id or ""):
+        return jsonify(ok=False, msg="在线任务源同步请求标识无效"), 400
+    try:
+        record = get_task_link_request(request_id)
+    except Exception as exc:
+        return jsonify(ok=False, msg=f"同步回执无法读取：{exc}"), 500
+    if not record:
+        return jsonify(ok=False, msg="同步请求不存在"), 404
+    return jsonify(ok=True, **record)
+
+
+@bp.route("/online-scripts/task-link-status/<request_id>")
+def online_scripts_task_link_status(request_id):
+    if not re.fullmatch(r"[a-f0-9]{32}", request_id or ""):
+        body = page_header_card(
+            "外部任务源同步状态",
+            help_html="在线任务源同步请求标识无效，请返回在线脚本页面重新发起请求。",
+            actions_html='<a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>',
+        )
+        return layout("外部任务源同步状态", "online_scripts", body), 400
+    try:
+        record = get_task_link_request(request_id)
+    except Exception as exc:
+        body = page_header_card(
+            "外部任务源同步状态",
+            help_html=f"同步回执无法读取：{h(exc)}。请修复存储后重新查询。",
+            actions_html=(
+                f'<a class="btn btn-blue" href="/online-scripts/task-link-status/{h(request_id)}">重新查询</a>'
+                '<a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>'
+            ),
+        )
+        return layout("外部任务源同步状态", "online_scripts", body), 500
+    if not record:
+        body = page_header_card(
+            "外部任务源同步状态",
+            help_html="同步请求不存在，可能已被清理或请求标识有误。",
+            actions_html='<a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>',
+        )
+        return layout("外部任务源同步状态", "online_scripts", body), 404
+
+    state = str(record.get("state") or "unknown")
+    labels = {
+        "prepared": "已准备，尚未确认外部请求",
+        "running": "正在请求外部任务源",
+        "failed": "请求失败，可继续原同步请求",
+        "unknown": "发布结果未知，请勿直接重发",
+        "completed": "同步已完成",
+    }
+    action_html = ""
+    if state == "failed":
+        action_html = f'''
+<form class="inline-form" method="post" action="/online-scripts/task-link/{h(quote(record.get("script_id", ""), safe=""))}">
+    <input type="hidden" name="request_id" value="{h(request_id)}">
+    <input type="hidden" name="proxy_id" value="{h(record.get("proxy_id", ""))}">
+    <button class="btn btn-primary" type="submit">继续原同步请求</button>
+</form>'''
+    elif state in ("prepared", "running", "unknown"):
+        action_html = f'<a class="btn btn-blue" href="/online-scripts/task-link-status/{h(request_id)}">刷新查询</a>'
+    action_html += '<a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>'
+    details = f'''
+<section class="section">
+    <div class="card">
+        <h2 class="section-title">{h(labels.get(state, state))}</h2>
+        <dl class="detail-list">
+            <dt>请求标识</dt><dd><code>{h(request_id)}</code></dd>
+            <dt>脚本</dt><dd>{h(record.get("script_id", "-"))}</dd>
+            <dt>代理</dt><dd>{h(record.get("proxy_id") or "直连")}</dd>
+            <dt>任务数</dt><dd>{h(record.get("total", 0))}（新增 {h(record.get("added", 0))}）</dd>
+            <dt>更新时间</dt><dd>{h(record.get("updated_at") or "-")}</dd>
+        </dl>
+        {f'<p role="alert">{h(record.get("error"))}</p>' if record.get("error") else ''}
+    </div>
+</section>'''
+    body = page_header_card(
+        "外部任务源同步状态",
+        help_html="该页面只查询已保存的同步回执，不会重复发起外部请求。未知状态请先核对当前缓存，再从在线脚本页面创建新的同步请求。",
+        actions_html=action_html,
+    ) + details
+    return layout("外部任务源同步状态", "online_scripts", body)

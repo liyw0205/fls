@@ -8,6 +8,7 @@ from ..utils import now_str
 
 DEFAULT_ONLINE_SCRIPT_SOURCE = "https://cdn.jsdelivr.net/gh/liyw0205/fls-scripts@main/index.json"
 ONLINE_SCRIPT_CACHE_FILE = DATA_DIR / "online_scripts_cache.json"
+ONLINE_TASK_LINK_REQUESTS_FILE = DATA_DIR / "online_task_link_requests.json"
 
 ONLINE_INSTALL_RUNNING = {}
 ONLINE_INSTALL_STOPPING = set()

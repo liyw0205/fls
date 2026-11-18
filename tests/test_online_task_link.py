@@ -92,6 +92,124 @@ class OnlineTaskLinkTests(unittest.TestCase):
             self.assertEqual(repeated.status_code, 302)
             self.assertEqual([task["name"] for task in source.load_online_script_cache()[0]["task_cron"]], ["existing", "new"])
 
+    def test_stable_request_replay_does_not_fetch_or_publish_twice_and_is_queryable(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import source
+
+            source.save_online_script_cache([self.item()])
+            request_id = "a" * 32
+            client = app.test_client()
+            with patch("fls_manager.routes.online_scripts.task_link.fetch_task_link_tasks", return_value=[self.task("new")]) as fetch:
+                first = client.post(
+                    "/api/online-scripts/task-link/demo",
+                    json={"request_id": request_id},
+                    headers={"X-Token": TOKEN},
+                )
+                repeated = client.post(
+                    "/api/online-scripts/task-link/demo",
+                    json={"request_id": request_id},
+                    headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(first.status_code, 200)
+            self.assertEqual(repeated.status_code, 200)
+            self.assertTrue(repeated.json["replayed"])
+            fetch.assert_called_once()
+            status = client.get(
+                "/api/online-scripts/task-link-status/" + request_id,
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(status.status_code, 200)
+            self.assertEqual(status.json["state"], "completed")
+            self.assertEqual(status.json["added"], 1)
+            html_status = client.get("/online-scripts/task-link-status/" + request_id, headers={"X-Token": TOKEN})
+            self.assertEqual(html_status.status_code, 200)
+            self.assertIn("同步已完成", html_status.get_data(as_text=True))
+
+    def test_unknown_publish_result_is_query_only_and_does_not_refetch(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import source
+
+            source.save_online_script_cache([self.item()])
+            request_id = "c" * 32
+            client = app.test_client()
+            with patch("fls_manager.routes.online_scripts.task_link.fetch_task_link_tasks", return_value=[self.task("new")]) as fetch, patch(
+                "fls_manager.routes.online_scripts.task_link.merge_task_link_tasks",
+                side_effect=RuntimeError("publish acknowledgement unavailable"),
+            ):
+                first = client.post(
+                    "/api/online-scripts/task-link/demo",
+                    json={"request_id": request_id},
+                    headers={"X-Token": TOKEN},
+                )
+                repeated = client.post(
+                    "/online-scripts/task-link/demo",
+                    data={"request_id": request_id},
+                    headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(first.status_code, 503)
+            self.assertEqual(repeated.status_code, 409)
+            self.assertFalse(repeated.json if repeated.is_json else False)
+            self.assertIn("查询原同步请求", repeated.get_data(as_text=True))
+            fetch.assert_called_once()
+            status = client.get("/api/online-scripts/task-link-status/" + request_id, headers={"X-Token": TOKEN})
+            self.assertEqual(status.json["state"], "unknown")
+            page = client.get("/online-scripts/task-link-status/" + request_id, headers={"X-Token": TOKEN})
+            self.assertEqual(page.status_code, 200)
+            html = page.get_data(as_text=True)
+            self.assertIn("发布结果未知，请勿直接重发", html)
+            self.assertNotIn("继续原同步请求", html)
+
+    def test_completed_receipt_write_failure_is_confirmed_without_replaying_fetch(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import source
+
+            source.save_online_script_cache([self.item()])
+            request_id = "b" * 32
+            persist = source.persist_task_link_request
+
+            def receipt(info):
+                if info["state"] == "completed":
+                    persist(info)
+                    raise OSError("fixture receipt acknowledgement fault")
+                return persist(info)
+
+            client = app.test_client()
+            with patch("fls_manager.routes.online_scripts.task_link.persist_task_link_request", side_effect=receipt), patch(
+                "fls_manager.routes.online_scripts.task_link.fetch_task_link_tasks", return_value=[self.task("new")],
+            ) as fetch:
+                first = client.post(
+                    "/online-scripts/task-link/demo",
+                    data={"request_id": request_id},
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(first.status_code, 302)
+                repeated = client.post(
+                    "/online-scripts/task-link/demo",
+                    data={"request_id": request_id},
+                    headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(repeated.status_code, 302)
+            fetch.assert_called_once()
+            self.assertEqual(client.get("/api/online-scripts/task-link-status/" + request_id, headers={"X-Token": TOKEN}).json["state"], "completed")
+
+    def test_invalid_request_id_is_rejected_before_fetch_or_receipt_write(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import source
+
+            source.save_online_script_cache([self.item()])
+            with patch("fls_manager.routes.online_scripts.task_link.fetch_task_link_tasks") as fetch, patch(
+                "fls_manager.routes.online_scripts.task_link.persist_task_link_request",
+            ) as persist:
+                response = app.test_client().post(
+                    "/api/online-scripts/task-link/demo",
+                    json={"request_id": "../bad"},
+                    headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(response.status_code, 400)
+            fetch.assert_not_called()
+            persist.assert_not_called()
+            self.assertFalse((source.ONLINE_TASK_LINK_REQUESTS_FILE).exists())
+
     def test_source_change_or_deletion_during_fetch_returns_conflict_without_overwriting(self):
         for change in ("delete", "task_link", "link", "name"):
             with self.subTest(change=change), isolated_app() as (app, _base_dir):
@@ -161,6 +279,37 @@ class OnlineTaskLinkTests(unittest.TestCase):
             tasks = source.load_online_script_cache()[0]["task_cron"]
             self.assertEqual(len(tasks), 4)
             self.assertEqual({task["name"] for task in tasks}, {"existing", "first", "second", "shared"})
+
+    def test_concurrent_replay_claims_one_request_before_external_fetch(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import source
+
+            source.save_online_script_cache([self.item()])
+            request_id = "d" * 32
+            started = threading.Event()
+            release = threading.Event()
+
+            def fetch(*_args, **_kwargs):
+                started.set()
+                self.assertTrue(release.wait(3))
+                return [self.task("once")]
+
+            def post():
+                return app.test_client().post(
+                    "/api/online-scripts/task-link/demo",
+                    json={"request_id": request_id},
+                    headers={"X-Token": TOKEN},
+                )
+
+            with patch("fls_manager.routes.online_scripts.task_link.fetch_task_link_tasks", side_effect=fetch) as fetch_mock, ThreadPoolExecutor(max_workers=2) as pool:
+                first_future = pool.submit(post)
+                self.assertTrue(started.wait(3))
+                second = pool.submit(post).result(timeout=3)
+                release.set()
+                first = first_future.result(timeout=5)
+            self.assertEqual(first.status_code, 200)
+            self.assertEqual(second.status_code, 409)
+            fetch_mock.assert_called_once()
 
     def test_missing_script_or_link_returns_recovery_page_without_fetching(self):
         with isolated_app() as (app, _base_dir):

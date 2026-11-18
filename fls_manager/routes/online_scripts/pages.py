@@ -63,6 +63,7 @@ def online_scripts_page():
             rows.append(
                 f'<div class="help" style="margin-top:6px;">{label}：{detail} '
                 f'<form class="inline-form" method="post" action="{h(action)}">'
+                f'<input type="hidden" name="request_id" value="{uuid.uuid4().hex}">'
                 f'<input type="hidden" name="proxy_id" value="{proxy_id}">'
                 '<button class="btn btn-orange" type="submit">重新同步外部任务源</button>'
                 '</form></div>'
@@ -215,9 +216,13 @@ async function updateOnlineRefreshStatus(){{
                 const href = "/online-scripts/task-link/" + encodeURIComponent(id);
                 const proxy = escapeHtml(item.proxy_id || "");
                 const csrf = typeof flsGetCsrfToken === "function" ? escapeHtml(flsGetCsrfToken()) : "";
+                const requestId = (typeof crypto !== "undefined" && crypto.getRandomValues)
+                    ? Array.from(crypto.getRandomValues(new Uint8Array(16)), function(value){{return value.toString(16).padStart(2, "0");}}).join("")
+                    : Array.from({{length:32}}, function(){{return Math.floor(Math.random() * 16).toString(16);}}).join("");
                 return "<div class='help' style='margin-top:6px;'>" + name + "：" + detail +
                     " <" + "form class='inline-form' method='post' action='" + escapeHtml(href) + "'>" +
                     "<input type='hidden' name='csrf_token' value='" + csrf + "'>" +
+                    "<input type='hidden' name='request_id' value='" + requestId + "'>" +
                     "<input type='hidden' name='proxy_id' value='" + proxy + "'>" +
                     "<button class='btn btn-orange' type='submit'>重新同步外部任务源</button></form></div>";
             }}).join("");

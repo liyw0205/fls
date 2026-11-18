@@ -1,3 +1,5 @@
+import uuid
+
 from ..utils import h
 from ..ui.components import empty_state, status_badge
 from ..proxy import proxy_select_options
@@ -138,6 +140,7 @@ def render_online_script_rows(items):
         if task_link_unloaded:
             task_link_form_html = f"""
 <form method="post" action="/online-scripts/task-link/{h(item_id)}">
+    <input type="hidden" name="request_id" value="{uuid.uuid4().hex}">
     <div class="fls-action-line">
         <select name="proxy_id" aria-label="外部任务源代理">{proxy_options}</select>
         <button class="btn btn-orange" type="submit">同步外部任务源</button>

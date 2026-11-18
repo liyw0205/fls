@@ -1,17 +1,20 @@
+import hashlib
 import json
 import os
+import re
 import threading
 import uuid
 from contextlib import closing
 from pathlib import Path
 
 from ..config import load_config
-from ..storage import storage_transaction
+from ..storage import mutate_json, storage_transaction
 from ..utils import now_str, LazyModule
 from ..proxy import requests_proxy_dict, github_proxy_url, validate_proxy_id
 from .constants import (
     DEFAULT_ONLINE_SCRIPT_SOURCE,
     ONLINE_SCRIPT_CACHE_FILE,
+    ONLINE_TASK_LINK_REQUESTS_FILE,
     ONLINE_REFRESH_LOCK,
     ONLINE_REFRESH_STATE,
     update_online_refresh_state,
@@ -131,6 +134,113 @@ def save_online_script_cache(items):
 
 class OnlineScriptCacheConflict(RuntimeError):
     pass
+
+
+def online_task_link_version(item):
+    metadata = {key: value for key, value in (item or {}).items() if key != "task_cron"}
+    payload = json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _validate_task_link_requests(data):
+    if not isinstance(data, dict):
+        raise RuntimeError("在线任务源同步回执损坏，未覆盖原文件")
+    for request_id, value in data.items():
+        if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
+            raise RuntimeError("在线任务源同步回执标识损坏，未覆盖原文件")
+        if not isinstance(value, dict) or value.get("request_id") != request_id:
+            raise RuntimeError("在线任务源同步回执标识不一致，未覆盖原文件")
+        if value.get("state") not in ("prepared", "running", "failed", "unknown", "completed"):
+            raise RuntimeError("在线任务源同步回执状态损坏，未覆盖原文件")
+        for field in ("script_id", "proxy_id", "expected_version", "error", "updated_at"):
+            if not isinstance(value.get(field, ""), str):
+                raise RuntimeError("在线任务源同步回执字段损坏，未覆盖原文件")
+    return data
+
+
+def _task_link_request_snapshot(info):
+    fields = (
+        "request_id", "script_id", "proxy_id", "expected_version", "state",
+        "added", "total", "error", "updated_at",
+    )
+    snapshot = {field: info.get(field, 0 if field in ("added", "total") else "") for field in fields}
+    if type(snapshot["added"]) is not int or type(snapshot["total"]) is not int:
+        raise RuntimeError("在线任务源同步回执计数损坏，未覆盖原文件")
+    return snapshot
+
+
+def get_task_link_request(request_id):
+    if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
+        return None
+    with storage_transaction():
+        try:
+            raw = ONLINE_TASK_LINK_REQUESTS_FILE.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        try:
+            data = _validate_task_link_requests(json.loads(raw))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"在线任务源同步回执损坏，未覆盖原文件：{exc}") from exc
+        value = data.get(request_id)
+        return dict(value) if isinstance(value, dict) else None
+
+
+def persist_task_link_request(info):
+    snapshot = _task_link_request_snapshot(info)
+    request_id = snapshot["request_id"]
+    if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
+        raise ValueError("在线任务源同步请求标识无效")
+    with storage_transaction():
+        if ONLINE_TASK_LINK_REQUESTS_FILE.is_symlink():
+            raise RuntimeError("在线任务源同步回执不能是符号链接，未覆盖原文件")
+
+        def update(data):
+            records = _validate_task_link_requests(data)
+            records[request_id] = snapshot
+            ordered = sorted(
+                records.items(),
+                key=lambda pair: str(pair[1].get("updated_at") or ""),
+                reverse=True,
+            )
+            return dict(ordered[:200])
+
+        mutate_json(ONLINE_TASK_LINK_REQUESTS_FILE, {}, update, strict=True)
+
+
+def claim_task_link_request(info):
+    """Atomically reserve a request id before making the external request."""
+    snapshot = _task_link_request_snapshot(info)
+    request_id = snapshot["request_id"]
+    if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
+        raise ValueError("在线任务源同步请求标识无效")
+
+    observed = {}
+    with storage_transaction():
+        if ONLINE_TASK_LINK_REQUESTS_FILE.is_symlink():
+            raise RuntimeError("在线任务源同步回执不能是符号链接，未覆盖原文件")
+
+        def update(data):
+            records = _validate_task_link_requests(data)
+            current = records.get(request_id)
+            if current and current.get("state") != "failed":
+                observed["value"] = dict(current)
+                return records
+            if current and any(current.get(field) != snapshot.get(field) for field in (
+                "script_id", "proxy_id", "expected_version",
+            )):
+                observed["value"] = dict(current)
+                return records
+            records[request_id] = snapshot
+            observed["value"] = None
+            ordered = sorted(
+                records.items(),
+                key=lambda pair: str(pair[1].get("updated_at") or ""),
+                reverse=True,
+            )
+            return dict(ordered[:200])
+
+        mutate_json(ONLINE_TASK_LINK_REQUESTS_FILE, {}, update, strict=True)
+    return observed.get("value")
 
 
 def merge_task_link_tasks(expected_item, linked_tasks):
