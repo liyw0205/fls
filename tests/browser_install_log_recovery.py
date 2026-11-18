@@ -1,5 +1,6 @@
 """Real HTTP/Chromium recovery for online and dependency install logs."""
 import os
+import json
 from pathlib import Path
 import shlex
 import subprocess
@@ -24,7 +25,9 @@ def main():
         from fls_manager import scheduler
         from fls_manager.install_records import INSTALL_JOBS_FILE, persist_install_job
         from fls_manager.online_scripts import install, source
-        from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING
+        from fls_manager.online_scripts.constants import (
+            ONLINE_INSTALL_JOBS_FILE, ONLINE_INSTALL_RETRYING, ONLINE_INSTALL_RUNNING,
+        )
         from fls_manager.state import DEPS_RUNNING
 
         base_dir = Path(temp)
@@ -77,6 +80,41 @@ def main():
                 "error": "retry attempt failed", "start_time": 2,
                 "updated_at": "2026-11-18 20:11:00",
             })
+
+        def seed_online_history():
+            jobs = {}
+
+            def online_record(install_id, started, updated, retry_of="", retried_by=""):
+                log_file = base_dir / "log" / f"{install_id}.log"
+                log_file.parent.mkdir(parents=True, exist_ok=True)
+                log_file.write_text(f"log for {install_id}\n", encoding="utf-8")
+                return {
+                    "id": install_id, "script_id": "browser-recovery", "script_name": "Install recovery",
+                    "log_file": str(log_file), "proxy_id": "", "import_task": False,
+                    "enable_task": False, "selected_task_indexes": [], "selected_tasks": [],
+                    "force": False, "retry_of": retry_of, "retried_by": retried_by,
+                    "running": False, "status": "失败", "phase": "failed",
+                    "start_time": started, "returncode": 1, "error": "fixture failure",
+                    "scheduler_reload_pending": False, "scheduler_reload_error": "",
+                    "updated_at": updated,
+                }
+
+            chain = [
+                online_record("online-old-parent", 1, "2026-11-01 00:00:00", retried_by="online-old-child"),
+                online_record("online-old-child", 2, "2026-11-01 00:01:00", retry_of="online-old-parent"),
+                online_record("online-latest-parent", 200, "2026-11-18 20:00:00", retried_by="online-latest-middle"),
+                online_record("online-latest-middle", 201, "2026-11-18 20:01:00", retry_of="online-latest-parent", retried_by="online-latest-final"),
+                online_record("online-latest-final", 202, "2026-11-18 20:02:00", retry_of="online-latest-middle"),
+            ]
+            jobs.update((item["id"], item) for item in chain)
+            for index in range(95):
+                item = online_record(f"online-filler-{index:03d}", 10 + index, "2026-11-10 00:00:00")
+                jobs[item["id"]] = item
+            ONLINE_INSTALL_JOBS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            ONLINE_INSTALL_JOBS_FILE.write_text(json.dumps(jobs, ensure_ascii=False), encoding="utf-8")
+            ONLINE_INSTALL_RUNNING.clear()
+            ONLINE_INSTALL_RETRYING.clear()
+            (base_dir / "scripts" / "demo.py").unlink(missing_ok=True)
         app_module.dispatch_frontend_open_event = lambda: None
         fault = {"status": 0}
         dependency_processes = []
@@ -116,6 +154,10 @@ def main():
                 fault["status"] = int(data.get("status") or 0)
                 if data.get("seed_retry_chain"):
                     seed_retry_chain()
+                if data.get("seed_online_history"):
+                    seed_online_history()
+                if data.get("remove_online_target"):
+                    (base_dir / "scripts" / "demo.py").unlink(missing_ok=True)
                 if data.get("fill_capacity"):
                     for index in range(99):
                         install_id = f"browser-capacity-{index:03d}"
@@ -384,6 +426,67 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    await page.locator('.install-retry-form button[type="submit"]').waitFor();
    assert.ok(await page.locator('.install-retry-form [name="request_id"]').inputValue());
    assert.equal((await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)),true);
+
+   await fixture({seed_online_history:true});
+   await page.goto(base+'/online-scripts');
+   await page.locator('form[action="/online-scripts/install-retry/online-latest-final"]').waitFor();
+   assert.ok((await page.locator('.content').textContent()).includes('上次安装状态：失败'));
+   const onlineDownloadsBefore=(await state()).downloads;
+   const capacityRequestId=require('node:crypto').randomBytes(16).toString('hex');
+   const onlineCsrf=await page.evaluate(()=>flsGetCsrfToken());
+   const capacityStart=await page.request.post(base+'/api/online-scripts/install/browser-recovery',{
+    headers:{'X-CSRF-Token':onlineCsrf},data:{request_id:capacityRequestId}});
+   assert.equal(capacityStart.status(),200,await capacityStart.text());
+   const capacityResult=await capacityStart.json();
+   assert.equal(capacityResult.ok,true);
+   await page.waitForFunction(async id=>{
+    const response=await fetch('/api/online-scripts/log/'+id,{cache:'no-store'});
+    if(!response.ok)return false;const job=await response.json();return job.running===false;
+   },capacityResult.install_id);
+   const onlineHistoryResponse=await page.request.get(base+'/api/online-scripts/install-history?limit=100');
+   assert.equal(onlineHistoryResponse.status(),200);
+   const onlineHistory=await onlineHistoryResponse.json();
+   const onlineIds=onlineHistory.items.map(item=>item.id);
+   assert.equal(onlineIds.includes('online-old-parent'),false);
+   assert.equal(onlineIds.includes('online-old-child'),false);
+   for(const id of ['online-latest-parent','online-latest-middle','online-latest-final',capacityResult.install_id])
+    assert.ok(onlineIds.includes(id),id+' should remain in the trimmed history');
+   const onlineById=Object.fromEntries(onlineHistory.items.map(item=>[item.id,item]));
+   assert.equal(onlineById['online-latest-middle'].retry_parent_id,'online-latest-parent');
+   assert.equal(onlineById['online-latest-middle'].retry_child_id,'online-latest-final');
+   assert.equal(onlineById['online-latest-final'].retry_relation_error,'');
+
+   await page.goto(base+'/online-scripts/install-history');
+   const latestParentRow=page.locator('tr').filter({hasText:'online-latest-parent'});
+   await latestParentRow.getByRole('link',{name:'后续重试'}).click();
+   await page.waitForURL('**/online-scripts/log/online-latest-middle?back=/online-scripts/install-history');
+   await page.waitForFunction(()=>document.querySelector('#log').textContent.includes('log for online-latest-middle'));
+   await page.getByRole('link',{name:'查看后续重试'}).click();
+   await page.waitForURL('**/online-scripts/log/online-latest-final?back=/online-scripts/install-history');
+   await page.waitForFunction(()=>document.querySelector('#log').textContent.includes('log for online-latest-final'));
+   await page.getByRole('link',{name:'查看原安装'}).click();
+   await page.waitForURL('**/online-scripts/log/online-latest-middle?back=/online-scripts/install-history');
+   await fixture({remove_online_target:true});
+   await page.goto(base+'/online-scripts/install-history');
+   const latestFinalRow=page.locator('tr').filter({hasText:'online-latest-final'});
+   await latestFinalRow.getByRole('link',{name:'查看安装日志'}).click();
+   await page.waitForURL('**/online-scripts/log/online-latest-final');
+   await page.locator('#installRecoveryAction [name="csrf_token"]').waitFor({state:'attached'});
+   await page.locator('#installRecoveryAction').getByRole('button',{name:'重试安装',exact:true}).click();
+   await page.waitForURL(url=>/^\/online-scripts\/log\/[a-f0-9]{32}$/.test(url.pathname));
+   const recoveredInstallId=new URL(page.url()).pathname.split('/').pop();
+   assert.notEqual(recoveredInstallId,'online-latest-final');
+   await page.waitForFunction(()=>document.querySelector('#installStatus').textContent==='已完成');
+   await page.goto(base+'/online-scripts/install-history');
+   const retriedFinalRow=page.locator('tr').filter({hasText:'online-latest-final'});
+   const newRetryLink=retriedFinalRow.getByRole('link',{name:'后续重试'});
+   assert.match(await newRetryLink.getAttribute('href'),new RegExp('/online-scripts/log/'+recoveredInstallId+'\\?back=/online-scripts/install-history$'));
+   await newRetryLink.click();
+   await page.waitForURL('**/online-scripts/log/'+recoveredInstallId+'?back=/online-scripts/install-history');
+   await page.getByRole('link',{name:'查看原安装'}).waitFor();
+   assert.equal((await state()).downloads,onlineDownloadsBefore+2);
+   assert.equal((await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)),true);
+   await page.screenshot({path:'/tmp/fls-online-install-history-'+viewport.width+'.png',fullPage:true});
    assert.deepEqual(errors,[]);await context.close();console.log('install log recovery passed '+viewport.width);
   }
  }finally{await browser.close();}

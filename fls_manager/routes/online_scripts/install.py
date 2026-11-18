@@ -10,6 +10,8 @@ from ...online_scripts.constants import (
     ONLINE_INSTALL_RETRYING,
     active_online_install_for_script,
     get_online_install_job,
+    InstallHistoryLimitError,
+    online_install_retry_relation,
     persist_online_install,
 )
 from ...online_scripts.install import capture_install_outputs, _persist_install_state
@@ -100,6 +102,11 @@ def _start_install_job(
                     f"安装记录无法读取，未覆盖原文件：{exc}。修复记录文件后重试。",
                     500,
                 )
+            relation = online_install_retry_relation(previous) if previous else None
+            if relation and relation.get("retry_relation_error"):
+                return _install_retry_error(
+                    retry_of, "无法重试在线安装", relation["retry_relation_error"], 409,
+                )
             if previous and previous.get("retried_by"):
                 return _install_retry_consumed(retry_of, previous["retried_by"])
         active_id, _ = active_online_install_for_script(script_id)
@@ -145,6 +152,30 @@ def _start_install_job(
         ONLINE_INSTALL_RUNNING[install_id] = info
         try:
             persist_online_install(info)
+        except InstallHistoryLimitError as e:
+            ONLINE_INSTALL_RUNNING.pop(install_id, None)
+            if request.path.startswith("/api/"):
+                return jsonify(
+                    ok=False,
+                    request_id=request_id or retry_of or install_id,
+                    msg=str(e),
+                    retry_allowed=False,
+                    history_url=url_for("online_scripts.online_install_history"),
+                ), 409
+            actions = (
+                f'<a class="btn btn-blue" href="/online-scripts/log/{h(retry_of)}">查看原安装</a>'
+                if retry_of else
+                f'<a class="btn btn-blue" href="/online-scripts/install-select/{h(script_id)}">重新选择安装选项</a>'
+            )
+            body = page_header_card(
+                "在线脚本安装历史容量已满",
+                help_html=f"{h(e)} 已有回执未修改，未启动下载安装。",
+                actions_html=(
+                    '<a class="btn btn-gray" href="/online-scripts/install-history">查看安装历史</a>'
+                    + actions
+                ),
+            )
+            return layout("在线脚本安装未启动", "online_scripts", body), 409
         except Exception as e:
             info.update(
                 running=False,
@@ -328,6 +359,8 @@ def _api_install_start_result(result, install_id):
     """Turn the HTML launch helper's failure tuple into a stable JSON result."""
     if isinstance(result, tuple) and len(result) == 2:
         _body, status = result
+        if getattr(_body, "is_json", False):
+            return result
         try:
             info = get_online_install_job(install_id) or {}
         except Exception as exc:
@@ -860,6 +893,11 @@ def online_scripts_install_retry(install_id):
             )
         if not info:
             return _install_retry_error(install_id, "无法重试在线安装", "安装记录不存在。", 404)
+        relation = online_install_retry_relation(info)
+        if relation.get("retry_relation_error"):
+            return _install_retry_error(
+                install_id, "无法重试在线安装", relation["retry_relation_error"], 409,
+            )
         if info.get("retried_by"):
             return _install_retry_consumed(install_id, info["retried_by"])
         active_id, _active = active_online_install_for_script(info.get("script_id"))

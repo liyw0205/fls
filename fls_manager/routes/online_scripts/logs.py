@@ -6,6 +6,7 @@ from pathlib import Path
 from ...online_scripts.constants import (
     get_online_install_job,
     list_online_install_jobs,
+    online_install_retry_relation,
     get_online_refresh_request,
     get_online_refresh_state,
 )
@@ -286,6 +287,9 @@ def _install_recovery(info):
             "api_action": url_for("online_scripts.api_online_scripts_install_reload", install_id=info.get("id")),
             "label": "重新加载调度器",
         }
+    relation = online_install_retry_relation(info)
+    if relation.get("retry_relation_error"):
+        return {"available": False, "reason": relation["retry_relation_error"]}
     if status not in RECOVERY_STATUSES:
         if (info or {}).get("phase") == "importing_tasks" and (info or {}).get("import_task"):
             consistency = verify_install_outputs(info)
@@ -471,6 +475,8 @@ def api_online_install_log(install_id):
         "log_file": str(log_file),
         "log": tail_file(str(log_file), lines),
     }
+    relation = online_install_retry_relation(info)
+    payload.update(relation)
     if str(payload["log"]).startswith("读取日志失败:"):
         payload.update(
             ok=False,
@@ -532,6 +538,25 @@ def online_install_log(install_id):
         info["log_file"] = str(log_path)
     recovery = _install_recovery(info)
     recovery_html = _install_recovery_html(recovery)
+    retry_relation = online_install_retry_relation(info)
+    retry_navigation_html = ""
+    if retry_relation.get("retry_relation_error"):
+        retry_navigation_html = f'<span class="help" style="color:#dc2626;">{h(retry_relation["retry_relation_error"])}</span>'
+    else:
+        if retry_relation.get("retry_parent_id"):
+            parent_url = url_for(
+                "online_scripts.online_install_log",
+                install_id=retry_relation["retry_parent_id"],
+                back="/online-scripts/install-history",
+            )
+            retry_navigation_html += f'<a class="btn btn-gray" href="{h(parent_url)}">查看原安装</a>'
+        if retry_relation.get("retry_child_id"):
+            child_url = url_for(
+                "online_scripts.online_install_log",
+                install_id=retry_relation["retry_child_id"],
+                back="/online-scripts/install-history",
+            )
+            retry_navigation_html += f'<a class="btn btn-blue" href="{h(child_url)}">查看后续重试</a>'
     consistency = verify_install_outputs(info)
     consistency_note = ""
     if consistency.get("changed"):
@@ -563,6 +588,7 @@ def online_install_log(install_id):
 <a class="btn btn-blue" href="/pull">脚本</a>
 <a class="btn btn-orange" href="/tasks">任务</a>
 <div id="installRecoveryAction">{recovery_html}</div>
+{retry_navigation_html}
 {stop_install_button}
 """,
     )
@@ -800,6 +826,24 @@ def online_install_history():
     rows = []
     for info in items:
         install_id = str(info.get("id") or "")
+        relation_error = str(info.get("retry_relation_error") or "")
+        relation_html = f'<span class="help" style="color:#dc2626;">{h(relation_error)}</span>' if relation_error else ""
+        if not relation_error and info.get("retry_parent_id"):
+            parent_url = url_for(
+                "online_scripts.online_install_log",
+                install_id=info["retry_parent_id"],
+                back="/online-scripts/install-history",
+            )
+            relation_html += f'<a href="{h(parent_url)}">原安装</a> '
+        if not relation_error and info.get("retry_child_id"):
+            child_url = url_for(
+                "online_scripts.online_install_log",
+                install_id=info["retry_child_id"],
+                back="/online-scripts/install-history",
+            )
+            relation_html += f'<a href="{h(child_url)}">后续重试</a>'
+        if not relation_html:
+            relation_html = "-"
         rows.append(
             "<tr>"
             f"<td><code>{h(install_id)}</code></td>"
@@ -807,13 +851,14 @@ def online_install_history():
             f"<td>{h(labels.get(info.get('status'), info.get('status') or '-'))}</td>"
             f"<td>{h(info.get('phase') or '-')}</td>"
             f"<td>{h(info.get('updated_at') or '-')}</td>"
+            f"<td>{relation_html}</td>"
             f'<td><a class="btn btn-blue" href="/online-scripts/log/{h(install_id)}">查看安装日志</a></td>'
             "</tr>"
         )
     table = (
         '<div class="table-wrap"><table><thead><tr><th>安装 ID</th><th>脚本</th><th>状态</th>'
-        '<th>阶段</th><th>更新时间</th><th>操作</th></tr></thead><tbody>'
-        + ("".join(rows) or '<tr><td colspan="6">暂无安装历史</td></tr>')
+        '<th>阶段</th><th>更新时间</th><th>重试关系</th><th>操作</th></tr></thead><tbody>'
+        + ("".join(rows) or '<tr><td colspan="7">暂无安装历史</td></tr>')
         + "</tbody></table></div>"
     )
     body = page_header_card(

@@ -22,10 +22,15 @@ ONLINE_INSTALL_JOBS_FILE = DATA_DIR / "online_install_jobs.json"
 ONLINE_INSTALL_LOCK = threading.RLock()
 ONLINE_INSTALL_LIMIT = 100
 ONLINE_INSTALL_TIMEOUT_SECONDS = 1800
+ONLINE_INSTALL_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 ONLINE_REFRESH_STATE_FILE = DATA_DIR / "online_script_refresh.json"
 ONLINE_REFRESH_HISTORY_FILE = DATA_DIR / "online_script_refresh_requests.json"
 ONLINE_REFRESH_LOCK = threading.RLock()
 ONLINE_TASK_IMPORT_LOCK = threading.RLock()
+
+
+class InstallHistoryLimitError(RuntimeError):
+    pass
 
 
 def _task_import_snapshot(info):
@@ -586,6 +591,72 @@ def _install_snapshot(info):
     return {field: info.get(field) for field in fields}
 
 
+def _bounded_online_install_jobs(data):
+    if len(data) <= ONLINE_INSTALL_LIMIT:
+        return dict(data)
+
+    roots = {install_id: install_id for install_id in data}
+
+    def find(install_id):
+        while roots[install_id] != install_id:
+            roots[install_id] = roots[roots[install_id]]
+            install_id = roots[install_id]
+        return install_id
+
+    def union(left, right):
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            roots[right_root] = left_root
+
+    for install_id, info in data.items():
+        for field in ("retry_of", "retried_by"):
+            linked_id = info.get(field)
+            if isinstance(linked_id, str) and linked_id in data and linked_id != install_id:
+                union(install_id, linked_id)
+
+    groups = {}
+    for install_id in data:
+        groups.setdefault(find(install_id), set()).add(install_id)
+
+    def group_key(group):
+        return max(
+            (str(data[install_id].get("updated_at") or ""), install_id)
+            for install_id in group
+        )
+
+    protected = []
+    disposable = []
+    for group in groups.values():
+        jobs = [data[install_id] for install_id in group]
+        if any(
+            job.get("running")
+            or job.get("status") in ("准备中", "运行中", "停止中")
+            or bool(job.get("scheduler_reload_pending"))
+            for job in jobs
+        ):
+            protected.append(group)
+        else:
+            disposable.append(group)
+
+    protected_count = sum(len(group) for group in protected)
+    if protected_count > ONLINE_INSTALL_LIMIT:
+        raise InstallHistoryLimitError(
+            "活动在线安装及其重试链超过历史保留上限，未写入新回执，也未启动下载或安装进程。"
+        )
+
+    retained_ids = set().union(*protected) if protected else set()
+    for group in sorted(disposable, key=group_key, reverse=True):
+        if len(retained_ids) + len(group) <= ONLINE_INSTALL_LIMIT:
+            retained_ids.update(group)
+
+    ordered = sorted(
+        ((install_id, data[install_id]) for install_id in retained_ids),
+        key=lambda pair: (str(pair[1].get("updated_at") or ""), pair[0]),
+        reverse=True,
+    )
+    return dict(ordered)
+
+
 def _read_install_jobs():
     """Read install history without treating corruption as an empty history."""
     with storage_transaction():
@@ -625,19 +696,36 @@ def persist_online_install(info):
                     raise RuntimeError("在线脚本安装记录损坏，未覆盖原文件：记录标识不一致")
                 jobs[key] = value
             retry_of = str(snapshot.get("retry_of") or "")
+            if retry_of == install_id:
+                raise RuntimeError("在线脚本安装重试记录不能引用自身，未覆盖原文件")
+            existing = jobs.get(install_id)
+            if existing and any(
+                existing.get(field) != snapshot.get(field)
+                for field in ("script_id", "retry_of")
+            ):
+                raise RuntimeError("在线脚本安装标识已绑定其他作业，未覆盖原文件")
             previous = jobs.get(retry_of)
-            if retry_of and isinstance(previous, dict):
+            if retry_of:
+                if not isinstance(previous, dict) or previous.get("script_id") != snapshot.get("script_id"):
+                    raise RuntimeError("在线脚本原安装记录缺失或不匹配，未覆盖原文件")
+                linked_id = str(previous.get("retried_by") or "")
+                if linked_id and linked_id != install_id:
+                    raise RuntimeError("在线脚本原安装已关联其他重试，未覆盖原文件")
                 previous = dict(previous)
                 previous["retried_by"] = install_id
                 jobs[retry_of] = previous
+            retry_child_id = str(snapshot.get("retried_by") or "")
+            if retry_child_id:
+                child = jobs.get(retry_child_id)
+                if (
+                    not isinstance(child, dict)
+                    or child.get("retry_of") != install_id
+                    or child.get("script_id") != snapshot.get("script_id")
+                ):
+                    raise RuntimeError("在线脚本重试关联损坏，未覆盖原文件")
             jobs.pop(install_id, None)
             jobs = {install_id: snapshot, **jobs}
-            ordered = sorted(
-                jobs.items(),
-                key=lambda pair: str(pair[1].get("updated_at") or ""),
-                reverse=True,
-            )
-            return dict(ordered[:ONLINE_INSTALL_LIMIT])
+            return _bounded_online_install_jobs(jobs)
 
         mutate_json(ONLINE_INSTALL_JOBS_FILE, {}, update, strict=True)
         previous = ONLINE_INSTALL_RUNNING.get(str(snapshot.get("retry_of") or ""))
@@ -658,6 +746,84 @@ def _load_persisted_online_installs():
         for install_id, info in jobs.items()
         if isinstance(info, dict)
     }
+
+
+def online_install_retry_relation(info, jobs=None):
+    install_id = str((info or {}).get("id") or "")
+    if not ONLINE_INSTALL_ID_RE.fullmatch(install_id):
+        return {"retry_parent_id": "", "retry_child_id": "", "retry_relation_error": "安装标识无效"}
+    try:
+        with ONLINE_INSTALL_LOCK:
+            if jobs is None:
+                jobs = _load_persisted_online_installs()
+                for live_id, live_info in ONLINE_INSTALL_RUNNING.items():
+                    if isinstance(live_info, dict):
+                        jobs[live_id] = _install_snapshot(live_info)
+            else:
+                jobs = dict(jobs)
+            jobs[install_id] = dict(info)
+    except Exception as exc:
+        return {
+            "retry_parent_id": "",
+            "retry_child_id": "",
+            "retry_relation_error": f"安装重试关系无法读取：{exc}",
+        }
+
+    def relation_error(message):
+        return {
+            "retry_parent_id": "",
+            "retry_child_id": "",
+            "retry_relation_error": message,
+        }
+
+    visited = {install_id}
+    current_id = install_id
+    while True:
+        current = jobs.get(current_id)
+        if not isinstance(current, dict):
+            return relation_error("安装重试关系指向缺失记录")
+        parent_id = current.get("retry_of") or ""
+        if not parent_id:
+            break
+        if not isinstance(parent_id, str) or not ONLINE_INSTALL_ID_RE.fullmatch(parent_id):
+            return relation_error("安装重试关联标识无效")
+        if parent_id in visited:
+            return relation_error("安装重试关系存在循环")
+        parent = jobs.get(parent_id)
+        if (
+            not isinstance(parent, dict)
+            or parent.get("retried_by") != current_id
+            or parent.get("script_id") != current.get("script_id")
+        ):
+            return relation_error("安装重试父子关联缺失或不匹配，已禁用重试")
+        visited.add(parent_id)
+        current_id = parent_id
+
+    current_id = install_id
+    while True:
+        current = jobs.get(current_id)
+        if not isinstance(current, dict):
+            return relation_error("安装重试关系指向缺失记录")
+        child_id = current.get("retried_by") or ""
+        if not child_id:
+            break
+        if not isinstance(child_id, str) or not ONLINE_INSTALL_ID_RE.fullmatch(child_id):
+            return relation_error("安装重试关联标识无效")
+        if child_id in visited:
+            return relation_error("安装重试关系存在循环")
+        child = jobs.get(child_id)
+        if (
+            not isinstance(child, dict)
+            or child.get("retry_of") != current_id
+            or child.get("script_id") != current.get("script_id")
+        ):
+            return relation_error("安装重试父子关联缺失或不匹配，已禁用重试")
+        visited.add(child_id)
+        current_id = child_id
+
+    parent_id = str((info or {}).get("retry_of") or "")
+    child_id = str((info or {}).get("retried_by") or "")
+    return {"retry_parent_id": parent_id, "retry_child_id": child_id, "retry_relation_error": ""}
 
 
 def get_online_install_job(install_id):
@@ -731,7 +897,9 @@ def latest_online_install_for_script(script_id):
         # Recovery changes updated_at, but must not promote an older attempt.
         matches.sort(key=order, reverse=True)
         install_id, info = matches[0]
-        return install_id, dict(info)
+        result = dict(info)
+        result.update(online_install_retry_relation(result, jobs))
+        return install_id, result
 
 
 def list_online_install_jobs(limit=50, script_id=""):
@@ -764,4 +932,7 @@ def list_online_install_jobs(limit=50, script_id=""):
             return started, str(info.get("updated_at") or "")
 
         items.sort(key=order, reverse=True)
-        return items[:limit]
+        selected = items[:limit]
+        for info in selected:
+            info.update(online_install_retry_relation(info, jobs))
+        return selected

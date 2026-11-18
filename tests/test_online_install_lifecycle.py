@@ -805,6 +805,233 @@ setImmediate(() => {
             self.assertIn("无法读取", page.get_data(as_text=True))
             self.assertEqual(ONLINE_INSTALL_JOBS_FILE.read_bytes(), original)
 
+    def test_install_history_clips_whole_retry_chains_and_exposes_recursive_recovery_navigation(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE, persist_online_install
+            from fls_manager.online_scripts.source import save_online_script_cache
+
+            save_online_script_cache([self.item()])
+
+            def record(install_id, *, started, updated, retry_of="", retried_by="", status="失败"):
+                log_file = base_dir / f"{install_id}.log"
+                log_file.write_text(f"log for {install_id}\n", encoding="utf-8")
+                return {
+                    "id": install_id, "script_id": "demo", "script_name": "Demo",
+                    "log_file": str(log_file), "proxy_id": "", "import_task": False,
+                    "enable_task": False, "selected_task_indexes": [], "selected_tasks": [],
+                    "force": False, "retry_of": retry_of, "retried_by": retried_by,
+                    "running": False, "status": status, "phase": "failed",
+                    "start_time": started, "returncode": 1, "error": "fixture failure",
+                    "scheduler_reload_pending": False, "scheduler_reload_error": "",
+                    "updated_at": updated,
+                }
+
+            jobs = {}
+            old = [
+                record("old-attempt", started=1, updated="2026-11-01 00:00:00", retried_by="old-retry"),
+                record("old-retry", started=2, updated="2026-11-01 00:01:00", retry_of="old-attempt"),
+            ]
+            latest = [
+                record("latest-attempt", started=200, updated="2026-11-18 20:00:00", retried_by="latest-retry"),
+                record("latest-retry", started=201, updated="2026-11-18 20:01:00", retry_of="latest-attempt", retried_by="latest-final"),
+                record("latest-final", started=202, updated="2026-11-18 20:02:00", retry_of="latest-retry"),
+            ]
+            jobs.update((item["id"], item) for item in old + latest)
+            for index in range(95):
+                item = record(f"filler-{index:03d}", started=10 + index, updated="2026-11-10 00:00:00")
+                jobs[item["id"]] = item
+            ONLINE_INSTALL_JOBS_FILE.write_text(json.dumps(jobs, ensure_ascii=False), encoding="utf-8")
+
+            newest = record("new-install", started=1000, updated="2026-11-19 00:00:00")
+            persist_online_install(newest)
+            stored = json.loads(ONLINE_INSTALL_JOBS_FILE.read_text(encoding="utf-8"))
+            self.assertLessEqual(len(stored), 100)
+            self.assertNotIn("old-attempt", stored)
+            self.assertNotIn("old-retry", stored)
+            self.assertEqual(stored["latest-attempt"]["retried_by"], "latest-retry")
+            self.assertEqual(stored["latest-retry"]["retry_of"], "latest-attempt")
+            self.assertEqual(stored["latest-retry"]["retried_by"], "latest-final")
+            self.assertEqual(stored["latest-final"]["retry_of"], "latest-retry")
+
+            client = app.test_client()
+            history = client.get("/api/online-scripts/install-history?limit=100", headers={"X-Token": TOKEN})
+            self.assertEqual(history.status_code, 200)
+            by_id = {item["id"]: item for item in history.json["items"]}
+            self.assertNotIn("old-attempt", by_id)
+            self.assertNotIn("old-retry", by_id)
+            self.assertEqual(by_id["latest-attempt"]["retry_child_id"], "latest-retry")
+            self.assertEqual(by_id["latest-retry"]["retry_parent_id"], "latest-attempt")
+            self.assertEqual(by_id["latest-retry"]["retry_child_id"], "latest-final")
+            self.assertEqual(by_id["latest-final"]["retry_parent_id"], "latest-retry")
+            self.assertTrue(all(not item["retry_relation_error"] for item in by_id.values()))
+
+            page = client.get("/online-scripts/install-history", headers={"X-Token": TOKEN})
+            self.assertEqual(page.status_code, 200)
+            html = page.get_data(as_text=True)
+            self.assertNotIn("old-attempt", html)
+            self.assertIn('/online-scripts/log/latest-retry?back=/online-scripts/install-history', html)
+            log_page = client.get("/online-scripts/log/latest-final", headers={"X-Token": TOKEN})
+            log_html = log_page.get_data(as_text=True)
+            self.assertEqual(log_page.status_code, 200)
+            self.assertIn('/online-scripts/log/latest-retry?back=/online-scripts/install-history', log_html)
+            self.assertIn('action="/online-scripts/install-retry/latest-final"', log_html)
+
+    def test_install_history_protects_running_stopping_and_scheduler_pending_retry_chains(self):
+        with isolated_app() as (_app, base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE, persist_online_install
+
+            def record(install_id, *, started, updated, retry_of="", retried_by="", status="失败", running=False, pending=False):
+                return {
+                    "id": install_id, "script_id": "demo", "script_name": "Demo",
+                    "log_file": str(base_dir / f"{install_id}.log"), "proxy_id": "",
+                    "import_task": False, "enable_task": False,
+                    "selected_task_indexes": [], "selected_tasks": [], "force": False,
+                    "retry_of": retry_of, "retried_by": retried_by, "running": running,
+                    "status": status, "phase": status, "start_time": started,
+                    "returncode": None if running else 1, "error": "",
+                    "scheduler_reload_pending": pending, "scheduler_reload_error": "",
+                    "updated_at": updated,
+                }
+
+            jobs = {}
+            for prefix, active in (
+                ("running", {"status": "运行中", "running": True}),
+                ("stopping", {"status": "停止中"}),
+                ("reload", {"status": "部分完成", "pending": True}),
+            ):
+                first = record(f"{prefix}-parent", started=1, updated="2026-11-01", retried_by=f"{prefix}-active")
+                second = record(
+                    f"{prefix}-active", started=2, updated="2026-11-02", retry_of=f"{prefix}-parent", **active,
+                )
+                jobs[first["id"]] = first
+                jobs[second["id"]] = second
+            for index in range(94):
+                item = record(f"terminal-{index:03d}", started=10 + index, updated="2026-10-01")
+                jobs[item["id"]] = item
+            ONLINE_INSTALL_JOBS_FILE.write_text(json.dumps(jobs, ensure_ascii=False), encoding="utf-8")
+
+            persist_online_install(record("new-terminal", started=1000, updated="2026-11-19"))
+            stored = json.loads(ONLINE_INSTALL_JOBS_FILE.read_text(encoding="utf-8"))
+            self.assertEqual(len(stored), 100)
+            for prefix in ("running", "stopping", "reload"):
+                self.assertIn(f"{prefix}-parent", stored)
+                self.assertIn(f"{prefix}-active", stored)
+            self.assertTrue(stored["reload-active"]["scheduler_reload_pending"])
+            self.assertTrue(any(f"terminal-{index:03d}" not in stored for index in range(94)))
+
+    def test_install_history_capacity_conflict_has_no_receipt_or_install_side_effect(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE, ONLINE_INSTALL_RUNNING
+
+            jobs = {}
+            for index in range(100):
+                install_id = f"active-{index:03d}"
+                jobs[install_id] = {
+                    "id": install_id, "script_id": f"other-{index}", "running": True,
+                    "status": "运行中", "updated_at": f"2026-11-{index % 28 + 1:02d}",
+                }
+            ONLINE_INSTALL_JOBS_FILE.write_text(json.dumps(jobs), encoding="utf-8")
+            before = ONLINE_INSTALL_JOBS_FILE.read_bytes()
+            client = app.test_client()
+            with patch("fls_manager.routes.online_scripts.install.get_online_script", return_value=self.item()), patch(
+                "fls_manager.routes.online_scripts.install.start_install_thread",
+            ) as start:
+                response = client.post(
+                    "/api/online-scripts/install/demo",
+                    json={"request_id": "9" * 32},
+                    headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(response.status_code, 409)
+            self.assertFalse(response.json["ok"])
+            self.assertIn("未启动", response.json["msg"])
+            self.assertEqual(ONLINE_INSTALL_JOBS_FILE.read_bytes(), before)
+            self.assertNotIn("9" * 32, ONLINE_INSTALL_RUNNING)
+            start.assert_not_called()
+
+    def test_retry_capacity_conflict_does_not_claim_parent_or_launch_download(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE, ONLINE_INSTALL_RUNNING
+            from fls_manager.online_scripts.source import save_online_script_cache
+
+            save_online_script_cache([self.item()])
+            jobs = {
+                "retry-parent": {
+                    "id": "retry-parent", "script_id": "demo", "script_name": "Demo",
+                    "log_file": str(base_dir / "retry-parent.log"), "retry_of": "", "retried_by": "",
+                    "running": False, "status": "失败", "phase": "failed", "start_time": 1,
+                    "returncode": 1, "error": "fixture failure", "updated_at": "2026-11-19",
+                },
+            }
+            for index in range(99):
+                install_id = f"active-{index:03d}"
+                jobs[install_id] = {
+                    "id": install_id, "script_id": f"other-{index}", "running": True,
+                    "status": "运行中", "updated_at": "2026-11-18",
+                }
+            ONLINE_INSTALL_JOBS_FILE.write_text(json.dumps(jobs, ensure_ascii=False), encoding="utf-8")
+            before = ONLINE_INSTALL_JOBS_FILE.read_bytes()
+            client = app.test_client()
+            with client.session_transaction() as session:
+                session.update(
+                    token=TOKEN, token_expire_at=int(time.time()) + 3600,
+                    security_verified=True, csrf_token="retry-capacity-csrf",
+                )
+            with patch("fls_manager.routes.online_scripts.install.start_install_thread") as start:
+                response = client.post(
+                    "/online-scripts/install-retry/retry-parent",
+                    data={"csrf_token": "retry-capacity-csrf"},
+                    headers={"X-Requested-With": "FLS-Ajax"},
+                )
+            self.assertEqual(response.status_code, 409)
+            self.assertIn("未启动下载或安装进程", response.get_data(as_text=True))
+            self.assertEqual(ONLINE_INSTALL_JOBS_FILE.read_bytes(), before)
+            self.assertFalse(json.loads(before)["retry-parent"].get("retried_by"))
+            self.assertFalse(any(info.get("running") for info in ONLINE_INSTALL_RUNNING.values()))
+            start.assert_not_called()
+
+    def test_damaged_online_retry_relation_is_visible_and_blocks_retry(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE
+            from fls_manager.online_scripts.source import save_online_script_cache
+
+            save_online_script_cache([self.item()])
+
+            parent = {
+                "id": "broken-parent", "script_id": "demo", "script_name": "Demo",
+                "log_file": str(base_dir / "broken-parent.log"), "retry_of": "",
+                "retried_by": "missing-child", "running": False, "status": "失败",
+                "phase": "failed", "start_time": 1, "returncode": 1,
+                "error": "fixture failure", "updated_at": "2026-11-19",
+            }
+            (base_dir / "broken-parent.log").write_text("failed\n", encoding="utf-8")
+            ONLINE_INSTALL_JOBS_FILE.write_text(json.dumps({parent["id"]: parent}), encoding="utf-8")
+            client = app.test_client()
+            with client.session_transaction() as session:
+                session.update(
+                    token=TOKEN, token_expire_at=int(time.time()) + 3600,
+                    security_verified=True, csrf_token="broken-chain-csrf",
+                )
+            history = client.get("/api/online-scripts/install-history", headers={"X-Token": TOKEN})
+            self.assertEqual(history.status_code, 200)
+            self.assertIn("缺失或不匹配", history.json["items"][0]["retry_relation_error"])
+            page = client.get("/online-scripts/log/broken-parent", headers={"X-Token": TOKEN})
+            self.assertIn("已禁用重试", page.get_data(as_text=True))
+            script_page = client.get("/online-scripts", headers={"X-Token": TOKEN})
+            script_html = script_page.get_data(as_text=True)
+            self.assertIn("已禁用重试", script_html)
+            self.assertNotIn('action="/online-scripts/install-retry/broken-parent"', script_html)
+            original = ONLINE_INSTALL_JOBS_FILE.read_bytes()
+            with patch("fls_manager.routes.online_scripts.install.start_install_thread") as start:
+                response = client.post(
+                    "/online-scripts/install-retry/broken-parent",
+                    data={"csrf_token": "broken-chain-csrf"},
+                    headers={"X-Requested-With": "FLS-Ajax"},
+                )
+            self.assertEqual(response.status_code, 409)
+            self.assertIn("已禁用重试", response.get_data(as_text=True))
+            self.assertEqual(ONLINE_INSTALL_JOBS_FILE.read_bytes(), original)
+            start.assert_not_called()
+
     def test_install_log_and_history_reject_uncontrolled_paths_and_symlink_storage(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE

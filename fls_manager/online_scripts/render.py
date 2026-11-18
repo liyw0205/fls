@@ -194,6 +194,8 @@ def render_online_script_rows(items):
     <form class="inline-form" method="post" action="/online-scripts/install-reload/{h(latest_install_id)}">
         <button class="btn btn-primary" type="submit">重新加载调度器</button>
     </form>'''
+                elif (latest_install_info or {}).get("retry_relation_error"):
+                    recovery_error = (latest_install_info or {}).get("retry_relation_error")
                 elif not (latest_install_info or {}).get("retried_by"):
                     retry_action = f'''
     <form class="inline-form" method="post" action="/online-scripts/install-retry/{h(latest_install_id)}">
