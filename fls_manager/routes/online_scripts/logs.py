@@ -9,6 +9,7 @@ from ...paths import LOG_DIR
 
 RECOVERY_STATUSES = {"结果未知", "失败", "超时", "已停止", "启动失败"}
 REFRESH_ID_RE = re.compile(r"^[a-f0-9]{32}$")
+REFRESH_TERMINAL_STATUSES = {"已完成", "部分完成", "失败", "结果未知", "超时", "已停止", "启动失败"}
 
 
 def _refresh_log_state(request_id):
@@ -82,6 +83,7 @@ def _refresh_log_payload(request_id, lines):
         "request_id": request_id,
         "id": state.get("id", ""),
         "running": bool(state.get("running")),
+        "terminal": not bool(state.get("running")) and state.get("status") in REFRESH_TERMINAL_STATUSES,
         "status": state.get("status") or "-",
         "updated_at": state.get("updated_at") or "",
         "error": state.get("error") or "",
@@ -136,7 +138,26 @@ const errorEl = document.getElementById("refreshLogError");
 const loginEl = document.getElementById("refreshLogLogin");
 const retryEl = document.getElementById("refreshLogRetry");
 const textEl = document.getElementById("refreshLogText");
+let pending = false;
+let pollTimer = null;
+let pollingStopped = false;
+
+function stopPolling(){{
+    pollingStopped = true;
+    if(pollTimer){{ clearTimeout(pollTimer); pollTimer = null; }}
+}}
+
+function schedulePolling(){{
+    if(pollingStopped || pollTimer) return;
+    pollTimer = setTimeout(function(){{
+        pollTimer = null;
+        loadRefreshLog();
+    }}, 2000);
+}}
+
 async function loadRefreshLog(){{
+    if(pending) return;
+    pending = true;
     if(retryEl) retryEl.disabled = true;
     try{{
         const response = await fetch("/api/online-scripts/refresh-log/{h(payload.get("request_id"))}?lines=1200", {{cache:"no-store", credentials:"same-origin"}});
@@ -149,13 +170,28 @@ async function loadRefreshLog(){{
         const updated = document.getElementById("refreshLogUpdatedAt");
         if(status) status.textContent = result.status || "-";
         if(updated) updated.textContent = result.updated_at || "-";
+        if(result.running || !result.terminal){{
+            pollingStopped = false;
+            schedulePolling();
+        }}else{{
+            stopPolling();
+        }}
     }}catch(error){{
+        stopPolling();
         const denied = error && (error.status === 401 || error.status === 403);
         if(errorEl){{ errorEl.hidden = false; errorEl.textContent = "刷新日志读取失败：" + (error && error.message || String(error || "请求失败")) + "。请重新读取或返回刷新状态。"; }}
         if(loginEl){{ loginEl.hidden = !denied; if(denied) loginEl.href = "/login?next=" + encodeURIComponent(location.pathname + location.search); }}
-    }}finally{{ if(retryEl) retryEl.disabled = false; }}
+    }}finally{{ pending = false; if(retryEl) retryEl.disabled = false; }}
 }}
-if(retryEl) retryEl.addEventListener("click", loadRefreshLog);
+if(retryEl) retryEl.addEventListener("click", function(){{
+    pollingStopped = false;
+    if(!pending) return loadRefreshLog();
+}});
+window.addEventListener("pagehide", stopPolling, {{once:true}});
+if({str(bool(payload.get("running"))).lower()}){{
+    pollingStopped = false;
+    loadRefreshLog();
+}}
 }})();
 </script>
 """

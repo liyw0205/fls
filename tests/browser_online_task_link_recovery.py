@@ -73,13 +73,16 @@ def main():
                     log_file="",
                 )
                 return jsonify(ok=True)
+            running = bool(data.get("running"))
+            status = "运行中" if running else "部分完成"
+            message = "正在后台同步在线脚本源，请稍候..." if running else "同步在线脚本源部分完成，请逐项重试"
             update_online_refresh_state(
                 id="e" * 32,
                 request_id="d" * 32,
                 proxy_id="",
-                running=False,
-                status="部分完成",
-                message="同步在线脚本源部分完成，请逐项重试",
+                running=running,
+                status=status,
+                message=message,
                 error="",
                 cache_published=True,
                 task_link_failures=[{
@@ -92,7 +95,10 @@ def main():
                 updated_at="now",
                 log_file=str(online_refresh_log_file("e" * 32)),
             )
-            online_refresh_log_file("e" * 32).write_text("fixture refresh log\nrefresh failed: upstream timeout\n", encoding="utf-8")
+            online_refresh_log_file("e" * 32).write_text(
+                "fixture refresh log\n" + ("refresh running\n" if running else "refresh failed: upstream timeout\n"),
+                encoding="utf-8",
+            )
             return jsonify(ok=True)
 
         server = make_server("127.0.0.1", 0, app, threaded=True)
@@ -159,6 +165,11 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    await page.locator('#onlineRefreshLogLink').click();
    await page.waitForSelector('#refreshLogText');
    assert.match(await page.locator('#refreshLogText').textContent(),/fixture refresh log/);
+   await page.request.post(base+'/api/fixture/online-refresh',{headers,data:{running:true}});
+   await page.goto(base+'/online-scripts/refresh-log/'+'d'.repeat(32));
+   await page.waitForFunction(()=>document.body.textContent.includes('运行中'));
+   await page.request.post(base+'/api/fixture/online-refresh',{headers,data:{running:false}});
+   await page.waitForFunction(()=>document.body.textContent.includes('部分完成'),{timeout:6000});
    await page.goto(base+'/online-scripts');
    await page.evaluate(()=>sessionStorage.setItem('fls-online-refresh-request',JSON.stringify({request_id:'d'.repeat(32),proxy_id:'',server_id:'e'.repeat(32)})));
    await page.locator('#onlineRefreshBtn').click();
