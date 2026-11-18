@@ -76,6 +76,8 @@ def _read_jobs():
 def persist_install_job(info):
     snapshot = _snapshot(info)
     _validate(snapshot)
+    if snapshot["retry_of"] == snapshot["id"]:
+        raise RuntimeError("依赖安装重试回执不能引用自身，未覆盖原文件")
     with INSTALL_JOBS_LOCK:
         if INSTALL_JOBS_FILE.is_symlink():
             raise RuntimeError("依赖安装回执不能是符号链接，未覆盖外部文件")
@@ -87,7 +89,26 @@ def persist_install_job(info):
                 if key != str(key) or not isinstance(value, dict) or value.get("id") != key:
                     raise RuntimeError("依赖安装回执标识损坏，未覆盖原文件")
                 _validate(value)
+            existing = data.get(snapshot["id"])
+            if isinstance(existing, dict) and any(
+                existing.get(field) != snapshot[field]
+                for field in ("kind", "package", "retry_of")
+            ):
+                raise RuntimeError("依赖安装请求标识已绑定其他安装，未覆盖原回执")
+            retry_of = snapshot["retry_of"]
+            if retry_of:
+                previous = data.get(retry_of)
+                if not isinstance(previous, dict):
+                    raise RuntimeError("原依赖安装回执不存在，未启动重试")
+                linked = str(previous.get("retried_by") or "")
+                if linked and linked != snapshot["id"]:
+                    raise RuntimeError("原依赖安装已经提交过重试，未重复启动")
             data[snapshot["id"]] = snapshot
+            if retry_of:
+                previous = dict(data[retry_of])
+                previous["retried_by"] = snapshot["id"]
+                previous["updated_at"] = snapshot["updated_at"]
+                data[retry_of] = previous
             ordered = sorted(
                 data.items(),
                 key=lambda pair: str(pair[1].get("updated_at") or ""),
@@ -97,6 +118,67 @@ def persist_install_job(info):
 
         mutate_json(INSTALL_JOBS_FILE, {}, update, strict=True)
     return dict(snapshot)
+
+
+def claim_install_retry(info):
+    """Atomically bind one retry to its parent before any process is launched."""
+    snapshot = _snapshot(info)
+    _validate(snapshot)
+    if not snapshot["retry_of"] or snapshot["retry_of"] == snapshot["id"]:
+        raise ValueError("依赖安装重试回执缺少有效的原安装 ID")
+    with INSTALL_JOBS_LOCK:
+        if INSTALL_JOBS_FILE.is_symlink():
+            raise RuntimeError("依赖安装回执不能是符号链接，未覆盖外部文件")
+        result = {"claimed": False, "job": None}
+
+        def update(data):
+            if not isinstance(data, dict):
+                raise RuntimeError("依赖安装回执损坏，未覆盖原文件")
+            for key, value in data.items():
+                if not isinstance(key, str) or not isinstance(value, dict) or value.get("id") != key:
+                    raise RuntimeError("依赖安装回执标识损坏，未覆盖原文件")
+                _validate(value)
+            parent = data.get(snapshot["retry_of"])
+            if not isinstance(parent, dict):
+                raise LookupError("原依赖安装回执不存在，未启动重试")
+            existing_child_id = str(parent.get("retried_by") or "")
+            if existing_child_id:
+                existing_child = data.get(existing_child_id)
+                if (
+                    isinstance(existing_child, dict)
+                    and existing_child.get("retry_of") == snapshot["retry_of"]
+                    and existing_child.get("kind") == parent.get("kind")
+                    and existing_child.get("package") == parent.get("package")
+                ):
+                    result["job"] = dict(existing_child)
+                    return None
+                raise RuntimeError("原安装重试回执损坏或缺失，未再次启动")
+            existing = data.get(snapshot["id"])
+            if isinstance(existing, dict):
+                if any(existing.get(field) != snapshot[field] for field in ("kind", "package", "retry_of")):
+                    raise RuntimeError("依赖安装重试 ID 已绑定其他安装，未覆盖原回执")
+                result["job"] = dict(existing)
+                return None
+            if parent.get("running") or parent.get("status") not in ("failed", "unknown"):
+                raise RuntimeError("原安装状态已变更，当前不允许重试")
+            parent = dict(parent)
+            parent["retried_by"] = snapshot["id"]
+            parent["updated_at"] = snapshot["updated_at"]
+            data[snapshot["retry_of"]] = parent
+            data[snapshot["id"]] = snapshot
+            ordered = sorted(
+                data.items(),
+                key=lambda pair: str(pair[1].get("updated_at") or ""),
+                reverse=True,
+            )
+            result["claimed"] = True
+            result["job"] = dict(snapshot)
+            return dict(ordered[:INSTALL_JOB_LIMIT])
+
+        mutate_json(INSTALL_JOBS_FILE, {}, update, strict=True)
+        if result["job"] is None:
+            raise RuntimeError("无法确认依赖安装重试回执")
+        return result
 
 
 def get_install_job(install_id, live_jobs=None):
@@ -127,7 +209,7 @@ def get_install_job(install_id, live_jobs=None):
         return _snapshot(info)
 
 
-def list_install_jobs(limit=50, kind=""):
+def list_install_jobs(limit=50, kind="", live_jobs=None):
     try:
         limit = int(limit)
     except (TypeError, ValueError) as exc:
@@ -144,7 +226,7 @@ def list_install_jobs(limit=50, kind=""):
             if kind and value.get("kind") != kind:
                 continue
             if value.get("running"):
-                value = get_install_job(install_id) or value
+                value = get_install_job(install_id, live_jobs) or value
             items.append(_snapshot(value))
         items.sort(key=lambda value: (str(value.get("updated_at") or ""), str(value.get("id") or "")), reverse=True)
         return items[:limit]

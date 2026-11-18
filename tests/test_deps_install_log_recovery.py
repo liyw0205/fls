@@ -2,6 +2,8 @@ import json
 import re
 import shutil
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -15,7 +17,8 @@ class DependencyInstallLogRecoveryTests(unittest.TestCase):
             with self.subTest(runtime=runtime), isolated_app() as (app, base_dir):
                 from fls_manager.state import DEPS_RUNNING
 
-                proc = SimpleNamespace(poll=lambda: None)
+                proc = SimpleNamespace(returncode=None)
+                proc.poll = lambda: proc.returncode
                 endpoint = "/install/runtime/node" if runtime else "/deps/install"
                 data = {"request_id": "replay-install-1", "name": "demo-package"}
                 if runtime:
@@ -36,6 +39,12 @@ class DependencyInstallLogRecoveryTests(unittest.TestCase):
                 install_id = first.headers["Location"].split("/deps/install-log/", 1)[1].split("?", 1)[0]
                 self.assertIn(install_id, DEPS_RUNNING)
                 self.assertEqual(DEPS_RUNNING[install_id]["request_id"], install_id)
+                history = app.test_client().get(
+                    "/api/deps/install-history", headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(history.status_code, 200)
+                self.assertEqual(history.json["items"][0]["id"], install_id)
+                self.assertEqual(history.json["items"][0]["status"], "running")
 
     def test_dependency_install_json_api_returns_stable_replay_state(self):
         with isolated_app() as (app, _base_dir):
@@ -123,6 +132,336 @@ class DependencyInstallLogRecoveryTests(unittest.TestCase):
             self.assertEqual(failed.json["returncode"], 7)
             dep_popen.assert_not_called()
             runtime_popen.assert_not_called()
+
+    def test_failed_install_retry_is_stable_and_links_original(self):
+        for runtime in (False, True):
+            with self.subTest(runtime=runtime), isolated_app() as (app, base_dir):
+                from fls_manager.install_records import persist_install_job
+                from fls_manager.state import DEPS_RUNNING
+
+                original = "failed-runtime" if runtime else "failed-dependency"
+                package = "node" if runtime else "demo-package"
+                log_name = "system-install-node" if runtime else "deps-install-demo-package"
+                log_file = base_dir / "log" / f"{log_name}-{original}.log"
+                log_file.parent.mkdir(parents=True, exist_ok=True)
+                log_file.write_text("previous attempt\n", encoding="utf-8")
+                persist_install_job({
+                    "id": original, "request_id": original,
+                    "kind": "runtime" if runtime else "dependency", "package": package,
+                    "log_file": str(log_file), "running": False, "finished": True,
+                    "status": "unknown" if runtime else "failed", "returncode": None if runtime else 7,
+                    "error": "previous result", "start_time": 1,
+                    "updated_at": "2026-11-18 18:00:00",
+                })
+                proc = SimpleNamespace(returncode=None)
+                proc.poll = lambda: proc.returncode
+                endpoint = f"/api/deps/install-retry/{original}"
+                patchers = [patch("fls_manager.routes.deps.subprocess.Popen", return_value=proc)]
+                if runtime:
+                    patchers.append(patch("fls_manager.routes.runtime.runtime_install_command", return_value="echo runtime"))
+                with patchers[0] as popen:
+                    runtime_patch = patchers[1] if runtime else None
+                    if runtime_patch:
+                        runtime_patch.start()
+                    try:
+                        client = app.test_client()
+                        first = client.post(
+                            endpoint, json={"request_id": f"retry-{runtime}"},
+                            headers={"X-Token": TOKEN},
+                        )
+                        proc.returncode = 7
+                        replay = client.post(
+                            endpoint, json={"request_id": f"retry-{runtime}"},
+                            headers={"X-Token": TOKEN},
+                        )
+                    finally:
+                        if runtime_patch:
+                            runtime_patch.stop()
+                self.assertEqual(first.status_code, 200)
+                self.assertTrue(first.json["ok"])
+                self.assertEqual(first.json["install_id"], f"retry-{runtime}")
+                self.assertEqual(first.json["status"], "running")
+                self.assertEqual(replay.status_code, 200)
+                self.assertEqual(replay.json["install_id"], first.json["install_id"])
+                self.assertEqual(replay.json["status"], "failed")
+                self.assertEqual(replay.json["returncode"], 7)
+                self.assertEqual(popen.call_count, 1)
+                from fls_manager.install_records import get_install_job
+                self.assertEqual(get_install_job(original)["retried_by"], f"retry-{runtime}")
+                self.assertEqual(DEPS_RUNNING[f"retry-{runtime}"]["retry_of"], original)
+
+    def test_retry_start_failure_is_durable_and_replay_does_not_restart(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.install_records import persist_install_job
+            from fls_manager.state import DEPS_RUNNING
+
+            original = "retry-start-failure"
+            original_log = base_dir / "log" / f"deps-install-demo-{original}.log"
+            original_log.parent.mkdir(parents=True, exist_ok=True)
+            persist_install_job({
+                "id": original, "request_id": original, "kind": "dependency",
+                "package": "demo", "log_file": str(original_log), "running": False,
+                "finished": True, "status": "failed", "returncode": 1,
+                "error": "failed", "start_time": 1, "updated_at": "2026-11-18 18:01:00",
+            })
+            with patch("fls_manager.routes.deps.subprocess.Popen", side_effect=OSError("quota")) as popen:
+                client = app.test_client()
+                first = client.post(
+                    f"/api/deps/install-retry/{original}",
+                    json={"request_id": "retry-start-child"}, headers={"X-Token": TOKEN},
+                )
+                replay = client.post(
+                    f"/api/deps/install-retry/{original}",
+                    json={"request_id": "retry-start-child"}, headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(first.status_code, 200)
+            self.assertEqual(first.json["status"], "start_failed")
+            self.assertIn("quota", first.json["error"])
+            self.assertEqual(replay.status_code, 200)
+            self.assertEqual(replay.json["install_id"], "retry-start-child")
+            self.assertEqual(replay.json["status"], "start_failed")
+            self.assertEqual(popen.call_count, 1)
+            from fls_manager.install_records import get_install_job
+            self.assertEqual(get_install_job(original)["retried_by"], "retry-start-child")
+
+    def test_retry_rejects_success_or_conflicting_request_without_starting(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.install_records import persist_install_job
+
+            for status, code in (("succeeded", 0), ("running", None)):
+                install_id = f"cannot-retry-{status}"
+                persist_install_job({
+                    "id": install_id, "request_id": install_id, "kind": "dependency",
+                    "package": "demo", "log_file": str(base_dir / "log" / f"{install_id}.log"),
+                    "running": status == "running", "finished": status != "running",
+                    "status": status, "returncode": code, "error": "", "start_time": 1,
+                    "updated_at": "2026-11-18 18:02:00",
+                })
+                if status == "running":
+                    from fls_manager.state import DEPS_RUNNING
+                    DEPS_RUNNING[install_id] = {
+                        "id": install_id, "request_id": install_id, "kind": "dependency",
+                        "package": "demo", "log_file": str(base_dir / "log" / f"{install_id}.log"),
+                        "running": True, "finished": False, "status": "running",
+                        "process": SimpleNamespace(poll=lambda: None), "log_fp": None,
+                        "returncode": None, "error": "", "updated_at": "2026-11-18 18:02:00",
+                    }
+                with patch(
+                    "fls_manager.routes.deps.subprocess.Popen",
+                    return_value=SimpleNamespace(poll=lambda: None),
+                ) as popen:
+                    response = app.test_client().post(
+                        f"/api/deps/install-retry/{install_id}",
+                        json={"request_id": f"new-{status}"}, headers={"X-Token": TOKEN},
+                    )
+                self.assertEqual(response.status_code, 409)
+                self.assertFalse(response.json["ok"])
+                popen.assert_not_called()
+
+            original = "conflict-original"
+            persist_install_job({
+                "id": original, "request_id": original, "kind": "dependency", "package": "demo",
+                "log_file": str(base_dir / "log" / "conflict.log"), "running": False,
+                "finished": True, "status": "failed", "returncode": 1, "error": "failed",
+                "start_time": 1, "updated_at": "2026-11-18 18:03:00",
+            })
+            with patch(
+                "fls_manager.routes.deps.subprocess.Popen",
+                return_value=SimpleNamespace(poll=lambda: None),
+            ) as popen:
+                first = app.test_client().post(
+                    f"/api/deps/install-retry/{original}",
+                    json={"request_id": "child-a"}, headers={"X-Token": TOKEN},
+                )
+                second = app.test_client().post(
+                    f"/api/deps/install-retry/{original}",
+                    json={"request_id": "child-b"}, headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(first.status_code, 200)
+            self.assertEqual(second.status_code, 409)
+            self.assertEqual(second.json["install_id"], "child-a")
+            popen.assert_called_once()
+
+            status = app.test_client().get(
+                f"/api/deps/install-retry/{original}/child-a", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(status.status_code, 200)
+            self.assertEqual(status.json["install_id"], "child-a")
+            self.assertFalse(status.json["retry_available"])
+
+    def test_retry_status_does_not_mark_a_live_parent_unknown(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.install_records import INSTALL_JOBS_FILE, get_install_job, persist_install_job
+            from fls_manager.state import DEPS_RUNNING
+
+            install_id = "live-retry-parent"
+            persist_install_job({
+                "id": install_id, "request_id": install_id, "kind": "dependency",
+                "package": "demo", "log_file": str(base_dir / "log" / "live.log"),
+                "running": True, "finished": False, "status": "running", "returncode": None,
+                "error": "", "start_time": 1, "updated_at": "2026-11-18 18:03:30",
+            })
+            DEPS_RUNNING[install_id] = {
+                "id": install_id, "request_id": install_id, "kind": "dependency",
+                "package": "demo", "log_file": str(base_dir / "log" / "live.log"),
+                "running": True, "finished": False, "status": "running",
+                "process": SimpleNamespace(poll=lambda: None), "log_fp": None,
+                "returncode": None, "error": "", "updated_at": "2026-11-18 18:03:30",
+            }
+            response = app.test_client().get(
+                f"/api/deps/install-retry/{install_id}/not-started-child", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json["status"], "original_running")
+            self.assertFalse(response.json["retry_available"])
+            persisted = json.loads(INSTALL_JOBS_FILE.read_text(encoding="utf-8"))
+            self.assertEqual(persisted[install_id]["status"], "running")
+
+    def test_retry_form_requires_csrf_and_renders_recovery_controls(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.install_records import persist_install_job
+
+            install_id = "form-retry"
+            log_file = base_dir / "log" / f"deps-install-demo-{install_id}.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_file.write_text("failed\n", encoding="utf-8")
+            persist_install_job({
+                "id": install_id, "request_id": install_id, "kind": "dependency",
+                "package": "demo", "log_file": str(log_file), "running": False,
+                "finished": True, "status": "failed", "returncode": 1, "error": "failed",
+                "start_time": 1, "updated_at": "2026-11-18 18:04:00",
+            })
+            client = app.test_client()
+            denied = client.post(
+                f"/deps/install-retry/{install_id}", data={"request_id": "form-child"},
+            )
+            self.assertEqual(denied.status_code, 400)
+            page = client.get(f"/deps/install-log/{install_id}", headers={"X-Token": TOKEN})
+            body = page.get_data(as_text=True)
+            self.assertIn(f'action="/deps/install-retry/{install_id}"', body)
+            self.assertIn(f'data-api-action="/api/deps/install-retry/{install_id}"', body)
+            self.assertIn('id="installRetryError"', body)
+            self.assertIn('id="installRetryLogin"', body)
+
+    def test_no_javascript_retry_form_uses_same_idempotent_transaction(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.install_records import get_install_job, persist_install_job
+
+            install_id = "html-retry-parent"
+            log_file = base_dir / "log" / f"deps-install-demo-{install_id}.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_file.write_text("failed\n", encoding="utf-8")
+            persist_install_job({
+                "id": install_id, "request_id": install_id, "kind": "dependency",
+                "package": "demo", "log_file": str(log_file), "running": False,
+                "finished": True, "status": "failed", "returncode": 1, "error": "failed",
+                "start_time": 1, "updated_at": "2026-11-18 18:04:30",
+            })
+            proc = SimpleNamespace(poll=lambda: None)
+            with patch("fls_manager.routes.deps.subprocess.Popen", return_value=proc) as popen:
+                response = app.test_client().post(
+                    f"/deps/install-retry/{install_id}",
+                    data={"request_id": "html-retry-child"}, headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(response.status_code, 302)
+            self.assertIn("/deps/install-log/html-retry-child", response.headers["Location"])
+            self.assertEqual(get_install_job(install_id)["retried_by"], "html-retry-child")
+            popen.assert_called_once()
+
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise retry recovery")
+    def test_retry_page_queries_saved_request_after_reload_and_recovers_errors(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.install_records import persist_install_job
+
+            install_id = "retry-browser-parent"
+            log_file = base_dir / "log" / f"deps-install-demo-{install_id}.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_file.write_text("failed\n", encoding="utf-8")
+            persist_install_job({
+                "id": install_id, "request_id": install_id, "kind": "dependency",
+                "package": "demo", "log_file": str(log_file), "running": False,
+                "finished": True, "status": "failed", "returncode": 1, "error": "failed",
+                "start_time": 1, "updated_at": "2026-11-18 18:05:00",
+            })
+            html = app.test_client().get(
+                f"/deps/install-log/{install_id}", headers={"X-Token": TOKEN},
+            ).get_data(as_text=True)
+            script = next(item for item in re.findall(r"<script>(.*?)</script>", html, re.S) if "function showRetryFailure" in item)
+            harness = r"""
+const vm=require('node:vm'),assert=require('node:assert/strict');
+const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const listeners={},calls=[],stored={"fls-deps-install-retry:retry-browser-parent":JSON.stringify({request_id:'stable-child',original_id:'retry-browser-parent'})};
+const elements=Object.fromEntries(['installRetryError','installRetryQuery','installRetryLog','installRetryLogin'].map(id=>[id,{hidden:true,textContent:'',href:'',disabled:false,addEventListener(name,fn){listeners[id+':'+name]=fn;}}]));
+const requestId={value:'new-child'},button={disabled:false},form={dataset:{apiAction:'/api/deps/install-retry/retry-browser-parent'},querySelector(selector){return selector.includes('request_id')?requestId:button;},addEventListener(name,fn){listeners['form:'+name]=fn;}};
+let response={ok:true,status:200},payload={ok:true,status:'running',status_label:'安装中',running:true,install_id:'stable-child',request_id:'stable-child',log_url:'/deps/install-log/stable-child'};
+const context={document:{querySelector:()=>form,getElementById:id=>elements[id]},sessionStorage:{getItem:key=>stored[key]||null,setItem:(key,value)=>{stored[key]=value;}},location:{pathname:'/deps/install-log/retry-browser-parent',search:''},fetch:async(url,options)=>{calls.push([url,options]);return response;},flsReadJsonResponse:async()=>payload,flsGetCsrfToken:()=> 'csrf-token',encodeURIComponent};
+vm.createContext(context);vm.runInContext(input.script,context);
+const tick=()=>new Promise(resolve=>setImmediate(resolve));
+(async()=>{
+ await tick();
+ assert.equal(calls[0][0],'/api/deps/install-retry/retry-browser-parent/stable-child');
+ assert.equal(elements.installRetryLog.hidden,false);
+ assert.equal(elements.installRetryLog.href,'/deps/install-log/stable-child');
+ assert.equal(elements.installRetryError.textContent,'原重试状态：安装中');
+ response={ok:false,status:502};payload={ok:false,msg:'upstream unavailable'};
+ await listeners['installRetryQuery:click']();
+ assert.equal(requestId.value,'stable-child');
+ assert.equal(elements.installRetryQuery.hidden,false);
+ assert.match(elements.installRetryError.textContent,/upstream unavailable/);
+ response={ok:false,status:401};payload={ok:false,msg:'登录已过期'};
+ await listeners['installRetryQuery:click']();
+ assert.equal(elements.installRetryLogin.hidden,false);
+ assert.match(elements.installRetryLogin.href,/^\/login\?next=/);
+ assert.equal(requestId.value,'stable-child');
+ console.log('retry request recovery passed');
+})().catch(error=>{console.error(error);process.exitCode=1});
+"""
+            result = subprocess.run(
+                ["node", "-e", harness], input=json.dumps({"script": script}),
+                capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_concurrent_retry_claim_starts_only_one_process(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.install_records import persist_install_job
+
+            original = "concurrent-retry-parent"
+            original_log = base_dir / "log" / f"deps-install-demo-{original}.log"
+            original_log.parent.mkdir(parents=True, exist_ok=True)
+            persist_install_job({
+                "id": original, "request_id": original, "kind": "dependency",
+                "package": "demo", "log_file": str(original_log), "running": False,
+                "finished": True, "status": "failed", "returncode": 1, "error": "failed",
+                "start_time": 1, "updated_at": "2026-11-18 18:06:00",
+            })
+            entered, release = threading.Event(), threading.Event()
+
+            def start_process(*_args, **_kwargs):
+                entered.set()
+                self.assertTrue(release.wait(5))
+                return SimpleNamespace(poll=lambda: None)
+
+            with patch("fls_manager.routes.deps.subprocess.Popen", side_effect=start_process) as popen:
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    first_future = pool.submit(
+                        lambda: app.test_client().post(
+                            f"/api/deps/install-retry/{original}", json={"request_id": "same-child"},
+                            headers={"X-Token": TOKEN},
+                        )
+                    )
+                    self.assertTrue(entered.wait(5))
+                    replay = app.test_client().post(
+                        f"/api/deps/install-retry/{original}", json={"request_id": "same-child"},
+                        headers={"X-Token": TOKEN},
+                    )
+                    release.set()
+                    first = first_future.result(timeout=5)
+            self.assertEqual(first.status_code, 200)
+            self.assertEqual(replay.status_code, 200)
+            self.assertEqual(first.json["install_id"], "same-child")
+            self.assertEqual(replay.json["install_id"], "same-child")
+            popen.assert_called_once()
 
     def test_restart_running_install_becomes_unknown_and_history_is_queryable(self):
         with isolated_app() as (app, base_dir):
