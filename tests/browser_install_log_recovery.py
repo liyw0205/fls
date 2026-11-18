@@ -22,6 +22,7 @@ def main():
         from fls_manager.app import create_app
         import fls_manager.app as app_module
         from fls_manager import scheduler
+        from fls_manager.install_records import persist_install_job
         from fls_manager.online_scripts import install, source
         from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING
         from fls_manager.state import DEPS_RUNNING
@@ -56,6 +57,26 @@ def main():
         fault = {"status": 0}
         dependency_processes = []
 
+        class CancelProcess:
+            def __init__(self, process, fail_first_terminate=False):
+                self.process = process
+                self.fail_first_terminate = fail_first_terminate
+
+            def poll(self):
+                return self.process.poll()
+
+            def terminate(self):
+                if self.fail_first_terminate:
+                    self.fail_first_terminate = False
+                    raise OSError("fixture terminate denied")
+                return self.process.terminate()
+
+            def wait(self, timeout=None):
+                return self.process.wait(timeout=timeout)
+
+            def kill(self):
+                return self.process.kill()
+
         @app.before_request
         def log_failure():
             if request.path.startswith(("/api/deps/install-log/", "/api/online-scripts/log/")):
@@ -81,6 +102,25 @@ def main():
                         "log_file": str(log_file), "log_fp": fp, "finished": False,
                         "returncode": None,
                     }
+                if data.get("reset_cancel"):
+                    cancel_id = str(data.get("cancel_id") or "browser-cancel")
+                    log_file = base_dir / "log" / f"deps-install-demo-{cancel_id}.log"
+                    fp = log_file.open("wb", buffering=0)
+                    proc = subprocess.Popen(
+                        [sys.executable, "-u", "-c", "import time; print('live cancel output', flush=True); time.sleep(120)"],
+                        stdout=fp, stderr=subprocess.STDOUT,
+                    )
+                    dependency_processes.append(proc)
+                    cancel_process = CancelProcess(proc, data.get("fail_first_terminate", False))
+                    info = {
+                        "id": cancel_id, "request_id": cancel_id,
+                        "kind": "dependency", "package": "demo",
+                        "log_file": str(log_file), "log_fp": fp, "process": cancel_process,
+                        "running": True, "finished": False, "status": "running",
+                        "returncode": None, "error": "", "start_time": 1,
+                    }
+                    DEPS_RUNNING[cancel_id] = info
+                    persist_install_job(info)
                 if "release" in data:
                     release.write_text(str(data["release"]), encoding="ascii")
             return jsonify(
@@ -99,6 +139,8 @@ def main():
         finally:
             release.write_text("0", encoding="ascii")
             for proc in dependency_processes:
+                if proc.poll() is None:
+                    proc.terminate()
                 proc.wait(timeout=5)
             for job_id in list(ONLINE_INSTALL_RUNNING):
                 install.request_stop_online_install(job_id)
@@ -204,6 +246,56 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    await page.waitForFunction(()=>document.querySelector('#installStatus')?.textContent==='已完成');
    assert.equal((await state()).downloads,before+2);
    assert.equal(await page.evaluate(()=>window.__FLS_ACTIVE_LOG_INTERVAL__),null);
+   const cancelId='browser-cancel-'+viewport.width;
+   await fixture({reset_cancel:true,cancel_id:cancelId});
+   await page.goto(base+'/deps/install-log/'+cancelId+'?back=%2Fdeps');
+   await page.waitForFunction(()=>document.querySelector('#log').textContent.includes('live cancel output'));
+   const cancelForm=page.locator('.install-cancel-form');
+   await cancelForm.getByRole('button',{name:'取消安装'}).waitFor();
+   const cancelRequestId=await cancelForm.locator('[name="request_id"]').inputValue();
+   let cancelPosts=0;
+   await page.route('**/api/deps/install-cancel/'+cancelId,async route=>{
+    if(route.request().method()==='POST'){
+     cancelPosts++;
+     const committed=await route.fetch();
+     assert.equal(committed.status(),200);
+     await route.fulfill({status:502,contentType:'text/plain',body:'fixture response lost after commit'});
+    }else await route.continue();
+   });
+   await cancelForm.getByRole('button',{name:'取消安装'}).click();
+   await page.waitForFunction(()=>document.querySelector('#installCancelError').textContent.includes('fixture response lost after commit'));
+   assert.equal(cancelPosts,1);
+   await page.reload();
+   assert.equal(await page.locator('.install-cancel-form').getAttribute('data-query-on-load'),'true');
+   assert.equal(await page.locator('.install-cancel-form [name="request_id"]').inputValue(),cancelRequestId);
+   await page.waitForFunction(()=>document.querySelector('#installCancelError').textContent.includes('已取消'));
+   assert.equal(await page.locator('.install-cancel-form button[type="submit"]').isHidden(),true);
+   assert.equal(await page.locator('#installCancelAgain').isHidden(),true);
+   assert.equal(cancelPosts,1);
+   assert.equal((await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)),true);
+   await page.screenshot({path:'/tmp/fls-install-cancel-recovery-'+viewport.width+'.png',fullPage:true});
+   const failedCancelId='browser-cancel-failed-'+viewport.width;
+   await fixture({reset_cancel:true,cancel_id:failedCancelId,fail_first_terminate:true});
+   await page.goto(base+'/deps/install-log/'+failedCancelId+'?back=%2Fdeps');
+   await page.waitForFunction(()=>document.querySelector('#log').textContent.includes('live cancel output'));
+   let failedCancelPosts=0;
+   await page.route('**/api/deps/install-cancel/'+failedCancelId,async route=>{
+    if(route.request().method()==='POST') failedCancelPosts++;
+    await route.continue();
+   });
+   const failedCancelForm=page.locator('.install-cancel-form');
+   await failedCancelForm.getByRole('button',{name:'取消安装'}).click();
+   await page.waitForFunction(()=>document.querySelector('#installCancelError').textContent.includes('fixture terminate denied'));
+   assert.equal(failedCancelPosts,1);
+   await page.locator('#installCancelQuery').click();
+   await page.waitForFunction(()=>!document.querySelector('#installCancelAgain').hidden);
+   const failedRequestId=await failedCancelForm.locator('[name="request_id"]').inputValue();
+   await page.locator('#installCancelAgain').click();
+   await page.waitForFunction(()=>document.querySelector('#installStatus').textContent==='已取消');
+   assert.notEqual(await failedCancelForm.locator('[name="request_id"]').inputValue(),failedRequestId);
+   assert.equal(failedCancelPosts,2);
+   assert.equal(await page.locator('#installCancelAgain').isHidden(),true);
+   assert.equal((await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)),true);
    assert.deepEqual(errors,[]);await context.close();console.log('install log recovery passed '+viewport.width);
   }
  }finally{await browser.close();}

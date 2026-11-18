@@ -11,7 +11,8 @@ INSTALL_JOBS_FILE = DATA_DIR / "dependency_install_jobs.json"
 INSTALL_JOBS_LOCK = threading.RLock()
 INSTALL_JOB_LIMIT = 100
 INSTALL_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
-INSTALL_STATES = {"prepared", "running", "succeeded", "failed", "unknown"}
+INSTALL_STATES = {"prepared", "running", "succeeded", "failed", "unknown", "cancelled"}
+CANCEL_STATES = {"", "requested", "cancelled", "completed", "failed", "unknown"}
 
 
 def _snapshot(info):
@@ -30,6 +31,9 @@ def _snapshot(info):
         "updated_at": str(info.get("updated_at") or now_str()),
         "retry_of": str(info.get("retry_of") or ""),
         "retried_by": str(info.get("retried_by") or ""),
+        "cancel_request_id": str(info.get("cancel_request_id") or ""),
+        "cancel_status": str(info.get("cancel_status") or ""),
+        "cancel_error": str(info.get("cancel_error") or ""),
     }
 
 
@@ -46,6 +50,9 @@ def _validate(info):
         or type(info.get("running")) is not bool
         or not isinstance(info.get("error"), str)
         or not isinstance(info.get("updated_at"), str)
+        or (info.get("cancel_request_id") and not INSTALL_ID_RE.fullmatch(info["cancel_request_id"]))
+        or info.get("cancel_status", "") not in CANCEL_STATES
+        or not isinstance(info.get("cancel_error", ""), str)
         or (info.get("retry_of") and not INSTALL_ID_RE.fullmatch(info["retry_of"]))
         or (info.get("retried_by") and not INSTALL_ID_RE.fullmatch(info["retried_by"]))
     ):
@@ -159,7 +166,7 @@ def claim_install_retry(info):
                     raise RuntimeError("依赖安装重试 ID 已绑定其他安装，未覆盖原回执")
                 result["job"] = dict(existing)
                 return None
-            if parent.get("running") or parent.get("status") not in ("failed", "unknown"):
+            if parent.get("running") or parent.get("status") not in ("failed", "unknown", "cancelled"):
                 raise RuntimeError("原安装状态已变更，当前不允许重试")
             parent = dict(parent)
             parent["retried_by"] = snapshot["id"]
@@ -178,6 +185,53 @@ def claim_install_retry(info):
         mutate_json(INSTALL_JOBS_FILE, {}, update, strict=True)
         if result["job"] is None:
             raise RuntimeError("无法确认依赖安装重试回执")
+        return result
+
+
+def claim_install_cancel(install_id, request_id):
+    if not INSTALL_ID_RE.fullmatch(str(install_id or "")) or not INSTALL_ID_RE.fullmatch(str(request_id or "")):
+        raise ValueError("安装或取消请求标识无效")
+    with INSTALL_JOBS_LOCK:
+        if INSTALL_JOBS_FILE.is_symlink():
+            raise RuntimeError("依赖安装回执不能是符号链接，未覆盖外部文件")
+        result = {"claimed": False, "job": None}
+
+        def update(data):
+            if not isinstance(data, dict):
+                raise RuntimeError("依赖安装回执损坏，未覆盖原文件")
+            for key, value in data.items():
+                if not isinstance(key, str) or not isinstance(value, dict) or value.get("id") != key:
+                    raise RuntimeError("依赖安装回执标识损坏，未覆盖原文件")
+                _validate(value)
+            info = data.get(install_id)
+            if not isinstance(info, dict):
+                raise LookupError("安装记录不存在")
+            current_id = str(info.get("cancel_request_id") or "")
+            current_status = str(info.get("cancel_status") or "")
+            if current_id:
+                if current_id == request_id:
+                    result["job"] = dict(info)
+                    return None
+                if current_status not in ("failed", "unknown"):
+                    result["job"] = dict(info)
+                    return None
+            if not info.get("running") or info.get("status") != "running":
+                raise RuntimeError("安装已结束或状态未知，不能确认取消")
+            info = dict(info)
+            info.update(
+                cancel_request_id=request_id,
+                cancel_status="requested",
+                cancel_error="",
+                updated_at=now_str(),
+            )
+            data[install_id] = info
+            result["claimed"] = True
+            result["job"] = dict(info)
+            return data
+
+        mutate_json(INSTALL_JOBS_FILE, {}, update, strict=True)
+        if result["job"] is None:
+            raise RuntimeError("无法确认安装取消回执")
         return result
 
 
@@ -201,6 +255,9 @@ def get_install_job(install_id, live_jobs=None):
                 info.get("error"),
                 "面板重启后无法确认安装进程结果，请查看安装日志后再决定是否重试。",
             )))
+            if info.get("cancel_status") == "requested":
+                info["cancel_status"] = "unknown"
+                info["cancel_error"] = "面板重启后无法确认取消信号是否生效，请检查原安装日志。"
             info["updated_at"] = now_str()
             try:
                 persist_install_job(info)

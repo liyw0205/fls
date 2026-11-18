@@ -15,7 +15,13 @@ from ..paths import BASE_DIR, LOG_DIR
 from ..state import DEPS_RUNNING
 from ..utils import h, now_str, safe_name, get_back_url, prune_completed_records
 from ..logs import tail_file
-from ..install_records import claim_install_retry, get_install_job, list_install_jobs, persist_install_job
+from ..install_records import (
+    claim_install_cancel,
+    claim_install_retry,
+    get_install_job,
+    list_install_jobs,
+    persist_install_job,
+)
 from ..ui.layout import layout
 from ..ui.components import page_header_card, page_header, table_card, empty_table_row
 
@@ -179,6 +185,233 @@ def _persist_dependency_state(info):
         )))
 
 
+def _install_cancel_payload(info):
+    status = str(info.get("status") or "unknown")
+    cancel_status = str(info.get("cancel_status") or "")
+    labels = {
+        "running": "安装中", "succeeded": "安装成功", "failed": "安装失败",
+        "unknown": "结果未知", "cancelled": "已取消", "prepared": "准备中",
+    }
+    if cancel_status == "requested" and info.get("running"):
+        cancel_label = "正在取消"
+    else:
+        cancel_label = {
+            "cancelled": "已取消", "completed": "安装已结束",
+            "failed": "取消失败", "unknown": "取消结果未知",
+        }.get(cancel_status, "")
+    return {
+        "ok": cancel_status in ("requested", "cancelled", "completed"),
+        "request_id": str(info.get("cancel_request_id") or ""),
+        "install_id": str(info.get("id") or ""),
+        "status": status,
+        "status_label": labels.get(status, "结果未知"),
+        "running": bool(info.get("running")),
+        "returncode": info.get("returncode"),
+        "error": str(info.get("cancel_error") or info.get("error") or ""),
+        "cancel_status": cancel_status,
+        "cancel_status_label": cancel_label,
+        "cancel_error": str(info.get("cancel_error") or ""),
+    }
+
+
+def _finish_install_cancel(info, returncode, cancel_status, error=""):
+    still_running = returncode is None and info.get("process") is not None and info["process"].poll() is None
+    fp = info.get("log_fp")
+    if fp and not still_running:
+        try:
+            fp.write(
+                f"\n===== 安装结束: {now_str()}，退出码: {returncode} =====\n".encode("utf-8")
+            )
+        except Exception:
+            pass
+        finally:
+            try:
+                fp.close()
+            except Exception:
+                pass
+    if still_running:
+        cancel_status = "failed"
+        error = error or "取消请求后进程仍在运行，请检查进程并重新请求取消。"
+    elif returncode is None:
+        cancel_status = "unknown"
+        error = error or "无法确认取消后进程的退出码，请检查安装日志。"
+    info.update(
+        finished=not still_running,
+        running=still_running,
+        process=info.get("process") if still_running else None,
+        log_fp=fp if still_running else None,
+        returncode=returncode,
+        status=(
+            "running" if still_running
+            else "unknown" if returncode is None
+            else "succeeded" if returncode == 0
+            else "cancelled" if cancel_status == "cancelled" else "failed"
+        ),
+        cancel_status=cancel_status,
+        cancel_error=error,
+        error=error,
+        updated_at=now_str(),
+    )
+    try:
+        persist_install_job(info)
+        return True
+    except Exception as exc:
+        message = f"安装进程已结束，但取消回执保存失败：{exc}"
+        info["cancel_error"] = "；".join(filter(None, (info.get("cancel_error"), message)))
+        info["error"] = "；".join(filter(None, (info.get("error"), message)))
+        return False
+
+
+def _cancel_install_job(install_id, cancel_id):
+    try:
+        info = get_install_job(install_id, DEPS_RUNNING)
+    except Exception as exc:
+        return {"ok": False, "request_id": cancel_id, "msg": f"安装回执无法读取：{exc}"}, 500
+    if not info:
+        return {"ok": False, "request_id": cancel_id, "msg": "安装记录不存在。"}, 404
+    previous_id = str(info.get("cancel_request_id") or "")
+    if previous_id:
+        if previous_id == cancel_id:
+            if install_id in DEPS_RUNNING and info.get("cancel_status") == "requested":
+                deps_install_result(install_id)
+                info = DEPS_RUNNING.get(install_id) or info
+            return _install_cancel_payload(info), 200
+        if info.get("cancel_status") not in ("failed", "unknown"):
+            return {
+                **_install_cancel_payload(info), "ok": False, "request_id": cancel_id,
+                "msg": "安装已有取消请求，请查询原取消请求。",
+            }, 409
+
+    # Poll first so a process that just completed is never reported as cancelled.
+    if install_id in DEPS_RUNNING:
+        deps_install_result(install_id)
+        info = DEPS_RUNNING.get(install_id) or info
+    if not info.get("running") or info.get("status") != "running":
+        return {
+            **_install_cancel_payload(info), "ok": False, "request_id": cancel_id,
+            "msg": "安装已结束或结果未知，未发送取消信号。",
+        }, 409
+    process = info.get("process")
+    if process is None:
+        info.update(
+            running=False, finished=True, status="unknown",
+            cancel_status="unknown", cancel_request_id=cancel_id,
+            cancel_error="没有可验证的活动进程句柄，未发送取消信号。",
+            error="没有可验证的活动进程句柄，未发送取消信号。", updated_at=now_str(),
+        )
+        try:
+            persist_install_job(info)
+        except Exception as exc:
+            info["cancel_error"] += f"；保存未知状态失败：{exc}"
+        return {
+            **_install_cancel_payload(info), "ok": False, "request_id": cancel_id,
+            "msg": info["cancel_error"],
+        }, 409
+    try:
+        claim = claim_install_cancel(install_id, cancel_id)
+    except LookupError as exc:
+        return {"ok": False, "request_id": cancel_id, "msg": str(exc)}, 404
+    except ValueError as exc:
+        return {"ok": False, "request_id": cancel_id, "msg": str(exc)}, 400
+    except Exception as exc:
+        return {"ok": False, "request_id": cancel_id, "msg": f"取消请求保存失败，未发送信号：{exc}"}, 500
+    claimed_info = claim["job"]
+    if not claim["claimed"]:
+        if claimed_info.get("cancel_request_id") == cancel_id:
+            info.update(
+                cancel_request_id=cancel_id,
+                cancel_status=claimed_info.get("cancel_status", ""),
+                cancel_error=claimed_info.get("cancel_error", ""),
+            )
+            return _install_cancel_payload(info), 200
+        return {
+            **_install_cancel_payload(claimed_info), "ok": False, "request_id": cancel_id,
+            "msg": "另一个取消请求已经认领该安装，未重复发送信号。",
+        }, 409
+
+    info.update(
+        cancel_request_id=cancel_id, cancel_status="requested", cancel_error="",
+    )
+    try:
+        process.terminate()
+        try:
+            returncode = process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            returncode = process.wait(timeout=3)
+    except Exception as exc:
+        returncode = process.poll()
+        if returncode is not None:
+            state = "completed"
+            persisted = _finish_install_cancel(info, returncode, state)
+            payload = _install_cancel_payload(info)
+            if not persisted:
+                payload.update(ok=False, msg=info["cancel_error"])
+                return payload, 503
+            return payload, 200
+        info.update(
+            cancel_status="failed", cancel_error=f"终止安装进程失败：{exc}",
+            error=f"终止安装进程失败：{exc}", updated_at=now_str(),
+        )
+        try:
+            persist_install_job(info)
+        except Exception as persist_error:
+            info["cancel_error"] += f"；取消失败状态保存失败：{persist_error}"
+        return _install_cancel_payload(info) | {"ok": False}, 503
+
+    state = "completed" if returncode == 0 else "cancelled"
+    persisted = _finish_install_cancel(info, returncode, state)
+    payload = _install_cancel_payload(info)
+    if not persisted:
+        payload.update(ok=False, msg=info["cancel_error"])
+        return payload, 503
+    return payload, 200
+
+
+def _install_cancel_status(install_id, cancel_id):
+    try:
+        info = get_install_job(install_id, DEPS_RUNNING) or get_install_job(install_id)
+    except Exception as exc:
+        return {"ok": False, "request_id": cancel_id, "msg": f"安装回执无法读取：{exc}"}, 500
+    if not info:
+        return {"ok": False, "request_id": cancel_id, "msg": "安装记录不存在。"}, 404
+    stored_id = str(info.get("cancel_request_id") or "")
+    if not stored_id:
+        live = DEPS_RUNNING.get(install_id)
+        if info.get("running") and isinstance(live, dict) and live.get("process") is not None:
+            return {
+                **_install_cancel_payload(info), "ok": True, "request_id": cancel_id,
+                "status": "not_started", "cancel_status": "", "retry_available": True,
+            }, 200
+        return {
+            **_install_cancel_payload(info), "ok": True, "request_id": cancel_id,
+            "status": "unknown", "cancel_status": "unknown", "retry_available": False,
+        }, 200
+    if stored_id != cancel_id:
+        return {
+            **_install_cancel_payload(info), "ok": False, "request_id": cancel_id,
+            "msg": "取消请求标识与安装记录不匹配。",
+        }, 409
+    if install_id in DEPS_RUNNING and info.get("running"):
+        deps_install_result(install_id)
+        info = DEPS_RUNNING.get(install_id) or info
+    if info.get("cancel_status") == "requested" and install_id not in DEPS_RUNNING:
+        info.update(
+            cancel_status="unknown",
+            cancel_error="没有活动进程句柄，无法确认取消信号是否生效。",
+            running=False,
+            status="unknown",
+            updated_at=now_str(),
+        )
+        try:
+            persist_install_job(info)
+        except Exception as exc:
+            info["cancel_error"] += f"；保存未知状态失败：{exc}"
+    payload = _install_cancel_payload(info)
+    payload["ok"] = True
+    return payload, 200
+
+
 def _retry_install_info(original, retry_id):
     kind = str(original.get("kind") or "")
     package = str(original.get("package") or "")
@@ -208,6 +441,55 @@ def _retry_install_info(original, retry_id):
     return info
 
 
+@bp.route("/deps/install-cancel/<install_id>", methods=["POST"])
+def deps_install_cancel(install_id):
+    try:
+        install_id = install_request_id(install_id)
+        cancel_id = install_request_id(request.form.get("request_id"))
+    except ValueError as exc:
+        body = page_header_card(
+            "取消安装失败", help_html=h(exc),
+            actions_html='<a class="btn btn-gray" href="/deps/install-history">返回安装历史</a>',
+        )
+        return layout("取消安装失败", "deps", body), 400
+    payload, status = _cancel_install_job(install_id, cancel_id)
+    if payload.get("ok"):
+        return redirect(url_for("deps.deps_install_log", install_id=install_id, back="/deps"))
+    body = page_header_card(
+        "取消安装未完成",
+        help_html=h(payload.get("msg") or payload.get("cancel_error") or "请查询原取消请求。"),
+        actions_html=(
+            f'<a class="btn btn-blue" href="/deps/install-log/{h(install_id)}?back=%2Fdeps">查看原安装</a>'
+            '<a class="btn btn-gray" href="/deps/install-history">返回安装历史</a>'
+        ),
+    )
+    return layout("取消安装未完成", "deps", body), status
+
+
+@bp.route("/api/deps/install-cancel/<install_id>", methods=["POST"])
+def api_deps_install_cancel(install_id):
+    try:
+        install_id = install_request_id(install_id)
+        data = request.get_json(silent=True) if request.is_json else request.form
+        cancel_id = install_request_id(data.get("request_id") if isinstance(data, dict) else "")
+    except ValueError as exc:
+        return jsonify(ok=False, request_id="", msg=str(exc)), 400
+    payload, status = _cancel_install_job(install_id, cancel_id)
+    return jsonify(payload), status
+
+
+@bp.route("/api/deps/install-cancel/<install_id>/<cancel_id>")
+def api_deps_install_cancel_status(install_id, cancel_id):
+    request_id = cancel_id
+    try:
+        install_id = install_request_id(install_id)
+        cancel_id = install_request_id(cancel_id)
+    except ValueError as exc:
+        return jsonify(ok=False, request_id=request_id, msg=str(exc)), 400
+    payload, status = _install_cancel_status(install_id, cancel_id)
+    return jsonify(payload), status
+
+
 def _retry_install_lookup(install_id, retry_id):
     original = get_install_job(install_id, DEPS_RUNNING) or get_install_job(install_id)
     if not original:
@@ -222,7 +504,7 @@ def _retry_install_lookup(install_id, retry_id):
         return {
             "ok": True, "request_id": retry_id, "original_id": install_id,
             "status": "not_started", "running": False,
-            "retry_available": original.get("status") in ("failed", "unknown"),
+            "retry_available": original.get("status") in ("failed", "unknown", "cancelled"),
         }, 200
     child = get_install_job(child_id, DEPS_RUNNING)
     if not child or child.get("retry_of") != install_id:
@@ -238,7 +520,7 @@ def _retry_install_lookup(install_id, retry_id):
         "install_id": child_id,
         "original_id": install_id,
         "log_url": url_for("deps.deps_install_log", install_id=child_id, back="/deps"),
-        "retry_available": not child.get("running") and child.get("status") in ("failed", "unknown", "start_failed"),
+        "retry_available": not child.get("running") and child.get("status") in ("failed", "unknown", "start_failed", "cancelled"),
         **deps_install_result(child_id),
     }, 200
 
@@ -274,10 +556,10 @@ def _retry_install_start(install_id, retry_id):
         return {"ok": False, "request_id": retry_id, "msg": "原安装已经提交重试，请查询原重试记录。", "install_id": linked}, 409
     if original.get("running"):
         return {"ok": False, "request_id": retry_id, "msg": "原安装仍在运行，请等待结果后重试。"}, 409
-    if original.get("status") not in ("failed", "unknown"):
+    if original.get("status") not in ("failed", "unknown", "cancelled"):
         return {
             "ok": False, "request_id": retry_id,
-            "msg": f"当前状态为 {original.get('status') or '未知'}，仅失败或结果未知允许重试。",
+            "msg": f"当前状态为 {original.get('status') or '未知'}，仅失败、结果未知或已取消允许重试。",
         }, 409
     try:
         info = _retry_install_info(original, retry_id)
@@ -398,10 +680,25 @@ def is_deps_install_running(install_id):
                 pass
 
     info["finished"] = True
+    info["running"] = False
     info["process"] = None
     info["log_fp"] = None
     info["returncode"] = returncode
-    info["status"] = "succeeded" if returncode == 0 else "failed" if returncode is not None else "unknown"
+    if info.get("cancel_status") == "requested":
+        if returncode == 0:
+            info["status"] = "succeeded"
+            info["cancel_status"] = "completed"
+            info["cancel_error"] = "安装在取消信号生效前已正常结束。"
+        elif returncode is not None:
+            info["status"] = "cancelled"
+            info["cancel_status"] = "cancelled"
+            info["cancel_error"] = ""
+        else:
+            info["status"] = "unknown"
+            info["cancel_status"] = "unknown"
+            info["cancel_error"] = "无法确认取消后进程的退出码，请检查安装日志。"
+    else:
+        info["status"] = "succeeded" if returncode == 0 else "failed" if returncode is not None else "unknown"
     _persist_dependency_state(info)
 
     return False
@@ -426,7 +723,9 @@ def deps_install_result(install_id):
             status, label = "missing", "无法追踪"
             error = "安装记录不存在或面板已重启，请到日志管理查看 deps-install-*.log / system-install-*.log。"
     elif running:
-        status, label = "running", "安装中"
+        status, label = "running", "正在取消" if info.get("cancel_status") == "requested" else "安装中"
+    elif info and info.get("status") == "cancelled":
+        status, label = "cancelled", "已取消"
     elif info and info.get("status") == "unknown":
         status, label = "unknown", "结果未知"
         error = error or "无法取得安装进程的退出码，请查看安装日志并明确重试。"
@@ -795,7 +1094,7 @@ def deps_install_log(install_id):
     result = deps_install_result(install_id)
     recovery_action = ""
     if not result.get("running") and result.get("status") in (
-        "unknown", "missing", "failed", "start_failed"
+        "unknown", "missing", "failed", "start_failed", "cancelled"
     ):
         recovery_context = dict(context or info or {})
         if info:
@@ -803,6 +1102,30 @@ def deps_install_log(install_id):
         recovery_action = install_recovery_action(
             recovery_context
             or {"kind": info.get("kind", "dependency") if info else "", "package": package}
+        )
+    cancel_action = ""
+    if info and info.get("cancel_request_id"):
+        cancel_action = (
+            f'<form class="inline-form install-cancel-form" method="post" '
+            f'action="/deps/install-cancel/{h(install_id)}" '
+            f'data-api-action="/api/deps/install-cancel/{h(install_id)}" '
+            'data-query-on-load="true">'
+            f'<input type="hidden" name="request_id" value="{h(info["cancel_request_id"])}">'
+            '<button class="btn btn-red" type="submit" hidden disabled>取消安装</button>'
+            '</form>'
+        )
+    elif (
+        result.get("running")
+        and info
+        and info.get("process") is not None
+    ):
+        cancel_action = (
+            f'<form class="inline-form install-cancel-form" method="post" '
+            f'action="/deps/install-cancel/{h(install_id)}" '
+            f'data-api-action="/api/deps/install-cancel/{h(install_id)}">'
+            f'<input type="hidden" name="request_id" value="{h(uuid.uuid4().hex)}">'
+            '<button class="btn btn-red" type="submit">取消安装</button>'
+            '</form>'
         )
 
     log_path, log_failure = safe_install_log_file(info, install_id) if info else (None, None)
@@ -828,6 +1151,7 @@ def deps_install_log(install_id):
     <button class="btn btn-blue" type="submit">刷新依赖检测结果</button>
 </form>
 {recovery_action}
+{cancel_action}
 """,
     )
 
@@ -1031,6 +1355,110 @@ if(pendingRetry){{
     queryButton.hidden = false;
     queryRetry();
 }}
+}})();
+</script>
+<div id="installCancelError" class="help" role="status" aria-live="polite" hidden></div>
+<button id="installCancelQuery" class="btn btn-blue" type="button" hidden>查询原取消请求</button>
+<button id="installCancelAgain" class="btn btn-orange" type="button" hidden>重新请求取消</button>
+<a id="installCancelLogin" class="btn btn-primary" hidden>重新登录后查询</a>
+<script>
+(function(){{
+const form = document.querySelector(".install-cancel-form");
+if(!form) return;
+const input = form.querySelector('input[name="request_id"]');
+const button = form.querySelector("button[type=submit]");
+const errorEl = document.getElementById("installCancelError");
+const queryButton = document.getElementById("installCancelQuery");
+const againButton = document.getElementById("installCancelAgain");
+const loginLink = document.getElementById("installCancelLogin");
+const installId = {h(install_id)!r};
+const storageKey = "fls-deps-install-cancel:" + installId;
+let pending = form.dataset.queryOnLoad === "true";
+try{{
+    const saved = JSON.parse(sessionStorage.getItem(storageKey) || "null");
+    if(saved && saved.request_id){{
+        if(!pending) input.value = saved.request_id;
+        pending = true;
+    }}
+}}catch(_error){{}}
+function showError(error){{
+    const denied = error && (error.status === 401 || error.status === 403);
+    errorEl.textContent = denied ? "取消状态查询失败：" + error.message + "。原请求已保留，请重新登录后继续查询。" : "取消状态查询失败：" + (error.message || String(error)) + "。原请求已保留，可再次查询。";
+    errorEl.hidden = false;
+    queryButton.hidden = denied;
+    loginLink.hidden = !denied;
+    if(denied) loginLink.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
+}}
+async function queryCancel(){{
+    queryButton.disabled = true;
+    try{{
+        const response = await fetch("/api/deps/install-cancel/" + encodeURIComponent(installId) + "/" + encodeURIComponent(input.value), {{cache:"no-store", credentials:"same-origin"}});
+        const json = await flsReadJsonResponse(response);
+        if(!response.ok || !json || json.ok !== true){{
+            const error = new Error((json && (json.msg || json.error)) || "取消状态响应无效");
+            error.status = response.status;
+            throw error;
+        }}
+        errorEl.hidden = false;
+        loginLink.hidden = true;
+        if(json.status === "not_started"){{
+            errorEl.textContent = "原取消请求尚未认领，可继续提交相同请求。";
+            if(button){{ button.disabled = false; button.hidden = false; }}
+            queryButton.hidden = true;
+            againButton.hidden = true;
+        }}else{{
+            errorEl.textContent = (json.cancel_status_label || json.status_label || json.status) + (json.cancel_error || "");
+            queryButton.hidden = json.cancel_status !== "requested";
+            againButton.hidden = !(json.running && json.cancel_status === "failed");
+            if(button) button.disabled = true;
+            if(!json.running){{
+                document.getElementById("installStatus").textContent = json.status_label || json.status;
+                document.getElementById("installReturncode").textContent = json.returncode == null ? "-" : String(json.returncode);
+            }}
+        }}
+    }}catch(error){{ showError(error); }}
+    finally{{ queryButton.disabled = false; }}
+}}
+async function submitCancel(){{
+    if(!button) return;
+    const cancelId = input.value;
+    try{{ sessionStorage.setItem(storageKey, JSON.stringify({{request_id: cancelId, install_id: installId}})); }}catch(_error){{}}
+    button.disabled = true;
+    errorEl.hidden = true;
+    queryButton.hidden = false;
+    againButton.hidden = true;
+    loginLink.hidden = true;
+    try{{
+        const headers = {{"Accept":"application/json", "X-Requested-With":"XMLHttpRequest"}};
+        const csrf = typeof flsGetCsrfToken === "function" ? flsGetCsrfToken() : "";
+        if(csrf) headers["X-CSRF-Token"] = csrf;
+        const response = await fetch(form.dataset.apiAction, {{method:"POST", body:new FormData(form), headers, credentials:"same-origin"}});
+        const json = await flsReadJsonResponse(response);
+        if(!response.ok || !json || json.request_id !== cancelId){{
+            const error = new Error((json && (json.msg || json.cancel_error || json.error)) || "取消请求响应无效");
+            error.status = response.status;
+            throw error;
+        }}
+        errorEl.textContent = (json.cancel_status_label || json.status_label || json.status) + (json.cancel_error || "");
+        errorEl.hidden = false;
+        document.getElementById("installStatus").textContent = json.status_label || json.status;
+        document.getElementById("installReturncode").textContent = json.returncode == null ? "-" : String(json.returncode);
+        queryButton.hidden = json.cancel_status !== "requested";
+        againButton.hidden = !(json.running && json.cancel_status === "failed");
+    }}catch(error){{
+        button.disabled = false;
+        showError(error);
+    }}
+}}
+form.addEventListener("submit", function(event){{ event.preventDefault(); submitCancel(); }});
+queryButton.addEventListener("click", queryCancel);
+againButton.addEventListener("click", function(){{
+    input.value = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : ("cancel-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2));
+    try{{ sessionStorage.setItem(storageKey, JSON.stringify({{request_id: input.value, install_id: installId}})); }}catch(_error){{}}
+    queryButton.hidden = true;
+    submitCancel();
+}});
+if(pending){{ queryButton.hidden = false; queryCancel(); }}
 }})();
 </script>
 """

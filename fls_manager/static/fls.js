@@ -242,7 +242,7 @@ function flsLogPollFailed(error, loader, label){
 
 document.addEventListener("submit", function(event){
     const form = event.target;
-    if(!form || String(form.dataset.noBusyState || "") === "true") return;
+    if(!form || String(form.dataset.noBusyState || "") === "true" || form.hasAttribute("data-api-action")) return;
     flsMarkFormSubmitting(form, event.submitter || null);
 });
 
@@ -2404,6 +2404,7 @@ if (document.readyState === "loading") {
         const form = e.target;
 
         if (!form || !form.closest(".content, .fls-disclosure-modal")) return;
+        if (form.hasAttribute("data-api-action")) return;
 
         const method = (form.getAttribute("method") || "GET").toUpperCase();
         const submitter = e.submitter || null;

@@ -207,6 +207,14 @@ class FrontendMethodContractTests(unittest.TestCase):
                 self.assertEqual(response.location, "/backup#backup-create")
                 start.assert_not_called()
 
+    def test_api_backed_forms_are_left_to_their_recovery_handler(self):
+        source = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+        self.assertIn(
+            'if(!form || String(form.dataset.noBusyState || "") === "true" || form.hasAttribute("data-api-action")) return;',
+            source,
+        )
+        self.assertIn('if (form.hasAttribute("data-api-action")) return;', source)
+
 
 if __name__ == "__main__":
     unittest.main()

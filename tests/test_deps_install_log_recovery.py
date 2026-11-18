@@ -12,6 +12,26 @@ from tests.test_ui_route_components import ROOT, TOKEN, isolated_app
 
 
 class DependencyInstallLogRecoveryTests(unittest.TestCase):
+    def seed_running_install(self, base_dir, install_id="cancel-install", kind="dependency", process=None):
+        from fls_manager.install_records import persist_install_job
+        from fls_manager.state import DEPS_RUNNING
+
+        package = "demo" if kind == "dependency" else "node"
+        prefix = "deps-install-demo" if kind == "dependency" else "system-install-node"
+        log_file = base_dir / "log" / f"{prefix}-{install_id}.log"
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        fp = log_file.open("ab", buffering=0)
+        process = process or SimpleNamespace(poll=lambda: None)
+        info = {
+            "id": install_id, "request_id": install_id, "kind": kind, "package": package,
+            "log_file": str(log_file), "running": True, "finished": False,
+            "status": "running", "returncode": None, "error": "", "start_time": 1,
+            "updated_at": "2026-11-18 19:00:00", "process": process, "log_fp": fp,
+        }
+        persist_install_job(info)
+        DEPS_RUNNING[install_id] = info
+        return info, fp
+
     def test_install_request_replay_is_idempotent_for_dependency_and_runtime(self):
         for runtime in (False, True):
             with self.subTest(runtime=runtime), isolated_app() as (app, base_dir):
@@ -462,6 +482,298 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
             self.assertEqual(first.json["install_id"], "same-child")
             self.assertEqual(replay.json["install_id"], "same-child")
             popen.assert_called_once()
+
+    def test_cancel_persists_intent_and_confirmed_exit_then_replays_without_signal(self):
+        for kind in ("dependency", "runtime"):
+            with self.subTest(kind=kind), isolated_app() as (app, base_dir):
+                from fls_manager.install_records import get_install_job
+
+                process = SimpleNamespace(
+                    returncode=-15, poll=lambda: None,
+                    terminate=unittest.mock.Mock(), kill=unittest.mock.Mock(),
+                    wait=unittest.mock.Mock(return_value=-15),
+                )
+                info, fp = self.seed_running_install(base_dir, f"cancel-{kind}", kind, process)
+                client = app.test_client()
+                first = client.post(
+                    f"/api/deps/install-cancel/{info['id']}",
+                    json={"request_id": "stable-cancel-id"}, headers={"X-Token": TOKEN},
+                )
+                replay = client.post(
+                    f"/api/deps/install-cancel/{info['id']}",
+                    json={"request_id": "stable-cancel-id"}, headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(first.status_code, 200)
+                self.assertEqual(first.json["status"], "cancelled")
+                self.assertEqual(first.json["cancel_status"], "cancelled")
+                self.assertFalse(first.json["running"])
+                self.assertEqual(replay.status_code, 200)
+                self.assertEqual(replay.json["cancel_status"], "cancelled")
+                process.terminate.assert_called_once()
+                process.wait.assert_called_once_with(timeout=3)
+                process.kill.assert_not_called()
+                self.assertTrue(fp.closed)
+                record = get_install_job(info["id"])
+                self.assertEqual(record["status"], "cancelled")
+                self.assertEqual(record["cancel_request_id"], "stable-cancel-id")
+
+    def test_cancel_timeout_kills_process_and_reports_cancelled(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.state import DEPS_RUNNING
+
+            process = SimpleNamespace(
+                poll=lambda: None,
+                terminate=unittest.mock.Mock(),
+                kill=unittest.mock.Mock(),
+                wait=unittest.mock.Mock(side_effect=[subprocess.TimeoutExpired("install", 3), -9]),
+            )
+            info, _fp = self.seed_running_install(base_dir, process=process)
+            response = app.test_client().post(
+                f"/api/deps/install-cancel/{info['id']}",
+                json={"request_id": "cancel-timeout"}, headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json["status"], "cancelled")
+            process.terminate.assert_called_once()
+            process.kill.assert_called_once()
+            self.assertEqual(process.wait.call_count, 2)
+            self.assertTrue(DEPS_RUNNING[info["id"]]["finished"])
+
+    def test_cancel_kill_failure_keeps_running_state_and_allows_a_new_attempt(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.install_records import get_install_job
+            from fls_manager.state import DEPS_RUNNING
+
+            waits = [
+                subprocess.TimeoutExpired("install", 3),
+                subprocess.TimeoutExpired("install", 3),
+                -9,
+            ]
+            kills = [OSError("kill denied"), None]
+            process = SimpleNamespace(
+                poll=lambda: None,
+                terminate=unittest.mock.Mock(),
+                kill=unittest.mock.Mock(side_effect=kills),
+                wait=unittest.mock.Mock(side_effect=waits),
+            )
+            info, _fp = self.seed_running_install(base_dir, process=process)
+            client = app.test_client()
+            response = client.post(
+                f"/api/deps/install-cancel/{info['id']}",
+                json={"request_id": "cancel-kill-failed"}, headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(response.status_code, 503)
+            self.assertTrue(response.json["running"])
+            self.assertEqual(response.json["status"], "running")
+            self.assertEqual(response.json["cancel_status"], "failed")
+            record = get_install_job(info["id"], DEPS_RUNNING)
+            self.assertTrue(record["running"])
+            self.assertEqual(record["cancel_status"], "failed")
+            self.assertIn("kill denied", record["cancel_error"])
+            queried = client.get(
+                f"/api/deps/install-cancel/{info['id']}/cancel-kill-failed",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(queried.status_code, 200)
+            self.assertTrue(queried.json["ok"])
+            self.assertEqual(queried.json["cancel_status"], "failed")
+            self.assertTrue(queried.json["running"])
+            retried = client.post(
+                f"/api/deps/install-cancel/{info['id']}",
+                json={"request_id": "cancel-kill-retry"}, headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(retried.status_code, 200)
+            self.assertEqual(retried.json["cancel_status"], "cancelled")
+            self.assertEqual(process.terminate.call_count, 2)
+            self.assertEqual(process.kill.call_count, 2)
+            self.assertEqual(process.wait.call_count, 3)
+
+    def test_cancel_race_with_successful_exit_reports_completed_not_cancelled(self):
+        with isolated_app() as (app, base_dir):
+            process_state = {"returncode": None}
+
+            def terminate():
+                process_state["returncode"] = 0
+
+            process = SimpleNamespace(
+                poll=lambda: process_state["returncode"],
+                terminate=unittest.mock.Mock(side_effect=terminate),
+                kill=unittest.mock.Mock(),
+                wait=unittest.mock.Mock(return_value=0),
+            )
+            info, _fp = self.seed_running_install(base_dir, process=process)
+            response = app.test_client().post(
+                f"/api/deps/install-cancel/{info['id']}",
+                json={"request_id": "cancel-raced-success"}, headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json["status"], "succeeded")
+            self.assertEqual(response.json["cancel_status"], "completed")
+            process.terminate.assert_called_once()
+            process.kill.assert_not_called()
+
+    def test_cancelled_install_can_be_explicitly_retried_once(self):
+        with isolated_app() as (app, base_dir):
+            cancelled_process = SimpleNamespace(
+                poll=lambda: None,
+                terminate=unittest.mock.Mock(),
+                kill=unittest.mock.Mock(),
+                wait=unittest.mock.Mock(return_value=-15),
+            )
+            info, _fp = self.seed_running_install(base_dir, process=cancelled_process)
+            client = app.test_client()
+            cancelled = client.post(
+                f"/api/deps/install-cancel/{info['id']}",
+                json={"request_id": "cancel-before-retry"}, headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(cancelled.status_code, 200)
+            self.assertEqual(cancelled.json["status"], "cancelled")
+
+            retry_process = SimpleNamespace(poll=lambda: None)
+            with patch("fls_manager.routes.deps.subprocess.Popen", return_value=retry_process) as popen:
+                first = client.post(
+                    f"/api/deps/install-retry/{info['id']}",
+                    json={"request_id": "cancel-retry-child"}, headers={"X-Token": TOKEN},
+                )
+                replay = client.post(
+                    f"/api/deps/install-retry/{info['id']}",
+                    json={"request_id": "cancel-retry-child"}, headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(first.status_code, 200)
+            self.assertEqual(first.json["install_id"], "cancel-retry-child")
+            self.assertEqual(replay.status_code, 200)
+            self.assertEqual(replay.json["install_id"], "cancel-retry-child")
+            self.assertEqual(popen.call_count, 1)
+
+    def test_cancel_refuses_missing_csrf_and_completed_install_without_signal(self):
+        with isolated_app() as (app, base_dir):
+            process = SimpleNamespace(
+                poll=unittest.mock.Mock(return_value=0),
+                terminate=unittest.mock.Mock(),
+                wait=unittest.mock.Mock(),
+                kill=unittest.mock.Mock(),
+            )
+            info, _fp = self.seed_running_install(base_dir, process=process)
+            client = app.test_client()
+            denied = client.post(
+                f"/api/deps/install-cancel/{info['id']}", json={"request_id": "cancel-no-csrf"},
+            )
+            self.assertEqual(denied.status_code, 400)
+            process.terminate.assert_not_called()
+            unauthenticated = app.test_client().get(
+                f"/api/deps/install-cancel/{info['id']}/cancel-auth-check",
+            )
+            self.assertEqual(unauthenticated.status_code, 401)
+            process.terminate.assert_not_called()
+            completed = client.post(
+                f"/api/deps/install-cancel/{info['id']}",
+                json={"request_id": "cancel-after-finish"}, headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(completed.status_code, 409)
+            self.assertEqual(completed.json["status"], "succeeded")
+            process.terminate.assert_not_called()
+
+    def test_cancel_after_restart_is_unknown_and_never_claims_success(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.install_records import INSTALL_JOBS_FILE
+            from fls_manager.state import DEPS_RUNNING
+
+            info, fp = self.seed_running_install(base_dir)
+            fp.close()
+            info.update(cancel_request_id="restart-cancel-id", cancel_status="requested")
+            from fls_manager.install_records import persist_install_job
+            persist_install_job(info)
+            DEPS_RUNNING.clear()
+            response = app.test_client().get(
+                f"/api/deps/install-cancel/{info['id']}/restart-cancel-id",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json["status"], "unknown")
+            self.assertEqual(response.json["cancel_status"], "unknown")
+            self.assertNotEqual(response.json["status"], "cancelled")
+            persisted = json.loads(INSTALL_JOBS_FILE.read_text(encoding="utf-8"))
+            self.assertEqual(persisted[info["id"]]["cancel_status"], "unknown")
+
+    def test_cancel_status_query_polls_a_live_process_before_reporting(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.install_records import persist_install_job
+
+            process = SimpleNamespace(
+                poll=unittest.mock.Mock(return_value=0),
+                terminate=unittest.mock.Mock(), kill=unittest.mock.Mock(),
+                wait=unittest.mock.Mock(),
+            )
+            info, fp = self.seed_running_install(base_dir, process=process)
+            info.update(cancel_request_id="cancel-race-query", cancel_status="requested")
+            persist_install_job(info)
+            response = app.test_client().get(
+                f"/api/deps/install-cancel/{info['id']}/cancel-race-query",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.json["ok"])
+            self.assertEqual(response.json["status"], "succeeded")
+            self.assertEqual(response.json["cancel_status"], "completed")
+            self.assertFalse(response.json["running"])
+            process.poll.assert_called_once()
+            self.assertTrue(fp.closed)
+
+    def test_running_install_page_has_csrf_cancel_form_and_recovery_controls(self):
+        with isolated_app() as (app, base_dir):
+            process = SimpleNamespace(
+                poll=lambda: None,
+                terminate=unittest.mock.Mock(),
+                kill=unittest.mock.Mock(),
+                wait=unittest.mock.Mock(return_value=-15),
+            )
+            info, _fp = self.seed_running_install(base_dir, process=process)
+            client = app.test_client()
+            with client.session_transaction() as session:
+                session.update(
+                    token=TOKEN, token_expire_at=4102444800,
+                    security_verified=True, csrf_token="install-cancel-csrf",
+                )
+            denied = client.post(
+                f"/deps/install-cancel/{info['id']}", data={"request_id": "html-cancel"},
+            )
+            self.assertEqual(denied.status_code, 400)
+            body = client.get(
+                f"/deps/install-log/{info['id']}",
+            ).get_data(as_text=True)
+            self.assertIn(f'action="/deps/install-cancel/{info["id"]}"', body)
+            self.assertIn(f'data-api-action="/api/deps/install-cancel/{info["id"]}"', body)
+            self.assertIn('id="installCancelQuery"', body)
+            self.assertIn('id="installCancelAgain"', body)
+            csrf = re.search(r'<meta name="csrf-token" content="([^"]+)"', body).group(1)
+            self.assertEqual(csrf, "install-cancel-csrf")
+            submitted = client.post(
+                f"/deps/install-cancel/{info['id']}",
+                data={"request_id": "html-cancel-valid", "csrf_token": csrf},
+            )
+            replay = client.post(
+                f"/deps/install-cancel/{info['id']}",
+                data={"request_id": "html-cancel-valid", "csrf_token": csrf},
+            )
+            self.assertEqual(submitted.status_code, 302)
+            self.assertEqual(replay.status_code, 302)
+            self.assertEqual(submitted.headers["Location"], replay.headers["Location"])
+            process.terminate.assert_called_once()
+
+    def test_refreshed_install_page_queries_persisted_cancel_request_id(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.install_records import persist_install_job
+
+            info, _fp = self.seed_running_install(base_dir)
+            info.update(cancel_request_id="stable-cancel-request", cancel_status="requested")
+            persist_install_job(info)
+            body = app.test_client().get(
+                f"/deps/install-log/{info['id']}", headers={"X-Token": TOKEN},
+            ).get_data(as_text=True)
+            self.assertIn('data-query-on-load="true"', body)
+            self.assertIn('name="request_id" value="stable-cancel-request"', body)
+            self.assertIn("queryCancel();", body)
+            self.assertIn('type="submit" hidden disabled>取消安装</button>', body)
 
     def test_restart_running_install_becomes_unknown_and_history_is_queryable(self):
         with isolated_app() as (app, base_dir):
