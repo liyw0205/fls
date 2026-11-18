@@ -758,6 +758,124 @@ setImmediate(() => {
                 capture_output=True, text=True, timeout=5,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+    def test_install_history_api_and_page_recover_stale_running_without_starting(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import (
+                ONLINE_INSTALL_RUNNING, persist_online_install,
+            )
+
+            first = self.register(base_dir, "history-running")
+            first["updated_at"] = "2026-11-18 12:00:00"
+            persist_online_install(first)
+            ONLINE_INSTALL_RUNNING.clear()
+            second = self.register(base_dir, "history-completed")
+            second.update(running=False, status="已完成", phase="completed", updated_at="2026-11-18 13:00:00")
+            persist_online_install(second)
+            client = app.test_client()
+            history = client.get(
+                "/api/online-scripts/install-history?limit=1&script_id=demo",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(history.status_code, 200)
+            self.assertEqual(history.json["items"][0]["id"], "history-completed")
+            stale = client.get(
+                "/api/online-scripts/install-history?limit=10&script_id=demo",
+                headers={"X-Token": TOKEN},
+            )
+            stale_info = next(item for item in stale.json["items"] if item["id"] == "history-running")
+            self.assertEqual(stale_info["status"], "结果未知")
+            page = client.get("/online-scripts/install-history?script_id=demo", headers={"X-Token": TOKEN})
+            self.assertEqual(page.status_code, 200)
+            self.assertIn("/online-scripts/log/history-running", page.get_data(as_text=True))
+
+    def test_install_history_rejects_invalid_limit_and_corrupt_record_without_overwrite(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE
+
+            client = app.test_client()
+            invalid = client.get("/api/online-scripts/install-history?limit=0", headers={"X-Token": TOKEN})
+            self.assertEqual(invalid.status_code, 400)
+            ONLINE_INSTALL_JOBS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            ONLINE_INSTALL_JOBS_FILE.write_text("not-json", encoding="utf-8")
+            original = ONLINE_INSTALL_JOBS_FILE.read_bytes()
+            failed = client.get("/api/online-scripts/install-history", headers={"X-Token": TOKEN})
+            self.assertEqual(failed.status_code, 500)
+            page = client.get("/online-scripts/install-history", headers={"X-Token": TOKEN})
+            self.assertEqual(page.status_code, 500)
+            self.assertIn("无法读取", page.get_data(as_text=True))
+            self.assertEqual(ONLINE_INSTALL_JOBS_FILE.read_bytes(), original)
+
+    def test_install_log_and_history_reject_uncontrolled_paths_and_symlink_storage(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE
+
+            client = app.test_client()
+            outside = base_dir.parent / f"{base_dir.name}-outside-install.log"
+            outside.write_text("outside secret\n", encoding="utf-8")
+            record = {
+                "id": "unsafe-install",
+                "script_id": "demo",
+                "script_name": "Demo",
+                "log_file": str(outside),
+                "running": False,
+                "status": "失败",
+                "start_time": "not-a-number",
+                "returncode": 1,
+                "error": "failed",
+                "updated_at": "2026-11-18 14:00:00",
+            }
+            ONLINE_INSTALL_JOBS_FILE.write_text(
+                json.dumps({"unsafe-install": record}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            original = outside.read_bytes()
+            response = client.get(
+                "/api/online-scripts/log/unsafe-install",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(response.status_code, 500)
+            self.assertEqual(response.json["status"], "失败")
+            self.assertIn("受控日志目录", response.json["error"])
+            self.assertEqual(outside.read_bytes(), original)
+            history = client.get(
+                "/api/online-scripts/install-history?script_id=demo",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(history.status_code, 200)
+            self.assertEqual(history.json["items"][0]["id"], "unsafe-install")
+
+            target = base_dir / "real-install.log"
+            target.write_text("target\n", encoding="utf-8")
+            link = base_dir / "unsafe-install-link.log"
+            link.symlink_to(target)
+            record["log_file"] = str(link)
+            ONLINE_INSTALL_JOBS_FILE.write_text(
+                json.dumps({"unsafe-install": record}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            linked = client.get(
+                "/api/online-scripts/log/unsafe-install",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(linked.status_code, 500)
+            self.assertIn("受控日志目录", linked.json["error"])
+            self.assertEqual(target.read_text(encoding="utf-8"), "target\n")
+
+            jobs_target = base_dir.parent / f"{base_dir.name}-jobs-target.json"
+            jobs_target.write_text("{}", encoding="utf-8")
+            jobs_link = ONLINE_INSTALL_JOBS_FILE.with_name("online-install-jobs-link.json")
+            jobs_link.symlink_to(jobs_target)
+            ONLINE_INSTALL_JOBS_FILE.unlink()
+            jobs_link.rename(ONLINE_INSTALL_JOBS_FILE)
+            corrupt = client.get(
+                "/api/online-scripts/install-history",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(corrupt.status_code, 500)
+            self.assertIn("符号链接", corrupt.json["msg"])
+            self.assertEqual(jobs_target.read_text(encoding="utf-8"), "{}")
+            outside.unlink()
+            jobs_target.unlink()
 
 
 if __name__ == "__main__":

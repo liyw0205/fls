@@ -1,9 +1,11 @@
 from ._common import *
 import re
+import stat
 from pathlib import Path
 
 from ...online_scripts.constants import (
     get_online_install_job,
+    list_online_install_jobs,
     get_online_refresh_request,
     get_online_refresh_state,
 )
@@ -14,6 +16,40 @@ from ...paths import LOG_DIR
 RECOVERY_STATUSES = {"结果未知", "失败", "超时", "已停止", "启动失败"}
 REFRESH_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 REFRESH_TERMINAL_STATUSES = {"已完成", "部分完成", "失败", "结果未知", "已确认发布", "已确认未发布", "超时", "已停止", "启动失败"}
+
+
+def _install_log_file(info):
+    """Resolve one persisted install log without following an uncontrolled path."""
+    install_id = str(info.get("id") or "")
+    raw_path = info.get("log_file")
+    if not install_id or not isinstance(raw_path, str) or not raw_path.strip():
+        return None, ("日志缺失", "安装记录没有日志身份，未读取未知路径。", 404)
+
+    candidate = Path(raw_path)
+    try:
+        base_dir = LOG_DIR.parent.resolve()
+        log_dir = LOG_DIR.resolve()
+        if not candidate.is_absolute():
+            return None, ("日志边界错误", "安装日志路径不是绝对路径，未读取该路径。", 500)
+        actual = candidate.resolve(strict=False)
+        if (
+            candidate.is_symlink()
+            or candidate.parent.resolve(strict=False) != candidate.parent
+            or actual.parent not in (base_dir, log_dir)
+            or install_id not in actual.name
+        ):
+            return None, ("日志边界错误", "安装日志路径不在受控日志目录内，未读取该文件。", 500)
+        if not actual.exists():
+            return None, ("日志不存在", "安装日志尚未生成或已被清理，请返回安装历史后重试。", 404)
+        if not stat.S_ISREG(actual.stat().st_mode):
+            return None, ("日志类型错误", "安装日志不是普通文件，未读取该路径。", 500)
+        with actual.open("rb") as handle:
+            handle.read(1)
+    except FileNotFoundError:
+        return None, ("日志不存在", "安装日志尚未生成或已被清理，请返回安装历史后重试。", 404)
+    except OSError as exc:
+        return None, ("日志不可读", f"安装日志无法读取：{exc}。请修复日志权限后重试。", 500)
+    return actual, None
 
 
 def _refresh_log_state(request_id):
@@ -346,6 +382,20 @@ def _install_recovery_html(recovery):
     return html
 
 
+@bp.route("/api/online-scripts/install-history")
+def api_online_install_history():
+    try:
+        items = list_online_install_jobs(
+            request.args.get("limit", 50),
+            request.args.get("script_id", ""),
+        )
+    except ValueError as exc:
+        return jsonify(ok=False, msg=str(exc)), 400
+    except Exception as exc:
+        return jsonify(ok=False, msg=f"安装历史无法读取：{exc}"), 500
+    return jsonify(ok=True, items=items)
+
+
 @bp.route("/api/online-scripts/log/<install_id>")
 def api_online_install_log(install_id):
     try:
@@ -388,8 +438,29 @@ def api_online_install_log(install_id):
             "recovery_url": "/logs",
         }), 404
 
-    log_file = info.get("log_file", "")
     recovery = _install_recovery(info)
+    log_file, log_failure = _install_log_file(info)
+    if log_failure:
+        title, message, failure_status = log_failure
+        payload = {
+            "ok": False,
+            "running": bool(info.get("running")),
+            "status": info.get("status") or title,
+            "phase": _install_phase(info),
+            "returncode": info.get("returncode"),
+            "error": "；".join(filter(None, (info.get("error"), message))),
+            "log_file": "",
+            "log": "",
+            "recovery_url": "/online-scripts/install-history",
+            "log_status": failure_status,
+        }
+        if recovery.get("available") or recovery.get("reason"):
+            payload["recovery"] = recovery
+        # A not-yet-created log is a normal early install state. Keep the
+        # historical 200 response for existing polling clients while exposing
+        # the real missing-log status in the JSON payload.
+        response_status = 200 if failure_status == 404 else failure_status
+        return jsonify(payload), response_status
 
     payload = {
         "running": bool(info.get("running")),
@@ -397,9 +468,17 @@ def api_online_install_log(install_id):
         "phase": _install_phase(info),
         "returncode": info.get("returncode"),
         "error": _install_error(info),
-        "log_file": log_file,
-        "log": tail_file(log_file, lines),
+        "log_file": str(log_file),
+        "log": tail_file(str(log_file), lines),
     }
+    if str(payload["log"]).startswith("读取日志失败:"):
+        payload.update(
+            ok=False,
+            error=payload["log"],
+            log="",
+            recovery_url="/online-scripts/install-history",
+        )
+        return jsonify(payload), 500
     consistency = verify_install_outputs(info)
     if consistency.get("checked"):
         payload["consistency"] = consistency
@@ -441,6 +520,16 @@ def online_install_log(install_id):
         )
         return layout("在线脚本日志", "online_scripts", body), 404
 
+    log_path, log_failure = _install_log_file(info)
+    log_notice = ""
+    if log_failure:
+        title, message, failure_status = log_failure
+        log_notice = f'<div class="notice red" role="alert">{h(message)}</div>'
+        info = dict(info)
+        info["log_file"] = ""
+    else:
+        info = dict(info)
+        info["log_file"] = str(log_path)
     recovery = _install_recovery(info)
     recovery_html = _install_recovery_html(recovery)
     consistency = verify_install_outputs(info)
@@ -480,11 +569,12 @@ def online_install_log(install_id):
 
     body = f"""
 {header_card}
+{log_notice}
 <div class="notice red" id="installPollError" role="status" hidden></div>
 <a id="installPollLogin" class="btn btn-primary" hidden>重新登录</a>
 <a id="installPollLogs" class="btn btn-orange" href="/logs" hidden>查看日志管理</a>
 <button id="installPollRetry" class="btn btn-primary" type="button" hidden>重新读取安装状态</button>
-<pre class="log" id="log">加载中...</pre>
+<pre class="log" id="log">{"暂无日志" if log_failure else "加载中..."}</pre>
 {log_controls()}
 
 <script>
@@ -525,6 +615,12 @@ async function loadLog(){{
         if(document.getElementById("installPollError") !== pollError) return;
         if(!json || typeof json.running !== "boolean" || typeof json.log !== "string"){{
             throw new Error("安装状态响应无效，请重新读取安装状态");
+        }}
+        if(json.ok === false){{
+            const missingError = new Error(json.error || "安装日志暂不可读");
+            missingError.status = json.log_status || 500;
+            missingError.payload = json;
+            throw missingError;
         }}
         if(pollError){{
             pollError.hidden = true;
@@ -679,3 +775,50 @@ loadLog();
 """
 
     return layout("在线脚本日志", "online_scripts", body)
+
+
+@bp.route("/online-scripts/install-history")
+def online_install_history():
+    script_id = str(request.args.get("script_id") or "").strip()
+    try:
+        items = list_online_install_jobs(request.args.get("limit", 50), script_id)
+    except ValueError as exc:
+        body = page_header_card(
+            "在线脚本安装历史",
+            help_html=h(exc),
+            actions_html='<a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>',
+        )
+        return layout("在线脚本安装历史", "online_scripts", body), 400
+    except Exception as exc:
+        body = page_header_card(
+            "在线脚本安装历史",
+            help_html=f"安装历史无法读取：{h(exc)}。请修复安装回执存储后重试。",
+            actions_html='<a class="btn btn-blue" href="/online-scripts/install-history">重新读取</a><a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>',
+        )
+        return layout("在线脚本安装历史", "online_scripts", body), 500
+    labels = {"结果未知": "结果未知", "失败": "失败，可重试", "已完成": "已完成", "停止中": "停止中"}
+    rows = []
+    for info in items:
+        install_id = str(info.get("id") or "")
+        rows.append(
+            "<tr>"
+            f"<td><code>{h(install_id)}</code></td>"
+            f"<td>{h(info.get('script_id') or '-')}</td>"
+            f"<td>{h(labels.get(info.get('status'), info.get('status') or '-'))}</td>"
+            f"<td>{h(info.get('phase') or '-')}</td>"
+            f"<td>{h(info.get('updated_at') or '-')}</td>"
+            f'<td><a class="btn btn-blue" href="/online-scripts/log/{h(install_id)}">查看安装日志</a></td>'
+            "</tr>"
+        )
+    table = (
+        '<div class="table-wrap"><table><thead><tr><th>安装 ID</th><th>脚本</th><th>状态</th>'
+        '<th>阶段</th><th>更新时间</th><th>操作</th></tr></thead><tbody>'
+        + ("".join(rows) or '<tr><td colspan="6">暂无安装历史</td></tr>')
+        + "</tbody></table></div>"
+    )
+    body = page_header_card(
+        "在线脚本安装历史",
+        help_html="历史只读取持久化安装回执，不会启动安装；结果未知或失败请进入原日志确认后再明确重试。",
+        actions_html='<a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>',
+    ) + f'<section class="section"><div class="card">{table}</div></section>'
+    return layout("在线脚本安装历史", "online_scripts", body)

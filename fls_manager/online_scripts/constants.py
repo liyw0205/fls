@@ -589,6 +589,8 @@ def _install_snapshot(info):
 def _read_install_jobs():
     """Read install history without treating corruption as an empty history."""
     with storage_transaction():
+        if ONLINE_INSTALL_JOBS_FILE.is_symlink():
+            raise RuntimeError("在线脚本安装记录不能是符号链接，未读取外部文件")
         try:
             raw = ONLINE_INSTALL_JOBS_FILE.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -611,6 +613,8 @@ def persist_online_install(info):
         install_id = str(snapshot.get("id") or "")
         if not install_id:
             return
+        if ONLINE_INSTALL_JOBS_FILE.is_symlink():
+            raise RuntimeError("在线脚本安装记录不能是符号链接，未覆盖外部文件")
 
         def update(data):
             if not isinstance(data, dict):
@@ -728,3 +732,36 @@ def latest_online_install_for_script(script_id):
         matches.sort(key=order, reverse=True)
         install_id, info = matches[0]
         return install_id, dict(info)
+
+
+def list_online_install_jobs(limit=50, script_id=""):
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("在线脚本安装历史数量无效") from exc
+    if not 1 <= limit <= 100:
+        raise ValueError("在线脚本安装历史数量必须在 1 到 100 之间")
+    script_id = str(script_id or "").strip()
+    with ONLINE_INSTALL_LOCK:
+        jobs = _load_persisted_online_installs()
+        for install_id, info in ONLINE_INSTALL_RUNNING.items():
+            if isinstance(info, dict):
+                jobs[str(install_id)] = _install_snapshot(info)
+        for install_id, info in list(jobs.items()):
+            if info.get("running") and install_id not in ONLINE_INSTALL_RUNNING:
+                jobs[install_id] = get_online_install_job(install_id) or info
+        items = [
+            _install_snapshot(info)
+            for info in jobs.values()
+            if not script_id or info.get("script_id") == script_id
+        ]
+
+        def order(info):
+            try:
+                started = float(info.get("start_time") or 0)
+            except (TypeError, ValueError):
+                started = 0
+            return started, str(info.get("updated_at") or "")
+
+        items.sort(key=order, reverse=True)
+        return items[:limit]

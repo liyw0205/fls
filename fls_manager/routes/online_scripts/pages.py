@@ -155,6 +155,7 @@ def online_scripts_page():
 <a class="btn btn-orange" href="/online-scripts/source">在线脚本源数据</a>
 <a class="btn btn-gray" href="/online-scripts/task-link-history">外部任务源历史</a>
 <a class="btn btn-gray" href="/online-scripts/import-tasks-history">任务导入历史</a>
+<a class="btn btn-gray" href="/online-scripts/install-history">安装历史</a>
 <a class="btn btn-gray" href="/config">修改源地址</a>
         """,
         content_style="min-width:0;flex:1 1 360px;",
