@@ -89,6 +89,118 @@ class OnlineSourceRefreshTests(unittest.TestCase):
             task.close.assert_called_once()
             self.assertEqual(json.loads((base_dir / "data" / "online_scripts_cache.json").read_text())[0]["id"], "demo")
 
+    def test_task_link_failure_is_persisted_as_partial_diagnostic_without_discarding_main_source(self):
+        with isolated_app() as (_app, base_dir):
+            from fls_manager.online_scripts import source
+
+            main = self.response(
+                '[{"id":"demo","name":"Demo","type":"raw",'
+                '"link":"https://example.invalid/demo.sh",'
+                '"task_link":"https://example.invalid/tasks.json"}]'
+            )
+            task = self.response("bad json")
+            failures = []
+            with patch.object(source, "requests", SimpleNamespace(get=Mock(side_effect=[main, task]))), patch.object(
+                source, "github_proxy_url", side_effect=lambda url, *_args: url,
+            ):
+                items = source.fetch_online_scripts(task_link_failures=failures)
+
+            self.assertEqual(items[0]["id"], "demo")
+            self.assertEqual(len(failures), 1)
+            self.assertEqual(failures[0]["script_id"], "demo")
+            self.assertIn("不是合法 JSON", failures[0]["error"])
+            self.assertEqual(json.loads((base_dir / "data" / "online_scripts_cache.json").read_text())[0]["id"], "demo")
+            main.close.assert_called_once()
+            task.close.assert_called_once()
+
+    def test_refresh_worker_exposes_partial_task_link_retry_actions(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import source
+            from fls_manager.online_scripts.constants import get_online_refresh_state
+
+            def fake_fetch(**kwargs):
+                kwargs["task_link_failures"].append({
+                    "script_id": "demo",
+                    "name": "Demo",
+                    "task_link": "https://example.invalid/tasks.json",
+                    "error": "任务源暂时不可用",
+                })
+                return [{
+                    "id": "demo", "name": "Demo", "type": "raw", "link": "x",
+                    "task_link": "https://example.invalid/tasks.json",
+                }]
+
+            with patch.object(source, "fetch_online_scripts", side_effect=fake_fetch):
+                source.refresh_worker("partial-refresh", log_file=str(base_dir / "refresh.log"))
+
+            state = get_online_refresh_state()
+            self.assertEqual(state["status"], "部分完成")
+            self.assertTrue(state["cache_published"])
+            self.assertEqual(state["task_link_failures"][0]["script_id"], "demo")
+            payload = app.test_client().get(
+                "/api/online-scripts/refresh-status", headers={"X-Token": TOKEN},
+            ).get_json()
+            self.assertEqual(payload["status"], "部分完成")
+            self.assertEqual(payload["task_link_failures"][0]["script_id"], "demo")
+            page = app.test_client().get(
+                "/online-scripts", headers={"X-Token": TOKEN},
+            ).get_data(as_text=True)
+            self.assertIn("任务源暂时不可用", page)
+            self.assertIn("/online-scripts/task-link/demo", page)
+            self.assertIn('name="csrf_token"', page)
+            self.assertIn('name="proxy_id"', page)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise the partial refresh UI")
+    def test_refresh_polling_renders_task_link_retry_action(self):
+        with isolated_app() as (app, _base_dir):
+            response = app.test_client().get("/online-scripts", headers={"X-Token": TOKEN})
+            self.assertEqual(response.status_code, 200)
+            scripts = re.findall(r"<script>(.*?)</script>", response.get_data(as_text=True), re.S)
+            script = next(script for script in scripts if "async function updateOnlineRefreshStatus()" in script)
+            source = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+            reader = source[source.index("async function flsReadJsonResponse("):source.index("async function flsReadTextResponse(")]
+            result = subprocess.run(
+                ["node", "-e", r'''
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+const elements = {
+  onlineRefreshStatusCard: {style: {}},
+  onlineRefreshStatusText: {innerHTML: ''},
+  onlineRefreshTaskLinkFailures: {innerHTML: ''},
+  onlineRefreshBtn: {disabled: true, textContent: '正在同步中...'},
+  onlineRefreshLogin: {hidden: true, href: ''},
+};
+const context = {
+  window: {},
+  location: {pathname: '/online-scripts', search: ''},
+  document: {getElementById: id => elements[id]},
+  fetch: async () => ({ok: true, status: 200, json: async () => ({
+    running: false, status: '部分完成', message: '1 个外部任务源加载失败，请逐项重试', error: '',
+    updated_at: 'now', log_file: '/tmp/refresh.log',
+    task_link_failures: [{script_id: 'demo', name: 'Demo', error: 'upstream timeout'}],
+  })}),
+  setTimeout: () => {},
+};
+vm.createContext(context);
+vm.runInContext(input.reader + input.script, context);
+setImmediate(() => {
+  assert.equal(elements.onlineRefreshStatusCard.style.display, 'block');
+  assert.match(elements.onlineRefreshStatusText.innerHTML, /部分完成/);
+  assert.match(elements.onlineRefreshTaskLinkFailures.innerHTML, /task-link\/demo/);
+  assert.match(elements.onlineRefreshTaskLinkFailures.innerHTML, /name='csrf_token'/);
+  assert.match(elements.onlineRefreshTaskLinkFailures.innerHTML, /upstream timeout/);
+  assert.equal(elements.onlineRefreshBtn.disabled, false);
+  console.log('partial refresh retry action passed');
+});
+'''],
+                input=json.dumps({"script": script, "reader": reader}),
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_refresh_worker_persists_success_and_failure_without_losing_cache(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.online_scripts import source

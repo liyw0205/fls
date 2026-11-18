@@ -46,12 +46,34 @@ def online_scripts_page():
     refresh_error = refresh_state.get("error", "")
     refresh_updated_at = refresh_state.get("updated_at", "")
     refresh_log = refresh_state.get("log_file", "")
+    refresh_task_link_failures = refresh_state.get("task_link_failures") or []
+
+    def refresh_task_link_actions(failures):
+        if not failures:
+            return ""
+        rows = []
+        for failure in failures:
+            script_id = str(failure.get("script_id") or "").strip()
+            if not script_id:
+                continue
+            action = url_for("online_scripts.online_scripts_pull_task_link", script_id=script_id)
+            label = h(failure.get("name") or script_id)
+            detail = h(failure.get("error") or "外部任务源加载失败")
+            proxy_id = h(failure.get("proxy_id") or "")
+            rows.append(
+                f'<div class="help" style="margin-top:6px;">{label}：{detail} '
+                f'<form class="inline-form" method="post" action="{h(action)}">'
+                f'<input type="hidden" name="proxy_id" value="{proxy_id}">'
+                '<button class="btn btn-orange" type="submit">重新同步外部任务源</button>'
+                '</form></div>'
+            )
+        return "".join(rows)
 
     proxy_options = proxy_select_options("")
 
     refresh_display = (
         "display:block;"
-        if refresh_running or refresh_message or refresh_error
+        if refresh_running or refresh_message or refresh_error or refresh_task_link_failures
         else "display:none;"
     )
 
@@ -141,6 +163,7 @@ def online_scripts_page():
         更新时间：{h(refresh_updated_at or "-")}<br>
         日志：{h(refresh_log or "-")}
     </div>
+    <div id="onlineRefreshTaskLinkFailures">{refresh_task_link_actions(refresh_task_link_failures)}</div>
     <a id="onlineRefreshLogin" class="btn btn-gray" href="/login?next=%2Fonline-scripts" hidden>重新登录</a>
 </div>
 </section>
@@ -177,18 +200,37 @@ async function updateOnlineRefreshStatus(){{
         const text = document.getElementById("onlineRefreshStatusText");
         const btn = document.getElementById("onlineRefreshBtn");
         const login = document.getElementById("onlineRefreshLogin");
+        const failures = document.getElementById("onlineRefreshTaskLinkFailures");
 
         if(!card || !text) return;
         if(login) login.hidden = true;
+
+        const taskFailures = Array.isArray(json.task_link_failures) ? json.task_link_failures : [];
+        if(failures) {{
+            failures.innerHTML = taskFailures.map(function(item) {{
+                const id = String(item && item.script_id || "").trim();
+                if(!id) return "";
+                const name = escapeHtml(item.name || id);
+                const detail = escapeHtml(item.error || "外部任务源加载失败");
+                const href = "/online-scripts/task-link/" + encodeURIComponent(id);
+                const proxy = escapeHtml(item.proxy_id || "");
+                const csrf = typeof flsGetCsrfToken === "function" ? escapeHtml(flsGetCsrfToken()) : "";
+                return "<div class='help' style='margin-top:6px;'>" + name + "：" + detail +
+                    " <" + "form class='inline-form' method='post' action='" + escapeHtml(href) + "'>" +
+                    "<input type='hidden' name='csrf_token' value='" + csrf + "'>" +
+                    "<input type='hidden' name='proxy_id' value='" + proxy + "'>" +
+                    "<button class='btn btn-orange' type='submit'>重新同步外部任务源</button></form></div>";
+            }}).join("");
+        }}
 
         if(json.running){{
             window.__FLS_ONLINE_REFRESH_WAS_RUNNING__ = true;
         }}
 
-        if(json.running || json.message || json.error){{
+        if(json.running || json.message || json.error || taskFailures.length){{
             card.style.display = "block";
 
-            let color = json.error ? "#dc2626" : "#18a058";
+            let color = json.error ? "#dc2626" : (taskFailures.length ? "#b45309" : "#18a058");
             let detail = json.message || json.error || "";
             let first = json.running ? "正在后台同步在线脚本源，请稍候..." :
                 ((json.status ? json.status + "：" : "") + detail);
@@ -245,6 +287,8 @@ async function updateOnlineRefreshStatus(){{
             ? "登录状态已失效，请重新登录后重试"
             : "确认面板服务和网络后点击重新同步";
         if(card) card.style.display = "block";
+        const failures = document.getElementById("onlineRefreshTaskLinkFailures");
+        if(failures) failures.innerHTML = "";
         if(text) text.innerHTML =
             "<span style='color:#dc2626;font-weight:900;'>同步状态读取失败（" +
             escapeHtml(status) + "）：" + escapeHtml(detail) +

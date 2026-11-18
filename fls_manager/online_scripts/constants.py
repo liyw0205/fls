@@ -26,6 +26,7 @@ ONLINE_REFRESH_STATE = {
     "message": "",
     "error": "",
     "cache_published": False,
+    "task_link_failures": [],
     "updated_at": "",
     "log_file": "",
 }
@@ -34,10 +35,16 @@ ONLINE_REFRESH_STATE = {
 def _refresh_snapshot(info):
     fields = (
         "id", "running", "status", "message", "error", "cache_published",
+        "task_link_failures",
         "updated_at", "log_file",
     )
+    defaults = {
+        "running": False,
+        "cache_published": False,
+        "task_link_failures": [],
+    }
     return {
-        field: info.get(field, False if field in ("running", "cache_published") else "")
+        field: info.get(field, defaults.get(field, ""))
         for field in fields
     }
 
@@ -50,6 +57,20 @@ def _validate_refresh_snapshot(info):
         or any(not isinstance(snapshot[field], str) for field in ("id", "status", "message", "error", "updated_at", "log_file"))
     ):
         raise RuntimeError("在线脚本源同步状态损坏，未覆盖原文件")
+    failures = snapshot["task_link_failures"]
+    if len(failures) > 100 or any(
+        not isinstance(item, dict)
+        or not isinstance(item.get("script_id"), str)
+        or not isinstance(item.get("name"), str)
+        or not isinstance(item.get("task_link"), str)
+        or not isinstance(item.get("error"), str)
+        or ("proxy_id" in item and not isinstance(item.get("proxy_id"), str))
+        for item in failures
+    ):
+        raise RuntimeError("在线脚本源同步状态损坏，未覆盖原文件")
+    for item in failures:
+        if any(len(item.get(field, "")) > 1000 for field in ("script_id", "name", "task_link", "error", "proxy_id")):
+            raise RuntimeError("在线脚本源同步状态损坏，未覆盖原文件")
     return snapshot
 
 
@@ -132,6 +153,7 @@ def reserve_online_refresh(proxy_id=""):
             "message": "正在后台同步在线脚本源，请稍候...",
             "error": "",
             "cache_published": False,
+            "task_link_failures": [],
             "updated_at": now_str(),
             "log_file": "",
             "proxy_id": proxy_id,

@@ -226,7 +226,22 @@ def fetch_task_link_tasks(item, proxy_id="", timeout=12):
     return normalize_online_task_crons(data)
 
 
-def fetch_online_scripts(proxy_id="", timeout=12, publish_cache=True):
+def _task_link_failure(item, error, proxy_id=""):
+    def clean(value, limit):
+        text = str(value or "")
+        text = "".join(char if char in "\n\t" or ord(char) >= 32 else " " for char in text)
+        return text[:limit]
+
+    return {
+        "script_id": clean(item.get("id"), 200),
+        "name": clean(item.get("name"), 300),
+        "task_link": clean(item.get("task_link"), 1000),
+        "error": clean(error, 1000),
+        "proxy_id": clean(proxy_id, 200),
+    }
+
+
+def fetch_online_scripts(proxy_id="", timeout=12, publish_cache=True, task_link_failures=None):
     validate_proxy_id(proxy_id)
     url = get_online_script_source()
     real_url = github_proxy_url(url, proxy_id)
@@ -280,6 +295,10 @@ def fetch_online_scripts(proxy_id="", timeout=12, publish_cache=True):
             )
 
             if not linked_tasks:
+                if task_link_failures is not None and len(task_link_failures) < 100:
+                    task_link_failures.append(
+                        _task_link_failure(item, "外部任务源没有可用任务，请检查任务字段后重新同步", proxy_id)
+                    )
                 print(
                     f"[OnlineScripts] 任务源为空: "
                     f"{item.get('name')} task_link={task_link}"
@@ -296,6 +315,8 @@ def fetch_online_scripts(proxy_id="", timeout=12, publish_cache=True):
             )
 
         except Exception as e:
+            if task_link_failures is not None and len(task_link_failures) < 100:
+                task_link_failures.append(_task_link_failure(item, e, proxy_id))
             print(
                 f"[OnlineScripts] 任务源加载失败: "
                 f"{item.get('name')} task_link={task_link} error={e}"
@@ -316,6 +337,7 @@ def refresh_worker(refresh_id, proxy_id="", log_file=""):
             message="正在后台同步在线脚本源，请稍候...",
             error="",
             cache_published=False,
+            task_link_failures=[],
             updated_at=now_str(),
             log_file=str(log_file),
         )
@@ -325,19 +347,34 @@ def refresh_worker(refresh_id, proxy_id="", log_file=""):
         append_log(log_file, f"代理ID: {proxy_id or '不使用代理'}")
         append_log(log_file, "============================================================")
 
-        items = fetch_online_scripts(proxy_id=proxy_id, timeout=20, publish_cache=False)
+        task_link_failures = []
+        items = fetch_online_scripts(
+            proxy_id=proxy_id,
+            timeout=20,
+            publish_cache=False,
+            task_link_failures=task_link_failures,
+        )
         save_online_script_cache(items)
         # Cache replacement is a separate durable side effect; retain that
         # fact when the later status-file write cannot be confirmed.
         with ONLINE_REFRESH_LOCK:
             ONLINE_REFRESH_STATE["cache_published"] = True
-        msg = f"同步在线脚本源成功，共 {len(items)} 条"
+            ONLINE_REFRESH_STATE["task_link_failures"] = list(task_link_failures)
+        if task_link_failures:
+            msg = (
+                f"同步在线脚本源部分完成，共 {len(items)} 条；"
+                f"{len(task_link_failures)} 个外部任务源加载失败，请逐项重试"
+            )
+            status = "部分完成"
+        else:
+            msg = f"同步在线脚本源成功，共 {len(items)} 条"
+            status = "已完成"
         append_log(log_file, msg)
 
         update_online_refresh_state(
             id=refresh_id,
             running=False,
-            status="已完成",
+            status=status,
             message=msg,
             error="",
             cache_published=True,
@@ -368,6 +405,7 @@ def refresh_worker(refresh_id, proxy_id="", log_file=""):
                 message="",
                 error=err,
                 cache_published=cache_published,
+                task_link_failures=ONLINE_REFRESH_STATE.get("task_link_failures", []),
                 updated_at=now_str(),
                 log_file=str(log_file),
             )
