@@ -614,6 +614,139 @@ class FormDataMock{constructor(){this.values={request_id:request.value};}delete(
 """], input=json.dumps({"script":script,"reader":reader}), capture_output=True, text=True, timeout=5)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise install recovery")
+    def test_install_selection_refresh_recovers_original_request_without_new_post(self):
+        with isolated_app() as (app, base_dir):
+            self.prepare(base_dir)
+            html = app.test_client().get(
+                "/online-scripts/install-select/demo", headers={"X-Token": TOKEN},
+            ).get_data(as_text=True)
+            script = next(
+                script for script in re.findall(r"<script>(.*?)</script>", html, re.S)
+                if "flsInstallRecoverPending" in script
+            )
+            source = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+            reader = source[
+                source.index("async function flsReadJsonResponse("):source.index(
+                    "async function flsReadTextResponse("
+                )
+            ]
+            result = subprocess.run(
+                ["node", "-e", r"""
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+const installId = 'a'.repeat(32);
+
+async function runCase(pending, response, expected) {
+  const elements = Object.fromEntries([
+    'onlineInstallRecoveryStatus', 'onlineInstallRecoveryLog',
+    'onlineInstallRecoveryRetry', 'onlineInstallApiLogin'
+  ].map(id => [id, {hidden: true, disabled: false, textContent: '', href: '', onclick: null}]));
+  const calls = [];
+      const storage = {
+        value: pending === undefined ? null : JSON.stringify(pending),
+        getItem() { return this.value; },
+        setItem(_key, value) { this.value = value; },
+      };
+      const form = {addEventListener() {}, querySelector: () => null, querySelectorAll: () => []};
+      const context = {
+    window: {FLS_INSTALL_SCRIPT_ID: 'demo', location: {pathname: '/online-scripts/install-select/demo', search: ''}},
+    location: {pathname: '/online-scripts/install-select/demo', search: ''},
+        document: {
+          getElementById: id => id === 'onlineInstallSelectForm' ? form : elements[id],
+      querySelectorAll: () => [],
+      querySelector: () => null,
+    },
+        sessionStorage: storage,
+        flsResponseErrorDiagnostic: (response, body) => {
+          let payload = null;
+          try { payload = JSON.parse(body); } catch (_) {}
+          return {payload, message: payload && (payload.msg || payload.error || payload.message) || ''};
+        },
+        fetch: async (url, options) => {
+      calls.push({url, options});
+      if (response.throw) throw new Error(response.throw);
+      return {
+        ok: response.ok,
+        status: response.status,
+        text: async () => response.body,
+      };
+    },
+    encodeURIComponent,
+    flsApplyExcludedToVisible: () => {},
+    setTimeout,
+  };
+  vm.createContext(context);
+  vm.runInContext(input.reader + input.script, context);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.length, expected.calls);
+  if (expected.calls) {
+    assert.equal(calls[0].url, '/api/online-scripts/log/' + installId + '?lines=80');
+    assert.equal(calls[0].options.method, undefined);
+    assert.equal(calls[0].options.credentials, 'same-origin');
+  }
+  assert.equal(elements.onlineInstallRecoveryLog.hidden, expected.logHidden);
+      assert.equal(elements.onlineInstallRecoveryRetry.hidden, expected.retryHidden);
+      assert.equal(elements.onlineInstallApiLogin.hidden, expected.loginHidden);
+      assert.match(elements.onlineInstallRecoveryStatus.textContent, expected.status);
+      assert.equal(storage.value, pending === undefined ? null : JSON.stringify(pending));
+      if (expected.logHidden === false) {
+        assert.equal(elements.onlineInstallRecoveryLog.href, '/online-scripts/log/' + installId);
+      }
+      if (expected.retry) {
+        await elements.onlineInstallRecoveryRetry.onclick();
+        assert.equal(calls.length, expected.calls + 1);
+        assert.equal(calls[1].url, calls[0].url);
+        assert.equal(calls[1].options.method, undefined);
+      }
+}
+
+(async () => {
+  await runCase(
+    {install_id: installId, script_id: 'demo'},
+    {ok: true, status: 200, body: JSON.stringify({running: true, status: '安装中', phase: 'downloading'})},
+        {calls: 1, logHidden: false, retryHidden: false, loginHidden: true, status: /安装中.*downloading/, retry: true}
+  );
+  await runCase(
+    {install_id: installId, script_id: 'demo'},
+    {ok: false, status: 502, body: JSON.stringify({msg: '上游暂不可用'})},
+    {calls: 1, logHidden: true, retryHidden: false, loginHidden: true, status: /上游暂不可用/}
+  );
+  await runCase(
+    {install_id: installId, script_id: 'demo'},
+    {ok: true, status: 200, body: '<html>gateway timeout</html>'},
+    {calls: 1, logHidden: true, retryHidden: false, loginHidden: true, status: /响应解析失败/}
+  );
+  await runCase(
+    {install_id: installId, script_id: 'demo'},
+    {ok: false, status: 403, body: JSON.stringify({msg: '登录已过期'})},
+    {calls: 1, logHidden: true, retryHidden: false, loginHidden: false, status: /登录已过期/}
+  );
+  await runCase(
+    {install_id: installId, script_id: 'demo'},
+    {throw: 'network disconnected'},
+    {calls: 1, logHidden: true, retryHidden: false, loginHidden: true, status: /network disconnected/}
+  );
+  await runCase(
+    '{not-json',
+    {ok: true, status: 200, body: JSON.stringify({running: true})},
+    {calls: 0, logHidden: true, retryHidden: true, loginHidden: true, status: /^$/}
+  );
+  await runCase(
+    {install_id: '../escape', script_id: 'demo'},
+    {ok: true, status: 200, body: JSON.stringify({running: true})},
+    {calls: 0, logHidden: true, retryHidden: true, loginHidden: true, status: /^$/}
+  );
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"""],
+                input=json.dumps({"script": script, "reader": reader}),
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise log polling")
     def test_polling_preserves_logs_and_stops_on_permission_or_missing_errors(self):
         with isolated_app() as (app, base_dir):

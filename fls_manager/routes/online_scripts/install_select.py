@@ -713,6 +713,9 @@ def online_scripts_install_select(script_id):
 
 <div class="notice red" id="onlineInstallApiError" role="status" hidden></div>
 <a class="btn btn-primary" id="onlineInstallApiLogin" href="/login" hidden>重新登录</a>
+<div class="notice blue" id="onlineInstallRecoveryStatus" role="status" hidden></div>
+<a class="btn btn-orange" id="onlineInstallRecoveryLog" href="#" hidden>查看原安装日志</a>
+<button class="btn btn-gray" id="onlineInstallRecoveryRetry" type="button" hidden>重新读取安装状态</button>
 
 <section class="section fls-form-section fls-save-section">
     <div class="row-actions" aria-label="在线脚本导入操作">
@@ -949,7 +952,47 @@ async function flsInstallSubmitApi(action, form, submitter){{
     }}
 }}
 
+async function flsInstallRecoverPending(){{
+    const statusEl = document.getElementById("onlineInstallRecoveryStatus");
+    const loginEl = document.getElementById("onlineInstallApiLogin");
+    const logEl = document.getElementById("onlineInstallRecoveryLog");
+    const retryEl = document.getElementById("onlineInstallRecoveryRetry");
+    let pending;
+    try{{ pending = JSON.parse(sessionStorage.getItem("fls-online-install-request") || "null"); }}catch(_error){{ pending = null; }}
+    const installId = pending && /^[a-f0-9]{{32}}$/.test(String(pending.install_id || "")) ? String(pending.install_id) : "";
+    if(!installId) return;
+
+    async function read(){{
+        if(retryEl) retryEl.disabled = true;
+        if(statusEl){{ statusEl.hidden = false; statusEl.textContent = "正在读取原安装状态..."; }}
+        if(loginEl) loginEl.hidden = true;
+        try{{
+            const response = await fetch("/api/online-scripts/log/" + encodeURIComponent(installId) + "?lines=80", {{cache:"no-store", credentials:"same-origin"}});
+            const json = await flsReadJsonResponse(response);
+            if(!json || typeof json.running !== "boolean") throw new Error("安装状态响应无效");
+            if(statusEl) statusEl.textContent = "原安装请求：" + (json.status || "未知") + (json.phase ? "（" + json.phase + "）" : "");
+            if(logEl){{ logEl.hidden = false; logEl.href = "/online-scripts/log/" + encodeURIComponent(installId); }}
+            if(retryEl) retryEl.hidden = false;
+            if(json.running || json.recovery){{
+                if(statusEl) statusEl.textContent += "，请查看原安装日志继续恢复。";
+            }}
+        }}catch(error){{
+            const denied = error && (error.status === 401 || error.status === 403);
+            const message = error && error.message ? error.message : String(error || "查询失败");
+            if(statusEl){{ statusEl.hidden = false; statusEl.textContent = "原安装状态读取失败：" + message; }}
+            if(loginEl){{
+                loginEl.hidden = !denied;
+                if(denied) loginEl.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
+            }}
+            if(retryEl) retryEl.hidden = false;
+        }}finally{{ if(retryEl) retryEl.disabled = false; }}
+    }}
+    if(retryEl){{ retryEl.hidden = false; retryEl.onclick = read; }}
+    await read();
+}}
+
 flsApplyExcludedToVisible();
+flsInstallRecoverPending();
 </script>
 """
 
