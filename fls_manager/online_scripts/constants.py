@@ -450,6 +450,26 @@ def confirm_online_refresh_result(request_id, cache_fingerprint, source_fingerpr
         return dict(snapshot)
 
 
+def _existing_online_refresh_retry(history, original_request_id, proxy_id, request_id):
+    existing = history.get(request_id)
+    if not existing:
+        return None
+    if existing.get("retry_of") != original_request_id or str(existing.get("proxy_id") or "") != str(proxy_id or ""):
+        return {"_binding_conflict": True, **dict(existing)}
+    return {"_replay": True, **dict(existing)}
+
+
+def get_online_refresh_retry(original_request_id, proxy_id, request_id):
+    if not isinstance(original_request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", original_request_id):
+        raise ValueError("原刷新请求标识无效")
+    if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
+        raise ValueError("新的刷新请求标识无效")
+    with ONLINE_REFRESH_LOCK, storage_transaction():
+        return _existing_online_refresh_retry(
+            _read_online_refresh_history_file(), original_request_id, proxy_id, request_id,
+        )
+
+
 def claim_online_refresh_retry(original_request_id, proxy_id="", request_id="", cache_fingerprint="", source_fingerprint=""):
     """Atomically create one explicit retry for a failed refresh history record."""
     if not isinstance(original_request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", original_request_id):
@@ -460,6 +480,9 @@ def claim_online_refresh_retry(original_request_id, proxy_id="", request_id="", 
         raise ValueError("刷新缓存指纹无效")
     with ONLINE_REFRESH_LOCK, storage_transaction():
         history = _read_online_refresh_history_file()
+        existing = _existing_online_refresh_retry(history, original_request_id, proxy_id, request_id)
+        if existing:
+            return existing
         original = history.get(original_request_id)
         if not original:
             return {"_missing": True}
@@ -472,11 +495,6 @@ def claim_online_refresh_retry(original_request_id, proxy_id="", request_id="", 
             return {"_stale": True, **dict(original)}
         if not original.get("source_fingerprint") or source_fingerprint != original.get("source_fingerprint"):
             return {"_stale": True, **dict(original)}
-        existing = history.get(request_id)
-        if existing:
-            if existing.get("retry_of") != original_request_id:
-                return {"_binding_conflict": True, **dict(existing)}
-            return {"_replay": True, **dict(existing)}
         current = dict(ONLINE_REFRESH_STATE)
         if current.get("running"):
             return None

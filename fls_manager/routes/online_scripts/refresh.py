@@ -9,6 +9,7 @@ from ...online_scripts.constants import (
     confirm_online_refresh_result,
     get_online_refresh_history,
     get_online_refresh_request,
+    get_online_refresh_retry,
     reserve_online_refresh,
     update_online_refresh_state,
 )
@@ -98,12 +99,14 @@ def _submit_online_refresh_retry(original_request_id, proxy_id, raw_request_id="
     except ValueError as exc:
         return {"ok": False, "status": "参数错误", "error": str(exc), "request_id": ""}, 400
     try:
-        validate_proxy_id(proxy_id)
-        cache_fingerprint = online_script_cache_fingerprint()
-        source_fingerprint = online_script_source_fingerprint()
-        info = claim_online_refresh_retry(
-            original_request_id, proxy_id, request_id, cache_fingerprint, source_fingerprint,
-        )
+        info = get_online_refresh_retry(original_request_id, proxy_id, request_id)
+        if info is None:
+            validate_proxy_id(proxy_id)
+            cache_fingerprint = online_script_cache_fingerprint()
+            source_fingerprint = online_script_source_fingerprint()
+            info = claim_online_refresh_retry(
+                original_request_id, proxy_id, request_id, cache_fingerprint, source_fingerprint,
+            )
     except ValueError as exc:
         return {"ok": False, "status": "参数错误", "request_id": request_id, "error": str(exc)}, 400
     except Exception as exc:
@@ -127,7 +130,10 @@ def _submit_online_refresh_retry(original_request_id, proxy_id, raw_request_id="
     if info.get("_replay"):
         return {"ok": True, "replayed": True, "request_id": request_id,
                 "retry_of": original_request_id, "id": info.get("id", ""),
-                "status": info.get("status", "运行中")}, 200
+                "status": info.get("status", "运行中"), "running": bool(info.get("running")),
+                "error": info.get("error") or "", "cache_published": bool(info.get("cache_published")),
+                "state_url": url_for("online_scripts.api_online_refresh_status_for_request", request_id=request_id),
+                "log_url": url_for("online_scripts.online_refresh_log", request_id=request_id)}, 200
     log_file = ""
     try:
         log_file = str(online_refresh_log_file(info["id"]))
@@ -243,6 +249,18 @@ def online_refresh_retry(request_id):
                 actions_html='<a class="btn btn-gray" href="/online-scripts#online-status">返回刷新状态</a>',
             ),
         ), status_code
+    if payload.get("replayed"):
+        return layout(
+            "在线脚本源重试结果", "online_scripts",
+            page_header_card(
+                "已查询原同步重试",
+                help_html=f'状态：{h(payload.get("status") or "-")}<br>{h(payload.get("error") or "")}',
+                actions_html=(
+                    f'<a class="btn btn-primary" href="{h(payload["log_url"])}">查看原重试日志</a>'
+                    '<a class="btn btn-gray" href="/online-scripts#online-status">返回刷新状态</a>'
+                ),
+            ),
+        ), 200
     return redirect(url_for("online_scripts.online_scripts_page", msg="已提交在线脚本源明确重试，正在处理中"))
 
 

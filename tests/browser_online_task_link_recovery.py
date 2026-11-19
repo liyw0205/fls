@@ -3,6 +3,7 @@ import os
 import tempfile
 import threading
 import subprocess
+import uuid
 from pathlib import Path
 
 from tools.browser_regression import TOKEN, find_chromium, find_playwright_core, seed_browser_fixture
@@ -24,6 +25,7 @@ def main():
         from fls_manager.online_scripts.constants import update_online_refresh_state
         from fls_manager.online_scripts.logs import online_refresh_log_file
         from fls_manager.routes.online_scripts import task_link
+        from fls_manager.routes.online_scripts import refresh
 
         item = {
             "id": "browser-link", "name": "浏览器任务源", "type": "raw",
@@ -31,8 +33,21 @@ def main():
             "task_link": "https://fixture.invalid/browser-link.json",
         }
         source.save_online_script_cache([item])
-        fault = {"fail": True, "fetches": 0}
+        fault = {"fail": True, "fetches": 0, "refreshes": 0}
         real_fetch = task_link.fetch_task_link_tasks
+        real_refresh_start = refresh.start_refresh_thread
+
+        def start_refresh(refresh_id, _proxy_id, log_file):
+            fault["refreshes"] += 1
+            source.save_online_script_cache([dict(item, name="Recovered refresh script")])
+            Path(log_file).write_text("original retry completed\n", encoding="utf-8")
+            update_online_refresh_state(
+                running=False, status="已完成", error="", message="fixture retry completed",
+                cache_published=True, published_cache_fingerprint=source.online_script_cache_fingerprint(),
+                log_file=log_file, updated_at="zz-completed",
+            )
+
+        refresh.start_refresh_thread = start_refresh
 
         def fetch(*_args, **_kwargs):
             fault["fetches"] += 1
@@ -53,7 +68,7 @@ def main():
                     fault["fetches"] = 0
                     source.save_online_script_cache([item])
             cached = source.load_online_script_cache()
-            return jsonify(fail=fault["fail"], fetches=fault["fetches"], cached=cached)
+            return jsonify(fail=fault["fail"], fetches=fault["fetches"], refreshes=fault["refreshes"], cached=cached)
 
         @app.route("/api/fixture/online-refresh", methods=["POST"])
         def refresh_fixture():
@@ -103,6 +118,23 @@ def main():
             )
             return jsonify(ok=True)
 
+        @app.route("/api/fixture/refresh-retry", methods=["POST"])
+        def refresh_retry_fixture():
+            fault["refreshes"] = 0
+            original = uuid.uuid4().hex
+            refresh_id = uuid.uuid4().hex
+            path = online_refresh_log_file(refresh_id)
+            path.write_text("original refresh failed\n", encoding="utf-8")
+            update_online_refresh_state(
+                id=refresh_id, request_id=original, proxy_id="", running=False,
+                status="失败", error="fixture retry needed", message="", task_link_failures=[],
+                cache_published=False, expected_cache_fingerprint=source.online_script_cache_fingerprint(),
+                published_cache_fingerprint="", source_fingerprint=source.online_script_source_fingerprint(),
+                retry_of="", confirmation="", confirmation_fingerprint="",
+                log_file=str(path), updated_at="zz-original",
+            )
+            return jsonify(ok=True, original=original)
+
         server = make_server("127.0.0.1", 0, app, threaded=True)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         try:
@@ -111,6 +143,7 @@ def main():
             subprocess.run(["node", "-e", SCRIPT], env=env, check=True, timeout=180)
         finally:
             task_link.fetch_task_link_tasks = real_fetch
+            refresh.start_refresh_thread = real_refresh_start
             server.shutdown()
             server.server_close()
             scheduler.scheduler.shutdown(wait=False)
@@ -213,9 +246,47 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    assert.match(await page.locator('.content').textContent(),/fixture refresh task source unavailable/);
    await fixture({fail:false});
    await dynamicRetry.click();
+   await page.waitForURL('**/online-scripts?msg=*');
    await page.waitForFunction(()=>document.body.textContent.includes('外部任务源同步完成'));
    const dynamicState=await fixture({});
    assert.equal(dynamicState.fetches,2);
+   const setup=await page.request.post(base+'/api/fixture/refresh-retry',{headers,data:{}});
+   assert.equal(setup.status(),200);
+   const original=(await setup.json()).original;
+   await page.goto(base+'/online-scripts');
+   const refreshRetryForm=page.locator('#onlineRefreshHistory form[data-refresh-retry-of="'+original+'"]');
+   await refreshRetryForm.waitFor();
+   const retryRequestId=await refreshRetryForm.locator('[name="retry_request_id"]').inputValue();
+   const retryEndpoint=base+'/api/online-scripts/refresh-retry/'+original;
+   await page.route(retryEndpoint,async route=>{
+     const actual=await route.fetch();
+     assert.equal(actual.status(),202);
+     await route.abort('failed');
+   });
+   await refreshRetryForm.getByRole('button',{name:'明确重新同步',exact:true}).click();
+   await page.locator('#onlineRefreshQuery').waitFor({state:'visible'});
+   assert.equal(await page.evaluate(()=>JSON.parse(sessionStorage.getItem('fls-online-refresh-request')).request_id),retryRequestId);
+   await page.unroute(retryEndpoint);
+   await page.locator('#onlineRefreshQuery').click();
+   await page.waitForFunction(()=>!sessionStorage.getItem('fls-online-refresh-request'));
+   await page.goto(base+'/online-scripts');
+   const [replayed]=await Promise.all([
+     page.waitForResponse(response=>response.url()===retryEndpoint&&response.request().method()==='POST'),
+     refreshRetryForm.getByRole('button',{name:'明确重新同步',exact:true}).click(),
+   ]);
+   assert.equal(replayed.status(),200);
+   const receipt=await replayed.json();
+   assert.equal(receipt.replayed,true);
+   assert.equal(receipt.request_id,retryRequestId);
+   assert.equal(receipt.status,'已完成');
+   const htmlReplay=await page.request.post(base+'/online-scripts/refresh-retry/'+original,{headers,form:{retry_request_id:retryRequestId,proxy_id:''}});
+   assert.equal(htmlReplay.status(),200);
+   assert.match(await htmlReplay.text(),/已查询原同步重试/);
+   await page.goto(base+receipt.log_url);
+   await page.waitForSelector('#refreshLogText');
+   assert.match(await page.locator('#refreshLogText').textContent(),/original retry completed/);
+   const current=await fixture({});
+   assert.equal(current.refreshes,1);
    assert.deepEqual(errors,[]);
    console.log('online task-link recovery passed '+viewport.width);
    await context.close();

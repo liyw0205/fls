@@ -2,6 +2,7 @@ import json
 import re
 import shutil
 import subprocess
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -259,6 +260,162 @@ class OnlineRefreshLogTests(unittest.TestCase):
             html = page.get_data(as_text=True)
             self.assertIn(f"/online-scripts/refresh-retry/{original}", html)
             self.assertIn("明确重新同步", html)
+
+    def test_refresh_retry_replay_returns_original_receipt_after_cache_changes(self):
+        for status in ("已完成", "部分完成", "失败", "结果未知"):
+            with self.subTest(status=status), isolated_app() as (app, base_dir):
+                from fls_manager.online_scripts import source
+                from fls_manager.online_scripts.constants import update_online_refresh_state
+                from fls_manager.online_scripts.logs import online_refresh_log_file
+                import fls_manager.routes.online_scripts.refresh as refresh
+
+                original = self._state(base_dir)
+                retry_request = "c" * 32
+                client = app.test_client()
+                endpoint = f"/api/online-scripts/refresh-retry/{original}"
+                values = {"retry_request_id": retry_request, "proxy_id": ""}
+                headers = {"X-Token": TOKEN}
+                with patch.object(refresh, "start_refresh_thread") as start:
+                    first = client.post(endpoint, json=values, headers=headers)
+                    self.assertEqual(first.status_code, 202)
+                    log_file = online_refresh_log_file(first.json["id"])
+                    log_file.parent.mkdir(parents=True, exist_ok=True)
+                    log_file.write_text("original retry result\n", encoding="utf-8")
+                    source.save_online_script_cache([{
+                        "id": "new", "name": "New cache", "type": "raw", "link": "https://example.invalid/new.py",
+                    }])
+                    update_online_refresh_state(
+                        running=False, status=status, message="retry finished", error="original diagnosis",
+                        cache_published=True, published_cache_fingerprint=source.online_script_cache_fingerprint(),
+                        log_file=str(log_file), updated_at="later",
+                    )
+                    history = base_dir / "data" / "online_script_refresh_requests.json"
+                    before = history.read_bytes()
+                    replay = client.post(endpoint, json=values, headers=headers)
+                    self.assertEqual(replay.status_code, 200)
+                    self.assertTrue(replay.json["replayed"])
+                    self.assertEqual(replay.json["id"], first.json["id"])
+                    self.assertEqual(replay.json["status"], status)
+                    with patch.object(refresh, "online_script_cache_fingerprint", side_effect=RuntimeError("cache unreadable")) as cache, patch.object(
+                        refresh, "online_script_source_fingerprint", side_effect=RuntimeError("source unreadable"),
+                    ) as config, patch.object(refresh, "validate_proxy_id", side_effect=ValueError("proxy deleted")) as proxy:
+                        replay = client.post(endpoint, json=values, headers=headers)
+                        self.assertEqual(replay.status_code, 200)
+                        self.assertEqual(replay.json["error"], "original diagnosis")
+                        self.assertEqual(replay.json["state_url"], f"/api/online-scripts/refresh-status/{retry_request}")
+                        page = client.post(endpoint.replace("/api/", "/", 1), data=values, headers=headers)
+                        self.assertEqual(page.status_code, 200)
+                        self.assertIn("original diagnosis", page.get_data(as_text=True))
+                        self.assertIn(f"/online-scripts/refresh-log/{retry_request}", page.get_data(as_text=True))
+                        cache.assert_not_called()
+                        config.assert_not_called()
+                        proxy.assert_not_called()
+                    stale = client.post(endpoint, json={**values, "retry_request_id": "d" * 32}, headers=headers)
+                    self.assertEqual(stale.status_code, 409)
+                    wrong_proxy = client.post(endpoint, json={**values, "proxy_id": "other"}, headers=headers)
+                    self.assertEqual(wrong_proxy.status_code, 409)
+                    wrong_parent = client.post("/api/online-scripts/refresh-retry/" + "e" * 32, json=values, headers=headers)
+                    self.assertEqual(wrong_parent.status_code, 409)
+                    self.assertEqual(history.read_bytes(), before)
+                    self.assertEqual(start.call_count, 1)
+
+    def test_refresh_retry_replay_survives_parent_cleanup_and_claim_race(self):
+        with isolated_app() as (app, base_dir):
+            import fls_manager.routes.online_scripts.refresh as refresh
+            from fls_manager.online_scripts import source
+            from fls_manager.online_scripts.constants import claim_online_refresh_retry, update_online_refresh_state
+
+            original = self._state(base_dir)
+            client = app.test_client()
+            endpoint = f"/api/online-scripts/refresh-retry/{original}"
+            values = {"retry_request_id": "c" * 32, "proxy_id": ""}
+            headers = {"X-Token": TOKEN}
+            with patch.object(refresh, "start_refresh_thread") as start:
+                first = client.post(endpoint, json=values, headers=headers)
+                self.assertEqual(first.status_code, 202)
+                source.save_online_script_cache([{"id": "later", "name": "Later", "type": "raw", "link": "x"}])
+                update_online_refresh_state(running=False, status="失败", error="child failure", updated_at="later")
+                history = base_dir / "data" / "online_script_refresh_requests.json"
+                records = json.loads(history.read_text(encoding="utf-8"))
+                records.pop(original)
+                history.write_text(json.dumps(records), encoding="utf-8")
+                before = history.read_bytes()
+                replay = client.post(endpoint, json=values, headers=headers)
+                self.assertEqual(replay.status_code, 200)
+                self.assertEqual(replay.json["id"], first.json["id"])
+                cache_fingerprint = source.online_script_cache_fingerprint()
+                source_fingerprint = source.online_script_source_fingerprint()
+
+                def concurrent_claim():
+                    claimed = claim_online_refresh_retry(
+                        original, "", values["retry_request_id"], cache_fingerprint, source_fingerprint,
+                    )
+                    self.assertTrue(claimed["_replay"])
+                    return cache_fingerprint
+
+                with patch.object(refresh, "get_online_refresh_retry", return_value=None), patch.object(
+                    refresh, "online_script_cache_fingerprint", side_effect=concurrent_claim,
+                ), patch.object(refresh, "online_script_source_fingerprint", return_value=source_fingerprint):
+                    raced = client.post(endpoint, json=values, headers=headers)
+                self.assertEqual(raced.status_code, 200)
+                self.assertEqual(raced.json["id"], first.json["id"])
+                missing = client.post(endpoint, json={**values, "retry_request_id": "d" * 32}, headers=headers)
+                self.assertEqual(missing.status_code, 404)
+                with client.session_transaction() as session:
+                    session["csrf_token"] = "retry-csrf"
+                unauthenticated = client.post(endpoint, json=values, headers={"X-CSRF-Token": "retry-csrf"})
+                self.assertEqual(unauthenticated.status_code, 401)
+                with client.session_transaction() as session:
+                    session.update(token=TOKEN, token_expire_at=4102444800, security_verified=True, csrf_token="retry-csrf")
+                denied = client.post(endpoint, json=values)
+                self.assertEqual(denied.status_code, 400)
+                allowed = client.post(endpoint, json=values, headers={"X-CSRF-Token": "retry-csrf"})
+                self.assertEqual(allowed.status_code, 200)
+                self.assertEqual(history.read_bytes(), before)
+                self.assertEqual(start.call_count, 1)
+                history.write_text("{broken", encoding="utf-8")
+                corrupt = client.post(endpoint, json=values, headers=headers)
+                self.assertEqual(corrupt.status_code, 500)
+                self.assertEqual(history.read_text(encoding="utf-8"), "{broken")
+                self.assertEqual(start.call_count, 1)
+
+    def test_refresh_retry_concurrent_preflight_claims_one_child(self):
+        with isolated_app() as (app, base_dir):
+            import fls_manager.routes.online_scripts.refresh as refresh
+            from fls_manager.online_scripts.source import online_script_cache_fingerprint
+
+            original = self._state(base_dir)
+            fingerprint = online_script_cache_fingerprint()
+            barrier = threading.Barrier(2)
+            results, errors = [], []
+
+            def preflight():
+                barrier.wait(timeout=5)
+                return fingerprint
+
+            def submit():
+                try:
+                    response = app.test_client().post(
+                        f"/api/online-scripts/refresh-retry/{original}",
+                        json={"retry_request_id": "c" * 32, "proxy_id": ""}, headers={"X-Token": TOKEN},
+                    )
+                    results.append((response.status_code, response.json))
+                except Exception as exc:
+                    errors.append(exc)
+
+            with patch.object(refresh, "online_script_cache_fingerprint", side_effect=preflight), patch.object(
+                refresh, "start_refresh_thread",
+            ) as start:
+                threads = [threading.Thread(target=submit) for _ in range(2)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=10)
+                self.assertFalse(any(thread.is_alive() for thread in threads))
+                self.assertEqual(errors, [])
+                self.assertEqual(sorted(code for code, _ in results), [200, 202])
+                self.assertEqual(len({payload["id"] for _, payload in results}), 1)
+                self.assertEqual(start.call_count, 1)
 
     def test_refresh_retry_rejects_terminal_or_bound_conflicts_without_starting(self):
         with isolated_app() as (app, base_dir):
