@@ -16,12 +16,12 @@ def main():
     with tempfile.TemporaryDirectory(prefix="fls-task-link-browser-") as temp:
         seed_browser_fixture(temp)
         os.environ.update(FLS_BASE_DIR=temp, FLS_TOKEN=TOKEN, FLS_SECRET_KEY="task-link-browser")
-        from flask import jsonify, request
+        from flask import g, jsonify, request
         from werkzeug.serving import make_server
         from fls_manager.app import create_app
         import fls_manager.app as app_module
         from fls_manager import scheduler
-        from fls_manager.online_scripts import source
+        from fls_manager.online_scripts import constants, source
         from fls_manager.online_scripts.constants import update_online_refresh_state
         from fls_manager.online_scripts.logs import online_refresh_log_file
         from fls_manager.routes.online_scripts import task_link
@@ -33,7 +33,7 @@ def main():
             "task_link": "https://fixture.invalid/browser-link.json",
         }
         source.save_online_script_cache([item])
-        fault = {"fail": True, "fetches": 0, "refreshes": 0}
+        fault = {"fail": True, "fetches": 0, "refreshes": 0, "fail_history_publication": False}
         real_fetch = task_link.fetch_task_link_tasks
         real_refresh_start = refresh.start_refresh_thread
 
@@ -58,6 +58,27 @@ def main():
         task_link.fetch_task_link_tasks = fetch
         app = create_app()
         app_module.dispatch_frontend_open_event = lambda: None
+
+        @app.before_request
+        def inject_refresh_history_failure():
+            if request.path != "/api/online-scripts/refresh" or not fault["fail_history_publication"]:
+                return None
+            fault["fail_history_publication"] = False
+            g.refresh_replace = constants.os.replace
+            original_replace = constants.os.replace
+
+            def fail_history_once(src_path, dst):
+                if Path(dst) == constants.ONLINE_REFRESH_HISTORY_FILE:
+                    raise OSError("browser history publication denied")
+                return original_replace(src_path, dst)
+
+            constants.os.replace = fail_history_once
+
+        @app.teardown_request
+        def restore_refresh_replace(_error):
+            original_replace = getattr(g, "refresh_replace", None)
+            if original_replace is not None:
+                constants.os.replace = original_replace
 
         @app.route("/api/fixture/task-link", methods=["GET", "POST"])
         def fixture():
@@ -134,6 +155,24 @@ def main():
                 log_file=str(path), updated_at="zz-original",
             )
             return jsonify(ok=True, original=original)
+
+        @app.route("/api/fixture/refresh-publication-failure", methods=["POST"])
+        def refresh_publication_failure_fixture():
+            fault["refreshes"] = 0
+            fault["fail_history_publication"] = True
+            source.save_online_script_cache([item])
+            update_online_refresh_state(
+                id="", request_id="", proxy_id="", running=False, status="", message="", error="",
+                cache_published=False, task_link_failures=[], updated_at="", log_file="",
+            )
+            return jsonify(cache_fingerprint=source.online_script_cache_fingerprint())
+
+        @app.route("/api/fixture/refresh-publication-state")
+        def refresh_publication_state_fixture():
+            return jsonify(
+                refreshes=fault["refreshes"], state=constants.get_online_refresh_state(),
+                cache_fingerprint=source.online_script_cache_fingerprint(),
+            )
 
         server = make_server("127.0.0.1", 0, app, threaded=True)
         threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -287,6 +326,55 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    assert.match(await page.locator('#refreshLogText').textContent(),/original retry completed/);
    const current=await fixture({});
    assert.equal(current.refreshes,1);
+
+   const publicationSetup=await page.request.post(base+'/api/fixture/refresh-publication-failure',{headers});
+   assert.equal(publicationSetup.status(),200);
+   const cacheFingerprint=(await publicationSetup.json()).cache_fingerprint;
+   await page.goto(base+'/online-scripts');
+   const refreshForm=page.locator('.fls-online-refresh-form');
+   const publicationRequestId=await refreshForm.locator('[name="request_id"]').inputValue();
+   await refreshForm.locator('button[type="submit"]').click();
+   await page.waitForFunction(()=>document.body.textContent.includes('browser history publication denied'));
+   assert.equal(JSON.parse(await page.evaluate(()=>sessionStorage.getItem('fls-online-refresh-request'))).request_id,publicationRequestId);
+   await page.locator('#onlineRefreshQuery').click();
+   const receiptRecovery=page.locator('#onlineRefreshPersistence form.fls-online-refresh-recover-form');
+   await receiptRecovery.waitFor();
+   assert.match(await page.locator('#onlineRefreshPersistence').textContent(),/未启动抓取/);
+   const recoverEndpoint=base+'/api/online-scripts/refresh-recover/'+publicationRequestId;
+   assert.equal(await receiptRecovery.getAttribute('data-api-action'),'/api/online-scripts/refresh-recover/'+publicationRequestId);
+   await page.route(recoverEndpoint,route=>route.fulfill({status:503,contentType:'text/html',body:'receipt repair temporarily unavailable'}));
+   await receiptRecovery.getByRole('button',{name:'修复刷新回执',exact:true}).click();
+   await page.waitForFunction(()=>document.querySelector('#onlineRefreshStatusText').textContent.includes('HTTP 503'));
+   assert.equal(await receiptRecovery.getByRole('button',{name:'修复刷新回执',exact:true}).isEnabled(),true);
+   assert.equal(JSON.parse(await page.evaluate(()=>sessionStorage.getItem('fls-online-refresh-request'))).request_id,publicationRequestId);
+   await page.unroute(recoverEndpoint);
+   let repairs=0;
+   await page.route(recoverEndpoint,async route=>{
+     repairs++;
+     const actual=await route.fetch();
+     assert.equal(actual.status(),200);
+     await route.abort('failed');
+   });
+   await receiptRecovery.getByRole('button',{name:'修复刷新回执',exact:true}).click();
+   await page.waitForFunction(()=>!document.querySelector('#onlineRefreshPersistence form').dataset.pending && document.querySelector('#onlineRefreshStatusText').textContent.includes('回执修复未确认'));
+   assert.equal(await receiptRecovery.getByRole('button',{name:'修复刷新回执',exact:true}).isEnabled(),true);
+   await page.unroute(recoverEndpoint);
+   await page.locator('#onlineRefreshQuery').click();
+   await receiptRecovery.waitFor({state:'detached'});
+   assert.equal(repairs,1);
+   assert.equal(new URL(page.url()).pathname,'/online-scripts');
+   const publicationState=await page.request.get(base+'/api/fixture/refresh-publication-state',{headers});
+   assert.equal(publicationState.status(),200);
+   const recoveredState=(await publicationState.json()).state;
+   assert.equal((await publicationState.json()).refreshes,0);
+   assert.equal(recoveredState.request_id,publicationRequestId);
+   assert.equal(recoveredState.running,false);
+   assert.equal(recoveredState.status,'结果未知');
+   assert.equal(recoveredState.persistence_error,undefined);
+   assert.equal((await publicationState.json()).cache_fingerprint,cacheFingerprint);
+   const receiptLog=await page.request.get(base+'/api/online-scripts/refresh-log/'+publicationRequestId,{headers});
+   assert.equal(receiptLog.status(),200);
+   assert.match((await receiptLog.json()).log,/未启动抓取/);
    assert.deepEqual(errors,[]);
    console.log('online task-link recovery passed '+viewport.width);
    await context.close();

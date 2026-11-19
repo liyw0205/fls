@@ -18,6 +18,7 @@ from .constants import (
     ONLINE_TASK_LINK_ACTIVE,
     ONLINE_REFRESH_LOCK,
     ONLINE_REFRESH_STATE,
+    RefreshPublicationError,
     update_online_refresh_state,
 )
 from .logs import append_log, online_refresh_log_file
@@ -566,7 +567,7 @@ def refresh_worker(refresh_id, proxy_id="", log_file=""):
         )
         if source_fingerprint and online_script_source_fingerprint() != source_fingerprint:
             raise RuntimeError("在线脚本源地址在抓取期间已变化，未发布缓存")
-        with storage_transaction():
+        with ONLINE_REFRESH_LOCK, storage_transaction():
             current_cache_fingerprint = online_script_cache_fingerprint()
             if retry_of and expected_cache_fingerprint and current_cache_fingerprint != expected_cache_fingerprint:
                 raise RuntimeError("在线脚本源缓存在抓取期间已变化，未覆盖后来缓存")
@@ -608,6 +609,12 @@ def refresh_worker(refresh_id, proxy_id="", log_file=""):
         )
 
     except Exception as e:
+        if isinstance(e, RefreshPublicationError) and e.published_snapshot and not e.published_snapshot.get("running") and e.published_snapshot.get("status") in ("已完成", "部分完成"):
+            try:
+                append_log(log_file, f"同步终态已保存，历史回执待修复：{e}")
+            except Exception:
+                pass
+            return
         cache_published = bool(ONLINE_REFRESH_STATE.get("cache_published"))
         if cache_published:
             err = (
@@ -634,9 +641,12 @@ def refresh_worker(refresh_id, proxy_id="", log_file=""):
                 updated_at=now_str(),
                 log_file=str(log_file),
             )
-        except Exception:
-            # A state-file failure must not leave an uncaught worker exception.
-            pass
+        except Exception as storage_error:
+            with ONLINE_REFRESH_LOCK:
+                ONLINE_REFRESH_STATE.update(
+                    running=False, status=status, message="", error=err,
+                    persistence_error=str(storage_error), updated_at=now_str(),
+                )
 
 
 def start_refresh_thread(refresh_id, proxy_id="", log_file=""):

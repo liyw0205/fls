@@ -6,6 +6,7 @@ import os
 import uuid
 
 from ..paths import DATA_DIR
+from .logs import online_refresh_log_file
 from ..storage import mutate_json, storage_transaction
 from ..utils import now_str
 
@@ -251,6 +252,8 @@ def _validate_refresh_snapshot(info):
 
 def _read_online_refresh_file():
     with storage_transaction():
+        if ONLINE_REFRESH_STATE_FILE.is_symlink() or (ONLINE_REFRESH_STATE_FILE.exists() and not ONLINE_REFRESH_STATE_FILE.is_file()):
+            raise RuntimeError("在线脚本源同步状态必须是普通文件，未覆盖原文件")
         try:
             raw = ONLINE_REFRESH_STATE_FILE.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -265,6 +268,8 @@ def _read_online_refresh_file():
 
 
 def _read_online_refresh_history_file():
+    if ONLINE_REFRESH_HISTORY_FILE.is_symlink() or (ONLINE_REFRESH_HISTORY_FILE.exists() and not ONLINE_REFRESH_HISTORY_FILE.is_file()):
+        raise RuntimeError("在线脚本源刷新历史必须是普通文件，未覆盖原文件")
     try:
         raw = ONLINE_REFRESH_HISTORY_FILE.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -284,6 +289,23 @@ def _read_online_refresh_history_file():
     return data
 
 
+class RefreshPublicationError(RuntimeError):
+    def __init__(self, error, published_snapshot=None):
+        super().__init__(str(error))
+        self.published_snapshot = published_snapshot
+
+
+def _publish_refresh_history(history):
+    temp = ONLINE_REFRESH_HISTORY_FILE.with_name(
+        f".{ONLINE_REFRESH_HISTORY_FILE.name}.{threading.get_ident()}.tmp"
+    )
+    try:
+        temp.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temp, ONLINE_REFRESH_HISTORY_FILE)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
 def persist_online_refresh(info):
     snapshot = _validate_refresh_snapshot(info)
     with storage_transaction():
@@ -301,22 +323,34 @@ def persist_online_refresh(info):
             f".{ONLINE_REFRESH_HISTORY_FILE.name}.{threading.get_ident()}.tmp"
         )
         try:
-            temp.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
-            os.replace(temp, ONLINE_REFRESH_STATE_FILE)
-            for candidate in (previous_snapshot, snapshot):
-                if candidate.get("request_id"):
-                    history[candidate["request_id"]] = candidate
-            if snapshot["request_id"]:
-                history = dict(sorted(
-                    history.items(),
-                    key=lambda pair: str(pair[1].get("updated_at") or ""),
-                    reverse=True,
-                )[:200])
-            history_temp.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
-            os.replace(history_temp, ONLINE_REFRESH_HISTORY_FILE)
-        finally:
-            temp.unlink(missing_ok=True)
-            history_temp.unlink(missing_ok=True)
+            try:
+                previous_id = previous_snapshot.get("request_id")
+                if previous_id and history.get(previous_id) != previous_snapshot:
+                    # Preserve a receipt left behind by a partial publication before replacing it.
+                    history[previous_id] = previous_snapshot
+                    _publish_refresh_history(history)
+                for candidate in (previous_snapshot, snapshot):
+                    if candidate.get("request_id"):
+                        history[candidate["request_id"]] = candidate
+                if snapshot["request_id"]:
+                    history = dict(sorted(
+                        history.items(),
+                        key=lambda pair: (pair[0] == snapshot["request_id"], str(pair[1].get("updated_at") or "")),
+                        reverse=True,
+                    )[:200])
+                temp.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+                history_temp.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+                os.replace(temp, ONLINE_REFRESH_STATE_FILE)
+                os.replace(history_temp, ONLINE_REFRESH_HISTORY_FILE)
+            finally:
+                temp.unlink(missing_ok=True)
+                history_temp.unlink(missing_ok=True)
+        except Exception as exc:
+            try:
+                published = snapshot if _read_online_refresh_file() == snapshot else None
+            except Exception:
+                published = None
+            raise RefreshPublicationError(exc, published) from exc
 
 
 def update_online_refresh_state(**updates):
@@ -325,9 +359,11 @@ def update_online_refresh_state(**updates):
         ONLINE_REFRESH_STATE.update(updates)
         try:
             persist_online_refresh(ONLINE_REFRESH_STATE)
-        except Exception:
+        except Exception as exc:
             ONLINE_REFRESH_STATE.clear()
-            ONLINE_REFRESH_STATE.update(previous)
+            ONLINE_REFRESH_STATE.update(getattr(exc, "published_snapshot", None) or previous)
+            if getattr(exc, "published_snapshot", None):
+                ONLINE_REFRESH_STATE["persistence_error"] = str(exc)
             raise
         return dict(ONLINE_REFRESH_STATE)
 
@@ -336,19 +372,35 @@ def get_online_refresh_state():
     with ONLINE_REFRESH_LOCK:
         current = dict(ONLINE_REFRESH_STATE)
         loaded_from_file = False
-        if ONLINE_REFRESH_STATE_FILE.exists():
+        if ONLINE_REFRESH_STATE_FILE.exists() or ONLINE_REFRESH_STATE_FILE.is_symlink():
             data = _read_online_refresh_file()
-            if data and not current.get("id"):
-                current.update(data)
+            if data and (data.get("id") != current.get("id") or (not data.get("running") and current.get("running"))):
+                current = dict(data)
                 loaded_from_file = True
+                ONLINE_REFRESH_STATE.clear()
+                ONLINE_REFRESH_STATE.update(current)
         if loaded_from_file and current.get("running"):
             current["running"] = False
             current["status"] = "结果未知"
             current["error"] = "面板重启后无法确认在线脚本源同步是否完成；保留旧缓存，请查看刷新日志后重试。"
             current["message"] = ""
             current["updated_at"] = now_str()
+            if not current.get("log_file") and re.fullmatch(r"[a-f0-9]{32}", current.get("id", "")):
+                recovered_log = online_refresh_log_file(current["id"])
+                if recovered_log.is_file() and not recovered_log.is_symlink():
+                    current["log_file"] = str(recovered_log)
             ONLINE_REFRESH_STATE.update(current)
             persist_online_refresh(current)
+        if current.get("request_id"):
+            disk = _read_online_refresh_file()
+            history = _read_online_refresh_history_file()
+            if history.get(current["request_id"]) != disk or _refresh_snapshot(current) != disk or current.get("persistence_error"):
+                current["persistence_error"] = current.get("persistence_error") or "刷新当前状态与历史回执尚未一致，请修复回执后继续。"
+                current["persistence_recovery"] = {
+                    "action": f'/online-scripts/refresh-recover/{current["request_id"]}',
+                    "api_action": f'/api/online-scripts/refresh-recover/{current["request_id"]}',
+                    "label": "修复刷新回执",
+                }
         return current
 
 
@@ -356,6 +408,9 @@ def get_online_refresh_request(request_id):
     if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
         return None
     with ONLINE_REFRESH_LOCK, storage_transaction():
+        current = get_online_refresh_state()
+        if current.get("request_id") == request_id:
+            return current
         value = _read_online_refresh_history_file().get(request_id)
         return dict(value) if isinstance(value, dict) else None
 
@@ -367,8 +422,8 @@ def get_online_refresh_history(limit=50):
         raise ValueError("刷新历史条数必须为整数")
     with ONLINE_REFRESH_LOCK, storage_transaction():
         history = _read_online_refresh_history_file()
-        current = _read_online_refresh_file()
-        if current.get("request_id") and current["request_id"] not in history:
+        current = get_online_refresh_state()
+        if current.get("request_id"):
             history[current["request_id"]] = current
         ordered = sorted(
             history.values(),
@@ -376,6 +431,21 @@ def get_online_refresh_history(limit=50):
             reverse=True,
         )
         return [dict(value) for value in ordered[:limit]]
+
+
+def recover_online_refresh_receipt(request_id):
+    if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
+        raise ValueError("刷新请求标识无效")
+    with ONLINE_REFRESH_LOCK, storage_transaction():
+        info = get_online_refresh_request(request_id)
+        if not info:
+            return None
+        if info.get("request_id") == ONLINE_REFRESH_STATE.get("request_id"):
+            persist_online_refresh(info)
+            ONLINE_REFRESH_STATE.clear()
+            ONLINE_REFRESH_STATE.update(_refresh_snapshot(info))
+            return get_online_refresh_state()
+        return info
 
 
 def confirm_online_refresh_result(request_id, cache_fingerprint, source_fingerprint):
@@ -387,7 +457,8 @@ def confirm_online_refresh_result(request_id, cache_fingerprint, source_fingerpr
         raise ValueError("在线脚本源版本指纹无效")
     with ONLINE_REFRESH_LOCK, storage_transaction():
         history = _read_online_refresh_history_file()
-        record = dict(history.get(request_id) or {})
+        current = get_online_refresh_state()
+        record = dict(current if current.get("request_id") == request_id else history.get(request_id) or {})
         current_matches = ONLINE_REFRESH_STATE.get("request_id") == request_id
         if not record and current_matches:
             record = _validate_refresh_snapshot(ONLINE_REFRESH_STATE)
@@ -426,15 +497,7 @@ def confirm_online_refresh_result(request_id, cache_fingerprint, source_fingerpr
             "updated_at": now_str(),
         })
         if current_matches:
-            previous = dict(ONLINE_REFRESH_STATE)
-            ONLINE_REFRESH_STATE.clear()
-            ONLINE_REFRESH_STATE.update(snapshot)
-            try:
-                persist_online_refresh(snapshot)
-            except Exception:
-                ONLINE_REFRESH_STATE.clear()
-                ONLINE_REFRESH_STATE.update(previous)
-                raise
+            update_online_refresh_state(**snapshot)
         else:
             if ONLINE_REFRESH_HISTORY_FILE.is_symlink():
                 raise RuntimeError("在线脚本源刷新历史不能是符号链接，未覆盖原文件")
@@ -465,8 +528,12 @@ def get_online_refresh_retry(original_request_id, proxy_id, request_id):
     if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
         raise ValueError("新的刷新请求标识无效")
     with ONLINE_REFRESH_LOCK, storage_transaction():
+        history = _read_online_refresh_history_file()
+        current = get_online_refresh_state()
+        if current.get("request_id"):
+            history[current["request_id"]] = current
         return _existing_online_refresh_retry(
-            _read_online_refresh_history_file(), original_request_id, proxy_id, request_id,
+            history, original_request_id, proxy_id, request_id,
         )
 
 
@@ -480,9 +547,18 @@ def claim_online_refresh_retry(original_request_id, proxy_id="", request_id="", 
         raise ValueError("刷新缓存指纹无效")
     with ONLINE_REFRESH_LOCK, storage_transaction():
         history = _read_online_refresh_history_file()
+        current = get_online_refresh_state()
+        if current.get("request_id"):
+            history[current["request_id"]] = current
         existing = _existing_online_refresh_retry(history, original_request_id, proxy_id, request_id)
         if existing:
             return existing
+        if current.get("persistence_error"):
+            if current.get("status") == "启动失败":
+                current = recover_online_refresh_receipt(current["request_id"])
+                history[current["request_id"]] = current
+            else:
+                raise RuntimeError("刷新当前状态与历史回执尚未一致，请先修复原刷新回执后再提交新的请求")
         original = history.get(original_request_id)
         if not original:
             return {"_missing": True}
@@ -517,10 +593,38 @@ def claim_online_refresh_retry(original_request_id, proxy_id="", request_id="", 
             "confirmation": "",
             "confirmation_fingerprint": "",
         }
-        persist_online_refresh(info)
+        try:
+            persist_online_refresh(info)
+        except Exception as exc:
+            _retain_unlaunched_refresh(exc)
+            raise
         ONLINE_REFRESH_STATE.clear()
         ONLINE_REFRESH_STATE.update(info)
         return dict(info)
+
+
+def _retain_unlaunched_refresh(exc):
+    published = getattr(exc, "published_snapshot", None)
+    if published:
+        error = f"刷新回执发布未确认，未启动抓取：{exc}。请先修复刷新回执。"
+        if re.fullmatch(r"[a-f0-9]{32}", published.get("id", "")):
+            log_path = online_refresh_log_file(published["id"])
+            try:
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+                fd = os.open(log_path, flags, 0o600)
+                with os.fdopen(fd, "ab") as stream:
+                    stream.write((error + "\n").encode("utf-8", errors="replace"))
+                published["log_file"] = str(log_path)
+            except Exception as log_error:
+                error += f"；刷新诊断日志未能创建：{log_error}"
+        ONLINE_REFRESH_STATE.clear()
+        ONLINE_REFRESH_STATE.update(published)
+        ONLINE_REFRESH_STATE.update(
+            running=False, status="结果未知", message="",
+            error=error,
+            persistence_error=str(exc),
+        )
 
 
 def reserve_online_refresh(proxy_id="", request_id="", cache_fingerprint="", source_fingerprint=""):
@@ -552,6 +656,11 @@ def reserve_online_refresh(proxy_id="", request_id="", cache_fingerprint="", sou
                     **dict(previous_request),
                     "error": previous_request.get("error") or "原刷新请求已有持久化记录，请先查询原日志后再创建新的刷新请求",
                 }
+        if current.get("persistence_error"):
+            if current.get("status") == "启动失败":
+                current = recover_online_refresh_receipt(current["request_id"])
+            else:
+                raise RuntimeError("刷新当前状态与历史回执尚未一致，请先修复原刷新回执后再提交新的请求")
         previous = dict(ONLINE_REFRESH_STATE)
         info = {
             "id": uuid.uuid4().hex,
@@ -576,9 +685,10 @@ def reserve_online_refresh(proxy_id="", request_id="", cache_fingerprint="", sou
         ONLINE_REFRESH_STATE.update(info)
         try:
             persist_online_refresh(info)
-        except Exception:
+        except Exception as exc:
             ONLINE_REFRESH_STATE.clear()
             ONLINE_REFRESH_STATE.update(previous)
+            _retain_unlaunched_refresh(exc)
             raise
         return dict(info)
 

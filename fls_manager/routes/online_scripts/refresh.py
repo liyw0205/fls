@@ -11,6 +11,7 @@ from ...online_scripts.constants import (
     get_online_refresh_request,
     get_online_refresh_retry,
     reserve_online_refresh,
+    recover_online_refresh_receipt,
     update_online_refresh_state,
 )
 from ...online_scripts.logs import online_refresh_log_file
@@ -169,6 +170,46 @@ def _confirm_online_refresh_result(request_id):
     return {"ok": True, "request_id": request_id, "status": info.get("status"),
             "confirmation": info.get("confirmation"), "cache_published": info.get("cache_published"),
             "replayed": bool(info.get("_replayed"))}, 200
+
+
+def _recover_online_refresh(request_id):
+    try:
+        info = recover_online_refresh_receipt(request_id)
+    except ValueError as exc:
+        return {"ok": False, "request_id": request_id, "error": str(exc)}, 400
+    except Exception as exc:
+        return {"ok": False, "request_id": request_id, "error": f"修复刷新回执失败：{exc}。请查询原请求后重试。"}, 500
+    if info is None:
+        return {"ok": False, "request_id": request_id, "error": "刷新请求不存在或已清理"}, 404
+    return {"ok": True, **info}, 200
+
+
+@bp.route("/api/online-scripts/refresh-recover/<request_id>", methods=["POST"])
+def api_online_refresh_recover(request_id):
+    payload, status_code = _recover_online_refresh(request_id)
+    return jsonify(payload), status_code
+
+
+@bp.route("/online-scripts/refresh-recover/<request_id>", methods=["POST"])
+def online_refresh_recover(request_id):
+    payload, status_code = _recover_online_refresh(request_id)
+    actions = '<a class="btn btn-gray" href="/online-scripts#online-status">返回刷新状态</a>'
+    if status_code == 500 and re.fullmatch(r"[a-f0-9]{32}", request_id):
+        actions += (
+            f'<form class="inline-form" method="post" action="/online-scripts/refresh-recover/{h(request_id)}">'
+            '<button class="btn btn-primary" type="submit">修复刷新回执</button></form>'
+        )
+    return layout(
+        "刷新回执恢复", "online_scripts",
+        page_header_card(
+            "刷新回执已修复" if payload.get("ok") else "刷新回执修复未完成",
+            help_html=(
+                (h(payload.get("error")) + "<br>" if payload.get("error") else "")
+                + f'原请求状态：{h(payload.get("status") or "-")}；仅修复回执，不重新抓取或改动缓存。'
+            ),
+            actions_html=actions,
+        ),
+    ), status_code
 
 
 @bp.route("/online-scripts/refresh", methods=["POST"])
