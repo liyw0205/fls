@@ -223,12 +223,13 @@ class OnlineRawDownloadTests(unittest.TestCase):
             with self.subTest(stop=stop), isolated_app() as (app, base_dir):
                 from fls_manager.online_scripts import install
                 from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING, get_online_install_job
+                from fls_manager.online_scripts.logs import online_install_log_file
 
                 target = install.online_script_target(self.item())
                 target.write_bytes(b"original")
                 ONLINE_INSTALL_RUNNING["raw-result"] = {
                     "id": "raw-result", "script_id": "raw-demo", "running": True,
-                    "log_file": str(base_dir / "install.log"), "status": "准备中", "error": "",
+                    "log_file": str(online_install_log_file("raw-result", "Raw demo")), "status": "准备中", "error": "",
                 }
 
                 def chunks():

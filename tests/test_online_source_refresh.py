@@ -173,15 +173,23 @@ const elements = {
   onlineRefreshStatusCard: {style: {}},
   onlineRefreshStatusText: {innerHTML: ''},
   onlineRefreshTaskLinkFailures: {innerHTML: '', querySelectorAll: () => [retryButton]},
+  onlineRefreshLogLink: {hidden: true, href: ''},
   onlineRefreshBtn: {disabled: true, textContent: '正在同步中...'},
   onlineRefreshLogin: {hidden: true, href: ''},
+  onlineRefreshQuery: {hidden: true, disabled: false},
 };
+const storage = {data:{}, get value(){return this.getItem('fls-online-refresh-request');},
+  set value(value){this.setItem('fls-online-refresh-request', value);},
+  getItem(key){return this.data[key] || null;}, setItem(key,value){this.data[key]=value;}, removeItem(key){delete this.data[key];}};
 const context = {
   window: {},
   location: {pathname: '/online-scripts', search: ''},
   document: {getElementById: id => elements[id], querySelectorAll: () => [], addEventListener: () => {}},
+  sessionStorage: storage,
+  flsResponseErrorDiagnostic: (_response, body) => ({payload: null, message: body}),
   fetch: async () => ({ok: true, status: 200, json: async () => ({
-    running: false, status: '部分完成', message: '1 个外部任务源加载失败，请逐项重试', error: '',
+    id: 'c'.repeat(32), request_id: 'd'.repeat(32), running: false,
+    status: '部分完成', message: '1 个外部任务源加载失败，请逐项重试', error: '',
     updated_at: 'now', log_file: '/tmp/refresh.log',
     task_link_failures: [{script_id: 'demo', name: 'Demo', error: 'upstream timeout'}],
   })}),
@@ -189,7 +197,7 @@ const context = {
 };
 vm.createContext(context);
 vm.runInContext(input.reader + input.script, context);
-setImmediate(() => {
+setImmediate(async () => {
   assert.equal(elements.onlineRefreshStatusCard.style.display, 'block');
   assert.match(elements.onlineRefreshStatusText.innerHTML, /部分完成/);
   assert.match(elements.onlineRefreshTaskLinkFailures.innerHTML, /task-link\/demo/);
@@ -198,6 +206,106 @@ setImmediate(() => {
   assert.equal(typeof retryButton.onclick, 'function');
   assert.equal(retryButton.__flsOnlineTaskLinkBound, true);
   assert.equal(elements.onlineRefreshBtn.disabled, false);
+  assert.equal(elements.onlineRefreshLogLink.hidden, false);
+  for(const status of [401, 403, 409, 500, 503]) {
+    context.fetch = async () => ({ok: false, status, text: async () => 'temporary status failure'});
+    await context.updateOnlineRefreshStatus();
+    assert.match(elements.onlineRefreshStatusText.innerHTML, new RegExp('HTTP ' + status));
+    assert.match(elements.onlineRefreshTaskLinkFailures.innerHTML, /task-link\/demo/);
+    assert.equal(elements.onlineRefreshLogLink.hidden, false);
+    assert.equal(elements.onlineRefreshQuery.hidden, false);
+    assert.equal(elements.onlineRefreshQuery.disabled, false);
+    assert.equal(elements.onlineRefreshLogin.hidden, status !== 401 && status !== 403);
+  }
+  const requestId = 'e'.repeat(32);
+  storage.value = JSON.stringify({request_id: requestId, proxy_id: '', server_id: 'f'.repeat(32)});
+  context.fetch = async () => ({ok: false, status: 404, text: async () => 'refresh request missing'});
+  await context.updateOnlineRefreshStatus();
+  assert.match(elements.onlineRefreshStatusText.innerHTML, /原刷新记录不存在或已被替换/);
+  assert.equal(JSON.parse(storage.value).request_id, requestId);
+  for(const body of ['<html>login</html>', '[]', JSON.stringify({running:false, request_id:'a'.repeat(32)})]) {
+    context.fetch = async () => ({ok: true, status: 200, text: async () => body});
+    await context.updateOnlineRefreshStatus();
+    assert.equal(elements.onlineRefreshQuery.hidden, false);
+    assert.equal(JSON.parse(storage.value).request_id, requestId);
+    assert.match(elements.onlineRefreshTaskLinkFailures.innerHTML, /task-link\/demo/);
+  }
+  let resolveQuery, queryCount = 0;
+  context.fetch = async (url, options) => {
+    queryCount++;
+    assert.equal(url, '/api/online-scripts/refresh-status/' + requestId);
+    assert.equal(options.method, undefined);
+    return new Promise(resolve => {resolveQuery = resolve;});
+  };
+  const query = elements.onlineRefreshQuery.onclick();
+  await elements.onlineRefreshQuery.onclick();
+  assert.equal(queryCount, 1);
+  assert.equal(elements.onlineRefreshQuery.disabled, true);
+  resolveQuery({ok:true, status:200, json:async()=>({
+    id:'f'.repeat(32), request_id:requestId, running:false, status:'失败', error:'original failure',
+    task_link_failures:[{script_id:'demo', error:'upstream timeout'}],
+  })});
+  await query;
+  assert.equal(elements.onlineRefreshQuery.hidden, true);
+  assert.equal(elements.onlineRefreshQuery.disabled, false);
+  assert.equal(elements.onlineRefreshLogin.hidden, true);
+  assert.equal(elements.onlineRefreshLogLink.href, '/online-scripts/refresh-log/' + requestId);
+  assert.match(elements.onlineRefreshTaskLinkFailures.innerHTML, /task-link\/demo/);
+  context.fetch = async () => ({ok:false, status:404, json:async()=>({error:'request missing'})});
+  await elements.onlineRefreshQuery.onclick();
+  const inputId = {value:requestId}, proxy = {value:''}, button = {disabled:false};
+  const form = {action:'/online-scripts/refresh', querySelector(selector){
+    if(selector.includes('request_id')) return inputId;
+    if(selector.includes('proxy_id')) return proxy;
+    return button;
+  }};
+  let posts = 0;
+  context.FormData = class {constructor(form){this.form = form;}};
+  context.fetch = async (url, options) => {
+    if(options.method === 'POST') {
+      posts++;
+      assert.equal(url, '/api/online-scripts/refresh');
+      assert.notEqual(inputId.value, requestId);
+      assert.match(inputId.value, /^[a-f0-9]{32}$/);
+      return {ok:true, status:202, json:async()=>({ok:true, id:'b'.repeat(32)})};
+    }
+    assert.equal(url, '/api/online-scripts/refresh-status/' + inputId.value);
+    return {ok:true, status:200, json:async()=>({id:'b'.repeat(32), request_id:inputId.value, running:true, status:'运行中'})};
+  };
+  context.window.confirm = () => false;
+  await context.submitOnlineRefreshForm(form);
+  assert.equal(posts, 0);
+  assert.equal(JSON.parse(storage.value).request_id, requestId);
+  context.window.confirm = () => true;
+  await context.submitOnlineRefreshForm(form);
+  assert.equal(posts, 1);
+  assert.equal(JSON.parse(storage.value).request_id, inputId.value);
+  const retryId = '9'.repeat(32), originalId = '8'.repeat(32);
+  const retryInput = {value:retryId};
+  const retryForm = {action:'/online-scripts/refresh-retry/' + originalId,
+    getAttribute(){return originalId;}, querySelector(selector){
+      if(selector.includes('retry_request_id')) return retryInput;
+      if(selector.includes('proxy_id')) return proxy;
+      return button;
+    }
+  };
+  context.fetch = async (url, options) => {
+    if(options.method === 'POST') {
+      posts++;
+      assert.equal(url, '/api/online-scripts/refresh-retry/' + originalId);
+      throw new Error('response lost after retry accepted');
+    }
+    assert.equal(url, '/api/online-scripts/refresh-status/' + retryId);
+    return {ok:true, status:200, json:async()=>({id:'b'.repeat(32), request_id:retryId, running:true, status:'运行中'})};
+  };
+  await context.submitOnlineRefreshRetryForm(retryForm);
+  assert.equal(posts, 2);
+  assert.equal(JSON.parse(storage.value).request_id, retryId);
+  assert.equal(elements.onlineRefreshQuery.hidden, false);
+  await elements.onlineRefreshQuery.onclick();
+  assert.equal(posts, 2);
+  assert.equal(elements.onlineRefreshQuery.hidden, true);
+  assert.equal(JSON.parse(storage.value).request_id, retryId);
   console.log('partial refresh retry action passed');
 });
 '''],
@@ -246,6 +354,7 @@ const elements = {
 const storage = {value: null, getItem(){return this.value;}, setItem(_key, value){this.value = value;}, removeItem(){this.value = null;}};
 let calls = [];
 let statusReads = 0;
+let resolveInitialStatus;
 const context = {
   window: {location: {pathname: '/online-scripts', search: ''}},
   location: {pathname: '/online-scripts', search: ''},
@@ -263,7 +372,8 @@ const context = {
     calls.push({url, options});
     if(url === '/api/online-scripts/refresh-status' || url.startsWith('/api/online-scripts/refresh-status/')) {
       statusReads += 1;
-      return {ok: true, status: 200, text: async () => JSON.stringify({id: 'b'.repeat(32), running: statusReads > 1, status: statusReads > 1 ? '运行中' : '', message: '', error: '', task_link_failures: []})};
+      if(statusReads === 1) return new Promise(resolve => {resolveInitialStatus = resolve;});
+      return {ok: true, status: 200, text: async () => JSON.stringify({id: 'b'.repeat(32), request_id: requestId, running: statusReads > 1, status: statusReads > 1 ? '运行中' : '', message: '', error: '', task_link_failures: []})};
     }
     assert.equal(url, '/api/online-scripts/refresh');
     assert.equal(options.method, 'POST');
@@ -283,6 +393,10 @@ vm.runInContext(input.reader + input.script, context);
   assert.equal(pending.request_id, requestId);
   assert.equal(pending.server_id, 'b'.repeat(32));
   assert.ok(calls.some(item => item.url === '/api/online-scripts/refresh-status/' + 'a'.repeat(32)));
+  resolveInitialStatus({ok:true, status:200, text:async()=>JSON.stringify({running:false, status:'旧状态', message:'', error:''})});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(button.disabled, true);
+  assert.match(elements.onlineRefreshStatusText.innerHTML, /正在后台同步/);
 })().catch(error => { console.error(error); process.exitCode = 1; });
 '''], input=json.dumps({"script": script, "reader": reader}), text=True, capture_output=True, timeout=5)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -707,6 +821,7 @@ for(const status of [401, 403, 409, 500, 200]) {
   onlineRefreshStatusText: {innerHTML: ''},
   onlineRefreshBtn: {disabled: true, textContent: '正在同步中...'},
   onlineRefreshLogin: {hidden: true, href: ''},
+  onlineRefreshQuery: {hidden: true, disabled: false},
 };
 const context = {
   window: {},
@@ -724,9 +839,12 @@ await new Promise(resolve => setImmediate(resolve));
   assert.ok(elements.onlineRefreshStatusText.innerHTML.includes('HTTP ' + status));
   assert.match(elements.onlineRefreshStatusText.innerHTML, status === 200 ? /响应解析失败/ : /backend diagnostic/);
   if(status === 401 || status === 403) assert.match(elements.onlineRefreshStatusText.innerHTML, /重新登录/);
-  else assert.match(elements.onlineRefreshStatusText.innerHTML, /重新同步/);
+  else assert.match(elements.onlineRefreshStatusText.innerHTML, /重新查询同步状态/);
   assert.equal(elements.onlineRefreshBtn.disabled, false);
-  assert.equal(elements.onlineRefreshBtn.textContent, '重新同步在线脚本源');
+  assert.equal(elements.onlineRefreshBtn.textContent, '同步在线脚本源');
+  assert.equal(elements.onlineRefreshQuery.hidden, false);
+  assert.equal(elements.onlineRefreshQuery.disabled, false);
+  assert.equal(typeof elements.onlineRefreshQuery.onclick, 'function');
   assert.equal(elements.onlineRefreshLogin.hidden, !(status === 401 || status === 403));
   if(status === 401 || status === 403) assert.match(elements.onlineRefreshLogin.href, /\/login\?next=/);
 }

@@ -217,6 +217,7 @@ def online_scripts_page():
     <div id="onlineRefreshTaskLinkFailures">{refresh_task_link_actions(refresh_task_link_failures)}</div>
     <a id="onlineRefreshLogLink" class="btn btn-blue" href="{h(refresh_log_href)}"{' hidden' if not refresh_log_href else ''}>查看刷新日志</a>
     <a id="onlineRefreshLogin" class="btn btn-gray" href="/login?next=%2Fonline-scripts" hidden>重新登录</a>
+    <button id="onlineRefreshQuery" class="btn btn-primary" type="button" hidden>重新查询同步状态</button>
     <div id="onlineRefreshHistory" class="action-row" style="margin-top:8px;">{refresh_history_html(refresh_history)}</div>
     <div id="onlineRefreshHistoryError" class="notice red" role="status"{' hidden' if not refresh_history_error else ''}>{h(refresh_history_error)}</div>
 </div>
@@ -258,6 +259,14 @@ function clearOnlineRefreshPending(){{
 
 const onlineRefreshPending = readOnlineRefreshPending();
 if(onlineRefreshPending) window.__FLS_ONLINE_REFRESH_WAS_RUNNING__ = true;
+let onlineRefreshStatusPending = false;
+let onlineRefreshStatusGeneration = 0;
+let onlineRefreshMissingRequest = false;
+
+function invalidateOnlineRefreshStatus(){{
+    onlineRefreshStatusGeneration++;
+    onlineRefreshStatusPending = false;
+}}
 
 function escapeHtml(s){{
     return String(s).replace(/[&<>"']/g, function(c){{
@@ -332,6 +341,8 @@ async function submitOnlineRefreshRetryForm(form, event){{
     if(input) input.value = retryId;
     const pending = {{request_id: retryId, proxy_id: proxy && proxy.value || "", original_request_id: original}};
     saveOnlineRefreshRetry(original, pending);
+    saveOnlineRefreshPending(pending);
+    invalidateOnlineRefreshStatus();
     if(button) button.disabled = true;
     try{{
         const headers = {{"X-Requested-With":"XMLHttpRequest"}};
@@ -348,7 +359,11 @@ async function submitOnlineRefreshRetryForm(form, event){{
         if(button) button.disabled = false;
         const errorEl = document.getElementById("onlineRefreshHistoryError");
         const denied = error && (error.status === 401 || error.status === 403);
-        if(errorEl){{ errorEl.hidden = false; errorEl.textContent = (denied ? "登录状态已失效" : "在线脚本源重试失败") + "：" + (error && error.message || String(error || "请求失败")) + "。原历史未覆盖，可继续明确重试。"; }}
+        if(errorEl){{ errorEl.hidden = false; errorEl.textContent = (denied ? "登录状态已失效" : "在线脚本源重试未确认") + "：" + (error && error.message || String(error || "请求失败")) + "。请先查询原重试状态，原历史未覆盖。"; }}
+        const query = document.getElementById("onlineRefreshQuery");
+        const card = document.getElementById("onlineRefreshStatusCard");
+        if(card) card.style.display = "block";
+        if(query){{ query.hidden = false; query.disabled = false; }}
         const login = document.getElementById("onlineRefreshLogin");
         if(login){{ login.hidden = !denied; if(denied) login.href = "/login?next=" + encodeURIComponent(location.pathname + location.search); }}
     }}
@@ -401,13 +416,27 @@ function bindOnlineRefreshConfirmForms(root){{
 }}
 
 async function updateOnlineRefreshStatus(){{
+    if(onlineRefreshStatusPending) return;
+    const generation = ++onlineRefreshStatusGeneration;
+    const statusText = document.getElementById("onlineRefreshStatusText");
+    const queryButton = document.getElementById("onlineRefreshQuery");
+    onlineRefreshStatusPending = true;
+    if(queryButton) queryButton.disabled = true;
     try {{
-        const currentPending = readOnlineRefreshPending() || onlineRefreshPending;
+        const currentPending = readOnlineRefreshPending();
         const statusUrl = currentPending && currentPending.request_id
             ? "/api/online-scripts/refresh-status/" + encodeURIComponent(currentPending.request_id)
             : "/api/online-scripts/refresh-status";
         const res = await fetch(statusUrl, {{cache:"no-store", credentials:"same-origin"}});
         const json = await flsReadJsonResponse(res);
+        if(generation !== onlineRefreshStatusGeneration || document.getElementById("onlineRefreshStatusText") !== statusText) return;
+        if(!json || typeof json.running !== "boolean" || json.ok === false){{
+            throw new Error("同步状态响应无效，请重新查询原请求");
+        }}
+        if(currentPending && json.request_id !== currentPending.request_id){{
+            throw new Error("同步状态与原请求不一致，请重新查询原请求");
+        }}
+        onlineRefreshMissingRequest = false;
 
         if(currentPending && json.id && !currentPending.server_id){{
             currentPending.server_id = String(json.id);
@@ -422,8 +451,9 @@ async function updateOnlineRefreshStatus(){{
         const failures = document.getElementById("onlineRefreshTaskLinkFailures");
 
         if(!card || !text) return;
+        if(queryButton) queryButton.hidden = true;
         if(login) login.hidden = true;
-        if(logLink && json.request_id && /^[a-f0-9]{32}$/.test(String(json.request_id))){{
+        if(logLink && json.request_id && /^[a-f0-9]{{32}}$/.test(String(json.request_id))){{
             logLink.href = "/online-scripts/refresh-log/" + encodeURIComponent(String(json.request_id));
             logLink.hidden = false;
         }}
@@ -512,37 +542,44 @@ async function updateOnlineRefreshStatus(){{
         }}
 
     }} catch(e) {{
-        if(e && e.status === 404 && (readOnlineRefreshPending() || onlineRefreshPending)) clearOnlineRefreshPending();
+        if(generation !== onlineRefreshStatusGeneration || document.getElementById("onlineRefreshStatusText") !== statusText) return;
+        if(e && e.status === 404 && readOnlineRefreshPending()) onlineRefreshMissingRequest = true;
         const card = document.getElementById("onlineRefreshStatusCard");
         const text = document.getElementById("onlineRefreshStatusText");
         const btn = document.getElementById("onlineRefreshBtn");
         const login = document.getElementById("onlineRefreshLogin");
-        const logLink = document.getElementById("onlineRefreshLogLink");
         const status = e && e.status ? "HTTP " + e.status : "请求失败";
         const detail = e && e.message ? e.message : String(e || "未知错误");
         const denied = e && (e.status === 401 || e.status === 403);
         const next = denied
             ? "登录状态已失效，请重新登录后重试"
-            : "确认面板服务和网络后点击重新同步";
+            : (e && e.status === 404
+                ? "原刷新记录不存在或已被替换；确认后可重新发起同步"
+                : "点击重新查询同步状态；已有日志和恢复操作已保留");
         if(card) card.style.display = "block";
-        if(logLink) logLink.hidden = true;
-        const failures = document.getElementById("onlineRefreshTaskLinkFailures");
-        if(failures) failures.innerHTML = "";
+        if(queryButton) queryButton.hidden = false;
         if(text) text.innerHTML =
             "<span style='color:#dc2626;font-weight:900;'>同步状态读取失败（" +
             escapeHtml(status) + "）：" + escapeHtml(detail) +
             "。下一步：" + escapeHtml(next) + "</span>";
         if(btn) {{
             btn.disabled = false;
-            btn.textContent = "重新同步在线脚本源";
+            btn.textContent = onlineRefreshMissingRequest ? "明确重新同步在线脚本源" : "同步在线脚本源";
         }}
         if(login) {{
             login.hidden = !denied;
             if(denied) login.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
         }}
+    }} finally {{
+        if(generation === onlineRefreshStatusGeneration){{
+            onlineRefreshStatusPending = false;
+            if(queryButton) queryButton.disabled = false;
+        }}
     }}
 }}
 
+const onlineRefreshQuery = document.getElementById("onlineRefreshQuery");
+if(onlineRefreshQuery) onlineRefreshQuery.onclick = updateOnlineRefreshStatus;
 updateOnlineRefreshStatus();
 updateOnlineRefreshHistory();
 bindOnlineRefreshRetryForms(document);
@@ -554,6 +591,12 @@ async function submitOnlineRefreshForm(form, event){{
     const proxyInput = form.querySelector('[name="proxy_id"]');
     const button = form.querySelector('button[type="submit"]');
     const proxyId = proxyInput && proxyInput.value || "";
+    if(onlineRefreshMissingRequest && readOnlineRefreshPending()){{
+        if(!window.confirm("原刷新回执已不存在，无法确认先前结果。确定创建新的同步请求吗？这会重新抓取并更新当前缓存。")) return;
+        clearOnlineRefreshPending();
+        if(requestInput) requestInput.value = randomOnlineRefreshRequestId();
+        onlineRefreshMissingRequest = false;
+    }}
     const savedPending = readOnlineRefreshPending();
     const requestId = savedPending && savedPending.proxy_id === proxyId
         ? savedPending.request_id
@@ -566,6 +609,7 @@ async function submitOnlineRefreshForm(form, event){{
     if(requestInput) requestInput.value = requestId;
     const pending = {{request_id: requestId, proxy_id: proxyId, server_id: savedPending && savedPending.proxy_id === proxyId ? (savedPending.server_id || "") : ""}};
     saveOnlineRefreshPending(pending);
+    invalidateOnlineRefreshStatus();
     window.__FLS_ONLINE_REFRESH_WAS_RUNNING__ = true;
     if(button) button.disabled = true;
     try{{
@@ -588,6 +632,8 @@ async function submitOnlineRefreshForm(form, event){{
         const denied = error && (error.status === 401 || error.status === 403);
         if(card) card.style.display = "block";
         if(text) text.textContent = "刷新请求失败：" + (error && error.message || String(error || "请求失败")) + "。请查询状态后重试。";
+        const query = document.getElementById("onlineRefreshQuery");
+        if(query){{ query.hidden = false; query.disabled = false; }}
         if(login){{
             login.hidden = !denied;
             if(denied) login.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
