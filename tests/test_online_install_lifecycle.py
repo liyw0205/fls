@@ -882,6 +882,65 @@ setImmediate(() => {
                 capture_output=True, text=True, timeout=5,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise stop recovery")
+    def test_stop_query_does_not_wait_for_or_apply_an_old_log_request(self):
+        with isolated_app() as (app, base_dir):
+            self.register(base_dir)
+            html = app.test_client().get(
+                "/online-scripts/log/install", headers={"X-Token": TOKEN},
+            ).get_data(as_text=True)
+            script = next(script for script in re.findall(r"<script>(.*?)</script>", html, re.S)
+                          if "async function loadLog(" in script)
+            result = subprocess.run(["node", "-e", r"""
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+(async () => {
+  const elements = Object.fromEntries(['installStatus', 'installError', 'installReturncode',
+    'installStopAction', 'installRecoveryAction', 'installPollError', 'installPollLogin',
+    'installPollLogs', 'installPollRetry', 'installStopQuery', 'log', 'flsLogNewTip']
+    .map(id => [id, {textContent: '', hidden: false, style: {}, dataset: {},
+      addEventListener(name, handler) { this[name] = handler; }}]));
+  elements.log.textContent = 'previous output';
+  const button = {disabled: false};
+  const form = {dataset: {apiAction: '/api/online-scripts/install-stop/install'},
+    querySelector: () => button, addEventListener(name, handler) { this[name] = handler; }};
+  let resolveOldLog;
+  const calls = [];
+  let intervals = 0;
+  const response = payload => ({ok: true, status: 200, json: async () => payload});
+  const context = {
+    window: {innerHeight: 800, scrollY: 0, addEventListener() {}, scrollTo() {}},
+    document: {documentElement: {scrollHeight: 800}, getElementById: id => elements[id],
+      querySelector: () => form},
+    flsGetCsrfToken: () => 'stop-csrf', flsReadJsonResponse: res => res.json(),
+    fetch: (url, options) => {
+      calls.push({url, options});
+      if(calls.length === 1) return new Promise(done => { resolveOldLog = done; });
+      if(options && options.method === 'POST') return Promise.resolve(response({ok: true, install_id: 'install'}));
+      return Promise.resolve(response({ok: true, install_id: 'install', running: false,
+        status: '已停止', returncode: -15, recovery: {available: false}}));
+    },
+    setInterval: () => { intervals++; return 1; }, clearInterval() {},
+  };
+  vm.createContext(context); vm.runInContext(input.script, context);
+  assert.equal(calls.length, 1);
+  await form.submit({preventDefault() {}});
+  assert.equal(calls.length, 3, 'stop state query must not wait for an unrelated log response');
+  assert.equal(calls[1].options.headers['X-CSRF-Token'], 'stop-csrf');
+  assert.equal(calls[2].url, '/api/online-scripts/log/install?state_only=1');
+  assert.equal(elements.installStatus.textContent, '已停止');
+  assert.equal(elements.log.textContent, 'previous output');
+  assert.equal(elements.installStopAction.hidden, true);
+  resolveOldLog(response({running: true, status: '运行中', log: 'outdated response'}));
+  await new Promise(done => setImmediate(done));
+  assert.equal(elements.installStatus.textContent, '已停止');
+  assert.equal(elements.log.textContent, 'previous output');
+  assert.equal(intervals, 0);
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"""], input=json.dumps({"script": script}), capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_install_history_api_and_page_recover_stale_running_without_starting(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.online_scripts.constants import (

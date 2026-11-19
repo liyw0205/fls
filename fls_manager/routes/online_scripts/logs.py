@@ -888,8 +888,10 @@ async function loadLog(stateOnly = false){{
             window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
         }}
     }}finally{{
-        pending = false;
-        if(retryAction) retryAction.disabled = false;
+        if(requestGeneration === logRequestGeneration){{
+            pending = false;
+            if(retryAction) retryAction.disabled = false;
+        }}
     }}
 }}
 
@@ -898,6 +900,7 @@ async function requestStop(event){{
     if(postingStop || needsStopQuery || stopActionButton.disabled) return;
     postingStop = true;
     logRequestGeneration++;
+    pending = false;
     if(typeof flsClearPageCache === "function") flsClearPageCache();
     clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
     window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
