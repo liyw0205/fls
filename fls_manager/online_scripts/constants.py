@@ -627,35 +627,42 @@ def _retain_unlaunched_refresh(exc):
         )
 
 
+def get_online_refresh_submission(proxy_id, request_id):
+    with ONLINE_REFRESH_LOCK, storage_transaction():
+        current = _read_online_refresh_file()
+        info = current if current.get("request_id") == request_id else _read_online_refresh_history_file().get(request_id)
+        if not info and ONLINE_REFRESH_STATE.get("request_id") == request_id:
+            info = dict(ONLINE_REFRESH_STATE)
+        if not info:
+            return None
+        if str(info.get("proxy_id") or "") != str(proxy_id or ""):
+            return {"_binding_conflict": True, **info}
+        info = get_online_refresh_request(request_id)
+        if info.get("running"):
+            return {"_running": True, **info}
+        if info.get("status") in ("已完成", "部分完成"):
+            return {"_replay": True, **info}
+        if (
+            info.get("status") == "启动失败"
+            and info.get("request_id") == ONLINE_REFRESH_STATE.get("request_id")
+            and not info.get("cache_published")
+        ):
+            return None
+        return {"_unknown": True, **info}
+
+
 def reserve_online_refresh(proxy_id="", request_id="", cache_fingerprint="", source_fingerprint=""):
     with ONLINE_REFRESH_LOCK:
         current = get_online_refresh_state()
-        if current.get("running"):
-            return None
         import uuid
         request_id = str(request_id or uuid.uuid4().hex)
         if not re.fullmatch(r"[a-f0-9]{32}", request_id):
             raise ValueError("在线脚本源刷新请求标识无效，请刷新页面后重试")
-        if current.get("request_id") == request_id:
-            if str(current.get("proxy_id") or "") != str(proxy_id or ""):
-                return {"_binding_conflict": True, **dict(current)}
-            if current.get("status") in ("已完成", "部分完成"):
-                return {"_replay": True, **dict(current)}
-            if current.get("status") == "结果未知" or current.get("cache_published"):
-                return {"_unknown": True, **dict(current)}
-        else:
-            history = _read_online_refresh_history_file()
-            previous_request = history.get(request_id)
-            if previous_request:
-                if str(previous_request.get("proxy_id") or "") != str(proxy_id or ""):
-                    return {"_binding_conflict": True, **dict(previous_request)}
-                if previous_request.get("status") in ("已完成", "部分完成"):
-                    return {"_replay": True, **dict(previous_request)}
-                return {
-                    "_unknown": True,
-                    **dict(previous_request),
-                    "error": previous_request.get("error") or "原刷新请求已有持久化记录，请先查询原日志后再创建新的刷新请求",
-                }
+        existing = get_online_refresh_submission(proxy_id, request_id)
+        if existing:
+            return existing
+        if current.get("running"):
+            return None
         if current.get("persistence_error"):
             if current.get("status") == "启动失败":
                 current = recover_online_refresh_receipt(current["request_id"])

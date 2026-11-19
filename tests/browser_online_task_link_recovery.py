@@ -174,6 +174,17 @@ def main():
                 cache_fingerprint=source.online_script_cache_fingerprint(),
             )
 
+        @app.route("/api/fixture/refresh-cache-unavailable", methods=["POST"])
+        def refresh_cache_unavailable_fixture():
+            cache = constants.ONLINE_SCRIPT_CACHE_FILE
+            if (request.get_json() or {}).get("restore"):
+                cache.rmdir()
+                source.save_online_script_cache([item])
+            else:
+                cache.unlink()
+                cache.mkdir()
+            return jsonify(ok=True, refreshes=fault["refreshes"])
+
         server = make_server("127.0.0.1", 0, app, threaded=True)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         try:
@@ -375,6 +386,45 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    const receiptLog=await page.request.get(base+'/api/online-scripts/refresh-log/'+publicationRequestId,{headers});
    assert.equal(receiptLog.status(),200);
    assert.match((await receiptLog.json()).log,/未启动抓取/);
+
+   await page.request.post(base+'/api/fixture/online-refresh',{headers,data:{clear:true}});
+   await page.evaluate(()=>sessionStorage.removeItem('fls-online-refresh-request'));
+   await page.goto(base+'/online-scripts');
+   const primaryForm=page.locator('.fls-online-refresh-form');
+   const primaryId=await primaryForm.locator('[name="request_id"]').inputValue();
+   const primaryEndpoint=base+'/api/online-scripts/refresh';
+   await page.route(primaryEndpoint,async route=>{
+     const actual=await route.fetch();
+     assert.equal(actual.status(),202);
+     await route.abort('failed');
+   });
+   await primaryForm.locator('button[type="submit"]').click();
+   await page.locator('#onlineRefreshQuery').waitFor({state:'visible'});
+   assert.equal(JSON.parse(await page.evaluate(()=>sessionStorage.getItem('fls-online-refresh-request'))).request_id,primaryId);
+   await page.unroute(primaryEndpoint);
+   const unavailable=await page.request.post(base+'/api/fixture/refresh-cache-unavailable',{headers,data:{}});
+   assert.equal(unavailable.status(),200);
+   assert.equal((await unavailable.json()).refreshes,1);
+   const [primaryReplay]=await Promise.all([
+     page.waitForResponse(response=>response.url()===primaryEndpoint&&response.request().method()==='POST'),
+     primaryForm.locator('button[type="submit"]').click(),
+   ]);
+   assert.equal(primaryReplay.status(),200);
+   const primaryReceipt=await primaryReplay.json();
+   assert.equal(primaryReceipt.replayed,true);
+   assert.equal(primaryReceipt.request_id,primaryId);
+   assert.equal(primaryReceipt.status,'已完成');
+   await page.waitForFunction(()=>!sessionStorage.getItem('fls-online-refresh-request'));
+   const primaryHtml=await page.request.post(base+'/online-scripts/refresh',{headers,form:{request_id:primaryId,proxy_id:''}});
+   assert.equal(primaryHtml.status(),200);
+   assert.match(await primaryHtml.text(),/已查询原同步请求/);
+   assert.match(await primaryHtml.text(),new RegExp(primaryReceipt.log_url));
+   await page.goto(base+primaryReceipt.log_url);
+   await page.waitForSelector('#refreshLogText');
+   assert.match(await page.locator('#refreshLogText').textContent(),/original retry completed/);
+   const restoredCache=await page.request.post(base+'/api/fixture/refresh-cache-unavailable',{headers,data:{restore:true}});
+   assert.equal(restoredCache.status(),200);
+   assert.equal((await restoredCache.json()).refreshes,1);
    assert.deepEqual(errors,[]);
    console.log('online task-link recovery passed '+viewport.width);
    await context.close();
