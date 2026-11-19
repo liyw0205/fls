@@ -991,24 +991,32 @@ def _stop_install_result(install_id):
 @bp.route("/online-scripts/install-stop/<install_id>", methods=["POST"])
 def online_scripts_install_stop(install_id):
     ok, msg, code = _stop_install_result(install_id)
+    back = get_back_url("/online-scripts")
+    log_url = url_for("online_scripts.online_install_log", install_id=install_id, back=back)
     if not ok:
         body = page_header_card(
             "无法停止在线安装",
             help_html=h(msg),
-            actions_html=f'<a class="btn btn-gray" href="/online-scripts/log/{h(install_id)}">查看安装记录</a>',
+            actions_html=(
+                f'<a class="btn btn-primary" href="{h(log_url)}">查询原安装状态</a>'
+                f'<a class="btn btn-gray" href="{h(back)}">返回</a>'
+            ),
         )
         return layout("无法停止在线安装", "online_scripts", body), code
 
-    return redirect(
-        url_for(
-            "online_scripts.online_scripts_page",
-            msg=msg if ok else "",
-            err="" if ok else msg,
-        )
-    )
+    return redirect(log_url)
 
 
 @bp.route("/api/online-scripts/install-stop/<install_id>", methods=["POST"])
 def api_online_scripts_install_stop(install_id):
     ok, msg, code = _stop_install_result(install_id)
-    return jsonify({"ok": ok, "msg": msg}), code
+    try:
+        info = get_online_install_job(install_id)
+    except Exception:
+        info = None
+    return jsonify({
+        "ok": ok, "msg": msg, "install_id": install_id,
+        "running": bool(info.get("running")) if info else None,
+        "status": (info or {}).get("status") or ("记录不存在" if code == 404 else "记录不可读"),
+        "state_url": url_for("online_scripts.api_online_install_log", install_id=install_id, state_only=1),
+    }), code

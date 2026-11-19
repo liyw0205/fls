@@ -158,6 +158,8 @@ def main():
                     seed_online_history()
                 if data.get("remove_online_target"):
                     (base_dir / "scripts" / "demo.py").unlink(missing_ok=True)
+                if data.get("remove_release"):
+                    release.unlink(missing_ok=True)
                 if data.get("fill_capacity"):
                     for index in range(99):
                         install_id = f"browser-capacity-{index:03d}"
@@ -257,6 +259,7 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
      await page.waitForLoadState('domcontentloaded');
     }
    };
+   if(process.env.FLS_INSTALL_LOG_ONLY!=='online-stop'){
    await fixture({seed_retry_chain:true});await fixture({reset:true});
    await page.goto(base+'/login');await login();
    await page.goto(base+'/deps/install-history?kind=dependency');
@@ -528,6 +531,69 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    await page.getByRole('link',{name:'查看原安装'}).waitFor();
    assert.equal((await state()).downloads,onlineDownloadsBefore+2);
    await page.goto(historyUrl.href);
+   assert.equal((await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)),true);
+   await page.screenshot({path:'/tmp/fls-online-install-history-'+viewport.width+'.png',fullPage:true});
+   }
+   await page.goto(base+'/login');await login();
+   await page.goto(base+'/online-scripts');
+   await fixture({remove_online_target:true,remove_release:true});
+   const stopRequestId=require('node:crypto').randomBytes(16).toString('hex');
+   const stopCsrf=await page.evaluate(()=>flsGetCsrfToken());
+   const stopStart=await page.request.post(base+'/api/online-scripts/install/browser-recovery',{
+    headers:{'X-CSRF-Token':stopCsrf},data:{request_id:stopRequestId}});
+   assert.equal(stopStart.status(),200,await stopStart.text());
+   const stopStarted=await stopStart.json();
+   assert.ok(stopStarted.install_id);
+   await page.goto(base+'/online-scripts/log/'+stopStarted.install_id+'?back='+encodeURIComponent('/online-scripts/install-history?script_id=browser-recovery'));
+   await page.waitForFunction(()=>document.querySelector('#installStatus').textContent==='运行中');
+   await page.waitForFunction(()=>document.querySelector('#log').textContent.split('\n').includes('live installer output'));
+   const visibleLog=await page.locator('#log').textContent();
+   let stopPosts=0;
+   await page.route('**/api/online-scripts/install-stop/'+stopStarted.install_id,async route=>{
+    if(route.request().method()==='POST'){
+     stopPosts++;
+     if(stopPosts===1){
+      await route.fulfill({status:503,contentType:'text/plain',body:'stop service unavailable before commit'});
+      return;
+     }
+     const committed=await route.fetch();
+     assert.equal(committed.status(),200);
+     await route.fulfill({status:502,contentType:'text/plain',body:'stop response lost after commit'});
+    }else await route.continue();
+   });
+   await page.locator('#installStopAction button').click();
+   await page.waitForFunction(()=>!document.querySelector('#installStopQuery').hidden);
+   assert.equal(stopPosts,1);
+   assert.equal(await page.locator('#log').textContent(),visibleLog);
+   const stopStateUrl='**/api/online-scripts/log/'+stopStarted.install_id+'?state_only=1';
+   await page.route(stopStateUrl,route=>route.fulfill({status:403,contentType:'text/plain',body:'state access denied'}));
+   await page.locator('#installStopQuery').click();
+   await page.locator('#installPollLogin').waitFor();
+   assert.equal(await page.locator('#log').textContent(),visibleLog);
+   assert.equal(await page.locator('#installStopAction').isHidden(),true);
+   await page.unroute(stopStateUrl);
+   await page.locator('#installStopQuery').click();
+   await page.waitForFunction(()=>!document.querySelector('#installStopAction').hidden &&
+    !document.querySelector('#installStopAction button').disabled);
+   assert.equal(await page.locator('#installStatus').textContent(),'运行中');
+   assert.equal(stopPosts,1);
+   await page.locator('#installStopAction button').click();
+   await page.waitForFunction(()=>!document.querySelector('#installStopQuery').hidden);
+   assert.equal(stopPosts,2);
+   assert.equal(await page.locator('#log').textContent(),visibleLog);
+   await page.locator('#installStopQuery').click();
+   await page.waitForFunction(()=>document.querySelector('#installStatus').textContent==='已停止');
+   assert.ok((await page.locator('#log').textContent()).includes('live installer output'));
+   const stopVisibility=await page.locator('#installStopAction').evaluate(el=>({
+    hidden:el.hidden,display:getComputedStyle(el).display,html:el.outerHTML,
+   }));
+   assert.equal(await page.locator('#installStopAction').isHidden(),true,JSON.stringify(stopVisibility));
+   await page.screenshot({path:'/tmp/fls-online-install-stop-'+viewport.width+'.png',fullPage:true});
+   const overflow=await page.evaluate(()=>[...document.querySelectorAll('body *')].filter(el=>{
+    const rect=el.getBoundingClientRect();return rect.width>0&&rect.right>innerWidth+1;
+   }).map(el=>({tag:el.tagName,id:el.id,class:el.className,text:el.textContent.slice(0,120)})));
+   assert.equal((await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)),true,JSON.stringify(overflow));
+   await page.goto(base+'/online-scripts/install-history?script_id=browser-recovery');
    assert.equal((await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)),true);
    await page.screenshot({path:'/tmp/fls-online-install-history-'+viewport.width+'.png',fullPage:true});
    assert.deepEqual(errors,[]);await context.close();console.log('install log recovery passed '+viewport.width);

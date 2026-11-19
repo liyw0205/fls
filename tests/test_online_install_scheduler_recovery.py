@@ -349,7 +349,7 @@ class OnlineInstallSchedulerRecoveryTests(unittest.TestCase):
             headers = {"X-Token": TOKEN}
             html = client.get(f"/online-scripts/log/{install_id}", headers=headers).get_data(as_text=True)
             payload = client.get(f"/api/online-scripts/log/{install_id}", headers=headers).json
-            script = next(script for script in re.findall(r"<script>(.*?)</script>", html, re.S) if "async function loadLog()" in script)
+            script = next(script for script in re.findall(r"<script>(.*?)</script>", html, re.S) if "async function loadLog(" in script)
             source = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
             reader = source[source.index("async function flsReadJsonResponse("):source.index("async function flsReadTextResponse(")]
             result = subprocess.run(["node", "-e", r"""
@@ -361,7 +361,7 @@ const elements = Object.fromEntries(['installStatus', 'installError', 'installRe
  .map(id => [id, {textContent: '', hidden: false, dataset: {}, style: {}}]));
 const context = {
  window: {innerHeight: 800, scrollY: 0, addEventListener() {}, scrollTo() {}},
- document: {documentElement: {scrollHeight: 800}, getElementById: id => elements[id]},
+ document: {documentElement: {scrollHeight: 800}, getElementById: id => elements[id], querySelector: () => null},
  fetch: async () => ({ok: true, status: 200, json: async () => input.payload}),
  setInterval: () => 1, clearInterval() {}, flsGetCsrfToken: () => 'reload-csrf',
 };
@@ -386,7 +386,7 @@ setImmediate(() => {
             headers = {"X-Token": TOKEN}
             html = client.get(f"/online-scripts/log/{install_id}", headers=headers).get_data(as_text=True)
             payload = client.get(f"/api/online-scripts/log/{install_id}", headers=headers).json
-            script = next(script for script in re.findall(r"<script>(.*?)</script>", html, re.S) if "async function loadLog()" in script)
+            script = next(script for script in re.findall(r"<script>(.*?)</script>", html, re.S) if "async function loadLog(" in script)
             source = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
             reader = source[source.index("async function flsReadJsonResponse("):source.index("async function flsReadTextResponse(")]
             result = subprocess.run(["node", "-e", r"""
@@ -406,7 +406,7 @@ let responses = [input.payload, {ok: true, request_id: input.payload.request_id,
   {running: false, status: '已完成', log: 'reloaded'}];
 const context = {
  window: {innerHeight: 800, scrollY: 0, addEventListener() {}, scrollTo() {}},
- document: {documentElement: {scrollHeight: 800}, getElementById: id => elements[id]},
+ document: {documentElement: {scrollHeight: 800}, getElementById: id => elements[id], querySelector: () => null},
  fetch: async (url, options) => {
    calls.push({url, options});
    const value = responses.shift();

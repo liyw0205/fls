@@ -305,6 +305,130 @@ class OnlineInstallLifecycleTests(unittest.TestCase):
             self.assertNotIn("install", ONLINE_INSTALL_STOPPING)
             self.assertEqual(info["status"], "准备中")
 
+    def test_stop_html_failure_keeps_log_query_and_history_back_context(self):
+        with isolated_app() as (app, _base_dir):
+            client = app.test_client()
+            with client.session_transaction() as session:
+                session.update(token=TOKEN, token_expire_at=int(time.time()) + 3600,
+                               security_verified=True, csrf_token="stop-context-csrf")
+            with patch("fls_manager.routes.online_scripts.install.request_stop_online_install",
+                       return_value=(False, "停止失败：permission denied")):
+                response = client.post(
+                    "/online-scripts/install-stop/missing?back=%2Fonline-scripts%2Finstall-history%3Fscript_id%3Ddemo%26status%3D%E5%A4%B1%E8%B4%A5",
+                    data={"csrf_token": "stop-context-csrf"}, headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(response.status_code, 404)
+            html = response.get_data(as_text=True)
+            self.assertIn("permission denied", html)
+            self.assertIn("install-history?script_id%3Ddemo", html)
+            self.assertIn("查询原安装状态", html)
+
+    def test_stop_state_query_reports_real_states_without_reading_log_or_changing_job(self):
+        with isolated_app() as (app, base_dir):
+            info = self.register(base_dir, "stop-query")
+            client = app.test_client()
+            with patch("fls_manager.routes.online_scripts.logs._install_log_file") as log_path, patch(
+                "fls_manager.routes.online_scripts.logs.tail_file",
+            ) as read_log:
+                for running, status, code in (
+                    (True, "准备中", None), (True, "停止中", None),
+                    (True, "停止失败", None), (False, "已停止", -15),
+                    (False, "结果未知", None),
+                ):
+                    with self.subTest(status=status):
+                        info.update(running=running, status=status, returncode=code)
+                        before = info.copy()
+                        response = client.get(
+                            "/api/online-scripts/log/stop-query?state_only=1", headers={"X-Token": TOKEN},
+                        )
+                        self.assertEqual(response.status_code, 200)
+                        self.assertTrue(response.json["ok"])
+                        self.assertEqual(response.json["install_id"], "stop-query")
+                        self.assertEqual(response.json["running"], running)
+                        self.assertEqual(response.json["status"], status)
+                        self.assertEqual(response.json["returncode"], code)
+                        self.assertIn("recovery", response.json)
+                        self.assertNotIn("log", response.json)
+                        self.assertEqual(info, before)
+                log_path.assert_not_called()
+                read_log.assert_not_called()
+            missing = client.get(
+                "/api/online-scripts/log/missing?state_only=1", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(missing.status_code, 404)
+            self.assertFalse(missing.json["ok"])
+
+    def test_stop_query_and_form_require_auth_csrf_and_preserve_history_after_success(self):
+        with isolated_app() as (app, base_dir):
+            info = self.register(base_dir, "stop-session")
+            client = app.test_client()
+            with patch("fls_manager.routes.online_scripts.install.request_stop_online_install") as stop:
+                self.assertEqual(client.get(
+                    "/api/online-scripts/log/stop-session?state_only=1",
+                ).status_code, 401)
+                with client.session_transaction() as session:
+                    session["csrf_token"] = "stop-session-csrf"
+                self.assertEqual(client.post(
+                    "/api/online-scripts/install-stop/stop-session",
+                    headers={"X-CSRF-Token": "stop-session-csrf"},
+                ).status_code, 401)
+                with client.session_transaction() as session:
+                    session.update(token=TOKEN, token_expire_at=int(time.time()) + 3600,
+                                   security_verified=True, csrf_token="stop-session-csrf")
+                for path in ("/api/online-scripts/install-stop/stop-session",
+                             "/online-scripts/install-stop/stop-session"):
+                    response = client.post(path, data={"csrf_token": "wrong"})
+                    self.assertEqual(response.status_code, 400)
+                stop.assert_not_called()
+            self.assertEqual(info["status"], "准备中")
+            back = "/online-scripts/install-history?script_id=demo&status=失败&limit=1"
+            response = client.post(
+                "/online-scripts/install-stop/stop-session", query_string={"back": back},
+                data={"csrf_token": "stop-session-csrf"},
+            )
+            self.assertEqual(response.status_code, 302)
+            from urllib.parse import parse_qs, urlsplit
+            location = urlsplit(response.location)
+            self.assertEqual(location.path, "/online-scripts/log/stop-session")
+            self.assertEqual(parse_qs(location.query)["back"], [back])
+            self.assertEqual(info["status"], "停止中")
+            repeat = client.post(
+                "/api/online-scripts/install-stop/stop-session",
+                headers={"X-CSRF-Token": "stop-session-csrf"},
+            )
+            self.assertEqual(repeat.status_code, 200)
+            state = client.get(repeat.json["state_url"])
+            self.assertEqual(state.status_code, 200)
+            self.assertEqual(state.json["status"], "停止中")
+            self.assertTrue(state.json["running"])
+
+    @unittest.skipIf(os.name == "nt", "Install commands use sh")
+    def test_stop_log_page_uses_csrf_api_and_exposes_query_after_request_error(self):
+        with isolated_app() as (app, base_dir):
+            info = self.register(base_dir, "stop-log-ui")
+            log_file = base_dir / "log" / "stop-log-ui.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_file.write_text("preserved stop output\n", encoding="utf-8")
+            info.update(log_file=str(log_file), status="运行中")
+            with app.test_client() as client:
+                with client.session_transaction() as session:
+                    session.update(token=TOKEN, token_expire_at=int(time.time()) + 3600,
+                                   security_verified=True, csrf_token="stop-log-csrf")
+                response = client.get(
+                    "/online-scripts/log/stop-log-ui?back=%2Fonline-scripts%2Finstall-history%3Fscript_id%3Ddemo",
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(response.status_code, 200)
+                html = response.get_data(as_text=True)
+                self.assertIn('data-api-action="/api/online-scripts/install-stop/stop-log-ui"', html)
+                self.assertIn('id="installStopQuery"', html)
+                api = client.post(
+                    "/api/online-scripts/install-stop/stop-log-ui",
+                    headers={"X-CSRF-Token": "wrong"},
+                )
+                self.assertIn(api.status_code, (400, 403))
+                self.assertTrue(info["running"])
+
     def test_concurrent_starts_register_exactly_one_worker(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING
@@ -671,7 +795,7 @@ class OnlineInstallLifecycleTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             html = response.get_data(as_text=True)
             scripts = re.findall(r"<script>(.*?)</script>", html, re.S)
-            script = next(script for script in scripts if "async function loadLog()" in script)
+            script = next(script for script in scripts if "async function loadLog(" in script)
             result = subprocess.run(
                 ["node", "-e", r"""
 const vm = require('node:vm');
@@ -681,7 +805,7 @@ const elements = Object.fromEntries(['installStatus', 'installError', 'installRe
   'installStopAction', 'log', 'flsLogNewTip'].map(id => [id, {textContent: '', style: {}}]));
 const context = {
   window: {innerHeight: 800, scrollY: 0, addEventListener() {}, scrollTo() {}},
-  document: {documentElement: {scrollHeight: 800}, getElementById: id => elements[id]},
+  document: {documentElement: {scrollHeight: 800}, getElementById: id => elements[id], querySelector: () => null},
   flsReadJsonResponse: async response => {
     if(!response.ok) throw new Error('HTTP ' + response.status);
     return response.json();
@@ -717,7 +841,7 @@ setImmediate(() => {
             self.assertEqual(response.status_code, 200)
             html = response.get_data(as_text=True)
             scripts = re.findall(r"<script>(.*?)</script>", html, re.S)
-            script = next(script for script in scripts if "async function loadLog()" in script)
+            script = next(script for script in scripts if "async function loadLog(" in script)
             result = subprocess.run(
                 ["node", "-e", r"""
 const vm = require('node:vm');
@@ -728,7 +852,7 @@ const elements = Object.fromEntries(['installStatus', 'installError', 'installRe
   .map(id => [id, {textContent: '', style: {}, dataset: {}, innerHTML: ''}]));
 const context = {
   window: {innerHeight: 800, scrollY: 0, addEventListener() {}, scrollTo() {}},
-  document: {documentElement: {scrollHeight: 800}, getElementById: id => elements[id]},
+  document: {documentElement: {scrollHeight: 800}, getElementById: id => elements[id], querySelector: () => null},
   flsGetCsrfToken: () => 'csrf-token',
   flsReadJsonResponse: async response => {
     if(!response.ok) throw new Error('HTTP ' + response.status);

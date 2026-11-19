@@ -498,6 +498,12 @@ def api_online_install_log(install_id):
         }), 404
 
     recovery = _install_recovery(info)
+    if request.args.get("state_only") == "1":
+        return jsonify(
+            ok=True, install_id=install_id, running=bool(info.get("running")),
+            status=info.get("status") or "-", phase=_install_phase(info),
+            returncode=info.get("returncode"), error=_install_error(info), recovery=recovery,
+        )
     log_file, log_failure = _install_log_file(info)
     if log_failure:
         title, message, failure_status = log_failure
@@ -522,6 +528,8 @@ def api_online_install_log(install_id):
         return jsonify(payload), response_status
 
     payload = {
+        "ok": True,
+        "install_id": install_id,
         "running": bool(info.get("running")),
         "status": info.get("status") or "-",
         "phase": _install_phase(info),
@@ -624,9 +632,11 @@ def online_install_log(install_id):
     stop_install_button = ""
 
     if info.get("running"):
+        stop_url = url_for("online_scripts.online_scripts_install_stop", install_id=install_id, back=back_url)
+        stop_api_url = url_for("online_scripts.api_online_scripts_install_stop", install_id=install_id)
         stop_install_button = f"""
 <div class="row-actions-danger" id="installStopAction">
-    <form method="post" action="/online-scripts/install-stop/{h(install_id)}" style="display:inline;">
+    <form method="post" action="{h(stop_url)}" data-api-action="{h(stop_api_url)}" style="display:inline;">
         <button class="btn btn-red" type="submit" onclick="return confirm('确定停止该安装任务吗？')">停止安装任务</button>
     </form>
 </div>
@@ -653,12 +663,16 @@ def online_install_log(install_id):
     )
 
     body = f"""
+<style>
+#installStopAction[hidden], #installRecoveryAction[hidden] {{ display: none !important; }}
+</style>
 {header_card}
 {log_notice}
 <div class="notice red" id="installPollError" role="status" hidden></div>
 <a id="installPollLogin" class="btn btn-primary" hidden>重新登录</a>
 <a id="installPollLogs" class="btn btn-orange" href="/logs" hidden>查看日志管理</a>
 <button id="installPollRetry" class="btn btn-primary" type="button" hidden>重新读取安装状态</button>
+<button id="installStopQuery" class="btn btn-gray" type="button" hidden>查询停止结果</button>
 <pre class="log" id="log">{"暂无日志" if log_failure else "加载中..."}</pre>
 {log_controls()}
 
@@ -668,7 +682,15 @@ const pollError = document.getElementById("installPollError");
 const loginAction = document.getElementById("installPollLogin");
 const logsAction = document.getElementById("installPollLogs");
 const retryAction = document.getElementById("installPollRetry");
+const stopQueryAction = document.getElementById("installStopQuery");
+const stopActionInitial = document.querySelector("#installStopAction form");
+const stopActionButton = stopActionInitial ? stopActionInitial.querySelector("button") : null;
+const installId = {json.dumps(install_id)};
+const logUrl = "/api/online-scripts/log/" + encodeURIComponent(installId);
 let pending = false;
+let postingStop = false;
+let needsStopQuery = false;
+let logRequestGeneration = 0;
 window.__FLS_LOG_LAST_TEXT__ = "";
 window.__FLS_LOG_NEAR_BOTTOM__ = true;
 
@@ -686,8 +708,9 @@ window.addEventListener("scroll", function(){{
     window.__FLS_LOG_NEAR_BOTTOM__ = nearBottom();
 }}, {{passive:true}});
 
-async function loadLog(){{
-    if(pending || document.getElementById("installPollError") !== pollError) return;
+async function loadLog(stateOnly = false){{
+    if(pending || postingStop || (!stateOnly && needsStopQuery) || document.getElementById("installPollError") !== pollError) return;
+    const requestGeneration = ++logRequestGeneration;
     pending = true;
     if(retryAction) retryAction.disabled = true;
     try {{
@@ -695,10 +718,10 @@ async function loadLog(){{
         const beforeHeight = document.documentElement.scrollHeight;
         const wasNearBottom = nearBottom();
 
-        const res = await fetch("/api/online-scripts/log/{h(install_id)}?lines=1600", {{cache:"no-store"}});
+        const res = await fetch(logUrl + (stateOnly ? "?state_only=1" : "?lines=1600"), {{cache:"no-store"}});
         const json = await flsReadJsonResponse(res);
-        if(document.getElementById("installPollError") !== pollError) return;
-        if(!json || typeof json.running !== "boolean" || typeof json.log !== "string"){{
+        if(requestGeneration !== logRequestGeneration || postingStop || (!stateOnly && needsStopQuery) || document.getElementById("installPollError") !== pollError) return;
+        if(!json || typeof json.running !== "boolean" || (stateOnly ? json.install_id !== installId : typeof json.log !== "string")){{
             throw new Error("安装状态响应无效，请重新读取安装状态");
         }}
         if(json.ok === false){{
@@ -707,13 +730,21 @@ async function loadLog(){{
             missingError.payload = json;
             throw missingError;
         }}
-        if(pollError){{
+        if(stateOnly){{
+            needsStopQuery = false;
+            if(pollError){{
+                pollError.textContent = "原安装状态已确认：" + (json.status || "-");
+                pollError.hidden = false;
+            }}
+        }}
+        if(pollError && !stateOnly){{
             pollError.hidden = true;
             pollError.textContent = "";
         }}
         if(loginAction) loginAction.hidden = true;
         if(logsAction) logsAction.hidden = true;
         if(retryAction) retryAction.hidden = true;
+        if(stopQueryAction) stopQueryAction.hidden = true;
 
         document.getElementById("installStatus").textContent = json.status || "-";
         const phaseEl = document.getElementById("installPhase");
@@ -726,6 +757,7 @@ async function loadLog(){{
         if(errorEl) errorEl.textContent = errorText ? "错误：" + errorText : "";
         document.getElementById("installReturncode").textContent = json.returncode == null ? "-" : String(json.returncode);
 
+        if(!stateOnly){{
         const text = json.log || "暂无日志";
         const old = window.__FLS_LOG_LAST_TEXT__ || "";
         const changed = text !== old;
@@ -753,11 +785,14 @@ async function loadLog(){{
             }}
         }}
 
+        }}
         const stopAction = document.getElementById("installStopAction");
         const recoveryEl = document.getElementById("installRecoveryAction");
         if(stopAction) stopAction.hidden = !json.running;
         if(recoveryEl) recoveryEl.hidden = json.running;
         if(json.running){{
+            if(stopActionButton) stopActionButton.disabled = json.status === "停止中";
+            if(stopQueryAction) stopQueryAction.hidden = json.status !== "停止中";
             if(!window.__FLS_ACTIVE_LOG_INTERVAL__){{
                 window.__FLS_ACTIVE_LOG_INTERVAL__ = setInterval(loadLog, 2000);
             }}
@@ -818,7 +853,7 @@ async function loadLog(){{
             window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
         }}
     }} catch(e) {{
-        if(document.getElementById("installPollError") !== pollError) return;
+        if(requestGeneration !== logRequestGeneration || postingStop || (!stateOnly && needsStopQuery) || document.getElementById("installPollError") !== pollError) return;
         const message = e && e.message ? e.message : String(e);
         const denied = e && (e.status === 401 || e.status === 403);
         const missing = e && e.status === 404;
@@ -840,6 +875,7 @@ async function loadLog(){{
             if(missing) logsAction.href = payload.recovery_url || "/logs";
         }}
         if(retryAction) retryAction.hidden = missing;
+        if(stopQueryAction) stopQueryAction.hidden = !needsStopQuery;
         if(denied || missing){{
             const stopAction = document.getElementById("installStopAction");
             const recoveryEl = document.getElementById("installRecoveryAction");
@@ -857,7 +893,52 @@ async function loadLog(){{
     }}
 }}
 
-if(retryAction) retryAction.onclick = loadLog;
+async function requestStop(event){{
+    event.preventDefault();
+    if(postingStop || needsStopQuery || stopActionButton.disabled) return;
+    postingStop = true;
+    logRequestGeneration++;
+    if(typeof flsClearPageCache === "function") flsClearPageCache();
+    clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
+    window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
+    if(stopActionButton) stopActionButton.disabled = true;
+    if(pollError){{ pollError.textContent = "停止请求已发送，正在确认状态..."; pollError.hidden = false; }}
+    try{{
+        const csrf = typeof flsGetCsrfToken === "function" ? flsGetCsrfToken() : "";
+        const headers = {{"X-Requested-With":"XMLHttpRequest"}};
+        if(csrf) headers["X-CSRF-Token"] = csrf;
+        const response = await fetch(stopActionInitial.dataset.apiAction, {{method:"POST", headers, credentials:"same-origin"}});
+        const result = await flsReadJsonResponse(response);
+        if(!result || result.ok !== true || result.install_id !== installId) throw new Error("停止响应格式无效");
+        if(document.getElementById("installPollError") !== pollError) return;
+        if(pollError) pollError.textContent = result.msg || "停止请求已提交";
+    }}catch(error){{
+        if(document.getElementById("installPollError") !== pollError) return;
+        const message = error && error.message || String(error || "请求失败");
+        const denied = error && (error.status === 401 || error.status === 403);
+        if(pollError) pollError.textContent = "停止请求未确认：" + message + "。请查询原安装状态。";
+        if(denied && loginAction){{
+            loginAction.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
+            loginAction.hidden = false;
+        }}
+        return;
+    }}finally{{
+        postingStop = false;
+        needsStopQuery = true;
+        if(stopQueryAction) stopQueryAction.hidden = false;
+    }}
+    await queryStop();
+}}
+
+async function queryStop(){{
+    if(stopQueryAction) stopQueryAction.disabled = true;
+    try{{ await loadLog(true); }}
+    finally{{ if(stopQueryAction) stopQueryAction.disabled = false; }}
+}}
+
+if(stopActionInitial) stopActionInitial.addEventListener("submit", requestStop);
+if(stopQueryAction) stopQueryAction.addEventListener("click", queryStop);
+if(retryAction) retryAction.onclick = () => loadLog(needsStopQuery);
 if(window.__FLS_ACTIVE_LOG_INTERVAL__) clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
 window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
 loadLog();

@@ -55,7 +55,7 @@ class OnlineInstallRecoveryTests(unittest.TestCase):
                 )
                 self.assertEqual(confirmation.status_code, 200)
                 self.assertIn("覆盖确认", confirmation.get_data(as_text=True))
-                self.assertIn('action="/online-scripts/install-retry/previous"', confirmation.get_data(as_text=True))
+                self.assertIn('action="/online-scripts/install-retry/previous?back=/online-scripts"', confirmation.get_data(as_text=True))
                 start.assert_not_called()
                 self.assertFalse(get_online_install_job("previous").get("retried_by"))
                 self.assertEqual(target.read_text(encoding="utf-8"), "original")
@@ -792,7 +792,7 @@ vm.createContext(context); vm.runInContext(input.reader+input.script,context);
             self.assertIn('id="installPollLogin" class="btn btn-primary" hidden>重新登录</a>', html)
             self.assertIn('id="installPollLogs" class="btn btn-orange" href="/logs" hidden>查看日志管理</a>', html)
             script = next(script for script in re.findall(r"<script>(.*?)</script>", html, re.S)
-                          if "async function loadLog()" in script)
+                          if "async function loadLog(" in script)
             source = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
             reader = source[source.index("async function flsReadJsonResponse("):source.index("async function flsReadTextResponse(")]
             result = subprocess.run(["node", "-e", r"""
@@ -807,7 +807,7 @@ const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
     elements.log.textContent = 'preserved output';
     const context = {
       window: {innerHeight: 800, scrollY: 0, addEventListener() {}, scrollTo() {}},
-      document: {documentElement: {scrollHeight: 800}, getElementById: id => elements[id]},
+      document: {documentElement: {scrollHeight: 800}, getElementById: id => elements[id], querySelector: () => null},
       location: {pathname: '/online-scripts/log/previous', search: '?back=%2Fpull'},
       fetch: async () => ({ok: status === 200, status,
         json: async () => {
@@ -865,7 +865,7 @@ const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
     let intervals = 0;
     const context = {
       window: {innerHeight: 800, scrollY: 0, addEventListener() {}, scrollTo() {}},
-      document: {documentElement: {scrollHeight: 800}, getElementById: id => elements[id]},
+      document: {documentElement: {scrollHeight: 800}, getElementById: id => elements[id], querySelector: () => null},
       fetch: () => { requests++; return new Promise(done => { resolve = done; }); },
       setInterval: () => { intervals++; return 1; }, clearInterval() {},
     };

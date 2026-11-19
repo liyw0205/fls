@@ -1570,9 +1570,13 @@ class UiRouteComponentTests(unittest.TestCase):
             log_file.write_bytes(b"password=" + b"s" * (2 * logs.MAX_TAIL_BYTES) + b"\nready\npassword=complete-secret\n")
             info = {"running": False, "returncode": 0, "log_file": str(log_file), "finished": True}
             SCRIPT_DEBUG_RUNNING["d1"] = info.copy()
-            DEPS_RUNNING["i1"] = info.copy()
+            deps_log = base_dir / "log" / "deps-install-demo-i1.log"
+            deps_log.write_bytes(log_file.read_bytes())
+            DEPS_RUNNING["i1"] = {**info, "log_file": str(deps_log)}
             ABOUT_JOBS["j1"] = info.copy()
-            ONLINE_INSTALL_RUNNING["o1"] = info.copy()
+            online_log = base_dir / "log" / "online-script-install-o1.log"
+            online_log.write_bytes(log_file.read_bytes())
+            ONLINE_INSTALL_RUNNING["o1"] = {**info, "id": "o1", "log_file": str(online_log)}
             expected = "\n".join([
                 logs.TAIL_TRUNCATION_NOTICE,
                 "ready",
@@ -1640,8 +1644,14 @@ class UiRouteComponentTests(unittest.TestCase):
             log_file = base_dir / "log" / "Demo-fixture.log"
             log_file.write_text("one\ntwo\nthree\n", encoding="utf-8")
             info = {"running": False, "returncode": 0, "log_file": str(log_file), "finished": True}
-            for records in (SCRIPT_DEBUG_RUNNING, DEPS_RUNNING, ABOUT_JOBS, ONLINE_INSTALL_RUNNING):
+            for records in (SCRIPT_DEBUG_RUNNING, ABOUT_JOBS):
                 records["r1"] = info.copy()
+            deps_log = base_dir / "log" / "deps-install-demo-r1.log"
+            deps_log.write_text("one\ntwo\nthree\n", encoding="utf-8")
+            DEPS_RUNNING["r1"] = {**info, "log_file": str(deps_log)}
+            online_log = base_dir / "log" / "online-script-install-r1.log"
+            online_log.write_text("one\ntwo\nthree\n", encoding="utf-8")
+            ONLINE_INSTALL_RUNNING["r1"] = {**info, "id": "r1", "log_file": str(online_log)}
 
             client = app.test_client()
             for url in (
@@ -2509,13 +2519,16 @@ class UiRouteComponentTests(unittest.TestCase):
                 "id": "install-1",
                 "script_id": "demo",
                 "script_name": "Demo",
-                "log_file": "/tmp/online-script-install-demo.log",
+                "log_file": str(_base_dir / "log" / "online-script-install-demo-install-1.log"),
                 "running": 1,
                 "status": "安装中",
                 "returncode": None,
                 "error": "",
                 "process": object(),
             }
+            log_path = Path(ONLINE_INSTALL_RUNNING["install-1"]["log_file"])
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text("fixture output\n", encoding="utf-8")
 
             with patch(
                 "fls_manager.routes.online_scripts.logs.tail_file",
@@ -2531,18 +2544,21 @@ class UiRouteComponentTests(unittest.TestCase):
             self.assertEqual(
                 response.get_json(),
                 {
+                    "ok": True,
+                    "install_id": "install-1",
                     "running": True,
                     "status": "安装中",
+                    "phase": "running",
                     "returncode": None,
                     "error": "",
-                    "log_file": "/tmp/online-script-install-demo.log",
+                    "log_file": str(log_path),
                     "log": "clone complete\ninstalling dependencies",
+                    "retry_parent_id": "",
+                    "retry_child_id": "",
+                    "retry_relation_error": "",
                 },
             )
-            tail_file.assert_called_once_with(
-                "/tmp/online-script-install-demo.log",
-                1600,
-            )
+            tail_file.assert_called_once_with(str(log_path), 1600)
 
     def test_online_install_log_api_missing_returns_stable_polling_fields(self):
         with isolated_app() as (app, _base_dir):
@@ -2896,7 +2912,7 @@ class UiRouteComponentTests(unittest.TestCase):
                 "id": "restart-install",
                 "script_id": "demo",
                 "script_name": "Demo",
-                "log_file": str(base_dir / "restart.log"),
+                "log_file": str(base_dir / "log" / "restart-install.log"),
                 "running": True,
                 "status": "运行中",
                 "start_time": 1,
@@ -2908,6 +2924,8 @@ class UiRouteComponentTests(unittest.TestCase):
                 json.dumps({"restart-install": snapshot}, ensure_ascii=False),
                 encoding="utf-8",
             )
+            (base_dir / "log").mkdir(parents=True, exist_ok=True)
+            (base_dir / "log" / "restart-install.log").write_text("restart fixture\n", encoding="utf-8")
             ONLINE_INSTALL_RUNNING.clear()
             client = app.test_client()
 
@@ -2915,7 +2933,7 @@ class UiRouteComponentTests(unittest.TestCase):
                 "/api/online-scripts/log/restart-install?lines=20",
                 headers={"X-Token": TOKEN},
             )
-            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
             payload = response.get_json()
             self.assertFalse(payload["running"])
             self.assertEqual(payload["status"], "结果未知")
@@ -2927,6 +2945,9 @@ class UiRouteComponentTests(unittest.TestCase):
             )
             self.assertEqual(response.status_code, 409)
             self.assertIn("结果未知", response.get_json()["msg"])
+            self.assertEqual(response.get_json()["install_id"], "restart-install")
+            self.assertEqual(response.get_json()["status"], "结果未知")
+            self.assertEqual(response.get_json()["state_url"], "/api/online-scripts/log/restart-install?state_only=1")
 
             response = client.get(
                 "/api/online-scripts/log/does-not-exist",
@@ -2996,6 +3017,10 @@ class UiRouteComponentTests(unittest.TestCase):
 
             self.assertEqual(response.status_code, 200)
             self.assertTrue(response.get_json()["ok"])
+            self.assertEqual(response.get_json()["install_id"], "stop-api-install")
+            self.assertEqual(response.get_json()["status"], "停止中")
+            self.assertTrue(response.get_json()["running"])
+            self.assertEqual(response.get_json()["state_url"], "/api/online-scripts/log/stop-api-install?state_only=1")
             self.assertEqual(
                 ONLINE_INSTALL_RUNNING["stop-api-install"]["status"], "停止中"
             )
