@@ -5,6 +5,7 @@ import subprocess
 import threading
 import time
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -177,6 +178,7 @@ const elements = {
   onlineRefreshBtn: {disabled: true, textContent: '正在同步中...'},
   onlineRefreshLogin: {hidden: true, href: ''},
   onlineRefreshQuery: {hidden: true, disabled: false},
+  onlineRefreshPersistence: {innerHTML: ''},
 };
 const storage = {data:{}, get value(){return this.getItem('fls-online-refresh-request');},
   set value(value){this.setItem('fls-online-refresh-request', value);},
@@ -186,6 +188,7 @@ const context = {
   location: {pathname: '/online-scripts', search: ''},
   document: {getElementById: id => elements[id], querySelectorAll: () => [], addEventListener: () => {}},
   sessionStorage: storage,
+  flsGetCsrfToken: () => 'refresh-repair-csrf',
   flsResponseErrorDiagnostic: (_response, body) => ({payload: null, message: body}),
   fetch: async () => ({ok: true, status: 200, json: async () => ({
     id: 'c'.repeat(32), request_id: 'd'.repeat(32), running: false,
@@ -306,6 +309,54 @@ setImmediate(async () => {
   assert.equal(posts, 2);
   assert.equal(elements.onlineRefreshQuery.hidden, true);
   assert.equal(JSON.parse(storage.value).request_id, retryId);
+  const recoveryId = '7'.repeat(32);
+  const recoverButton = {disabled:false};
+  const recoverForm = {dataset:{}, getAttribute:()=>recoveryId, querySelector:()=>recoverButton};
+  storage.value = JSON.stringify({request_id:recoveryId, proxy_id:'original-proxy', server_id:'6'.repeat(32)});
+  context.renderOnlineRefreshPersistence({request_id:recoveryId, persistence_error:'history write denied'});
+  assert.match(elements.onlineRefreshPersistence.innerHTML,/data-api-action='\/api\/online-scripts\/refresh-recover\//);
+  for(const status of [401,403,409,500,503,200]) {
+    context.fetch = async (url, options) => {
+      assert.equal(url,'/api/online-scripts/refresh-recover/'+recoveryId);
+      assert.equal(options.method,'POST');
+      assert.equal(options.headers['X-CSRF-Token'],'refresh-repair-csrf');
+      return {ok:status===200, status, text:async()=>'<html>unavailable</html>'};
+    };
+    await context.submitOnlineRefreshRecoverForm(recoverForm);
+    assert.match(elements.onlineRefreshStatusText.textContent,/回执修复未确认/);
+    assert.equal(recoverButton.disabled,false);
+    assert.equal(recoverForm.dataset.pending,undefined);
+    assert.equal(elements.onlineRefreshQuery.hidden,false);
+    assert.equal(elements.onlineRefreshLogin.hidden,status!==401 && status!==403);
+    assert.equal(JSON.parse(storage.value).request_id,recoveryId);
+    assert.equal(JSON.parse(storage.value).proxy_id,'original-proxy');
+  }
+  let finishRepair, repairPosts=0;
+  context.fetch = async (url, options) => {
+    if(options.method==='POST') {
+      repairPosts++;
+      return new Promise(resolve=>{finishRepair=resolve;});
+    }
+    if(url.includes('refresh-history')) return {ok:true,status:200,json:async()=>({ok:true,items:[]})};
+    assert.equal(url,'/api/online-scripts/refresh-status/'+recoveryId);
+    return {ok:true,status:200,json:async()=>({id:'6'.repeat(32),request_id:recoveryId,running:false,status:'结果未知',error:'original diagnosis'})};
+  };
+  const repair = context.submitOnlineRefreshRecoverForm(recoverForm);
+  await context.submitOnlineRefreshRecoverForm(recoverForm);
+  assert.equal(repairPosts,1);
+  assert.equal(recoverButton.disabled,true);
+  finishRepair({ok:true,status:200,json:async()=>({ok:true,request_id:recoveryId})});
+  await repair;
+  assert.equal(recoverButton.disabled,false);
+  assert.equal(elements.onlineRefreshPersistence.innerHTML,'');
+  context.fetch=async()=>new Promise(resolve=>{finishRepair=resolve;});
+  const lateRepair=context.submitOnlineRefreshRecoverForm(recoverForm);
+  storage.value=JSON.stringify({request_id:'5'.repeat(32),proxy_id:''});
+  elements.onlineRefreshStatusText.textContent='new request';
+  finishRepair({ok:false,status:500,text:async()=>'old repair failed'});
+  await lateRepair;
+  assert.equal(elements.onlineRefreshStatusText.textContent,'new request');
+  assert.equal(JSON.parse(storage.value).request_id,'5'.repeat(32));
   console.log('partial refresh retry action passed');
 });
 '''],
@@ -461,6 +512,94 @@ vm.runInContext(input.reader + input.script, context);
             page = app.test_client().get("/online-scripts", headers={"X-Token": TOKEN}).get_data(as_text=True)
             self.assertIn("缓存已发布", page)
 
+    def test_terminal_success_remains_recoverable_when_history_publication_fails(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import constants, source
+            from fls_manager.online_scripts.constants import get_online_refresh_state, update_online_refresh_state
+            from fls_manager.online_scripts.source import online_script_cache_fingerprint, online_script_source_fingerprint
+
+            update_online_refresh_state(
+                id="a" * 32, request_id="b" * 32, running=True, status="运行中",
+                expected_cache_fingerprint=online_script_cache_fingerprint(),
+                source_fingerprint=online_script_source_fingerprint(), updated_at="before",
+            )
+            items = [{"id": "published", "name": "Published", "type": "raw", "link": "https://example.invalid/new.py"}]
+            real_replace = constants.os.replace
+            publications = []
+
+            def fail_terminal_history(src_path, dst):
+                if Path(dst) == constants.ONLINE_REFRESH_HISTORY_FILE:
+                    candidate = json.loads(Path(src_path).read_text(encoding="utf-8"))
+                    publications.append(candidate.get("b" * 32, {}).get("status"))
+                    if candidate.get("b" * 32, {}).get("status") == "已完成":
+                        raise OSError("terminal history publication denied")
+                return real_replace(src_path, dst)
+
+            with patch.object(source, "fetch_online_scripts", return_value=items) as fetch, patch.object(
+                constants.os, "replace", side_effect=fail_terminal_history,
+            ):
+                source.refresh_worker("a" * 32, log_file=str(base_dir / "log" / "terminal.log"))
+            self.assertEqual(fetch.call_count, 1)
+            self.assertIn("已完成", publications)
+            self.assertEqual(json.loads(constants.ONLINE_REFRESH_STATE_FILE.read_text())["status"], "已完成")
+            history_before = json.loads(constants.ONLINE_REFRESH_HISTORY_FILE.read_text())
+            self.assertEqual(history_before["b" * 32]["status"], "发布中")
+            visible = get_online_refresh_state()
+            self.assertEqual(visible["status"], "已完成")
+            self.assertFalse(visible["running"])
+            self.assertIn("terminal history publication denied", visible["persistence_error"])
+            self.assertTrue(visible["persistence_recovery"]["api_action"])
+            self.assertEqual([item["id"] for item in source.load_online_script_cache()], ["published"])
+
+            repaired = app.test_client().post(
+                visible["persistence_recovery"]["api_action"], headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(repaired.status_code, 200)
+            self.assertEqual(repaired.json["status"], "已完成")
+            self.assertFalse(repaired.json["running"])
+            self.assertEqual(json.loads(constants.ONLINE_REFRESH_HISTORY_FILE.read_text())["b" * 32]["status"], "已完成")
+            self.assertEqual(fetch.call_count, 1)
+
+    def test_failed_worker_final_history_write_error_is_not_left_running(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import constants, source
+            from fls_manager.online_scripts.constants import get_online_refresh_state, update_online_refresh_state
+            from fls_manager.online_scripts.source import online_script_cache_fingerprint, online_script_source_fingerprint
+
+            update_online_refresh_state(
+                id="a" * 32, request_id="b" * 32, running=True, status="运行中",
+                expected_cache_fingerprint=online_script_cache_fingerprint(),
+                source_fingerprint=online_script_source_fingerprint(), updated_at="before",
+            )
+            real_replace = constants.os.replace
+            publications = []
+
+            def fail_failed_history(src_path, dst):
+                if Path(dst) == constants.ONLINE_REFRESH_HISTORY_FILE:
+                    candidate = json.loads(Path(src_path).read_text(encoding="utf-8"))
+                    publications.append(candidate.get("b" * 32, {}).get("status"))
+                    if candidate.get("b" * 32, {}).get("status") == "失败":
+                        raise OSError("failed history publication denied")
+                return real_replace(src_path, dst)
+
+            with patch.object(source, "fetch_online_scripts", side_effect=TimeoutError("upstream timeout")), patch.object(
+                constants.os, "replace", side_effect=fail_failed_history,
+            ):
+                source.refresh_worker("a" * 32, log_file=str(base_dir / "log" / "failed.log"))
+            self.assertIn("失败", publications)
+            visible = get_online_refresh_state()
+            self.assertEqual(visible["status"], "失败")
+            self.assertFalse(visible["running"])
+            self.assertIn("upstream timeout", visible["error"])
+            self.assertIn("failed history publication denied", visible["persistence_error"])
+            repaired = app.test_client().post(
+                visible["persistence_recovery"]["api_action"], headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(repaired.status_code, 200)
+            self.assertEqual(repaired.json["status"], "失败")
+            self.assertFalse(repaired.json["running"])
+            self.assertEqual(json.loads(constants.ONLINE_REFRESH_HISTORY_FILE.read_text())["b" * 32]["status"], "失败")
+
     def test_refresh_worker_publishes_real_fetched_cache_only_once(self):
         with isolated_app() as (_app, base_dir):
             from fls_manager.online_scripts import source
@@ -474,6 +613,99 @@ vm.runInContext(input.reader + input.script, context);
             save.assert_called_once()
             self.assertEqual(source.load_online_script_cache()[0]["id"], "demo")
             self.assertEqual(get_online_refresh_state()["status"], "已完成")
+
+    def test_refresh_worker_keeps_refresh_lock_before_storage_during_concurrent_status_read(self):
+        with isolated_app() as (_app, base_dir):
+            from contextlib import contextmanager
+
+            from fls_manager.online_scripts import constants, source
+            from fls_manager.online_scripts.source import (
+                online_script_cache_fingerprint,
+                online_script_source_fingerprint,
+            )
+
+            class TrackingRLock:
+                def __init__(self):
+                    self.lock = threading.RLock()
+                    self.local = threading.local()
+
+                def __enter__(self):
+                    self.lock.acquire()
+                    self.local.depth = getattr(self.local, "depth", 0) + 1
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    self.local.depth -= 1
+                    self.lock.release()
+
+                def owned_by_current_thread(self):
+                    return getattr(self.local, "depth", 0) > 0
+
+            refresh_lock = TrackingRLock()
+            constants.update_online_refresh_state(
+                id="a" * 32,
+                request_id="b" * 32,
+                running=True,
+                status="运行中",
+                expected_cache_fingerprint=online_script_cache_fingerprint(),
+                source_fingerprint=online_script_source_fingerprint(),
+                updated_at="before",
+            )
+
+            real_storage_transaction = source.storage_transaction
+            publish_entered = threading.Event()
+            allow_publish = threading.Event()
+            query_started = threading.Event()
+            violations = []
+            query_results = []
+
+            @contextmanager
+            def checked_storage_transaction():
+                if threading.current_thread().name == "refresh-worker":
+                    if not refresh_lock.owned_by_current_thread():
+                        violations.append("refresh worker acquired storage before refresh lock")
+                        raise RuntimeError(violations[-1])
+                    with real_storage_transaction():
+                        publish_entered.set()
+                        if not allow_publish.wait(timeout=5):
+                            raise TimeoutError("cache publication gate timed out")
+                        yield
+                    return
+                with real_storage_transaction():
+                    yield
+
+            def read_status():
+                query_started.set()
+                query_results.append(constants.get_online_refresh_state())
+
+            with patch.object(constants, "ONLINE_REFRESH_LOCK", refresh_lock), patch.object(
+                source, "ONLINE_REFRESH_LOCK", refresh_lock,
+            ), patch.object(source, "storage_transaction", checked_storage_transaction), patch.object(
+                source,
+                "fetch_online_scripts",
+                return_value=[{"id": "demo", "name": "Demo", "type": "raw", "link": "https://example.invalid/demo.sh"}],
+            ):
+                worker = threading.Thread(
+                    name="refresh-worker",
+                    target=source.refresh_worker,
+                    args=("a" * 32, "", str(base_dir / "log" / "concurrent-refresh.log")),
+                )
+                worker.start()
+                self.assertTrue(publish_entered.wait(timeout=3))
+                reader = threading.Thread(name="refresh-status-reader", target=read_status)
+                reader.start()
+                self.assertTrue(query_started.wait(timeout=1))
+                allow_publish.set()
+                worker.join(timeout=5)
+                reader.join(timeout=5)
+
+            self.assertFalse(worker.is_alive(), "refresh worker stalled while publishing cache")
+            self.assertFalse(reader.is_alive(), "status query stalled behind refresh publication")
+            self.assertEqual(violations, [])
+            self.assertEqual(len(query_results), 1)
+            self.assertEqual(query_results[0]["request_id"], "b" * 32)
+            self.assertEqual(constants.get_online_refresh_state()["status"], "已完成")
+            self.assertEqual(source.load_online_script_cache()[0]["id"], "demo")
 
     def test_api_refresh_serializes_concurrent_starts_and_reports_start_failure(self):
         with isolated_app() as (app, _base_dir):
@@ -592,6 +824,164 @@ vm.runInContext(input.reader + input.script, context);
             self.assertEqual(invalid.json["request_id"], "")
             start.assert_called_once()
 
+    def test_original_refresh_replays_terminal_receipt_before_reading_changed_inputs(self):
+        for status in ("已完成", "部分完成", "失败", "结果未知"):
+            with self.subTest(status=status), isolated_app() as (app, base_dir):
+                from fls_manager.online_scripts import constants, source
+                from fls_manager.online_scripts.logs import online_refresh_log_file
+                from fls_manager.routes.online_scripts import refresh
+
+                request_id, refresh_id = "a" * 32, "b" * 32
+                log_file = online_refresh_log_file(refresh_id)
+                log_file.write_text("original refresh diagnosis\n", encoding="utf-8")
+                constants.update_online_refresh_state(
+                    request_id=request_id, id=refresh_id, proxy_id="deleted-proxy", running=False,
+                    status=status, error="original diagnosis", message="original result",
+                    log_file=str(log_file), updated_at="before",
+                )
+                state_before = constants.ONLINE_REFRESH_STATE_FILE.read_bytes()
+                history_before = constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes()
+                client = app.test_client()
+                with patch.object(refresh, "validate_proxy_id", side_effect=ValueError("proxy was deleted")) as proxy, patch.object(
+                    refresh, "online_script_cache_fingerprint", side_effect=OSError("cache unreadable"),
+                ) as cache, patch.object(
+                    refresh, "online_script_source_fingerprint", side_effect=OSError("source unreadable"),
+                ) as config, patch.object(refresh, "start_refresh_thread") as start:
+                    response = client.post(
+                        "/api/online-scripts/refresh", json={"request_id": request_id, "proxy_id": "deleted-proxy"},
+                        headers={"X-Token": TOKEN},
+                    )
+                    html_response = client.post(
+                        "/online-scripts/refresh", data={"request_id": request_id, "proxy_id": "deleted-proxy"},
+                        headers={"X-Token": TOKEN},
+                    )
+                self.assertEqual(response.status_code, 200 if status in ("已完成", "部分完成") else 409)
+                self.assertTrue(response.json["replayed"])
+                self.assertEqual(response.json["request_id"], request_id)
+                self.assertEqual(response.json["id"], refresh_id)
+                self.assertEqual(response.json["status"], status)
+                self.assertEqual(response.json["error"], "original diagnosis")
+                self.assertEqual(response.json["state_url"], f"/api/online-scripts/refresh-status/{request_id}")
+                self.assertEqual(response.json["log_url"], f"/online-scripts/refresh-log/{request_id}")
+                self.assertEqual(html_response.status_code, response.status_code)
+                self.assertIn("已查询原同步请求", html_response.get_data(as_text=True))
+                self.assertIn("original diagnosis", html_response.get_data(as_text=True))
+                self.assertIn(response.json["log_url"], html_response.get_data(as_text=True))
+                proxy.assert_not_called()
+                cache.assert_not_called()
+                config.assert_not_called()
+                start.assert_not_called()
+                self.assertEqual(constants.ONLINE_REFRESH_STATE_FILE.read_bytes(), state_before)
+                self.assertEqual(constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes(), history_before)
+
+    def test_original_refresh_can_replay_history_while_another_refresh_is_running(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import constants
+            from fls_manager.routes.online_scripts import refresh
+
+            original = "a" * 32
+            constants.update_online_refresh_state(
+                request_id=original, id="b" * 32, running=False, status="已完成", updated_at="old",
+            )
+            constants.update_online_refresh_state(
+                request_id="c" * 32, id="d" * 32, running=True, status="运行中", updated_at="new",
+            )
+            before = constants.ONLINE_REFRESH_STATE_FILE.read_bytes()
+            with patch.object(refresh, "start_refresh_thread") as start:
+                replay = app.test_client().post(
+                    "/api/online-scripts/refresh", json={"request_id": original}, headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(replay.status_code, 200)
+            self.assertEqual(replay.json["id"], "b" * 32)
+            self.assertEqual(replay.json["request_id"], original)
+            self.assertEqual(constants.ONLINE_REFRESH_STATE_FILE.read_bytes(), before)
+            start.assert_not_called()
+
+    def test_original_refresh_concurrent_submission_claims_one_job(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.routes.online_scripts import refresh
+
+            barrier = threading.Barrier(2)
+            real_fingerprint = refresh.online_script_cache_fingerprint
+            responses, errors = [], []
+
+            def fingerprint():
+                barrier.wait(timeout=5)
+                return real_fingerprint()
+
+            def submit():
+                try:
+                    responses.append(app.test_client().post(
+                        "/api/online-scripts/refresh", json={"request_id": "a" * 32}, headers={"X-Token": TOKEN},
+                    ))
+                except Exception as exc:
+                    errors.append(exc)
+
+            with patch.object(refresh, "online_script_cache_fingerprint", side_effect=fingerprint), patch.object(
+                refresh, "start_refresh_thread",
+            ) as start:
+                threads = [threading.Thread(target=submit, daemon=True) for _ in range(2)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=10)
+                self.assertFalse(any(thread.is_alive() for thread in threads))
+                self.assertEqual(errors, [])
+                self.assertEqual(sorted(response.status_code for response in responses), [202, 409])
+                self.assertEqual(len({response.json["id"] for response in responses}), 1)
+                start.assert_called_once()
+
+    def test_original_refresh_replay_checks_auth_csrf_and_binding_without_mutation(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import constants
+            from fls_manager.routes.online_scripts import refresh
+
+            constants.update_online_refresh_state(
+                request_id="a" * 32, id="b" * 32, proxy_id="original", running=True, status="运行中", updated_at="before",
+            )
+            constants.ONLINE_REFRESH_STATE.clear()
+            before = constants.ONLINE_REFRESH_STATE_FILE.read_bytes()
+            history_before = constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes()
+            client = app.test_client()
+            with client.session_transaction() as session:
+                session.update(token=TOKEN, token_expire_at=4102444800, security_verified=True, csrf_token="original-csrf")
+            anonymous = app.test_client()
+            with anonymous.session_transaction() as session:
+                session["csrf_token"] = "without-login"
+            with patch.object(refresh, "start_refresh_thread") as start:
+                denied = anonymous.post(
+                    "/api/online-scripts/refresh", json={"request_id": "a" * 32},
+                    headers={"X-CSRF-Token": "without-login"},
+                )
+                self.assertEqual(denied.status_code, 401)
+                csrf_denied = client.post("/api/online-scripts/refresh", json={"request_id": "a" * 32})
+                self.assertEqual(csrf_denied.status_code, 400)
+                mismatch = client.post(
+                    "/api/online-scripts/refresh", json={"request_id": "a" * 32, "proxy_id": "wrong"},
+                    headers={"X-CSRF-Token": "original-csrf"},
+                )
+                self.assertEqual(mismatch.status_code, 409)
+                self.assertIn("绑定", mismatch.json["error"])
+                invalid = client.post(
+                    "/api/online-scripts/refresh", json={"request_id": "c" * 32, "proxy_id": "missing"},
+                    headers={"X-CSRF-Token": "original-csrf"},
+                )
+                self.assertEqual(invalid.status_code, 400)
+                start.assert_not_called()
+            self.assertEqual(constants.ONLINE_REFRESH_STATE_FILE.read_bytes(), before)
+            self.assertEqual(constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes(), history_before)
+            self.assertEqual(constants.ONLINE_REFRESH_STATE, {})
+            with patch.object(refresh, "start_refresh_thread") as start:
+                original_form = client.post(
+                    "/online-scripts/refresh",
+                    data={"request_id": "a" * 32, "proxy_id": "original", "csrf_token": "original-csrf"},
+                )
+            self.assertEqual(original_form.status_code, 409)
+            self.assertIn("已查询原同步请求", original_form.get_data(as_text=True))
+            self.assertIn("/online-scripts/refresh-log/" + "a" * 32, original_form.get_data(as_text=True))
+            start.assert_not_called()
+
+
     def test_refresh_request_status_rejects_unknown_or_replaced_identifiers(self):
         with isolated_app() as (app, _base_dir):
             client = app.test_client()
@@ -653,11 +1043,17 @@ vm.runInContext(input.reader + input.script, context);
                         self.assertIn('name="csrf_token"', detail)
                     self.assertFalse(constants.get_online_refresh_state()["running"])
                     self.assertEqual(cache.read_bytes(), original)
+                    original_request_id = constants.ONLINE_REFRESH_STATE.get("request_id")
                     with patch.object(refresh, "start_refresh_thread") as retry_start:
                         retried = client.post(path, headers=headers)
                     self.assertEqual(retried.status_code, success_status)
                     retry_start.assert_called_once()
                     self.assertTrue(constants.get_online_refresh_state()["running"])
+                    if failure == "thread-and-state":
+                        previous = constants.get_online_refresh_request(original_request_id)
+                        self.assertEqual(previous["status"], "启动失败")
+                        self.assertFalse(previous["running"])
+                        self.assertIn("thread quota exhausted", previous["error"])
 
     def test_form_and_api_share_conflict_admission_without_starting_a_second_worker(self):
         for first_path, next_path in (

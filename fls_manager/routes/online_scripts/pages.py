@@ -55,6 +55,19 @@ def online_scripts_page():
         if re.fullmatch(r"[a-f0-9]{32}", refresh_request_id) else ""
     )
     refresh_task_link_failures = refresh_state.get("task_link_failures") or []
+    refresh_persistence_html = ""
+    if refresh_state.get("persistence_error") and re.fullmatch(r"[a-f0-9]{32}", refresh_request_id):
+        persistence_diagnosis = "<br>".join(
+            h(value) for value in (refresh_state.get("error"), refresh_state.get("persistence_error")) if value
+        )
+        refresh_persistence_html = (
+            f'<div class="notice red">{persistence_diagnosis}</div>'
+            f'<form class="inline-form fls-online-refresh-recover-form" method="post" '
+            f'action="/online-scripts/refresh-recover/{h(refresh_request_id)}" '
+            f'data-api-action="/api/online-scripts/refresh-recover/{h(refresh_request_id)}" '
+            f'data-refresh-recover-id="{h(refresh_request_id)}">'
+            '<button class="btn btn-primary" type="submit">修复刷新回执</button></form>'
+        )
     try:
         refresh_history = get_online_refresh_history(limit=8)
         refresh_history_error = ""
@@ -218,6 +231,7 @@ def online_scripts_page():
     <a id="onlineRefreshLogLink" class="btn btn-blue" href="{h(refresh_log_href)}"{' hidden' if not refresh_log_href else ''}>查看刷新日志</a>
     <a id="onlineRefreshLogin" class="btn btn-gray" href="/login?next=%2Fonline-scripts" hidden>重新登录</a>
     <button id="onlineRefreshQuery" class="btn btn-primary" type="button" hidden>重新查询同步状态</button>
+    <div id="onlineRefreshPersistence">{refresh_persistence_html}</div>
     <div id="onlineRefreshHistory" class="action-row" style="margin-top:8px;">{refresh_history_html(refresh_history)}</div>
     <div id="onlineRefreshHistoryError" class="notice red" role="status"{' hidden' if not refresh_history_error else ''}>{h(refresh_history_error)}</div>
 </div>
@@ -272,6 +286,55 @@ function escapeHtml(s){{
     return String(s).replace(/[&<>"']/g, function(c){{
         return {{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}}[c];
     }});
+}}
+
+function renderOnlineRefreshPersistence(info){{
+    const element = document.getElementById("onlineRefreshPersistence");
+    if(!element) return;
+    const requestId = String(info.request_id || "");
+    if(!info.persistence_error || !/^[a-f0-9]{{32}}$/.test(requestId)){{ element.innerHTML = ""; return; }}
+    const diagnosis = [info.error, info.persistence_error].filter(Boolean).map(escapeHtml).join("<br>");
+    element.innerHTML = "<div class='notice red'>" + diagnosis + "</div>" +
+        "<" + "form class='inline-form fls-online-refresh-recover-form' method='post' action='/online-scripts/refresh-recover/" + requestId +
+        "' data-api-action='/api/online-scripts/refresh-recover/" + requestId + "' data-refresh-recover-id='" + requestId + "'>" +
+        "<button class='btn btn-primary' type='submit'>修复刷新回执</button></form>";
+}}
+
+async function submitOnlineRefreshRecoverForm(form, event){{
+    if(event){{ event.preventDefault(); event.stopImmediatePropagation(); }}
+    if(form.dataset.pending) return;
+    const requestId = String(form.getAttribute("data-refresh-recover-id") || "");
+    if(!/^[a-f0-9]{{32}}$/.test(requestId)) return;
+    form.dataset.pending = "1";
+    const button = form.querySelector("button");
+    if(button) button.disabled = true;
+    const pending = readOnlineRefreshPending();
+    saveOnlineRefreshPending(pending && pending.request_id === requestId ? pending : {{request_id:requestId}});
+    invalidateOnlineRefreshStatus();
+    try{{
+        const headers = {{"X-Requested-With":"XMLHttpRequest"}};
+        const csrf = typeof flsGetCsrfToken === "function" ? flsGetCsrfToken() : "";
+        if(csrf) headers["X-CSRF-Token"] = csrf;
+        const response = await fetch("/api/online-scripts/refresh-recover/" + requestId, {{method:"POST", headers, credentials:"same-origin"}});
+        const result = await flsReadJsonResponse(response);
+        if((readOnlineRefreshPending() || {{}}).request_id !== requestId) return;
+        if(!result || result.ok !== true || result.request_id !== requestId) throw new Error("回执修复响应无效，请查询原请求");
+        if(typeof flsClearPageCache === "function") flsClearPageCache();
+        await updateOnlineRefreshStatus();
+        await updateOnlineRefreshHistory();
+    }}catch(error){{
+        if((readOnlineRefreshPending() || {{}}).request_id !== requestId) return;
+        const text = document.getElementById("onlineRefreshStatusText");
+        if(text) text.textContent = "回执修复未确认：" + (error && error.message || String(error)) + "。请先查询原请求，未重新抓取源。";
+        const query = document.getElementById("onlineRefreshQuery");
+        if(query){{ query.hidden = false; query.disabled = false; }}
+        const login = document.getElementById("onlineRefreshLogin");
+        const denied = error && (error.status === 401 || error.status === 403);
+        if(login){{ login.hidden = !denied; if(denied) login.href = "/login?next=" + encodeURIComponent(location.pathname + location.search); }}
+    }}finally{{
+        delete form.dataset.pending;
+        if(button) button.disabled = false;
+    }}
 }}
 
 async function updateOnlineRefreshHistory(){{
@@ -451,6 +514,7 @@ async function updateOnlineRefreshStatus(){{
         const failures = document.getElementById("onlineRefreshTaskLinkFailures");
 
         if(!card || !text) return;
+        renderOnlineRefreshPersistence(json);
         if(queryButton) queryButton.hidden = true;
         if(login) login.hidden = true;
         if(logLink && json.request_id && /^[a-f0-9]{{32}}$/.test(String(json.request_id))){{
@@ -663,6 +727,10 @@ if(document.addEventListener){{
     document.addEventListener("submit", function(event){{
         const form = event.target && event.target.closest ? event.target.closest(".fls-online-refresh-confirm-form") : null;
         if(form) return submitOnlineRefreshConfirmForm(form, event);
+    }}, true);
+    document.addEventListener("submit", function(event){{
+        const form = event.target && event.target.closest ? event.target.closest(".fls-online-refresh-recover-form") : null;
+        if(form) return submitOnlineRefreshRecoverForm(form, event);
     }}, true);
 }}
 

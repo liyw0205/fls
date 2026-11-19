@@ -62,6 +62,8 @@ def _refresh_log_state(request_id):
     try:
         state = get_online_refresh_state()
     except Exception as exc:
+        if "刷新历史" in str(exc):
+            return None, ("历史不可读", f"刷新历史无法读取，未覆盖原记录：{exc}", 500)
         return None, ("状态不可读", f"在线脚本源刷新状态无法读取，未覆盖原记录：{exc}", 500)
     if state.get("request_id") != request_id:
         try:
