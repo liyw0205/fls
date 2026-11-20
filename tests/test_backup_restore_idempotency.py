@@ -2,6 +2,8 @@ import io
 import hashlib
 import json
 import os
+import subprocess
+import sys
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -412,6 +414,87 @@ class BackupRestoreIdempotencyTests(unittest.TestCase):
             self.assertEqual(primary, backup)
             self.assertEqual(sum(restore._restore_request_path(f"{number:032x}").exists()
                                  for number in range(1, 8)), 2)
+
+    def test_process_restart_recovers_crashes_after_index_publish_and_during_cleanup(self):
+        for crash_point in ("after_backup_publish", "during_detail_cleanup"):
+            with self.subTest(crash_point=crash_point), isolated_app() as (app, base):
+                from fls_manager.routes.backup import restore
+
+                raw = restore_test_archive().getvalue()
+                directory = base / ".backup_restore_requests"
+                directory.mkdir()
+                request_ids = tuple(f"{number:032x}" for number in range(1, 4))
+                for number, request_id in enumerate(request_ids, 1):
+                    record = {
+                        "request_id": request_id,
+                        "archive_sha256": hashlib.sha256(raw).hexdigest(),
+                        "filename": "restore.tar.gz",
+                        "restore_items": ["data", "scripts"],
+                        "restore_deps": False,
+                        "state": "restored",
+                        "scheduler_reload_required": False,
+                        "scheduler_reloaded": True,
+                        "dependencies_failed": False,
+                        "created_at": f"2026-11-{number:02d} 00:00:00",
+                        "updated_at": f"2026-11-{number:02d} 00:00:00",
+                    }
+                    restore._restore_request_path(request_id).write_text(json.dumps(record), encoding="utf-8")
+
+                if crash_point == "after_backup_publish":
+                    write_index = restore._write_restore_archive_index_file
+
+                    def crash_after_backup(path, index):
+                        result = write_index(path, index)
+                        if path == restore._restore_archive_backup_path():
+                            raise SystemExit("fixture process crash after backup index publish")
+                        return result
+
+                    patcher = patch.object(restore, "_write_restore_archive_index_file", crash_after_backup)
+                else:
+                    unlink = Path.unlink
+                    target = restore._restore_request_path(request_ids[0])
+
+                    def crash_during_cleanup(path, *args, **kwargs):
+                        if path == target:
+                            raise SystemExit("fixture process crash during archive detail cleanup")
+                        return unlink(path, *args, **kwargs)
+
+                    patcher = patch.object(Path, "unlink", crash_during_cleanup)
+
+                with patch.object(restore, "RESTORE_RECEIPT_DETAIL_LIMIT", 1), patcher:
+                    with self.assertRaises(SystemExit):
+                        restore._compact_restore_receipts()
+                self.assertTrue(all(restore._restore_request_path(request_id).exists() for request_id in request_ids))
+
+                # A separate process retains only durable files, not flags, locks, or module state.
+                restarted = subprocess.run(
+                    [sys.executable, "-c", (
+                        "from fls_manager.routes.backup import restore; "
+                        "assert restore._compact_restore_receipts() == 0"
+                    )],
+                    cwd=Path(__file__).resolve().parents[1],
+                    env=os.environ.copy(),
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertEqual(restarted.returncode, 0, restarted.stderr)
+                self.assertEqual(sum(restore._restore_request_path(request_id).exists()
+                                     for request_id in request_ids), 1)
+                primary = restore._read_restore_archive_index_file(restore._restore_archive_index_path())
+                backup = restore._read_restore_archive_index_file(restore._restore_archive_backup_path())
+                self.assertEqual(primary, backup)
+
+                history = app.test_client().get(
+                    "/api/backup/restore-history?limit=20", headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(history.status_code, 200)
+                self.assertEqual(history.json["total"], 3)
+                self.assertEqual(sum(item["archived"] for item in history.json["items"]), 2)
+                with patch.object(restore, "_commit_restore_directories") as commit:
+                    replay = self.post(app.test_client(), raw, restore_request_id=request_ids[0])
+                self.assertEqual(replay.status_code, 410)
+                commit.assert_not_called()
 
     def test_corrupt_or_symlinked_archive_index_fails_closed(self):
         for mode in ("invalid_json", "invalid_shape", "symlink", "both_invalid"):
