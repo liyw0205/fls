@@ -852,7 +852,7 @@ async function queryPending(pending){{
         if(!json || json.request_id !== pending.request_id) throw new Error("同步状态响应无效");
         if(json.state === "completed"){{
             sessionStorage.removeItem(storageKey);
-            window.location.href = "/online-scripts?msg=" + encodeURIComponent("外部任务源同步完成，已刷新任务列表");
+            window.location.href = "/online-scripts/task-link-status/" + encodeURIComponent(pending.request_id);
             return;
         }}
         writeMessage("原同步请求：" + (json.error || json.state || "未知"), false, pending, json.state === "failed", json.state === "unknown");
@@ -865,6 +865,7 @@ async function queryPending(pending){{
 async function submitTaskLinkForm(form, event){{
         event.preventDefault();
         event.stopImmediatePropagation();
+        if(form.__flsTaskLinkPending) return;
         const requestInput = form.querySelector('input[name="request_id"]');
         const button = form.querySelector('button[type="submit"]');
         const requestId = requestInput && requestInput.value || "";
@@ -877,6 +878,7 @@ async function submitTaskLinkForm(form, event){{
             return;
         }}
         try{{ sessionStorage.setItem(storageKey, JSON.stringify(pending)); }}catch(_error){{}}
+        form.__flsTaskLinkPending = true;
         if(button) button.disabled = true;
         try{{
             const headers = {{"X-Requested-With":"XMLHttpRequest"}};
@@ -884,14 +886,19 @@ async function submitTaskLinkForm(form, event){{
             if(csrf) headers["X-CSRF-Token"] = csrf;
             const response = await fetch(form.action.replace("/online-scripts/task-link/", "/api/online-scripts/task-link/"), {{method:"POST", body:new FormData(form), headers, credentials:"same-origin"}});
             const json = await flsReadJsonResponse(response);
-            if(!json || json.ok !== true) throw Object.assign(new Error(json && json.msg || "同步未完成"), {{status: response.status}});
+            if(!json || json.ok !== true || json.request_id !== requestId) throw Object.assign(new Error(json && json.msg || "同步响应无效，请查询原请求"), {{status: response.status}});
             sessionStorage.removeItem(storageKey);
-            window.location.href = "/online-scripts?msg=" + encodeURIComponent(json.msg || "外部任务源同步完成");
+            window.location.href = json.replayed
+                ? "/online-scripts/task-link-status/" + encodeURIComponent(requestId)
+                : "/online-scripts?msg=" + encodeURIComponent(json.msg || "外部任务源同步完成");
         }}catch(error){{
             if(button) button.disabled = false;
             const denied = error && (error.status === 401 || error.status === 403);
-            writeMessage("外部任务源同步失败：" + (error && error.message || String(error || "请求失败")), denied, pending, true);
-        }}
+            const payload = error && error.payload;
+            const bound = payload && payload.request_id === requestId;
+            writeMessage("外部任务源同步失败：" + (error && error.message || String(error || "请求失败")), denied, pending,
+                bound && payload.retry_allowed === true, bound && payload.state === "unknown");
+        }}finally{{ form.__flsTaskLinkPending = false; }}
 }}
 
 function bindOnlineTaskLinkForms(root){{

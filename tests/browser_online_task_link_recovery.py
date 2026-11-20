@@ -139,6 +139,17 @@ def main():
             )
             return jsonify(ok=True)
 
+        @app.route("/api/fixture/task-link-cache", methods=["POST"])
+        def task_link_cache_fixture():
+            cache = source.ONLINE_SCRIPT_CACHE_FILE
+            if (request.get_json() or {}).get("restore"):
+                cache.rmdir()
+                source.save_online_script_cache([item])
+            else:
+                cache.unlink()
+                cache.mkdir()
+            return jsonify(fetches=fault["fetches"], cache_is_directory=cache.is_dir())
+
         @app.route("/api/fixture/refresh-retry", methods=["POST"])
         def refresh_retry_fixture():
             fault["refreshes"] = 0
@@ -274,6 +285,39 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    const state=await fixture({});
    assert.equal(state.fetches,2);
    assert.equal(state.cached[0].task_cron[0].name,'Browser task');
+
+   await fixture({reset:true,fail:false});
+   await page.goto(base+'/online-scripts');
+   const lostForm=page.locator('#online-list form[action="/online-scripts/task-link/browser-link"]');
+   const lostId=await lostForm.locator('[name="request_id"]').inputValue();
+   const taskPost=base+'/api/online-scripts/task-link/browser-link';
+   await page.route(taskPost,async route=>{
+     const response=await route.fetch();
+     assert.equal(response.status(),200);
+     assert.equal((await response.json()).request_id,lostId);
+     const failure=await page.request.post(base+'/api/fixture/task-link-cache',{headers,data:{}});
+     assert.equal(failure.status(),200);
+     assert.equal((await failure.json()).fetches,1);
+     await route.abort('connectionfailed');
+   });
+   await lostForm.locator('button[type="submit"]').click();
+   await page.waitForFunction(()=>document.querySelector('#onlineTaskLinkRecovery').textContent.includes('外部任务源同步失败'));
+   assert.equal(await page.getByRole('button',{name:'继续原同步请求',exact:true}).count(),0);
+   assert.equal(await lostForm.locator('button[type="submit"]').isEnabled(),true);
+   assert.equal(await page.evaluate(()=>JSON.parse(sessionStorage.getItem('fls-online-task-link-request')).request_id),lostId);
+   await page.unroute(taskPost);
+   await lostForm.locator('button[type="submit"]').click();
+   await page.waitForURL(base+'/online-scripts/task-link-status/'+lostId);
+   assert.match(await page.locator('.content').textContent(),/同步已完成/);
+   assert.equal(await page.evaluate(()=>sessionStorage.getItem('fls-online-task-link-request')),null);
+   await page.evaluate(id=>sessionStorage.setItem('fls-online-task-link-request',JSON.stringify({request_id:id,script_id:'browser-link',proxy_id:''})),lostId);
+   await page.goto(base+'/online-scripts');
+   await page.waitForURL(base+'/online-scripts/task-link-status/'+lostId);
+   assert.match(await page.locator('.content').textContent(),/同步已完成/);
+   await page.screenshot({path:'/tmp/fls-task-link-replay-'+viewport.width+'.png'});
+   const restoredTaskLinkCache=await page.request.post(base+'/api/fixture/task-link-cache',{headers,data:{restore:true}});
+   assert.equal(restoredTaskLinkCache.status(),200);
+   assert.equal((await restoredTaskLinkCache.json()).fetches,1);
 
    await fixture({reset:true,fail:true});
    await page.goto(base+'/online-scripts');

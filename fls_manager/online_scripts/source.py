@@ -208,7 +208,7 @@ def online_script_task_fingerprint(item):
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def get_task_link_request(request_id):
+def get_task_link_request(request_id, *, script_id=None, proxy_id=None):
     if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
         return None
     with storage_transaction():
@@ -224,6 +224,9 @@ def get_task_link_request(request_id):
         if not isinstance(value, dict):
             return None
         value = dict(value)
+        if ((script_id is not None and value.get("script_id") != script_id)
+                or (proxy_id is not None and value.get("proxy_id") != proxy_id)):
+            return value
         if value.get("state") == "running" and request_id not in ONLINE_TASK_LINK_ACTIVE:
             value["state"] = "unknown"
             value["error"] = "面板重启或请求中断后无法确认任务是否已合并，请核对当前任务列表"
