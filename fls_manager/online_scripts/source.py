@@ -318,6 +318,21 @@ def claim_task_link_request(info):
             )):
                 observed["value"] = dict(current)
                 return records
+            if current and current.get("confirmation") == "not_merged":
+                try:
+                    current_item = next((item for item in load_online_script_cache()
+                                         if item.get("id") == current.get("script_id")), None)
+                    confirmation_is_current = (
+                        current_item is not None
+                        and online_task_link_version(current_item) == current.get("expected_version")
+                        and online_script_task_fingerprint(current_item) == current.get("confirmation_fingerprint")
+                    )
+                except Exception as exc:
+                    observed["value"] = {**current, "_confirmation_error": str(exc)}
+                    return None
+                if not confirmation_is_current:
+                    observed["value"] = {**current, "_confirmation_stale": True}
+                    return None
             records[request_id] = snapshot
             observed["value"] = None
             ordered = sorted(

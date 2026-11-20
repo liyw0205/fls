@@ -15,6 +15,12 @@ from ...online_scripts.source import (
 )
 from ...online_scripts.constants import ONLINE_TASK_LINK_ACTIVE
 from ...utils import now_str
+from ...storage import storage_transaction
+
+
+_STALE_TASK_LINK_CONFIRMATION = (
+    "原未合并确认已因任务缓存变化失效，不能继续原同步请求；请核对当前任务后再创建新请求。"
+)
 
 
 def _task_link_error(script_id, message, status_code, proxy_id="", request_id="", retry=False):
@@ -112,6 +118,51 @@ def _existing_task_link_result(record, script_id, proxy_id, expected_version="")
     }, 200 if state == "completed" else 409
 
 
+def _stale_task_link_confirmation(record):
+    request_id = record.get("request_id", "")
+    return {
+        "ok": False,
+        "request_id": request_id,
+        "state": record.get("state", "unknown"),
+        "confirmation_stale": True,
+        "confirmation_error": _STALE_TASK_LINK_CONFIRMATION,
+        "msg": _STALE_TASK_LINK_CONFIRMATION + " 未发起外部请求。",
+        "retry_allowed": False,
+        "status_url": f"/online-scripts/task-link-status/{request_id}",
+    }, 409
+
+
+def _task_link_confirmation_matches_current_cache(record):
+    current_items = load_online_script_cache()
+    current_item = next(
+        (item for item in current_items if item.get("id") == record.get("script_id")),
+        None,
+    )
+    return (
+        current_item is not None
+        and online_task_link_version(current_item) == record.get("expected_version")
+        and online_script_task_fingerprint(current_item) == record.get("confirmation_fingerprint")
+    )
+
+
+def _task_link_status_record(request_id):
+    with storage_transaction():
+        record = get_task_link_request(request_id)
+        if not record or record.get("confirmation") != "not_merged":
+            return record
+        try:
+            matches = _task_link_confirmation_matches_current_cache(record)
+        except Exception as exc:
+            record["confirmation_check_error"] = str(exc)
+            record["retry_allowed"] = False
+            return record
+        record["confirmation_stale"] = not matches
+        record["retry_allowed"] = matches
+        if not matches:
+            record["confirmation_error"] = _STALE_TASK_LINK_CONFIRMATION
+        return record
+
+
 def _submit_task_link(script_id, proxy_id, raw_request_id):
     try:
         request_id = _request_id(raw_request_id)
@@ -156,6 +207,9 @@ def _submit_task_link(script_id, proxy_id, raw_request_id):
         return existing
 
     expected_tasks_fingerprint = online_script_task_fingerprint(item)
+    if (previous and previous.get("confirmation") == "not_merged"
+            and previous.get("confirmation_fingerprint") != expected_tasks_fingerprint):
+        return _stale_task_link_confirmation(previous)
     record = {
         "request_id": request_id,
         "script_id": script_id,
@@ -177,6 +231,12 @@ def _submit_task_link(script_id, proxy_id, raw_request_id):
         return {"ok": False, "request_id": request_id,
                 "msg": f"同步请求无法保存，未发起外部请求：{exc}", "retry_allowed": True}, 500
     if claimed_previous:
+        if "_confirmation_error" in claimed_previous:
+            return {"ok": False, "request_id": request_id,
+                    "msg": f"任务缓存无法复核原确认：{claimed_previous['_confirmation_error']}；未发起外部请求。",
+                    "retry_allowed": False}, 503
+        if claimed_previous.get("_confirmation_stale"):
+            return _stale_task_link_confirmation(claimed_previous)
         return _existing_task_link_result(claimed_previous, script_id, proxy_id, expected_version)
 
     try:
@@ -288,9 +348,14 @@ def _render_task_link_result(script_id, payload, status_code, proxy_id):
 
 
 def _confirm_task_link(request_id):
-    """Resolve an interrupted merge by comparing the bound cache fingerprints."""
     if not re.fullmatch(r"[a-f0-9]{32}", request_id or ""):
         return {"ok": False, "msg": "在线任务源同步请求标识无效"}, 400
+    with storage_transaction():
+        return _confirm_task_link_locked(request_id)
+
+
+def _confirm_task_link_locked(request_id):
+    """Resolve an interrupted merge by comparing the bound cache fingerprints."""
     try:
         record = get_task_link_request(request_id)
     except Exception as exc:
@@ -300,6 +365,14 @@ def _confirm_task_link(request_id):
 
     confirmation = record.get("confirmation")
     if confirmation in ("merged", "not_merged"):
+        if confirmation == "not_merged":
+            try:
+                current_matches = _task_link_confirmation_matches_current_cache(record)
+            except Exception as exc:
+                return {"ok": False, "request_id": request_id,
+                        "msg": f"任务缓存无法复核原确认：{exc}；未修改回执。"}, 503
+            if not current_matches:
+                return _stale_task_link_confirmation(record)
         return {
             "ok": True,
             "request_id": request_id,
@@ -406,7 +479,7 @@ def api_online_scripts_task_link_status(request_id):
     if not re.fullmatch(r"[a-f0-9]{32}", request_id or ""):
         return jsonify(ok=False, msg="在线任务源同步请求标识无效"), 400
     try:
-        record = get_task_link_request(request_id)
+        record = _task_link_status_record(request_id)
     except Exception as exc:
         return jsonify(ok=False, msg=f"同步回执无法读取：{exc}"), 500
     if not record:
@@ -463,7 +536,7 @@ def online_scripts_task_link_status(request_id):
         )
         return layout("外部任务源同步状态", "online_scripts", body), 400
     try:
-        record = get_task_link_request(request_id)
+        record = _task_link_status_record(request_id)
     except Exception as exc:
         body = page_header_card(
             "外部任务源同步状态",
@@ -483,6 +556,8 @@ def online_scripts_task_link_status(request_id):
         return layout("外部任务源同步状态", "online_scripts", body), 404
 
     state = str(record.get("state") or "unknown")
+    confirmation_stale = record.get("confirmation_stale") is True
+    confirmation_check_error = str(record.get("confirmation_check_error") or "")
     labels = {
         "prepared": "已准备，尚未确认外部请求",
         "running": "正在请求外部任务源",
@@ -490,8 +565,20 @@ def online_scripts_task_link_status(request_id):
         "unknown": "发布结果未知，请勿直接重发",
         "completed": "同步已完成",
     }
+    state_label = labels.get(state, state)
+    if confirmation_stale:
+        state_label = "原未合并确认已失效，任务缓存已变化"
+    elif confirmation_check_error:
+        state_label = "原未合并确认暂时无法复核"
     action_html = ""
-    if state == "failed":
+    if confirmation_stale or confirmation_check_error:
+        action_html = (
+            f'<a class="btn btn-blue" href="/online-scripts/task-link-status/{h(request_id)}">重新查询</a>'
+            '<a class="btn btn-primary" href="/online-scripts">核对当前任务</a>'
+        )
+    elif state == "failed" and (
+        record.get("confirmation") != "not_merged" or record.get("retry_allowed") is True
+    ):
         action_html = f'''
 <form class="inline-form" method="post" action="/online-scripts/task-link/{h(quote(record.get("script_id", ""), safe=""))}">
     <input type="hidden" name="request_id" value="{h(request_id)}">
@@ -510,7 +597,7 @@ def online_scripts_task_link_status(request_id):
     details = f'''
 <section class="section">
     <div class="card">
-        <h2 class="section-title">{h(labels.get(state, state))}</h2>
+        <h2 class="section-title">{h(state_label)}</h2>
         <dl class="detail-list">
             <dt>请求标识</dt><dd><code>{h(request_id)}</code></dd>
             <dt>脚本</dt><dd>{h(record.get("script_id", "-"))}</dd>
@@ -519,11 +606,19 @@ def online_scripts_task_link_status(request_id):
             <dt>更新时间</dt><dd>{h(record.get("updated_at") or "-")}</dd>
         </dl>
         {f'<p role="alert">{h(record.get("error"))}</p>' if record.get("error") else ''}
+        {f'<p role="alert">{h(record.get("confirmation_error"))}</p>' if record.get("confirmation_error") else ''}
+        {f'<p role="alert">原确认状态无法复核：{h(confirmation_check_error)}</p>' if confirmation_check_error else ''}
     </div>
 </section>'''
     body = page_header_card(
         "外部任务源同步状态",
-        help_html="该页面只查询已保存的同步回执，不会重复发起外部请求。未知状态请先检查当前任务合并；确认未合并后再执行重试。",
+        help_html=(
+            _STALE_TASK_LINK_CONFIRMATION
+            if confirmation_stale
+            else "任务缓存暂时无法验证原确认；修复缓存后重新查询，期间不会继续原请求。"
+            if confirmation_check_error
+            else "该页面只查询已保存的同步回执，不会重复发起外部请求。未知状态请先检查当前任务合并；确认未合并后再执行重试。"
+        ),
         actions_html=action_html,
     ) + details
     return layout("外部任务源同步状态", "online_scripts", body)
