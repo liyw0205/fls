@@ -186,6 +186,34 @@ def main():
                     record = restore._read_restore_request(fault["unknown"])
                     record["state"] = "committing"
                     restore_receipt(record)
+                if fault.get("retention"):
+                    backup.BACKUP_JOBS.clear()
+                    backup.BACKUP_CANCEL_EVENTS.clear()
+                    backup.BACKUP_JOBS_FILE.unlink(missing_ok=True)
+
+                    def retained_job(job_id, running, status, updated_at):
+                        return {
+                            "id": job_id,
+                            "items": ["scripts"],
+                            "type_text": "仅脚本",
+                            "running": running,
+                            "status": status,
+                            "filename": "",
+                            "size": 0,
+                            "size_text": "-",
+                            "error": "",
+                            "created_at": "2020-01-01 00:00:00",
+                            "updated_at": updated_at,
+                        }
+
+                    backup.persist_backup_job(retained_job("a" * 32, True, "正在压缩", "2020-01-01 00:00:00"))
+                    for index in range(backup.BACKUP_JOB_LIMIT + 1):
+                        backup.persist_backup_job(retained_job(
+                            f"retention-terminal-{index:03d}", False, "已完成", f"2026-01-{index + 1:03d} 00:00:00"
+                        ))
+                    backup.BACKUP_JOBS.clear()
+                    backup.BACKUP_CANCEL_EVENTS.clear()
+                    backup.ACTIVE_BACKUP_WORKERS = 0
                 if fault.get("orphan_stage"):
                     orphan_id = "c" * 32
                     orphan = {
@@ -432,21 +460,61 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
     await page.waitForFunction(()=>!sessionStorage.getItem('fls-backup-request'));
     await page.getByRole('link',{name:'下载备份',exact:true}).first().waitFor();
    };
-   await page.goto(base+'/login');await login();await page.goto(base+'/backup');
+   await page.goto(base+'/login');await login();
+   const workersBeforeRetention=(await state()).workers.length;
+   await fixture({retention:true});await page.goto(base+'/backup?job_id='+'a'.repeat(32));
+   await page.waitForFunction(()=>document.getElementById('backupJobText')?.textContent.includes('结果未知'));
+   const retained=await state();assert.equal(retained.jobs.find(row=>row.id==='a'.repeat(32)).status,'结果未知');
+   assert.equal(retained.workers.length,workersBeforeRetention);
+   const pendingAfterRestart=await page.evaluate(()=>JSON.parse(sessionStorage.getItem('fls-backup-request')));
+   assert.equal(pendingAfterRestart.job_id,'a'.repeat(32));assert.equal(pendingAfterRestart.result_unknown,true);
+   await page.evaluate(()=>sessionStorage.removeItem('fls-backup-request'));
+   await page.goto(base+'/backup');
+   const workersBeforeCorrupt=(await state()).workers.length;
+   for(const [index,raw] of ['{broken','[]','', '{"request_id":"bad","items":["scripts"]}'].entries()){
+    await page.evaluate(value=>sessionStorage.setItem('fls-backup-request',value),raw);
+    await page.reload();
+    const recoverCorrupt=()=>page.getByRole('button',{name:'刷新备份列表并清理无效请求',exact:true});
+    await recoverCorrupt().waitFor();assert.equal(await create().isEnabled(),false);
+    if(index===0){
+     await page.route('**/api/backup/list',route=>route.fulfill({status:503,contentType:'text/plain',body:'fixture list failure'}),{times:1});
+     await recoverCorrupt().click();
+     assert.equal(await page.evaluate(()=>sessionStorage.getItem('fls-backup-request')),raw);
+     assert.equal(await create().isEnabled(),false);
+     await page.route('**/api/backup/list',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({ok:true,items:{}})}),{times:1});
+     await recoverCorrupt().click();
+     assert.equal(await page.evaluate(()=>sessionStorage.getItem('fls-backup-request')),raw);
+     assert.equal(await create().isEnabled(),false);
+    }
+    await recoverCorrupt().click();
+    await page.waitForFunction(()=>sessionStorage.getItem('fls-backup-request')===null);
+    assert.equal(await create().isEnabled(),true);
+    assert.equal((await state()).workers.length,workersBeforeCorrupt);
+   }
    const initial=(await state()).workers.length;
    const fields=await page.locator('#backupCreateForm').evaluate(f=>({request_id:f.elements.request_id.value,items:['scripts']}));
    assert.equal((await page.request.post(base+'/api/backup/create',{data:fields,headers:{'X-CSRF-Token':'bad'}})).status(),400);
    const csrf=await page.locator('meta[name="csrf-token"]').getAttribute('content');
+   const formRequestId=viewport.width.toString(16).padStart(32,'0');
+   const formData={request_id:formRequestId,items:['scripts']};
+   const formCreate=()=>page.request.post(base+'/api/backup/create',{form:formData,headers:{'X-CSRF-Token':csrf}});
+   const formFirst=await formCreate();assert.equal(formFirst.status(),200);
+   const formJob=(await formFirst.json()).job_id;assert.equal(formJob,formRequestId);
+   const formReplay=await formCreate();assert.equal(formReplay.status(),200);
+   assert.equal((await formReplay.json()).job_id,formJob);
+   await page.waitForFunction(async id=>{const response=await fetch('/api/backup/job/'+id);const job=await response.json();return job.ok&&!job.running&&job.status==='已完成';},formJob);
+   assert.equal((await state()).workers.length,initial+1);
+   const beforeUi=(await state()).workers.length;
    assert.equal((await page.request.post(base+'/api/backup/create',{data:{...fields,items:['scripts','bad']},headers:{'X-CSRF-Token':csrf}})).status(),400);
-   assert.equal((await state()).workers.length,initial);
+   assert.equal((await state()).workers.length,beforeUi);
    await page.locator('#backupCreateForm [value="data"]').uncheck();
    // Real creation completes, but its HTTP response never reaches the page.
    await page.route('**/api/backup/create',async route=>{await route.fetch();await route.abort();},{times:1});
-   await create().click();await query().waitFor();assert.equal((await state()).workers.length,initial+1);
+   await create().click();await query().waitFor();assert.equal((await state()).workers.length,beforeUi+1);
    await page.reload();await query().waitFor();
    await page.locator('#backupCreateForm [value="data"]').check();
    assert.equal((await submit(query())).status(),200);await settled();
-   assert.equal((await state()).workers.length,initial+1);
+   assert.equal((await state()).workers.length,beforeUi+1);
    const row=(await state()).jobs.find(row=>row.id===fields.request_id);
    assert.deepEqual(row.items,['scripts']);assert.equal(row.status,'已完成');
    assert.equal((await page.request.get(base+'/backup/download/'+row.filename)).status(),200);
@@ -527,13 +595,18 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    await fixture({reload:true});assert.equal((await submit(upload(),'/backup/import')).status(),503);
    assert.equal((await state()).restores,initial+1);assert.equal((await state()).script,"print('restored')");
    assert.equal(await page.locator('form[action="/backup/import"]').count(),0);
-   let recovery=page.locator('form[action^="/scheduler/reload"]');await recovery.waitFor();
+   let recovery=page.locator('form[action^="/backup/restore/"][action$="/reload"]');await recovery.waitFor();
+   const restoreReloadAction=await recovery.getAttribute('action');
+   const restoreRequestId=restoreReloadAction.match(/\/backup\/restore\/([a-f0-9]{32})\/reload$/)[1];
    if(process.env.FLS_BULK_SCREENSHOTS) await page.screenshot({path:process.env.FLS_BULK_SCREENSHOTS+'/backup-restore-failure-'+viewport.width+'.png',fullPage:true});
    const fields=await recovery.evaluate(f=>Object.fromEntries(new FormData(f)));
-   assert.equal((await page.request.post(base+'/scheduler/reload?back=/backup',{form:{...fields,csrf_token:'bad'}})).status(),400);
-   assert.equal((await submit(recovery,'/scheduler/reload')).status(),500);
+   assert.equal((await page.request.post(base+restoreReloadAction,{form:{...fields,csrf_token:'bad'}})).status(),400);
+   assert.equal((await submit(recovery,restoreReloadAction)).status(),503);
    // Persisted scheduler failure retains a recovery action after a fresh navigation.
-   await page.goto(base+'/backup');await page.getByRole('button',{name:'仅重新加载已保存任务',exact:true}).waitFor();
+   await page.goto(base+'/backup');
+   await page.locator('#backupRestoreRecovery').getByRole('button',{name:'查询原恢复请求',exact:true}).click();
+   await page.locator('#backupRestoreRecovery').getByRole('button',{name:'仅重新加载调度器',exact:true}).waitFor();
+   await page.getByRole('button',{name:'仅重新加载已保存任务',exact:true}).waitFor();
    await fixture({edit:true,reload:true});
    const api=await page.request.post(base+'/api/scheduler/reload',{headers});assert.equal(api.status(),500);
    await fixture({});
@@ -549,6 +622,13 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    assert.equal((await state()).tasks[0].name,'Later edit');assert.ok((await state()).scheduled.includes('task_restored'));
    assert.equal((await page.request.post(base+'/api/scheduler/reload',{headers})).status(),200);
    assert.equal((await state()).restores,initial+1);
+   assert.equal((await page.request.get(base+'/api/backup/restore/'+restoreRequestId)).status(),503);
+   await page.locator('#backupRestoreRecovery').getByRole('button',{name:'查询原恢复请求',exact:true}).click();
+   const scopedRecovery=page.locator('#backupRestoreRecovery').getByRole('button',{name:'仅重新加载调度器',exact:true});
+   await scopedRecovery.waitFor();await scopedRecovery.click();
+   const restoreStatus=await page.request.get(base+'/api/backup/restore/'+restoreRequestId);
+   assert.equal(restoreStatus.status(),200);assert.equal((await restoreStatus.json()).resolved,true);
+   assert.equal((await state()).script,"print('later edit')");assert.equal((await state()).tasks[0].name,'Later edit');
    // Actual multipart API uses the same partial-state contract and recovery endpoint.
    await fixture({reload:true});
    const response=await page.request.post(base+'/api/backup/import',{headers,multipart:{file:archive,restore_items:'scripts'}});

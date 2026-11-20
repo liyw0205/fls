@@ -47,6 +47,87 @@ class BackupRestoreRecoveryTests(unittest.TestCase):
             self.assertEqual((base / "data/tasks.json").read_bytes(), before)
             self.assertEqual((base / "scripts/demo.py").read_text(), "print('later edit')")
 
+    def test_restore_scheduler_recovery_is_bound_to_original_request(self):
+        with isolated_app() as (app, base):
+            from fls_manager.routes.backup import restore
+
+            client = app.test_client()
+            self.authenticate(client)
+            request_id = "9" * 32
+            fields = {"restore_request_id": request_id, "csrf_token": "proxy-csrf"}
+            with patch.object(restore, "reload_scheduler", side_effect=RuntimeError("initial reload unavailable")):
+                failed_restore = self.post(client, fields=fields, headers={})
+
+            self.assertEqual(failed_restore.status_code, 503)
+            failed_payload = failed_restore.get_json()
+            reload_url = f"/api/backup/restore/{request_id}/reload"
+            self.assertEqual(failed_payload["request_id"], request_id)
+            self.assertEqual(failed_payload["reload_url"], reload_url)
+            status = client.get(f"/api/backup/restore/{request_id}")
+            self.assertEqual(status.status_code, 503)
+            self.assertEqual(status.get_json()["reload_url"], reload_url)
+
+            script = base / "scripts/demo.py"
+            script.write_text("print('later edit')", encoding="utf-8")
+            with patch.object(restore, "reload_scheduler", side_effect=RuntimeError("retry unavailable")):
+                failed_reload = client.post(reload_url, headers={"X-CSRF-Token": "proxy-csrf"})
+            self.assertEqual(failed_reload.status_code, 503)
+            self.assertTrue(failed_reload.get_json()["scheduler_reload_required"])
+            pending = client.get(f"/api/backup/restore/{request_id}")
+            self.assertEqual(pending.status_code, 503)
+            self.assertEqual(pending.get_json()["scheduler_error"], "retry unavailable")
+            self.assertEqual(pending.get_json()["reload_url"], reload_url)
+
+            with patch.object(restore, "reload_scheduler") as reload_scheduler:
+                recovered = client.post(reload_url, headers={"X-CSRF-Token": "proxy-csrf"})
+                self.assertEqual(recovered.status_code, 200)
+                reload_scheduler.assert_called_once()
+            resolved = client.get(f"/api/backup/restore/{request_id}")
+            self.assertEqual(resolved.status_code, 200)
+            self.assertTrue(resolved.get_json()["resolved"])
+            self.assertFalse(resolved.get_json()["scheduler_reload_required"])
+            self.assertEqual(resolved.get_json()["scheduler_error"], "")
+
+            with patch.object(restore, "reload_scheduler") as reload_again:
+                replay = client.post(reload_url, headers={"X-CSRF-Token": "proxy-csrf"})
+                self.assertEqual(replay.status_code, 200)
+                reload_again.assert_not_called()
+            self.assertEqual(script.read_text(encoding="utf-8"), "print('later edit')")
+
+    def test_html_restore_scheduler_recovery_keeps_csrf_and_request_identity(self):
+        with isolated_app() as (app, base):
+            from fls_manager.routes.backup import restore
+
+            client = app.test_client()
+            self.authenticate(client)
+            request_id = "8" * 32
+            action = f"/backup/restore/{request_id}/reload"
+            fields = {"restore_request_id": request_id, "csrf_token": "proxy-csrf"}
+            with patch.object(restore, "reload_scheduler", side_effect=RuntimeError("initial reload unavailable")):
+                failed_restore = self.post(client, api=False, fields=fields, headers={})
+
+            self.assertEqual(failed_restore.status_code, 503)
+            form = self.form(failed_restore, action)
+            self.assertEqual(form["action"], action)
+            self.assertEqual(form["fields"].get("csrf_token"), "proxy-csrf")
+            self.assertEqual(client.post(action, data={"csrf_token": "bad"}).status_code, 400)
+
+            script = base / "scripts/demo.py"
+            script.write_text("print('later edit')", encoding="utf-8")
+            with patch.object(restore, "reload_scheduler", side_effect=RuntimeError("retry unavailable")):
+                retry_failed = client.post(action, data=form["fields"])
+            self.assertEqual(retry_failed.status_code, 503)
+            form = self.form(retry_failed, action)
+
+            with patch.object(restore, "reload_scheduler") as reload_scheduler:
+                recovered = client.post(action, data=form["fields"])
+                self.assertEqual(recovered.status_code, 302)
+                reload_scheduler.assert_called_once()
+            resolved = client.get(f"/api/backup/restore/{request_id}")
+            self.assertEqual(resolved.status_code, 200)
+            self.assertTrue(resolved.get_json()["resolved"])
+            self.assertEqual(script.read_text(encoding="utf-8"), "print('later edit')")
+
     def test_invalid_ranges_and_dependency_selection_never_extract_or_write(self):
         for api in (False, True):
             for fields in ({"restore_items": ["data", "unknown"]}, {"restore_items": ["data", "data"]},

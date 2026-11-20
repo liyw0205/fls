@@ -247,7 +247,18 @@ def persist_backup_job(info):
                 key=lambda pair: str(pair[1].get("updated_at") or pair[1].get("created_at") or ""),
                 reverse=True,
             )
-            return dict(ordered[:BACKUP_JOB_LIMIT])
+            protected, history = [], []
+            for pair in ordered:
+                info = pair[1]
+                if (
+                    info.get("running") is True
+                    or info.get("status") in ("准备中", "正在压缩", "正在取消", "结果未知")
+                    or info.get("staged_cleanup_pending") is True
+                ):
+                    protected.append(pair)
+                else:
+                    history.append(pair)
+            return dict(protected + history[:BACKUP_JOB_LIMIT])
 
         mutate_json(BACKUP_JOBS_FILE, {}, update, strict=True)
 

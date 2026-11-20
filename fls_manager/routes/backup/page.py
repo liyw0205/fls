@@ -218,8 +218,57 @@ function flsShowBackupJob(text){{
 }}
 
 function flsBackupRequest(){{
-    const raw = sessionStorage.getItem("fls-backup-request");
-    return raw ? JSON.parse(raw) : null;
+    let raw;
+    try {{
+        raw = sessionStorage.getItem("fls-backup-request");
+    }} catch(error) {{
+        return flsInvalidBackupRequestRecovery("本地备份请求状态无法读取，请先核对实际备份列表。");
+    }}
+    if(raw === null) return null;
+
+    let pending;
+    try {{
+        pending = JSON.parse(raw);
+    }} catch(error) {{
+        return flsInvalidBackupRequestRecovery("本地备份请求状态损坏，原记录已保留；请先核对实际备份列表。");
+    }}
+    const validId = value => typeof value === "string" && /^[a-f0-9]{{32}}$/.test(value);
+    if(!pending || typeof pending !== "object" || Array.isArray(pending)
+        || pending.request_id !== undefined && !validId(pending.request_id)
+        || pending.job_id !== undefined && !validId(pending.job_id)
+        || !validId(pending.request_id) && !validId(pending.job_id)
+        || pending.items !== undefined && (!Array.isArray(pending.items) || !pending.items.length
+            || pending.items.some(item => item !== "data" && item !== "scripts")
+            || new Set(pending.items).size !== pending.items.length)
+        || !validId(pending.job_id) && (!Array.isArray(pending.items) || !pending.items.length)
+        || pending.result_unknown !== undefined && typeof pending.result_unknown !== "boolean"
+        || pending.archive_list_verified !== undefined && typeof pending.archive_list_verified !== "boolean") {{
+        return flsInvalidBackupRequestRecovery("本地备份请求状态无效，原记录已保留；请先核对实际备份列表。");
+    }}
+    return pending;
+}}
+
+function flsInvalidBackupRequestRecovery(message){{
+    flsSetBackupCreateLocked(true);
+    flsShowBackupJob("<p role='alert'>" + flsEscapeHtml(message) + "</p><button class='btn btn-primary' type='button' onclick='flsRecoverInvalidBackupRequest(this)'>刷新备份列表并清理无效请求</button> <a class='btn btn-gray' href='#backup-list'>查看备份列表</a>");
+    return {{invalid:true}};
+}}
+
+async function flsRecoverInvalidBackupRequest(source){{
+    if(!confirm("将先刷新实际备份列表。只有列表读取成功后，才清理损坏的本地请求记录；确认继续吗？")) return;
+    if(!flsMarkButtonBusy(source, "核对中...")) return;
+    try {{
+        if(!await flsRefreshBackupList()) throw new Error("备份列表读取失败");
+        sessionStorage.removeItem("fls-backup-request");
+        const form = document.getElementById("backupCreateForm");
+        if(form) form.elements.request_id.value = flsNewBackupRequest();
+        flsSetBackupCreateLocked(false);
+        flsShowBackupJob("已刷新实际备份列表并清理无效的本地请求记录。请核对归档后再创建备份。");
+    }} catch(error) {{
+        flsInvalidBackupRequestRecovery("无法确认或清理本地请求状态，原记录仍保留；请重试。" + String(error));
+    }} finally {{
+        flsRestoreButton(source);
+    }}
 }}
 
 function flsNewBackupRequest(){{
@@ -270,7 +319,7 @@ function flsBackupJobRecovery(jobId, message, retryAllowed){{
 
 function flsResumeBackup(confirmRetry, source){{
     const pending = flsBackupRequest();
-    if(!pending) return;
+    if(!pending || pending.invalid) return;
     if(pending.job_id) return flsPollBackupJob(pending.job_id, source);
     return flsCreateBackup(source, confirmRetry);
 }}
@@ -278,6 +327,7 @@ function flsResumeBackup(confirmRetry, source){{
 async function flsCreateBackup(source, confirmRetry){{
     const form = document.getElementById("backupCreateForm");
     const pending = flsBackupRequest();
+    if(pending && pending.invalid) return;
     if(pending && pending.job_id){{
         await flsPollBackupJob(pending.job_id, source);
         return;
@@ -483,12 +533,12 @@ async function flsRefreshBackupList(source, unknownJobId){{
         }});
 
         const json = await flsReadJsonResponse(res);
-        if(!res.ok || !json.ok){{
+        if(!res.ok || !json.ok || !Array.isArray(json.items)){{
             throw new Error(flsActionFailure(json.msg || ("HTTP " + res.status), "检查服务状态后重试"));
         }}
 
         const tbody = document.getElementById("backupListTbody");
-        if(!tbody) return;
+        if(!tbody) return false;
         const pending = JSON.parse(sessionStorage.getItem("fls-backup-delete") || "null");
         if(pending){{
             const current = (json.items || []).find(item => item.name === pending.filename);
@@ -501,7 +551,7 @@ async function flsRefreshBackupList(source, unknownJobId){{
         if(!json.items || !json.items.length){{
             tbody.innerHTML = "<tr class='empty-state-row'><td colspan='4'><div class='empty-state'><p>暂无备份</p><div class='empty-state-actions'><a class='btn btn-primary' href='#backup-create'>创建备份</a></div></div></td></tr>";
             if(unknownJobId) flsBackupArchiveListVerified(unknownJobId);
-            return;
+            return true;
         }}
 
         let html = "";
@@ -526,9 +576,11 @@ async function flsRefreshBackupList(source, unknownJobId){{
             flsEnhanceMobileTables(document);
         }}
         if(unknownJobId) flsBackupArchiveListVerified(unknownJobId);
+        return true;
 
     }} catch(e) {{
         alert(flsActionFailure("刷新备份列表失败：" + e, "检查服务状态后重试"));
+        return false;
     }} finally {{
         flsRestoreButton(source);
     }}
@@ -581,6 +633,7 @@ setTimeout(function(){{
     }}
     const pending = flsBackupRequest();
     const jobId = new URLSearchParams(location.search).get("job_id");
+    if(pending && pending.invalid) return;
     if(pending){{
         if(pending.result_unknown) flsSetBackupCreateLocked(true, pending.items);
         if(pending.job_id) flsPollBackupJob(pending.job_id);

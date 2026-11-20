@@ -6,6 +6,7 @@ import re
 from flask import send_file
 from contextlib import nullcontext
 from ... import models
+from ...csrf import csrf_token
 from ...storage import storage_transaction
 from ...ui.components import page_header_card
 
@@ -84,7 +85,7 @@ def _restore_request_response(record):
         "restored": restored, "restore_outcome_unknown": unknown,
         "restored_items": record.get("restore_items", []),
         "scheduler_reload_required": reload_required,
-        "reload_url": "/api/scheduler/reload" if reload_required else "",
+        "reload_url": f"/api/backup/restore/{record['request_id']}/reload" if reload_required else "",
         "dependencies_failed": dependencies_failed,
         "dependencies": record.get("dependencies", ""),
         "dependency_log": record.get("dependency_log", ""),
@@ -117,38 +118,108 @@ def api_backup_restore_request(request_id):
     return jsonify(payload), status
 
 
-@bp.route("/api/backup/restore/<request_id>/reload", methods=["POST"])
-def api_backup_restore_reload(request_id):
+def _reload_restore_scheduler(request_id):
     if not re.fullmatch(r"[a-f0-9]{32}", request_id):
-        return jsonify(ok=False, msg="恢复请求标识无效"), 400
+        return {"ok": False, "request_id": request_id, "msg": "恢复请求标识无效"}, 400
     try:
         with models.TASKS_MUTATION_LOCK, storage_transaction(), BACKUP_RESTORE_REQUEST_LOCK:
             record = _read_restore_request(request_id)
             if not record:
-                return jsonify(ok=False, msg="恢复请求不存在"), 404
+                return {"ok": False, "request_id": request_id, "msg": "恢复请求不存在"}, 404
             if record["state"] not in ("restored", "unknown"):
-                return jsonify(ok=False, msg="恢复请求尚未结束，请稍后查询"), 409
+                return {"ok": False, "request_id": request_id, "msg": "恢复请求尚未结束，请稍后查询"}, 409
             if backup_state.RESTORE_ACTIVE:
-                return jsonify(ok=False, msg="正在恢复目录，请恢复结束后重试"), 409
-            if record.get("scheduler_reload_required", False) or record["state"] == "unknown" and not record.get("scheduler_reloaded", False):
-                reload_scheduler()
-                record.update(scheduler_reload_required=False, scheduler_reloaded=True)
+                return {"ok": False, "request_id": request_id, "msg": "正在恢复目录，请恢复结束后重试"}, 409
+            reload_required = record.get("scheduler_reload_required", False) or (
+                record["state"] == "unknown" and not record.get("scheduler_reloaded", False)
+            )
+            if reload_required:
+                try:
+                    reload_scheduler()
+                except Exception as exc:
+                    scheduler_error = str(exc)
+                    record.update(
+                        scheduler_reload_required=True,
+                        scheduler_reloaded=False,
+                        scheduler_error=scheduler_error,
+                    )
+                    message = f"调度器重载未确认：{scheduler_error}。请查询原恢复请求后重试。"
+                    try:
+                        _save_restore_request(record)
+                    except Exception as persist_exc:
+                        message += f"恢复诊断保存失败：{persist_exc}。"
+                    return {
+                        "ok": False,
+                        "request_id": request_id,
+                        "state": record["state"],
+                        "restored": record["state"] == "restored",
+                        "scheduler_reload_required": True,
+                        "scheduler_error": _bounded_restore_diagnostic(scheduler_error),
+                        "reload_url": f"/api/backup/restore/{request_id}/reload",
+                        "msg": message,
+                    }, 503
+                record.update(scheduler_reload_required=False, scheduler_reloaded=True, scheduler_error="")
                 _save_restore_request(record)
-            return jsonify(ok=True, msg="已重新加载当前任务，目录保持不变", request_id=request_id)
+            return {
+                "ok": True,
+                "request_id": request_id,
+                "state": record["state"],
+                "restored": record["state"] == "restored",
+                "scheduler_reload_required": False,
+                "msg": "已重新加载当前任务，目录保持不变",
+            }, 200
     except Exception as exc:
-        return jsonify(ok=False, msg=f"调度器重载未确认：{exc}。请查询原恢复请求后重试。"), 503
+        return {
+            "ok": False,
+            "request_id": request_id,
+            "scheduler_reload_required": True,
+            "reload_url": f"/api/backup/restore/{request_id}/reload",
+            "msg": f"调度器重载未确认：{exc}。请查询原恢复请求后重试。",
+        }, 503
+
+
+@bp.route("/backup/restore/<request_id>/reload", methods=["POST"])
+def backup_restore_reload(request_id):
+    payload, status = _reload_restore_scheduler(request_id)
+    if payload.get("ok"):
+        return redirect(url_for("backup.backup_page", _anchor="backup-restore"))
+    return restore_error(
+        payload.get("msg") or "调度器重载未确认",
+        status,
+        restored=bool(payload.get("restored")),
+        request_id=request_id,
+        scheduler_reload_required=bool(payload.get("scheduler_reload_required")),
+        scheduler_error=payload.get("scheduler_error", ""),
+        state=payload.get("state", ""),
+    )
+
+
+@bp.route("/api/backup/restore/<request_id>/reload", methods=["POST"])
+def api_backup_restore_reload(request_id):
+    payload, status = _reload_restore_scheduler(request_id)
+    return jsonify(payload), status
 
 
 def restore_error(message, status, *, restored=False, restored_items=None, **details):
     payload = {"ok": False, "msg": message, "restored": restored,
                "restored_items": restored_items or [], "scheduler_reload_required": restored, **details}
     if payload["scheduler_reload_required"]:
-        payload["reload_url"] = "/api/scheduler/reload"
+        if isinstance(details.get("request_id"), str) and re.fullmatch(r"[a-f0-9]{32}", details["request_id"]):
+            payload["reload_url"] = f"/api/backup/restore/{details['request_id']}/reload"
+        else:
+            payload["reload_url"] = "/api/scheduler/reload"
     if request.path.startswith("/api/"):
         return jsonify(payload), status
     body = f'<section class="section" role="alert"><p>{h(message)}</p></section>'
     if payload["scheduler_reload_required"]:
-        body += '<form method="post" action="/scheduler/reload?back=/backup"><section class="section"><button class="btn btn-primary" type="submit">仅重新加载调度器</button></section></form><a class="btn btn-blue" href="/tasks">查看已恢复任务</a>'
+        request_id = details.get("request_id")
+        reload_action = (
+            f"/backup/restore/{request_id}/reload"
+            if isinstance(request_id, str) and re.fullmatch(r"[a-f0-9]{32}", request_id)
+            else "/scheduler/reload?back=/backup"
+        )
+        csrf_field = f'<input type="hidden" name="csrf_token" value="{h(csrf_token())}">'
+        body += f'<form method="post" action="{h(reload_action)}">{csrf_field}<section class="section"><button class="btn btn-primary" type="submit">仅重新加载调度器</button></section></form><a class="btn btn-blue" href="/tasks">查看已恢复任务</a>'
     if payload.get("dependencies_failed"):
         body += f'<section class="section"><p>{h(payload.get("dependencies", ""))}</p><pre>{h(payload.get("dependency_log", ""))}</pre></section>'
         body += '<a class="btn btn-blue" href="/deps">查看并修复依赖</a>'
@@ -476,6 +547,9 @@ def backup_import():
             return restore_error(
                 f"备份已恢复，但调度器重载失败：{scheduler_error}。请查看已恢复任务并仅重新加载调度器。",
                 503, restored=True, restored_items=restore_items,
+                request_id=request_id,
+                state=restore_record.get("state", "restored") if restore_record else "restored",
+                scheduler_error=scheduler_error,
                 dependencies=deps_msg or "未恢复依赖", dependency_log=deps_log, dependencies_failed=dependencies_failed,
             )
 
