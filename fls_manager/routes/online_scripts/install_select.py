@@ -2,7 +2,7 @@ from ._common import *
 import re
 import uuid
 
-from ...models import TaskSchedulerReloadError
+from ...models import TASKS_MUTATION_LOCK, TaskSchedulerReloadError
 from ...scheduler import reload_scheduler
 from ...online_scripts.constants import (
     claim_online_task_import_request,
@@ -14,7 +14,10 @@ from ...online_scripts.constants import (
     TaskImportHistoryFull,
     TaskImportReceiptMissing,
 )
-from ...online_scripts.tasks import online_task_import_version
+from ...online_scripts.tasks import (
+    online_task_import_version, OnlineTaskPreparationError, OnlineTaskConfirmationStale, task_import_publication_state,
+    task_import_file_signature,
+)
 from ...online_scripts.source import get_task_link_request, online_task_link_version
 from ...storage import storage_transaction
 from ...utils import now_str
@@ -136,10 +139,27 @@ def _run_online_task_import(record, item, enable_task, selected_task_indexes, re
     ONLINE_TASK_IMPORT_ACTIVE.add(request_id)
     try:
         try:
+            with TASKS_MUTATION_LOCK, storage_transaction():
+                record["task_baseline"] = task_import_file_signature()
+                record["task_baseline_captured"] = True
+                persist_online_task_import_request(record)
+        except Exception as exc:
+            return _import_failure(record, f"任务文件基线无法保存，未写入任务：{exc}", 503)
+
+        try:
             _import_record_update(record, "running")
             persist_online_task_import_request(record)
         except Exception as exc:
             return _import_failure(record, f"导入启动回执无法保存，未写入任务：{exc}", 500)
+
+        def before_publish(publication):
+            if record.get("retry_source") and record["retry_source"] != publication["before_source"]:
+                raise OnlineTaskConfirmationStale("原未写入确认已因任务文件变化失效，未写入任务；请重新核对当前任务")
+            if record.get("task_baseline_captured") and record["task_baseline"] != publication["before_source"]:
+                raise OnlineTaskConfirmationStale("任务文件自原请求检查后已变化，未写入任务；请重新核对当前任务")
+            record["publication"] = publication
+            persist_online_task_import_request(record)
+
         try:
             ok, message = import_task_if_needed(
                 item,
@@ -147,6 +167,7 @@ def _run_online_task_import(record, item, enable_task, selected_task_indexes, re
                 enable_task=enable_task,
                 selected_task_indexes=selected_task_indexes,
                 raise_on_reload_error=True,
+                before_publish=before_publish,
             )
         except TaskSchedulerReloadError as exc:
             return _import_failure(
@@ -158,7 +179,15 @@ def _run_online_task_import(record, item, enable_task, selected_task_indexes, re
             )
         except OnlineTaskValidationError as exc:
             return _import_failure(record, str(exc), 400)
+        except OnlineTaskConfirmationStale as exc:
+            record["publication"] = None
+            return _import_failure(record, str(exc), 409, state="unknown")
+        except OnlineTaskPreparationError as exc:
+            record["publication"] = None
+            return _import_failure(record, str(exc), 500)
         except Exception as exc:
+            if record.get("publication"):
+                return _import_failure(record, f"任务发布结果无法确认：{exc}。请检查原导入结果，勿重复写入。", 503, state="unknown")
             return _import_failure(record, f"任务导入失败：{exc}。请检查文件权限和磁盘空间后重试。", 500)
 
         message = message or "任务导入已完成"
@@ -172,7 +201,7 @@ def _run_online_task_import(record, item, enable_task, selected_task_indexes, re
             except Exception:
                 pass
             if not actual or actual.get("state") != "completed":
-                return {"ok": False, "request_id": request_id, "msg": f"任务已导入，但完成回执无法确认：{exc}，请查询原请求。", "retry_allowed": False}, 503
+                return _import_failure(record, f"任务已导入，但完成回执无法确认：{exc}，请检查原导入结果。", 503, state="unknown")
         if not ok:
             return {"ok": False, "request_id": request_id, "msg": message, "retry_allowed": False}, 409
         return {"ok": True, "request_id": request_id, "msg": message}, 200
@@ -223,6 +252,9 @@ def _existing_import_result(record, script_id, data, *, expected_version=""):
     if record.get("archived"):
         return {**identity, "ok": False, "archived": True, "replayed": True,
                 "msg": "原导入请求已归档，不能继续导入；" + record.get("message", "")}, 409
+    if record.get("confirmation_stale") or record.get("confirmation_check_error"):
+        return {**identity, "ok": False, "confirmation_stale": True,
+                "msg": "原未写入确认已失效或无法复核，请检查原导入结果；未重复写入任务。"}, 409
     if record["state"] == "failed" and not record.get("active"):
         if expected_version and record.get("expected_version") != expected_version:
             return {**identity, "ok": False, "msg": "脚本源版本已变化，请查询原请求并重新选择。"}, 409
@@ -305,6 +337,7 @@ def _submit_online_task_import(script_id, data):
         "expected_version": expected_version,
         "selected_task_indexes": list(selected_task_indexes),
         "task_count": len(online_script_task_crons(item)),
+        "publication_tracking": True,
         "enable_task": bool(enable_task),
         "state": "prepared",
         "message": "",
@@ -419,6 +452,63 @@ def _import_history_page():
                                            with_pagination=True)
 
 
+def _confirm_task_import(request_id):
+    if not re.fullmatch(r"[a-f0-9]{32}", request_id or ""):
+        return {"ok": False, "msg": "在线任务导入请求标识无效", "retry_allowed": False}, 400
+    with ONLINE_TASK_IMPORT_LOCK, TASKS_MUTATION_LOCK, storage_transaction():
+        try:
+            record = get_online_task_import_request(request_id)
+        except TaskImportReceiptMissing as exc:
+            return _missing_import_receipt(request_id, exc)
+        except Exception as exc:
+            return {"ok": False, "request_id": request_id, "msg": f"导入回执无法读取：{exc}", "retry_allowed": False}, 503
+        if not record:
+            return {"ok": False, "request_id": request_id, "msg": "导入请求不存在", "retry_allowed": False}, 404
+        identity = {"request_id": request_id, "script_id": record["script_id"], "retry_allowed": False,
+                    "status_url": f"/online-scripts/import-tasks-status/{request_id}"}
+        if record.get("active") or record.get("archived"):
+            return {**identity, "ok": False, "msg": "原导入仍在处理中或已归档，不能确认。"}, 409
+        if record["state"] == "completed":
+            return {**identity, "ok": True, "state": "completed", "replayed": True, "msg": record["message"]}, 200
+        if record["state"] not in ("unknown", "scheduler_pending") and not record.get("confirmation"):
+            return {**identity, "ok": False, "msg": "当前导入无需检查写入结果，请查询原请求。"}, 409
+        try:
+            confirmation, signature = task_import_publication_state(record)
+        except Exception as exc:
+            return {**identity, "ok": False, "state": record["state"], "msg": f"原导入结果无法确认：{exc}"}, 409
+        state = "scheduler_pending" if confirmation == "published" else "failed"
+        replayed = record.get("confirmation") == confirmation and record["state"] == state
+        if not replayed:
+            message = ("已核对原选择，任务已写入，仅需恢复调度器。" if confirmation == "published"
+                       else "已核对任务文件未变化，原导入未写入，可继续原请求。")
+            if record.get("message"):
+                message += "原诊断：" + record["message"]
+            _import_record_update(record, state, message, record.get("scheduler_reload_error", ""))
+            record.update(confirmation=confirmation, confirmation_source=signature)
+            try:
+                persist_online_task_import_request(record)
+            except Exception as exc:
+                return {**identity, "ok": False, "msg": f"检查结果回执无法确认，请查询原导入请求后重试：{exc}"}, 503
+        return {**identity, "ok": True, "state": state, "confirmation": confirmation, "replayed": replayed,
+                "retry_allowed": state == "failed", "scheduler_reload_required": state == "scheduler_pending",
+                "msg": record["message"]}, 200
+
+
+@bp.route("/api/online-scripts/import-tasks-confirm/<request_id>", methods=["POST"])
+def api_online_scripts_import_tasks_confirm(request_id):
+    payload, status_code = _confirm_task_import(request_id)
+    return jsonify(payload), status_code
+
+
+@bp.route("/online-scripts/import-tasks-confirm/<request_id>", methods=["POST"])
+def online_scripts_import_tasks_confirm(request_id):
+    payload, status_code = _confirm_task_import(request_id)
+    if payload.get("ok"):
+        return redirect(url_for("online_scripts.online_scripts_import_tasks_status", request_id=request_id))
+    return _task_import_error(payload.get("script_id", ""), payload.get("msg", "导入检查失败"), status_code,
+                              request_id=request_id)
+
+
 @bp.route("/api/online-scripts/import-tasks-reload/<request_id>", methods=["POST"])
 def api_online_scripts_import_tasks_reload(request_id):
     payload, status_code = _reload_import_scheduler(request_id)
@@ -428,7 +518,7 @@ def api_online_scripts_import_tasks_reload(request_id):
 def _reload_import_scheduler(request_id):
     if not re.fullmatch(r"[a-f0-9]{32}", request_id or ""):
         return {"ok": False, "msg": "在线任务导入请求标识无效"}, 400
-    with ONLINE_TASK_IMPORT_LOCK:
+    with ONLINE_TASK_IMPORT_LOCK, TASKS_MUTATION_LOCK:
         try:
             record = get_online_task_import_request(request_id)
         except TaskImportReceiptMissing as exc:
@@ -444,6 +534,15 @@ def _reload_import_scheduler(request_id):
             return {"ok": True, "request_id": request_id, "script_id": record.get("script_id", ""), "msg": "调度器已恢复，未重复导入", "replayed": True}, 200
         if record.get("state") != "scheduler_pending":
             return {"ok": False, "request_id": request_id, "script_id": record.get("script_id", ""), "msg": "当前导入没有待恢复的调度器状态"}, 409
+        if record.get("publication"):
+            try:
+                with storage_transaction():
+                    confirmation, _signature = task_import_publication_state(record)
+                if confirmation != "published":
+                    raise RuntimeError("原导入任务未写入，请检查原导入结果")
+            except Exception as exc:
+                return {"ok": False, "request_id": request_id, "script_id": record.get("script_id", ""),
+                        "msg": f"原任务状态无法复核，未重载调度器：{exc}", "retry_allowed": False}, 409
         try:
             reload_scheduler()
         except Exception as exc:
@@ -505,7 +604,8 @@ def online_scripts_import_tasks_reload(request_id):
     payload, status_code = _reload_import_scheduler(request_id)
     if payload.get("ok"):
         return redirect(url_for("online_scripts.online_scripts_page", msg=payload.get("msg")))
-    return _task_import_error(payload.get("script_id", ""), payload.get("msg", "导入恢复失败"), status_code, persisted=True, request_id=request_id)
+    return _task_import_error(payload.get("script_id", ""), payload.get("msg", "导入恢复失败"), status_code,
+                              persisted=status_code == 503, request_id=request_id)
 
 
 @bp.route("/online-scripts/import-tasks-status/<request_id>")
@@ -532,22 +632,27 @@ def online_scripts_import_tasks_status(request_id):
     actions = '<a class="btn btn-gray" href="/online-scripts/import-tasks-history">导入历史</a><a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>'
     if record.get("archived"):
         labels[state] = {"failed": "导入失败", "unknown": "导入结果未知", "scheduler_pending": "任务已保存，调度器未确认恢复"}[state] + "（已归档）"
-    elif state == "failed" and not record.get("active"):
+    elif record.get("confirmation_stale") or record.get("confirmation_check_error"):
+        labels[state] = "原未写入确认已失效或无法复核，请检查当前任务"
+        actions = '<a class="btn btn-primary" href="/tasks">核对当前任务</a>' + actions
+    elif state == "failed" and record.get("retry_allowed"):
         fields = f'<input type="hidden" name="request_id" value="{h(request_id)}">'
         fields += "".join(f'<input type="hidden" name="task_indexes" value="{h(index)}">' for index in record.get("selected_task_indexes", []))
         if record.get("enable_task"):
             fields += '<input type="hidden" name="enable_task" value="1">'
         actions = f'<form class="inline-form" method="post" action="/online-scripts/import-tasks/{h(record.get("script_id", ""))}">{fields}<button class="btn btn-primary" type="submit">继续原导入请求</button></form>' + actions
-    elif state == "scheduler_pending" and not record.get("active"):
+    elif state == "scheduler_pending" and not record.get("active") and not record.get("confirmation_stale") and not record.get("confirmation_check_error"):
         actions = f'<form class="inline-form" method="post" action="/online-scripts/import-tasks-reload/{h(request_id)}"><button class="btn btn-primary" type="submit">仅重新加载调度器</button></form>' + actions
     elif state in ("prepared", "running", "unknown"):
         actions = f'<a class="btn btn-blue" href="/online-scripts/import-tasks-status/{h(request_id)}">刷新查询</a>' + actions
+    if not record.get("active") and not record.get("archived") and (state == "unknown" or record.get("confirmation_stale") or record.get("confirmation_check_error")):
+        actions = f'<form class="inline-form" method="post" action="/online-scripts/import-tasks-confirm/{h(request_id)}"><button class="btn btn-primary" type="submit">检查原导入结果</button></form>' + actions
     body = page_header_card(
         "在线任务导入状态",
         help_html="该页面只读取导入回执，不会重复写入任务。调度器待恢复时仅执行重载，不会再次导入。",
         actions_html=actions,
     )
-    body += f'''<section class="section"><div class="card"><h2 class="section-title">{h(labels.get(state, state))}</h2><p>请求标识：<code>{h(request_id)}</code></p><p>脚本：{h(record.get("script_id"))}</p><p>更新时间：{h(record.get("updated_at"))}</p><p>{h(record.get("message") or record.get("scheduler_reload_error") or "-")}</p></div></section>'''
+    body += f'''<section class="section"><div class="card"><h2 class="section-title">{h(labels.get(state, state))}</h2><p>请求标识：<code>{h(request_id)}</code></p><p>脚本：{h(record.get("script_id"))}</p><p>更新时间：{h(record.get("updated_at"))}</p><p>{h(record.get("message") or record.get("scheduler_reload_error") or "-")}</p>{f'<p role="alert">原导入任务复核失败：{h(record.get("confirmation_check_error")) if record.get("confirmation_check_error") else "原任务内容已变化"}</p>' if record.get("confirmation_stale") or record.get("confirmation_check_error") else ''}</div></section>'''
     if not record.get("active") and not record.get("archived") and state in ("failed", "unknown", "scheduler_pending"):
         body += f'''<form method="post" action="/online-scripts/import-tasks-archive/{h(request_id)}" style="display:grid;gap:12px;margin:16px 0">
 <label style="display:flex;align-items:flex-start;gap:8px"><input type="checkbox" name="acknowledge" value="archive" required style="width:auto;flex:none"><span>已核对任务，保留当前任务和调度器状态并放弃此请求，允许清理其回执</span></label>
@@ -591,14 +696,19 @@ def online_scripts_import_tasks_history():
         state = str(record.get("state") or "unknown")
         status_label = "失败" if state == "failed" and record.get("archived") else labels.get(state, state)
         actions = f'<a class="btn btn-blue" href="/online-scripts/import-tasks-status/{h(request_id)}">查看状态</a>'
-        if state == "scheduler_pending" and not record.get("active") and not record.get("archived"):
+        if (state == "scheduler_pending" and not record.get("active") and not record.get("archived")
+                and not record.get("confirmation_stale") and not record.get("confirmation_check_error")):
             actions += f'<form class="inline-form" method="post" action="/online-scripts/import-tasks-reload/{h(request_id)}"><button class="btn btn-primary" type="submit">仅重载调度器</button></form>'
-        elif state == "failed" and not record.get("active") and not record.get("archived"):
+        elif state == "failed" and record.get("retry_allowed"):
             fields = f'<input type="hidden" name="request_id" value="{h(request_id)}">'
             fields += "".join(f'<input type="hidden" name="task_indexes" value="{h(index)}">' for index in record.get("selected_task_indexes", []))
             if record.get("enable_task"):
                 fields += '<input type="hidden" name="enable_task" value="1">'
             actions += f'<form class="inline-form" method="post" action="/online-scripts/import-tasks/{h(record.get("script_id") or "")}">{fields}<button class="btn btn-orange" type="submit">继续原导入请求</button></form>'
+        elif not record.get("active") and not record.get("archived") and (state == "unknown" or record.get("confirmation_stale") or record.get("confirmation_check_error")):
+            actions += f'<form class="inline-form" method="post" action="/online-scripts/import-tasks-confirm/{h(request_id)}"><button class="btn btn-primary" type="submit">检查原导入结果</button></form>'
+            if state == "failed":
+                status_label = "原未写入确认无法复核"
         rows.append(
             "<tr>"
             f"<td><code>{h(request_id)}</code></td>"
@@ -1024,6 +1134,7 @@ def online_scripts_install_select(script_id):
 <a class="btn btn-orange" id="onlineInstallRecoveryLog" href="#" hidden>查看原安装日志</a>
 <a class="btn btn-blue" id="onlineInstallRecoveryStatusLink" href="#" hidden>查询原导入请求</a>
 <a class="btn btn-primary" id="onlineInstallRecoveryHistory" href="/online-scripts/import-tasks-history?recovery=1" hidden>处理待恢复导入</a>
+<button class="btn btn-primary" id="onlineInstallRecoveryConfirm" type="button" hidden>检查原导入结果</button>
 <button class="btn btn-primary" id="onlineInstallRecoveryReload" type="button" hidden>仅重新加载调度器</button>
 <button class="btn btn-gray" id="onlineInstallRecoveryRetry" type="button" hidden>重新读取安装状态</button>
 
@@ -1304,6 +1415,7 @@ async function flsInstallRecoverPending(){{
     const logEl = document.getElementById("onlineInstallRecoveryLog");
     const importStatusEl = document.getElementById("onlineInstallRecoveryStatusLink");
     const reloadSchedulerEl = document.getElementById("onlineInstallRecoveryReload");
+    const confirmImportEl = document.getElementById("onlineInstallRecoveryConfirm");
     const retryEl = document.getElementById("onlineInstallRecoveryRetry");
     let pending;
     try{{ pending = JSON.parse(sessionStorage.getItem("fls-online-install-request") || "null"); }}catch(_error){{ pending = null; }}
@@ -1318,6 +1430,7 @@ async function flsInstallRecoverPending(){{
         if(statusEl){{ statusEl.hidden = false; statusEl.textContent = "正在读取原安装状态..."; }}
         if(loginEl) loginEl.hidden = true;
         if(reloadSchedulerEl) reloadSchedulerEl.hidden = true;
+        if(confirmImportEl) confirmImportEl.hidden = true;
         try{{
             const response = await fetch(
                 importMode
@@ -1336,23 +1449,37 @@ async function flsInstallRecoverPending(){{
                     return;
                 }}
                 if(statusEl) statusEl.textContent = "原任务导入请求：" + (json.archived ? "已归档，不能继续导入或恢复调度器；" : "") + (json.message || json.state || "未知");
-                if(reloadSchedulerEl && json.state === "scheduler_pending" && !json.archived && !json.active){{
-                    reloadSchedulerEl.hidden = false;
-                    reloadSchedulerEl.onclick = async function(){{
-                        reloadSchedulerEl.disabled = true;
-                        try{{
-                            const csrf = typeof flsGetCsrfToken === "function" ? flsGetCsrfToken() : "";
-                            const headers = {{"X-Requested-With":"XMLHttpRequest"}};
-                            if(csrf) headers["X-CSRF-Token"] = csrf;
-                            const reloadResponse = await fetch("/api/online-scripts/import-tasks-reload/" + encodeURIComponent(installId), {{method:"POST", headers, credentials:"same-origin"}});
-                            const reloadJson = await flsReadJsonResponse(reloadResponse);
-                            if(!reloadJson || reloadJson.ok !== true) throw Object.assign(new Error(reloadJson && reloadJson.msg || "调度器重载未完成"), {{status: reloadResponse.status}});
-                            await read();
-                        }}catch(error){{
-                            if(statusEl) statusEl.textContent = "调度器重载失败：" + (error && error.message || String(error || "请求失败")) + "。任务文件保持已保存。";
-                            reloadSchedulerEl.disabled = false;
+                if(json.confirmation_stale || json.confirmation_check_error){{
+                    if(statusEl) statusEl.textContent += "。原未写入确认已失效或无法复核，请检查当前任务。";
+                }}
+                async function recoverImport(action, button, label){{
+                    if(button.__flsRecovering) return;
+                    button.__flsRecovering = true;
+                    button.disabled = true;
+                    try{{
+                        const csrf = typeof flsGetCsrfToken === "function" ? flsGetCsrfToken() : "";
+                        const headers = {{"X-Requested-With":"XMLHttpRequest"}};
+                        if(csrf) headers["X-CSRF-Token"] = csrf;
+                        const response = await fetch("/api/online-scripts/import-tasks-" + action + "/" + encodeURIComponent(installId), {{method:"POST", headers, credentials:"same-origin"}});
+                        const result = await flsReadJsonResponse(response);
+                        if(!result || result.ok !== true || result.request_id !== installId) throw new Error("原请求恢复响应无效，请查询原导入请求");
+                        await read();
+                    }}catch(error){{
+                        if(statusEl) statusEl.textContent = label + "失败：" + (error && error.message || String(error || "请求失败")) + "。请查询原导入请求。";
+                        const denied = error && (error.status === 401 || error.status === 403);
+                        if(loginEl){{
+                            loginEl.hidden = !denied;
+                            if(denied) loginEl.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
                         }}
-                    }};
+                    }}finally{{ button.disabled = false; button.__flsRecovering = false; }}
+                }}
+                if(confirmImportEl && !json.active && !json.archived && (json.state === "unknown" || json.confirmation_stale || json.confirmation_check_error)){{
+                    confirmImportEl.hidden = false;
+                    confirmImportEl.onclick = () => recoverImport("confirm", confirmImportEl, "原导入结果检查");
+                }}
+                if(reloadSchedulerEl && json.state === "scheduler_pending" && !json.archived && !json.active && !json.confirmation_stale && !json.confirmation_check_error){{
+                    reloadSchedulerEl.hidden = false;
+                    reloadSchedulerEl.onclick = () => recoverImport("reload", reloadSchedulerEl, "调度器重载");
                 }}
                 return;
             }}

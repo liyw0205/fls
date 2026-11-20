@@ -404,7 +404,7 @@ class OnlineInstallLifecycleTests(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "Install commands use sh")
     def test_stop_log_page_uses_csrf_api_and_exposes_query_after_request_error(self):
-        with isolated_app() as (app, base_dir):
+        with isolated_app() as (app, base_dir), patch("fls_manager.app.dispatch_frontend_open_event"):
             info = self.register(base_dir, "stop-log-ui")
             log_file = base_dir / "log" / "stop-log-ui.log"
             log_file.parent.mkdir(parents=True, exist_ok=True)

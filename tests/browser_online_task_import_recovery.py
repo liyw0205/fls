@@ -20,7 +20,9 @@ def main():
         from fls_manager.app import create_app
         import fls_manager.app as app_module
         from fls_manager import scheduler
+        from fls_manager import storage
         from fls_manager.models import load_tasks, save_tasks
+        from fls_manager import models
         from fls_manager.online_scripts import constants, source, tasks
         from fls_manager.routes.online_scripts import install_select
 
@@ -31,7 +33,7 @@ def main():
                           {"name": "Excluded task", "command": "echo excluded", "cron": ""}],
         }
         source.save_online_script_cache([item])
-        fault = {"fail": True, "reloads": 0, "startup_failure": ""}
+        fault = {"fail": True, "reloads": 0, "recovery_reloads": 0, "startup_failure": "", "publication_failure": False}
 
         def task_reload():
             fault["reloads"] += 1
@@ -39,11 +41,22 @@ def main():
                 raise RuntimeError("fixture scheduler unavailable")
 
         def recovery_reload():
+            fault["recovery_reloads"] += 1
             return None
 
         real_task_reload = tasks.reload_scheduler
         real_recovery_reload = install_select.reload_scheduler
         real_persist = install_select.persist_online_task_import_request
+        real_write = storage._write_json_unlocked
+
+        def write(path, data):
+            if path == models.TASK_FILE and fault["publication_failure"]:
+                fault["publication_failure"] = False
+                real_write(path, data)
+                raise OSError("browser task publication confirmation lost")
+            return real_write(path, data)
+
+        storage._write_json_unlocked = write
 
         def persist(record):
             mode = fault["startup_failure"]
@@ -67,7 +80,7 @@ def main():
                 session["token_expire_at"] = 1
                 return jsonify(ok=True)
             if data.get("inspect"):
-                return jsonify(ok=True, tasks=load_tasks(), reloads=fault["reloads"])
+                return jsonify(ok=True, tasks=load_tasks(), reloads=fault["reloads"], recovery_reloads=fault["recovery_reloads"])
             if data.get("damage_cache"):
                 constants.ONLINE_SCRIPT_CACHE_FILE.write_text("broken browser cache", encoding="utf-8")
                 return jsonify(ok=True)
@@ -75,7 +88,7 @@ def main():
             save_tasks([])
             constants.ONLINE_TASK_IMPORT_ACTIVE.clear()
             constants.mutate_json(constants.ONLINE_TASK_IMPORT_REQUESTS_FILE, {}, lambda _: {}, strict=True)
-            fault.update(fail=data.get("fail", True), startup_failure=data.get("startup_failure", ""), reloads=0)
+            fault.update(fail=data.get("fail", True), startup_failure=data.get("startup_failure", ""), publication_failure=data.get("publication_failure", False), reloads=0, recovery_reloads=0)
             request_id = uuid.uuid4().hex
             if data.get("capacity"):
                 normalized = source.load_online_script_cache()[0]
@@ -112,6 +125,7 @@ def main():
             tasks.reload_scheduler = real_task_reload
             install_select.reload_scheduler = real_recovery_reload
             install_select.persist_online_task_import_request = real_persist
+            storage._write_json_unlocked = real_write
             server.shutdown()
             server.server_close()
             scheduler.scheduler.shutdown(wait=False)
@@ -221,6 +235,35 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    assert.equal(await reload.count(),1);
    await reload.click();
    await page.waitForFunction(()=>document.body.textContent.includes('任务已保存，调度器已恢复'));
+   await fixture({fail:false,publication_failure:true});
+   await page.goto(selectUrl);
+   await page.locator('.fls-install-task-checkbox[data-index="2"]').uncheck();
+   const uncertainPost=base+'/api/online-scripts/import-tasks/browser-import';
+   await page.route(uncertainPost,async route=>{const response=await route.fetch();assert.equal(response.status(),503);await route.abort('connectionfailed');});
+   await page.locator('button[formaction="/online-scripts/import-tasks/browser-import"]').click();
+   await page.locator('#onlineInstallApiError').waitFor({state:'visible'});
+   const uncertainId=await page.evaluate(()=>JSON.parse(sessionStorage.getItem('fls-online-install-request')).request_id);
+   assert.equal((await fixture({inspect:true})).tasks.length,1);
+   assert.equal((await fixture({inspect:true})).reloads,0);
+   await page.unroute(uncertainPost);
+   await page.reload();
+   await page.getByRole('button',{name:'检查原导入结果',exact:true}).waitFor({state:'visible'});
+   const confirmPost=base+'/api/online-scripts/import-tasks-confirm/'+uncertainId;
+   await page.route(confirmPost,route=>route.fulfill({status:503,contentType:'text/html',body:'confirmation temporarily unavailable'}));
+   await page.getByRole('button',{name:'检查原导入结果',exact:true}).click();
+   await page.waitForFunction(()=>document.querySelector('#onlineInstallRecoveryStatus').textContent.includes('confirmation temporarily unavailable'));
+   assert.equal(await page.evaluate(()=>JSON.parse(sessionStorage.getItem('fls-online-install-request')).request_id),uncertainId);
+   await page.unroute(confirmPost);
+   await page.getByRole('button',{name:'检查原导入结果',exact:true}).click();
+   await page.waitForFunction(()=>document.querySelector('#onlineInstallRecoveryStatus').textContent.includes('仅需恢复调度器'));
+   assert.equal((await fixture({inspect:true})).tasks.length,1);
+   assert.equal((await fixture({inspect:true})).recovery_reloads,0);
+   await page.getByRole('button',{name:'仅重新加载调度器',exact:true}).click();
+   await page.waitForURL(url=>url.pathname==='/online-scripts'&&url.searchParams.has('msg'));
+   const confirmed=await fixture({inspect:true});
+   assert.equal(confirmed.tasks.length,1);assert.equal(confirmed.reloads,0);assert.equal(confirmed.recovery_reloads,1);
+   const confirmedStatus=await page.request.get(base+'/api/online-scripts/import-tasks-status/'+uncertainId,{headers});
+   assert.equal((await confirmedStatus.json()).state,'completed');
    const full=await fixture({capacity:true,fail:false});
    await page.evaluate(()=>sessionStorage.removeItem('fls-online-install-request'));
    await page.goto(selectUrl);
