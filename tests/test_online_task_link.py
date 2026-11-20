@@ -4,7 +4,7 @@ import subprocess
 import threading
 import time
 import unittest
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from html.parser import HTMLParser
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -124,6 +124,221 @@ class OnlineTaskLinkTests(unittest.TestCase):
             html_status = client.get("/online-scripts/task-link-status/" + request_id, headers={"X-Token": TOKEN})
             self.assertEqual(html_status.status_code, 200)
             self.assertIn("同步已完成", html_status.get_data(as_text=True))
+
+    def test_receipt_replay_survives_later_cache_and_proxy_changes(self):
+        for state in ("completed", "unknown"):
+            for change in ("corrupt-cache", "deleted-script", "missing-link", "changed-source", "deleted-proxy", "proxy-error"):
+                with self.subTest(state=state, change=change), isolated_app() as (app, _base_dir):
+                    from fls_manager.models import save_proxies
+                    from fls_manager.online_scripts import source
+                    from fls_manager.routes.online_scripts import task_link
+
+                    save_proxies([{"id": "chosen", "name": "Chosen", "type": "http",
+                                   "host": "127.0.0.1", "port": "8080", "enabled": True}])
+                    source.save_online_script_cache([self.item()])
+                    client = app.test_client()
+                    request_id = "b" * 32
+                    data = {"request_id": request_id, "proxy_id": "chosen"}
+                    headers = {"X-Token": TOKEN}
+                    with patch.object(task_link, "fetch_task_link_tasks", return_value=[self.task("original")]):
+                        self.assertEqual(client.post("/api/online-scripts/task-link/demo", json=data, headers=headers).status_code, 200)
+                    record = source.get_task_link_request(request_id)
+                    record.update(state=state, error="original receipt diagnosis")
+                    source.persist_task_link_request(record)
+                    if change == "corrupt-cache":
+                        source.ONLINE_SCRIPT_CACHE_FILE.write_text("{broken cache", encoding="utf-8")
+                    elif change == "deleted-script":
+                        source.save_online_script_cache([])
+                    elif change == "missing-link":
+                        item = self.item()
+                        item.pop("task_link")
+                        source.save_online_script_cache([item])
+                    elif change == "changed-source":
+                        source.save_online_script_cache([dict(self.item(), task_link="https://example.invalid/later.json")])
+                    elif change == "deleted-proxy":
+                        save_proxies([])
+                    cache_before = source.ONLINE_SCRIPT_CACHE_FILE.read_bytes()
+                    receipt_before = source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes()
+                    with patch.object(task_link, "get_online_script", wraps=task_link.get_online_script) as cache_read, patch.object(
+                        task_link, "validate_proxy_id", wraps=task_link.validate_proxy_id,
+                        side_effect=RuntimeError("proxy config unavailable") if change == "proxy-error" else None,
+                    ) as proxy_read, patch.object(task_link, "fetch_task_link_tasks") as fetch, patch.object(
+                        task_link, "claim_task_link_request",
+                    ) as claim:
+                        result = client.post("/api/online-scripts/task-link/demo", json=data, headers=headers)
+                        page = client.post("/online-scripts/task-link/demo", data=data, headers=headers)
+                        self.assertEqual(result.status_code, 200 if state == "completed" else 409)
+                        self.assertEqual(page.status_code, result.status_code)
+                        self.assertEqual(result.json["state"], state)
+                        self.assertTrue(result.json["replayed"])
+                        self.assertFalse(result.json["retry_allowed"])
+                        self.assertEqual(result.json["diagnostic"], "original receipt diagnosis")
+                        self.assertEqual(result.json["state_url"], "/api/online-scripts/task-link-status/" + request_id)
+                        self.assertEqual(result.json["status_url"], "/online-scripts/task-link-status/" + request_id)
+                        self.assertIn('href="/online-scripts/task-link-status/' + request_id + '"', page.get_data(as_text=True))
+                        self.assertIn("original receipt diagnosis", page.get_data(as_text=True))
+                        cache_read.assert_not_called()
+                        proxy_read.assert_not_called()
+                        fetch.assert_not_called()
+                        claim.assert_not_called()
+                    self.assertEqual(source.ONLINE_SCRIPT_CACHE_FILE.read_bytes(), cache_before)
+                    self.assertEqual(source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes(), receipt_before)
+
+    def test_receipt_replay_preserves_binding_auth_csrf_and_invalid_identity_boundaries(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import source
+            from fls_manager.routes.online_scripts import task_link
+
+            source.persist_task_link_request({
+                "request_id": "a" * 32, "script_id": "demo", "proxy_id": "original",
+                "state": "completed", "added": 1, "total": 1,
+            })
+            before = source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes()
+            client = app.test_client()
+            with client.session_transaction() as session:
+                session.update(token=TOKEN, token_expire_at=int(time.time()) + 3600,
+                               security_verified=True, csrf_token="replay-csrf")
+            data = {"request_id": "a" * 32, "proxy_id": "original", "csrf_token": "replay-csrf"}
+            with patch.object(task_link, "get_online_script") as cache, patch.object(task_link, "fetch_task_link_tasks") as fetch, patch.object(
+                task_link, "claim_task_link_request",
+            ) as claim:
+                original = client.post("/online-scripts/task-link/demo", data=data)
+                self.assertEqual(original.status_code, 200)
+                self.assertIn('href="/online-scripts/task-link-status/' + "a" * 32 + '"', original.get_data(as_text=True))
+                for script_id, proxy_id in (("other-script", "original"), ("demo", "other-proxy")):
+                    denied = client.post("/api/online-scripts/task-link/" + script_id, json=dict(data, proxy_id=proxy_id), headers={"X-CSRF-Token": "replay-csrf"})
+                    self.assertEqual(denied.status_code, 409)
+                    self.assertFalse(denied.json["retry_allowed"])
+                for csrf in ("", "wrong"):
+                    self.assertEqual(client.post("/api/online-scripts/task-link/demo", json=data, headers={"X-CSRF-Token": csrf}).status_code, 400)
+                self.assertEqual(client.post("/api/online-scripts/task-link/demo", json=dict(data, request_id="invalid-id"), headers={"X-CSRF-Token": "replay-csrf"}).status_code, 400)
+                with client.session_transaction() as session:
+                    session["token_expire_at"] = 1
+                expired = client.post("/api/online-scripts/task-link/demo", json=data, headers={"X-CSRF-Token": "replay-csrf"})
+                self.assertEqual(expired.status_code, 401)
+                cache.assert_not_called()
+                fetch.assert_not_called()
+                claim.assert_not_called()
+            self.assertEqual(source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes(), before)
+
+    def test_wrong_binding_does_not_reconcile_or_change_orphaned_running_receipt(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import source
+            from fls_manager.routes.online_scripts import task_link
+
+            request_id = "a" * 32
+            source.persist_task_link_request({
+                "request_id": request_id, "script_id": "demo", "proxy_id": "original", "state": "running",
+            })
+            before = source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes()
+            with patch.object(task_link, "get_online_script") as cache, patch.object(task_link, "claim_task_link_request") as claim:
+                for script_id, proxy_id in (("other-script", "original"), ("demo", "other-proxy")):
+                    response = app.test_client().post("/api/online-scripts/task-link/" + script_id,
+                                                     json={"request_id": request_id, "proxy_id": proxy_id}, headers={"X-Token": TOKEN})
+                    self.assertEqual(response.status_code, 409)
+                    self.assertEqual(source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes(), before)
+                cache.assert_not_called()
+                claim.assert_not_called()
+
+    def test_failed_receipt_retry_still_validates_current_source_proxy_and_cache(self):
+        for change, status in (("source", 409), ("proxy", 400), ("cache", 500), ("none", 200)):
+            with self.subTest(change=change), isolated_app() as (app, _base_dir):
+                from fls_manager.online_scripts import source
+                from fls_manager.routes.online_scripts import task_link
+
+                item = self.item()
+                source.save_online_script_cache([item])
+                item = source.load_online_script_cache()[0]
+                source.persist_task_link_request({
+                    "request_id": "a" * 32, "script_id": "demo", "proxy_id": "",
+                    "state": "failed", "expected_version": source.online_task_link_version(item),
+                })
+                if change == "source":
+                    source.save_online_script_cache([dict(item, task_link="https://example.invalid/later.json")])
+                elif change == "cache":
+                    source.ONLINE_SCRIPT_CACHE_FILE.write_text("{corrupt", encoding="utf-8")
+                data = {"request_id": "a" * 32, "proxy_id": "missing" if change == "proxy" else ""}
+                # The original proxy binding must match before validating its current availability.
+                if change == "proxy":
+                    source.persist_task_link_request({
+                        "request_id": "a" * 32, "script_id": "demo", "proxy_id": "missing",
+                        "state": "failed", "expected_version": source.online_task_link_version(item),
+                    })
+                before = source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes()
+                cache_before = source.ONLINE_SCRIPT_CACHE_FILE.read_bytes()
+                with patch.object(task_link, "fetch_task_link_tasks", return_value=[self.task("once")]) as fetch:
+                    response = app.test_client().post("/api/online-scripts/task-link/demo", json=data, headers={"X-Token": TOKEN})
+                self.assertEqual(response.status_code, status)
+                self.assertEqual(fetch.call_count, 1 if change == "none" else 0)
+                if change != "none":
+                    self.assertEqual(source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes(), before)
+                    self.assertEqual(source.ONLINE_SCRIPT_CACHE_FILE.read_bytes(), cache_before)
+                else:
+                    self.assertEqual(source.get_task_link_request("a" * 32)["state"], "completed")
+                    self.assertEqual(len(source.load_online_script_cache()[0]["task_cron"]), 1)
+
+    def test_active_receipt_replay_does_not_consult_later_cache_or_claim_again(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import source
+            from fls_manager.online_scripts.constants import ONLINE_TASK_LINK_ACTIVE
+            from fls_manager.routes.online_scripts import task_link
+
+            request_id = "c" * 32
+            source.persist_task_link_request({"request_id": request_id, "script_id": "demo", "proxy_id": "", "state": "running"})
+            before = source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes()
+            ONLINE_TASK_LINK_ACTIVE.add(request_id)
+            try:
+                with patch.object(task_link, "get_online_script") as cache, patch.object(task_link, "claim_task_link_request") as claim:
+                    result = app.test_client().post("/api/online-scripts/task-link/demo", json={"request_id": request_id}, headers={"X-Token": TOKEN})
+                    self.assertEqual(result.status_code, 409)
+                    self.assertEqual(result.json["state"], "running")
+                    self.assertTrue(result.json["replayed"])
+                    cache.assert_not_called()
+                    claim.assert_not_called()
+            finally:
+                ONLINE_TASK_LINK_ACTIVE.discard(request_id)
+            self.assertEqual(source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes(), before)
+
+    def test_simultaneous_initial_receipt_misses_still_claim_and_fetch_only_once(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import source
+            from fls_manager.routes.online_scripts import task_link
+
+            source.save_online_script_cache([self.item()])
+            barrier = threading.Barrier(2)
+            started, release = threading.Event(), threading.Event()
+            request_id = "e" * 32
+
+            def miss_together(identity, **binding):
+                previous = source.get_task_link_request(identity, **binding)
+                barrier.wait(3)
+                return previous
+
+            def fetch_once(*_args, **_kwargs):
+                started.set()
+                self.assertTrue(release.wait(5))
+                return [self.task("only-once")]
+
+            def post():
+                return app.test_client().post("/api/online-scripts/task-link/demo", json={"request_id": request_id}, headers={"X-Token": TOKEN})
+
+            with patch.object(task_link, "get_task_link_request", side_effect=miss_together), patch.object(
+                task_link, "fetch_task_link_tasks", side_effect=fetch_once,
+            ) as fetch, ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [pool.submit(post) for _ in range(2)]
+                try:
+                    self.assertTrue(started.wait(3))
+                    done, _pending = wait(futures, timeout=3, return_when=FIRST_COMPLETED)
+                    self.assertEqual(len(done), 1)
+                    observed = next(iter(done)).result()
+                    self.assertEqual(observed.status_code, 409)
+                    self.assertTrue(observed.json["replayed"])
+                finally:
+                    release.set()
+                self.assertEqual(sorted(future.result(timeout=5).status_code for future in futures), [200, 409])
+                fetch.assert_called_once()
+            self.assertEqual(source.get_task_link_request(request_id)["state"], "completed")
+            self.assertEqual(len(source.load_online_script_cache()[0]["task_cron"]), 1)
 
     def test_unknown_publish_result_is_query_only_and_does_not_refetch(self):
         with isolated_app() as (app, _base_dir):
@@ -434,7 +649,9 @@ class OnlineTaskLinkTests(unittest.TestCase):
                     data={"request_id": request_id},
                     headers={"X-Token": TOKEN},
                 )
-            self.assertEqual(repeated.status_code, 302)
+            self.assertEqual(repeated.status_code, 200)
+            self.assertIn("外部任务源原同步结果", repeated.get_data(as_text=True))
+            self.assertIn('href="/online-scripts/task-link-status/' + request_id + '"', repeated.get_data(as_text=True))
             fetch.assert_called_once()
             self.assertEqual(client.get("/api/online-scripts/task-link-status/" + request_id, headers={"X-Token": TOKEN}).json["state"], "completed")
 
@@ -737,6 +954,77 @@ vm.runInContext(input.handler, context);
 })().catch(error => {console.error(error); process.exitCode = 1;});
 """], input=json.dumps({"handler": handler, "html": response.get_data(as_text=True)}),
                 text=True, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise task-link recovery")
+    def test_task_link_ajax_replay_identity_and_ambiguous_errors_preserve_original_request(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import source
+
+            source.save_online_script_cache([self.item()])
+            html = app.test_client().get("/online-scripts", headers={"X-Token": TOKEN}).get_data(as_text=True)
+            scripts = __import__("re").findall(r"<script>(.*?)</script>", html, __import__("re").S)
+            script = next(value for value in scripts if "queryPending(pending)" in value)
+            script = script[script.index("(function(){", script.index("updateOnlineRefreshStatus();")):]
+            static = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+            reader = static[static.index("async function flsReadJsonResponse("):static.index("async function flsReadTextResponse(")]
+            result = subprocess.run(["node", "-e", r'''
+const vm=require('node:vm'),assert=require('node:assert/strict');
+const input=JSON.parse(require('node:fs').readFileSync(0,'utf8')),requestId='a'.repeat(32);
+function element(tag='div'){
+ return {tagName:tag.toUpperCase(),children:[],listeners:{},hidden:true,disabled:false,textContent:'',href:'',value:'',
+   appendChild(child){this.children.push(child);},addEventListener(name,fn){this.listeners[name]=fn;},
+   setAttribute(name,value){(this.attrs||(this.attrs={}))[name]=value;},
+   getAttribute(name){return this.attrs&&this.attrs[name]||'';}};
+}
+async function scenario(status,payload,expected){
+ const recovery=element(),button=element('button'),form=element('form');
+ form.attrs={'data-script-id':'demo'};form.action='/online-scripts/task-link/demo';
+ form.querySelector=selector=>selector.includes('request_id')?{value:requestId}:selector.includes('proxy_id')?{value:''}:button;
+ form.closest=()=>form;
+ const storage={value:null,getItem(){return this.value;},setItem(_key,value){this.value=value;},removeItem(){this.value=null;}};
+ let submit,calls=0,finish;
+ const context={window:{location:{href:''}},location:{pathname:'/online-scripts',search:''},sessionStorage:storage,encodeURIComponent,
+   document:{getElementById:()=>recovery,createElement:element,querySelectorAll:()=>[],addEventListener:(_name,fn)=>{submit=fn;}},
+   FormData:class{},flsGetCsrfToken:()=> 'csrf',
+   flsResponseErrorDiagnostic:(_response,body)=>{let data;try{data=JSON.parse(body);}catch{}return {payload:data,message:data&&(data.msg||data.error)||body};},
+   fetch:(url,options)=>{calls++;assert.equal(url,'/api/online-scripts/task-link/demo');assert.equal(options.method,'POST');assert.equal(options.headers['X-CSRF-Token'],'csrf');return new Promise(resolve=>{finish=resolve;});}};
+ vm.createContext(context);vm.runInContext(input.reader+input.script,context);
+ const event={target:form,preventDefault(){},stopImmediatePropagation(){}};
+ const pending=submit(event);await submit(event);assert.equal(calls,1);
+ finish(status===0?Promise.reject(new Error('connection interrupted')):{ok:status===200,status,
+   text:async()=>typeof payload==='string'?payload:JSON.stringify(payload),json:async()=>payload});
+ await pending;
+ if(expected==='completed'){
+   assert.equal(storage.value,null);
+   assert.equal(context.window.location.href,'/online-scripts/task-link-status/'+requestId);
+ }else{
+   assert.equal(JSON.parse(storage.value).request_id,requestId);
+   assert.equal(button.disabled,false);
+   assert.equal(context.window.location.href,'');
+   assert.equal(recovery.children[1].href,'/online-scripts/task-link-status/'+requestId);
+   const labels=recovery.children.flatMap(child=>[child.textContent,...child.children.map(value=>value.textContent)]);
+   if(expected==='confirm') assert.ok(labels.includes('检查当前任务合并'));
+   else if(expected==='retry') assert.ok(labels.includes('继续原同步请求'));
+   else if(expected==='login') assert.ok(labels.includes('重新登录'));
+   else assert.ok(labels.includes('重新读取同步状态'));
+   if(expected!=='retry') assert.ok(!labels.includes('继续原同步请求'));
+ }
+}
+(async()=>{
+ for(const status of [401,403,404,409,500,503]){
+   await scenario(status,'<html>temporarily unavailable</html>',status===401||status===403?'login':'query');
+ }
+ await scenario(0,null,'query');
+ await scenario(409,{ok:false,request_id:requestId,state:'unknown',retry_allowed:false,msg:'original unknown diagnosis'},'confirm');
+ await scenario(409,{ok:false,request_id:requestId,state:'running',retry_allowed:false,msg:'still running'},'query');
+ await scenario(502,{ok:false,request_id:requestId,retry_allowed:true,msg:'upstream failed'},'retry');
+ await scenario(200,{ok:true,request_id:'b'.repeat(32),replayed:true},'query');
+ await scenario(200,{ok:true,replayed:true},'query');
+ await scenario(200,{ok:true,request_id:requestId,replayed:true},'completed');
+ console.log('task-link replay identity, errors and concurrent submission passed');
+})().catch(error=>{console.error(error);process.exitCode=1;});
+'''], input=json.dumps({"script": script, "reader": reader}), text=True, capture_output=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise task-link recovery")
