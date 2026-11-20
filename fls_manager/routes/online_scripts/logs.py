@@ -81,54 +81,46 @@ def _refresh_log_state(request_id):
         base = LOG_DIR.resolve()
         actual = candidate.resolve(strict=False)
         if candidate.is_symlink() or actual != expected.resolve(strict=False) or base not in actual.parents:
-            return None, ("日志边界错误", "刷新日志路径不在受控日志目录内，未读取该文件。", 500)
+            return (state, None), ("日志边界错误", "刷新日志路径不在受控日志目录内，未读取该文件。", 500)
         if not candidate.exists():
-            return None, ("日志不存在", "刷新日志尚未生成或已被清理，请返回刷新状态后重试。", 404)
+            return (state, None), ("日志不存在", "刷新日志尚未生成或已被清理，请返回刷新状态后重试。", 404)
         if not candidate.is_file():
-            return None, ("日志类型错误", "刷新日志不是普通文件，未读取该路径。", 500)
+            return (state, None), ("日志类型错误", "刷新日志不是普通文件，未读取该路径。", 500)
         with candidate.open("rb") as handle:
             handle.read(1)
     except OSError as exc:
-        return None, ("日志不可读", f"刷新日志无法读取：{exc}。请修复日志权限后重试。", 500)
+        return (state, None), ("日志不可读", f"刷新日志无法读取：{exc}。请修复日志权限后重试。", 500)
     return (state, candidate), None
+
+
+def _refresh_log_error_payload(request_id, title, message, status, state=None):
+    valid_id = bool(REFRESH_ID_RE.fullmatch(str(request_id or "")))
+    return {
+        "ok": False, "request_id": request_id, "status": title, "error": message, "log": "",
+        "retry_url": f"/api/online-scripts/refresh-log/{request_id}" if valid_id else "",
+        "log_url": f"/online-scripts/refresh-log/{request_id}" if valid_id else "/online-scripts#online-status",
+        "state_url": f"/api/online-scripts/refresh-status/{request_id}" if valid_id else "",
+        "history_url": f"/online-scripts?refresh_request_id={request_id}#onlineRefreshHistory" if valid_id else "/online-scripts#online-status",
+        "refresh_state": {
+            key: state.get(key) for key in ("id", "request_id", "status", "running", "error", "cache_published", "updated_at")
+        } if state else None,
+    }, status
 
 
 def _refresh_log_payload(request_id, lines):
     resolved, failure = _refresh_log_state(request_id)
     if failure:
         title, message, status = failure
-        return {
-            "ok": False,
-            "request_id": request_id,
-            "status": title,
-            "error": message,
-            "log": "",
-            "retry_url": f"/api/online-scripts/refresh-log/{request_id}",
-            "state_url": f"/online-scripts#online-status",
-        }, status
+        return _refresh_log_error_payload(request_id, title, message, status, resolved[0] if resolved else None)
     state, candidate = resolved
     try:
         log = tail_file(str(candidate), lines)
     except Exception as exc:
-        return {
-            "ok": False,
-            "request_id": request_id,
-            "status": "日志不可读",
-            "error": f"刷新日志读取失败：{exc}。请修复日志权限后重试。",
-            "log": "",
-            "retry_url": f"/api/online-scripts/refresh-log/{request_id}",
-            "state_url": "/online-scripts#online-status",
-        }, 500
+        return _refresh_log_error_payload(
+            request_id, "日志不可读", f"刷新日志读取失败：{exc}。请修复日志权限后重试。", 500, state,
+        )
     if str(log).startswith("读取日志失败:"):
-        return {
-            "ok": False,
-            "request_id": request_id,
-            "status": "日志不可读",
-            "error": str(log),
-            "log": "",
-            "retry_url": f"/api/online-scripts/refresh-log/{request_id}",
-            "state_url": "/online-scripts#online-status",
-        }, 500
+        return _refresh_log_error_payload(request_id, "日志不可读", str(log), 500, state)
     return {
         "ok": True,
         "request_id": request_id,
@@ -162,10 +154,49 @@ def online_refresh_log(request_id):
             f"在线脚本源刷新日志：{payload.get('status') or '读取失败'}",
             help_html=h(payload.get("error") or "刷新日志无法读取"),
             actions_html=(
-                f'<a class="btn btn-primary" href="{h(payload.get("retry_url") or request.path)}">重新读取日志</a>'
-                f'<a class="btn btn-blue" href="{h(payload.get("state_url") or "/online-scripts#online-status")}">返回刷新状态</a>'
+                '<button class="btn btn-primary" type="button" onclick="flsRefreshCurrentPage()">重新读取日志</button>'
+                f'<noscript><a class="btn btn-primary" href="{h(payload["log_url"])}">重新读取日志</a></noscript>'
+                f'<a class="btn btn-blue" href="{h(payload["history_url"])}">返回原刷新记录</a>'
+                '<a class="btn btn-gray" href="/online-scripts#online-status">返回刷新状态</a>'
+                + ('<button id="refreshLogQuery" class="btn btn-gray" type="button">查询原请求状态</button>' if payload.get("state_url") else "")
             ),
         )
+        if payload.get("state_url"):
+            receipt = payload.get("refresh_state") or {}
+            known = "；".join(str(value) for value in (receipt.get("status"), receipt.get("error")) if value)
+            body += f"""
+<div class="notice" id="refreshLogQueryResult" role="status">{h(known)}</div>
+<div class="notice red" id="refreshLogQueryError" role="status" hidden></div>
+<a class="btn btn-primary" id="refreshLogQueryLogin" hidden>重新登录</a>
+<script>
+(function(){{
+const button = document.getElementById("refreshLogQuery");
+const result = document.getElementById("refreshLogQueryResult");
+const error = document.getElementById("refreshLogQueryError");
+const login = document.getElementById("refreshLogQueryLogin");
+let pending = false;
+async function loadRefreshReceipt(){{
+    if(pending) return;
+    pending = true;
+    button.disabled = true;
+    try{{
+        const response = await fetch({json.dumps(payload["state_url"])}, {{cache:"no-store", credentials:"same-origin"}});
+        const info = await flsReadJsonResponse(response);
+        if(!info || info.request_id !== {json.dumps(request_id)} || typeof info.status !== "string" || typeof info.running !== "boolean") throw new Error("原刷新状态响应无效");
+        result.textContent = "原刷新状态：" + info.status + (info.error ? "；" + info.error : "");
+        error.hidden = true;
+        login.hidden = true;
+    }}catch(e){{
+        error.hidden = false;
+        error.textContent = "原请求状态查询失败：" + (e && e.message || String(e)) + "。已知结果保留，请重新查询或返回原刷新记录。";
+        login.hidden = !(e && (e.status === 401 || e.status === 403));
+        if(!login.hidden) login.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
+    }}finally{{ pending = false; button.disabled = false; }}
+}}
+button.addEventListener("click", loadRefreshReceipt);
+}})();
+</script>
+"""
         return layout("在线脚本源刷新日志", "online_scripts", body), status
     body = f"""
 {page_header_card(
