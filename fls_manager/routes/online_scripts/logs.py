@@ -177,15 +177,18 @@ def online_refresh_log(request_id):
     ),
     actions_html=(
         '<a class="btn btn-gray" href="/online-scripts#online-status">返回刷新状态</a>'
-        + (
-            f'<form class="inline-form" method="post" action="/online-scripts/refresh-confirm/{h(payload.get("request_id"))}">'
-            '<button class="btn btn-gray" type="submit">检查当前缓存结果</button></form>'
-            if payload.get("status") == "结果未知" else ""
-        )
+        + '<span id="refreshLogConfirm"'
+        + (' hidden' if payload.get("status") != "结果未知" else '')
+        + f'><form class="inline-form" method="post" action="/online-scripts/refresh-confirm/{h(payload.get("request_id"))}">'
+        + '<button class="btn btn-gray" type="submit">检查当前缓存结果</button></form></span>'
+        + f'<a id="refreshLogHistory" class="btn btn-orange" href="/online-scripts?refresh_request_id={h(payload.get("request_id"))}#onlineRefreshHistory"'
+        + (' hidden' if payload.get("status") not in ("结果未知", "失败", "启动失败", "部分完成") else '')
+        + '>从历史重新同步</a>'
         + '<button class="btn btn-primary" type="button" id="refreshLogRetry">重新读取日志</button>'
     ),
 )}
 <div class="notice red" id="refreshLogError" role="status" hidden></div>
+<div class="notice red" id="refreshLogDiagnosis" role="status"{' hidden' if not payload.get('error') else ''}>{h(payload.get('error') or '')}</div>
 <a id="refreshLogLogin" class="btn btn-primary" hidden>重新登录</a>
 <pre class="log" id="refreshLogText">{h(payload.get("log") or "暂无日志")}</pre>
 <script>
@@ -194,6 +197,9 @@ const errorEl = document.getElementById("refreshLogError");
 const loginEl = document.getElementById("refreshLogLogin");
 const retryEl = document.getElementById("refreshLogRetry");
 const textEl = document.getElementById("refreshLogText");
+const diagnosisEl = document.getElementById("refreshLogDiagnosis");
+const confirmEl = document.getElementById("refreshLogConfirm");
+const historyEl = document.getElementById("refreshLogHistory");
 let pending = false;
 let pollTimer = null;
 let pollingStopped = false;
@@ -222,6 +228,9 @@ async function loadRefreshLog(){{
         if(errorEl){{ errorEl.hidden = true; errorEl.textContent = ""; }}
         if(loginEl) loginEl.hidden = true;
         if(textEl) textEl.textContent = result.log || "暂无日志";
+        if(diagnosisEl){{ diagnosisEl.textContent = result.error || ""; diagnosisEl.hidden = !result.error; }}
+        if(confirmEl) confirmEl.hidden = result.status !== "结果未知";
+        if(historyEl) historyEl.hidden = ["结果未知", "失败", "启动失败", "部分完成"].indexOf(result.status) < 0;
         const status = document.getElementById("refreshLogStatus");
         const updated = document.getElementById("refreshLogUpdatedAt");
         if(status) status.textContent = result.status || "-";

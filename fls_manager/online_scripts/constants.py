@@ -404,6 +404,23 @@ def get_online_refresh_state():
         return current
 
 
+def _recover_online_refresh_history(history, current, request_id=""):
+    recovered = dict(history)
+    changed = False
+    for key, info in history.items():
+        if (request_id and key != request_id) or key == current.get("request_id") or not info.get("running"):
+            continue
+        reason = "原同步已不再是当前活动刷新，无法确认是否完成；请查看原日志并检查当前缓存，再明确重试。"
+        recovered[key] = _validate_refresh_snapshot({
+            **info, "running": False, "status": "结果未知", "message": "",
+            "error": "；".join(filter(None, (info.get("error"), reason))), "updated_at": now_str(),
+        })
+        changed = True
+    if changed:
+        _publish_refresh_history(recovered)
+    return recovered
+
+
 def get_online_refresh_request(request_id):
     if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
         return None
@@ -411,23 +428,33 @@ def get_online_refresh_request(request_id):
         current = get_online_refresh_state()
         if current.get("request_id") == request_id:
             return current
-        value = _read_online_refresh_history_file().get(request_id)
+        history = _recover_online_refresh_history(_read_online_refresh_history_file(), current, request_id)
+        value = history.get(request_id)
         return dict(value) if isinstance(value, dict) else None
 
 
-def get_online_refresh_history(limit=50):
+def get_online_refresh_history(limit=50, request_id=""):
     try:
         limit = max(1, min(int(limit), 200))
     except (TypeError, ValueError):
         raise ValueError("刷新历史条数必须为整数")
+    if request_id and (not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id)):
+        raise ValueError("刷新请求标识无效")
     with ONLINE_REFRESH_LOCK, storage_transaction():
-        history = _read_online_refresh_history_file()
+        if request_id:
+            saved_history = _read_online_refresh_history_file()
+            saved_current = _read_online_refresh_file()
+            if request_id not in saved_history and request_id not in (
+                saved_current.get("request_id"), ONLINE_REFRESH_STATE.get("request_id"),
+            ):
+                raise LookupError("原刷新记录不存在或已清理，请返回刷新状态重新选择")
         current = get_online_refresh_state()
+        history = _recover_online_refresh_history(_read_online_refresh_history_file(), current)
         if current.get("request_id"):
             history[current["request_id"]] = current
         ordered = sorted(
             history.values(),
-            key=lambda value: str(value.get("updated_at") or ""),
+            key=lambda value: (value.get("request_id") == request_id, str(value.get("updated_at") or "")),
             reverse=True,
         )
         return [dict(value) for value in ordered[:limit]]
@@ -468,7 +495,8 @@ def confirm_online_refresh_result(request_id, cache_fingerprint, source_fingerpr
             if record.get("confirmation_fingerprint") != cache_fingerprint:
                 return {"_conflict": True, **record}
             return {"_replayed": True, **record}
-        if record.get("running") or record.get("status") != "结果未知":
+        orphaned = record.get("running") and record.get("request_id") != current.get("request_id")
+        if not orphaned and (record.get("running") or record.get("status") != "结果未知"):
             return {"_conflict": True, **record}
         if not record.get("source_fingerprint") or record.get("source_fingerprint") != source_fingerprint:
             return {"_conflict": True, **record}
@@ -486,6 +514,8 @@ def confirm_online_refresh_result(request_id, cache_fingerprint, source_fingerpr
             cache_published = False
         else:
             return {"_conflict": True, **record}
+        if orphaned:
+            record = get_online_refresh_request(request_id)
         snapshot = _validate_refresh_snapshot({
             **record,
             "running": False,
@@ -532,9 +562,10 @@ def get_online_refresh_retry(original_request_id, proxy_id, request_id):
         current = get_online_refresh_state()
         if current.get("request_id"):
             history[current["request_id"]] = current
-        return _existing_online_refresh_retry(
-            history, original_request_id, proxy_id, request_id,
-        )
+        existing = _existing_online_refresh_retry(history, original_request_id, proxy_id, request_id)
+        if existing and existing.get("_replay") and existing.get("running") and request_id != current.get("request_id"):
+            return {"_replay": True, **get_online_refresh_request(request_id)}
+        return existing
 
 
 def claim_online_refresh_retry(original_request_id, proxy_id="", request_id="", cache_fingerprint="", source_fingerprint=""):
@@ -552,6 +583,8 @@ def claim_online_refresh_retry(original_request_id, proxy_id="", request_id="", 
             history[current["request_id"]] = current
         existing = _existing_online_refresh_retry(history, original_request_id, proxy_id, request_id)
         if existing:
+            if existing.get("_replay") and existing.get("running") and request_id != current.get("request_id"):
+                return {"_replay": True, **get_online_refresh_request(request_id)}
             return existing
         if current.get("persistence_error"):
             if current.get("status") == "启动失败":
@@ -562,7 +595,8 @@ def claim_online_refresh_retry(original_request_id, proxy_id="", request_id="", 
         original = history.get(original_request_id)
         if not original:
             return {"_missing": True}
-        if original.get("status") not in ("失败", "部分完成", "结果未知", "启动失败"):
+        orphaned = original.get("running") and original.get("request_id") != current.get("request_id")
+        if not orphaned and original.get("status") not in ("失败", "部分完成", "结果未知", "启动失败"):
             return {"_not_retryable": True, **dict(original)}
         if str(original.get("proxy_id") or "") != str(proxy_id or ""):
             return {"_binding_conflict": True, **dict(original)}
@@ -571,6 +605,8 @@ def claim_online_refresh_retry(original_request_id, proxy_id="", request_id="", 
             return {"_stale": True, **dict(original)}
         if not original.get("source_fingerprint") or source_fingerprint != original.get("source_fingerprint"):
             return {"_stale": True, **dict(original)}
+        if orphaned:
+            original = get_online_refresh_request(original_request_id)
         current = dict(ONLINE_REFRESH_STATE)
         if current.get("running"):
             return None

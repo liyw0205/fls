@@ -6,6 +6,26 @@ from ...online_scripts.constants import get_online_refresh_history
 
 @bp.route("/online-scripts")
 def online_scripts_page():
+    selected_refresh_request = request.args.get("refresh_request_id", "").strip()
+    if selected_refresh_request and not re.fullmatch(r"[a-f0-9]{32}", selected_refresh_request):
+        return layout("刷新历史", "online_scripts", page_header_card(
+            "刷新请求标识无效", help_html="请返回刷新状态重新选择。",
+            actions_html='<a class="btn btn-gray" href="/online-scripts#online-status">返回刷新状态</a>',
+        )), 400
+    refresh_history_url = "/api/online-scripts/refresh-history?limit=8"
+    if selected_refresh_request:
+        refresh_history_url += "&request_id=" + selected_refresh_request
+    try:
+        refresh_history = get_online_refresh_history(limit=8, request_id=selected_refresh_request)
+        refresh_history_error = ""
+    except LookupError as exc:
+        return layout("刷新历史", "online_scripts", page_header_card(
+            "原刷新记录不可用", help_html=h(exc),
+            actions_html='<a class="btn btn-gray" href="/online-scripts#online-status">返回刷新状态</a>',
+        )), 404
+    except Exception as exc:
+        refresh_history = []
+        refresh_history_error = f"在线脚本源刷新历史无法读取，未覆盖当前状态：{exc}"
     source = get_online_script_source()
     cache_error = ""
     try:
@@ -68,13 +88,6 @@ def online_scripts_page():
             f'data-refresh-recover-id="{h(refresh_request_id)}">'
             '<button class="btn btn-primary" type="submit">修复刷新回执</button></form>'
         )
-    try:
-        refresh_history = get_online_refresh_history(limit=8)
-        refresh_history_error = ""
-    except Exception as exc:
-        refresh_history = []
-        refresh_history_error = f"在线脚本源刷新历史无法读取，未覆盖当前状态：{exc}"
-
     def refresh_history_html(items):
         rows = []
         for item in items:
@@ -342,7 +355,7 @@ async function updateOnlineRefreshHistory(){{
     const error = document.getElementById("onlineRefreshHistoryError");
     if(!history) return;
     try{{
-        const response = await fetch("/api/online-scripts/refresh-history?limit=8", {{cache:"no-store", credentials:"same-origin"}});
+        const response = await fetch({json.dumps(refresh_history_url)}, {{cache:"no-store", credentials:"same-origin"}});
         const json = await flsReadJsonResponse(response);
         if(!json || !Array.isArray(json.items)) throw new Error("刷新历史响应无效");
         const rows = json.items.map(function(item){{
