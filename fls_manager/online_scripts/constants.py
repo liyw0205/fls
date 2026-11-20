@@ -679,6 +679,8 @@ def _existing_online_refresh_retry(history, original_request_id, proxy_id, reque
         return None
     if existing.get("retry_of") != original_request_id or str(existing.get("proxy_id") or "") != str(proxy_id or ""):
         return {"_binding_conflict": True, **dict(existing)}
+    if existing.get("status") == "启动失败" and not existing.get("running") and not existing.get("cache_published"):
+        return None
     return {"_replay": True, **dict(existing)}
 
 

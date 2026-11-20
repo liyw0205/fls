@@ -156,6 +156,11 @@ def _submit_online_refresh_retry(original_request_id, proxy_id, raw_request_id="
             )
         except Exception as state_error:
             error += f"；同步状态保存失败：{state_error}"
+            with ONLINE_REFRESH_LOCK:
+                ONLINE_REFRESH_STATE.update(
+                    running=False, status="启动失败", message="", error=error,
+                    persistence_error=str(state_error), updated_at=now_str(), log_file=log_file,
+                )
         return {"ok": False, "id": info["id"], "request_id": request_id,
                 "retry_of": original_request_id, "status": "启动失败", "error": error}, 500
     return {"ok": True, "id": info["id"], "request_id": request_id,
