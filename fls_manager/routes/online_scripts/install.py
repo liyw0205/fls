@@ -682,13 +682,24 @@ def _retry_install_tasks(install_id):
                 raise_on_reload_error=True,
             )
         except TaskSchedulerReloadError as exc:
+            snapshot_error = ""
+            try:
+                snapshot_saved = capture_install_outputs(updated, updated.get("target_path"))
+                if not snapshot_saved:
+                    snapshot_error = updated.get("persistence_error") or "任务产物快照未能保存"
+            except Exception as snapshot_exc:
+                snapshot_error = f"任务产物快照无法读取：{snapshot_exc}"
+            scheduler_error = f"任务已保存，但调度器重载失败：{exc}"
+            if snapshot_error:
+                scheduler_error += f"；{snapshot_error}"
             updated.update(
                 running=False,
                 status="部分完成",
                 phase="scheduler_reload_pending",
                 returncode=0,
                 scheduler_reload_pending=True,
-                scheduler_reload_error=f"任务已保存，但调度器重载失败：{exc}",
+                scheduler_reload_error=scheduler_error,
+                error=scheduler_error,
                 updated_at=now_str(),
             )
             _persist_install_state(updated)

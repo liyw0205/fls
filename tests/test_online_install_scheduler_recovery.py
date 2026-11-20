@@ -11,6 +11,37 @@ from tests.test_ui_route_components import ROOT, TOKEN, isolated_app
 
 
 class OnlineInstallSchedulerRecoveryTests(unittest.TestCase):
+    def pending_task_import(self, base_dir):
+        from fls_manager.online_scripts.constants import persist_online_install
+        from fls_manager.online_scripts.install import capture_install_outputs
+        from fls_manager.online_scripts.logs import online_install_log_file
+        from fls_manager.online_scripts.source import save_online_script_cache
+
+        item = {
+            "id": "demo", "name": "Demo", "type": "raw",
+            "link": "https://example.invalid/demo.sh", "link_name": "demo.sh",
+            "task_cron": [{"name": "Daily", "command": "task demo.sh", "cron": "0 0 * * *"}],
+        }
+        save_online_script_cache([item])
+        install_id = "d" * 32
+        target = base_dir / "scripts" / "demo.sh"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("downloaded", encoding="utf-8")
+        log_file = online_install_log_file(install_id, item["name"])
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        log_file.write_text("download completed\n", encoding="utf-8")
+        info = {
+            "id": install_id, "script_id": item["id"], "script_name": item["name"],
+            "log_file": str(log_file), "running": False, "status": "失败",
+            "phase": "importing_tasks", "returncode": 1, "error": "scheduler failed",
+            "proxy_id": "", "import_task": True, "enable_task": False,
+            "selected_task_indexes": ["1"], "selected_tasks": [item["task_cron"][0]],
+            "target_path": str(target), "start_time": 1,
+        }
+        capture_install_outputs(info, target)
+        persist_online_install(info)
+        return install_id
+
     def partial_install(self, app, base_dir, command_failure=False):
         from fls_manager.models import load_tasks
         from fls_manager.online_scripts.constants import get_online_install_job
@@ -429,6 +460,91 @@ vm.runInContext(input.reader + input.script, context);
   assert.equal(elements.log.textContent, 'reloaded');
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """], input=json.dumps({"script": script, "reader": reader, "payload": payload}), capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise retry-to-reload recovery")
+    def test_task_retry_503_refreshes_into_scheduler_reload_action(self):
+        with isolated_app() as (app, base_dir):
+            install_id = self.pending_task_import(base_dir)
+            client = app.test_client()
+            headers = {"X-Token": TOKEN}
+            html = client.get(f"/online-scripts/log/{install_id}", headers=headers).get_data(as_text=True)
+            initial = client.get(f"/api/online-scripts/log/{install_id}", headers=headers).json
+            self.assertEqual(initial["recovery"]["label"], "仅恢复任务导入")
+            self.assertEqual(initial["recovery"]["api_action"], f"/api/online-scripts/install-task-retry/{install_id}")
+            script = next(script for script in re.findall(r"<script>(.*?)</script>", html, re.S) if "async function loadLog(" in script)
+            source = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+            reader = source[source.index("async function flsReadJsonResponse("):source.index("async function flsReadTextResponse(")]
+            pending = dict(initial)
+            pending.update(
+                status="部分完成", phase="scheduler_reload_pending", error="scheduler unavailable",
+                scheduler_reload_pending=True,
+                scheduler_reload_required=True,
+                reload_url=f"/api/online-scripts/install-reload/{install_id}",
+                recovery={
+                    "available": True,
+                    "action": f"/online-scripts/install-reload/{install_id}",
+                    "api_action": f"/api/online-scripts/install-reload/{install_id}",
+                    "label": "重新加载调度器",
+                },
+            )
+            complete = dict(initial)
+            complete.update(running=False, status="已完成", phase="completed", log="recovered")
+            complete.pop("recovery", None)
+            result = subprocess.run(["node", "-e", r"""
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+let calls = [];
+let payloads = [input.initial, input.pending, input.pending, {ok:true}, input.complete];
+const button = {disabled:false};
+const recovery = {
+  hidden:false, dataset:{}, form:null, html:'',
+  set innerHTML(value) {
+    this.html=value;
+    this.form={listeners:{}, querySelector: selector=>selector==='button'?button:null,
+      addEventListener(name, handler){this.listeners[name]=handler;}};
+  },
+  get innerHTML(){return this.html;},
+  querySelector: selector=>selector==='form[data-api-action]'?recovery.form:null,
+};
+const elements = Object.fromEntries(['installStatus','installPhase','installError','installReturncode',
+  'installStopAction','installPollError','installPollLogin','installPollLogs','installPollRetry','installStopQuery',
+  'log','flsLogNewTip'].map(id=>[id,{textContent:'',hidden:true,dataset:{},style:{},addEventListener(){}}]));
+elements.installRecoveryAction=recovery;
+const context = {
+  window:{innerHeight:800,scrollY:0,addEventListener(){},scrollTo(){}},
+  document:{documentElement:{scrollHeight:800},getElementById:id=>elements[id],
+    querySelector:()=>recovery.form},
+  location:{pathname:'/online-scripts/log/'+input.initial.install_id,search:''},
+  fetch:async(url,options={})=>{
+    calls.push({url,options});
+    const payload=payloads.shift();
+        const status=calls.length===2?503:200;
+    return {ok:status<400,status,json:async()=>payload};
+  },
+  setInterval:()=>1,clearInterval(){},flsGetCsrfToken:()=> 'reload-csrf',
+};
+vm.createContext(context);vm.runInContext(input.reader+input.script,context);
+(async()=>{
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.match(recovery.html,/仅恢复任务导入/);
+  const taskRetryForm=recovery.form;
+  await taskRetryForm.listeners.submit({preventDefault(){}});
+  assert.equal(calls[1].url,input.initial.recovery.api_action);
+  assert.equal(calls[1].options.headers['X-CSRF-Token'],'reload-csrf');
+  assert.equal(calls[2].url,'/api/online-scripts/log/'+input.initial.install_id+'?lines=1600');
+  assert.match(recovery.html,/重新加载调度器/);
+  assert.equal(button.disabled,false);
+  const reloadForm=recovery.form;
+  await reloadForm.listeners.submit({preventDefault(){}});
+  assert.equal(calls[3].url,input.pending.recovery.api_action);
+  assert.equal(calls[3].options.headers['X-CSRF-Token'],'reload-csrf');
+  assert.equal(calls[4].url,'/api/online-scripts/log/'+input.initial.install_id+'?lines=1600');
+  assert.equal(elements.installStatus.textContent,'已完成');
+  assert.equal(elements.log.textContent,'recovered');
+})().catch(error=>{console.error(error);process.exitCode=1;});
+"""], input=json.dumps({"script":script,"reader":reader,"initial":initial,"pending":pending,"complete":complete}), capture_output=True, text=True, timeout=5)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
