@@ -335,23 +335,6 @@ def _install_recovery(info):
     relation = online_install_retry_relation(info)
     if relation.get("retry_relation_error"):
         return {"available": False, "reason": relation["retry_relation_error"]}
-    if status not in RECOVERY_STATUSES:
-        if (info or {}).get("phase") == "importing_tasks" and (info or {}).get("import_task"):
-            consistency = verify_install_outputs(info)
-            if consistency.get("changed"):
-                return {
-                    "available": False,
-                    "reason": "安装后的脚本或任务已被后来修改，未自动恢复任务导入，请明确重新选择。",
-                    "script_id": info.get("script_id"),
-                }
-            return {
-                "available": True,
-                "action": url_for("online_scripts.online_scripts_install_task_retry", install_id=info.get("id")),
-                "api_action": url_for("online_scripts.api_online_scripts_install_task_retry", install_id=info.get("id")),
-                "label": "仅恢复任务导入",
-            }
-        return {"available": False}
-
     if (info or {}).get("phase") == "importing_tasks" and (info or {}).get("import_task"):
         consistency = verify_install_outputs(info)
         if consistency.get("changed"):
@@ -360,6 +343,17 @@ def _install_recovery(info):
                 "reason": "安装后的脚本或任务已被后来修改，未自动恢复任务导入，请明确重新选择。",
                 "script_id": info.get("script_id"),
             }
+        if status in RECOVERY_STATUSES:
+            return {
+                "available": True,
+                "action": url_for("online_scripts.online_scripts_install_task_retry", install_id=info.get("id")),
+                "api_action": url_for("online_scripts.api_online_scripts_install_task_retry", install_id=info.get("id")),
+                "label": "仅恢复任务导入",
+            }
+        return {"available": False}
+
+    if status not in RECOVERY_STATUSES:
+        return {"available": False}
 
     retry_id = str((info or {}).get("retried_by") or "")
     if retry_id:
@@ -870,9 +864,21 @@ async function loadLog(stateOnly = false){{
                                 method: "POST", headers, credentials: "same-origin",
                             }});
                             const result = await flsReadJsonResponse(response);
-                            if(!result || result.ok !== true) throw new Error(result && result.msg || "调度器恢复失败");
+                            if(!result || result.ok !== true){{
+                                const error = new Error(result && result.msg || "调度器恢复失败");
+                                error.payload = result;
+                                throw error;
+                            }}
                             await loadLog();
                         }}catch(error){{
+                            const payload = error && error.payload || {{}};
+                            if(payload.scheduler_reload_required){{
+                                await loadLog();
+                                const currentForm = document.querySelector("#installRecoveryAction form[data-api-action]");
+                                const currentButton = currentForm && currentForm.querySelector("button");
+                                if(currentButton) currentButton.disabled = false;
+                                return;
+                            }}
                             const message = error && error.message ? error.message : String(error || "调度器恢复失败");
                             if(pollError){{
                                 pollError.textContent = "调度器恢复失败：" + message + "。请稍后重试。";

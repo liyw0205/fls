@@ -24,10 +24,15 @@ def main():
         import fls_manager.app as app_module
         from fls_manager import scheduler
         from fls_manager.install_records import INSTALL_JOBS_FILE, persist_install_job
-        from fls_manager.online_scripts import install, source
+        from fls_manager.online_scripts import install, source, tasks as online_tasks
+        from fls_manager.models import load_tasks
         from fls_manager.online_scripts.constants import (
             ONLINE_INSTALL_JOBS_FILE, ONLINE_INSTALL_RETRYING, ONLINE_INSTALL_RUNNING,
+            persist_online_install,
         )
+        from fls_manager.online_scripts.install import capture_install_outputs
+        from fls_manager.online_scripts.logs import online_install_log_file
+        from fls_manager.routes.online_scripts import install as install_routes
         from fls_manager.state import DEPS_RUNNING
 
         base_dir = Path(temp)
@@ -45,8 +50,30 @@ def main():
             "link": "https://fixture.invalid/demo.py", "link_name": "demo.py",
             "install": shlex.join([sys.executable, "-u", "-c", command]),
         }
-        source.save_online_script_cache([item])
+        task_items = {
+            width: {
+                "id": f"browser-task-recovery-{width}", "name": f"Task recovery {width}",
+                "type": "raw", "link": "https://fixture.invalid/task-recovery.sh",
+                "link_name": "task-recovery.sh",
+                "task_cron": [{"name": "Recovery task", "command": "task recovery.sh"}],
+            }
+            for width in (390, 1280)
+        }
+        source.save_online_script_cache([item, *task_items.values()])
         downloads = []
+        task_reload_state = {"failures": 0, "calls": 0}
+
+        def task_import_reload():
+            task_reload_state["calls"] += 1
+            if task_reload_state["failures"]:
+                task_reload_state["failures"] -= 1
+                raise RuntimeError("browser scheduler unavailable")
+
+        def recovered_task_reload():
+            task_reload_state["calls"] += 1
+
+        online_tasks.reload_scheduler = task_import_reload
+        install_routes.reload_scheduler = recovered_task_reload
 
         def download(**kwargs):
             downloads.append(kwargs["install_id"])
@@ -115,6 +142,30 @@ def main():
             ONLINE_INSTALL_RUNNING.clear()
             ONLINE_INSTALL_RETRYING.clear()
             (base_dir / "scripts" / "demo.py").unlink(missing_ok=True)
+
+        def seed_task_retry_recovery(width):
+            task_item = task_items[width]
+            install_id = ("a" if width == 390 else "b") * 32
+            target = base_dir / "scripts" / f"task-recovery-{width}.sh"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("task recovery fixture\n", encoding="utf-8")
+            log_file = online_install_log_file(install_id, task_item["name"])
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_file.write_text("download completed\n", encoding="utf-8")
+            job = {
+                "id": install_id, "script_id": task_item["id"], "script_name": task_item["name"],
+                "log_file": str(log_file), "proxy_id": "", "import_task": True,
+                "enable_task": False, "selected_task_indexes": ["1"],
+                "selected_tasks": [online_tasks.online_script_task_crons(task_item)[0]], "force": False,
+                "running": False, "status": "失败", "phase": "importing_tasks",
+                "target_path": str(target), "start_time": 1, "returncode": 1,
+                "error": "task import failed", "scheduler_reload_pending": False,
+                "scheduler_reload_error": "", "updated_at": "2026-11-20 00:00:00",
+            }
+            capture_install_outputs(job, target)
+            task_reload_state.update(failures=1, calls=0)
+            return install_id
+
         app_module.dispatch_frontend_open_event = lambda: None
         fault = {"status": 0}
         dependency_processes = []
@@ -156,6 +207,8 @@ def main():
                     seed_retry_chain()
                 if data.get("seed_online_history"):
                     seed_online_history()
+                if data.get("seed_task_retry_recovery"):
+                    seed_task_retry_recovery(int(data["width"]))
                 if data.get("remove_online_target"):
                     (base_dir / "scripts" / "demo.py").unlink(missing_ok=True)
                 if data.get("remove_release"):
@@ -211,8 +264,15 @@ def main():
                     persist_install_job(info)
                 if "release" in data:
                     release.write_text(str(data["release"]), encoding="ascii")
+            task_imports = {}
+            for task in load_tasks():
+                task_script_id = str(task.get("online_script_id") or "")
+                if task_script_id.startswith("browser-task-recovery-"):
+                    task_imports[task_script_id] = task_imports.get(task_script_id, 0) + 1
             return jsonify(
                 downloads=len(downloads),
+                task_reload_count=task_reload_state["calls"],
+                task_imports=task_imports,
                 online=[{"id": job_id, "running": info.get("running")} for job_id, info in ONLINE_INSTALL_RUNNING.items()],
                 deps_running=bool(DEPS_RUNNING.get("browser-deps", {}).get("process") and
                                   DEPS_RUNNING["browser-deps"]["process"].poll() is None),
@@ -530,6 +590,24 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    await page.waitForURL('**/online-scripts/log/'+recoveredInstallId+'?back=/online-scripts/install-history');
    await page.getByRole('link',{name:'查看原安装'}).waitFor();
    assert.equal((await state()).downloads,onlineDownloadsBefore+2);
+
+   const beforeTaskRecovery=await state();
+   await fixture({seed_task_retry_recovery:true,width:viewport.width});
+   const taskRecoveryId=(viewport.width===390?'a':'b').repeat(32);
+   await page.goto(base+'/online-scripts/log/'+taskRecoveryId);
+   await page.locator('#installRecoveryAction').getByRole('button',{name:'仅恢复任务导入',exact:true}).waitFor();
+   await page.locator('#installRecoveryAction').getByRole('button',{name:'仅恢复任务导入',exact:true}).click();
+   await page.locator('#installRecoveryAction').getByRole('button',{name:'重新加载调度器',exact:true}).waitFor();
+   assert.equal(await page.locator('#installStatus').textContent(),'部分完成');
+   await page.locator('#installRecoveryAction').getByRole('button',{name:'重新加载调度器',exact:true}).click();
+   await page.waitForFunction(()=>document.querySelector('#installStatus').textContent==='已完成');
+   const afterTaskRecovery=await state();
+   assert.equal(afterTaskRecovery.task_imports['browser-task-recovery-'+viewport.width],1);
+   assert.equal(afterTaskRecovery.task_reload_count,2);
+   assert.equal(afterTaskRecovery.downloads,beforeTaskRecovery.downloads);
+   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true);
+   await page.screenshot({path:'/tmp/fls-install-task-recovery-'+viewport.width+'.png',fullPage:true});
+
    await page.goto(historyUrl.href);
    assert.equal((await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)),true);
    await page.screenshot({path:'/tmp/fls-online-install-history-'+viewport.width+'.png',fullPage:true});

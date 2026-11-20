@@ -551,7 +551,70 @@ class OnlineInstallRecoveryTests(unittest.TestCase):
                 )
                 self.assertEqual(repeated.status_code, 409)
                 importer.assert_called_once()
+            completed_job = get_online_install_job(info["id"])
+            self.assertEqual(completed_job["status"], "已完成")
+            self.assertEqual(completed_job.get("error"), "")
+            self.assertEqual(completed_job.get("scheduler_reload_error"), "")
+
+    def test_task_retry_scheduler_failure_records_outputs_for_reload_recovery(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.models import load_tasks
+            from fls_manager.online_scripts.constants import get_online_install_job
+            from fls_manager.online_scripts.install import capture_install_outputs
+            from fls_manager.online_scripts.logs import online_install_log_file
+
+            _item, info = self.prepare(base_dir)
+            info.update(
+                id="c" * 32,
+                running=False,
+                status="失败",
+                phase="importing_tasks",
+            )
+            target = base_dir / "scripts" / "demo.sh"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("downloaded", encoding="utf-8")
+            log_path = online_install_log_file(info["id"], info["script_name"])
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text("download completed\n", encoding="utf-8")
+            info["log_file"] = str(log_path)
+            capture_install_outputs(info, target)
+            client = app.test_client()
+            endpoint = f"/api/online-scripts/install-task-retry/{info['id']}"
+
+            with patch(
+                "fls_manager.online_scripts.tasks.reload_scheduler",
+                side_effect=RuntimeError("scheduler unavailable"),
+            ) as failed_reload, patch(
+                "fls_manager.online_scripts.install.download_online_script_logged",
+            ) as download:
+                failed = client.post(endpoint, headers={"X-Token": TOKEN})
+            self.assertEqual(failed.status_code, 503)
+            self.assertTrue(failed.json["scheduler_reload_required"])
+            failed_reload.assert_called_once()
+            download.assert_not_called()
+            self.assertEqual([task["name"] for task in load_tasks()], ["Hourly"])
+
+            with patch(
+                "fls_manager.routes.online_scripts.install.reload_scheduler",
+            ) as recovered_reload, patch(
+                "fls_manager.online_scripts.install.download_online_script_logged",
+            ) as download:
+                recovered = client.post(
+                    f"/api/online-scripts/install-reload/{info['id']}",
+                    headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(recovered.status_code, 200)
+            self.assertTrue(recovered.json["ok"])
+            recovered_reload.assert_called_once()
+            download.assert_not_called()
             self.assertEqual(get_online_install_job(info["id"])["status"], "已完成")
+            self.assertEqual([task["name"] for task in load_tasks()], ["Hourly"])
+
+            final_state = client.get(
+                f"/api/online-scripts/log/{info['id']}", headers={"X-Token": TOKEN},
+            ).json
+            self.assertFalse(final_state["consistency"]["changed"])
+            self.assertEqual(final_state["consistency"]["tasks"], "unchanged")
 
     def test_api_task_retry_refuses_later_target_changes_and_requires_csrf(self):
         with isolated_app() as (app, base_dir):
