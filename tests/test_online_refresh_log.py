@@ -35,6 +35,476 @@ class OnlineRefreshLogTests(unittest.TestCase):
         )
         return request_id
 
+    def _orphaned_refresh(self, base_dir, *, active_current=False):
+        from fls_manager.online_scripts import constants
+
+        original = self._state(base_dir)
+        constants.update_online_refresh_state(running=True, status="运行中", error="original diagnosis")
+        self._state(base_dir, refresh_id="c" * 32, request_id="d" * 32)
+        if active_current:
+            constants.update_online_refresh_state(running=True, status="运行中")
+        else:
+            constants.ONLINE_REFRESH_STATE.clear()
+        return original
+
+    def test_orphaned_running_history_recovers_from_each_query_or_recovery_entry(self):
+        for entry in ("status", "history", "log", "page", "retry", "confirm"):
+            with self.subTest(entry=entry), isolated_app() as (app, base_dir):
+                from fls_manager.online_scripts import constants
+                from fls_manager.routes.online_scripts import refresh
+
+                original = self._orphaned_refresh(base_dir)
+                current_before = constants.ONLINE_REFRESH_STATE_FILE.read_bytes()
+                client = app.test_client()
+                headers = {"X-Token": TOKEN}
+                endpoint = {
+                    "status": f"/api/online-scripts/refresh-status/{original}",
+                    "history": "/api/online-scripts/refresh-history",
+                    "log": f"/api/online-scripts/refresh-log/{original}",
+                    "page": f"/online-scripts/refresh-log/{original}",
+                    "retry": f"/api/online-scripts/refresh-retry/{original}",
+                    "confirm": f"/api/online-scripts/refresh-confirm/{original}",
+                }[entry]
+                with patch.object(refresh, "start_refresh_thread") as start:
+                    if entry in ("retry", "confirm"):
+                        response = client.post(endpoint, json={"retry_request_id": "e" * 32}, headers=headers)
+                    else:
+                        response = client.get(endpoint, headers=headers)
+                self.assertEqual(response.status_code, 202 if entry == "retry" else 200)
+                saved = json.loads(constants.ONLINE_REFRESH_HISTORY_FILE.read_text())[original]
+                self.assertFalse(saved["running"])
+                self.assertEqual(saved["status"], "已确认未发布" if entry == "confirm" else "结果未知")
+                self.assertEqual(saved["id"], "a" * 32)
+                self.assertIn("original diagnosis", saved["error"])
+                self.assertTrue(saved["log_file"].endswith("a" * 32 + ".log"))
+                if entry == "retry":
+                    self.assertEqual(response.json["retry_of"], original)
+                    start.assert_called_once()
+                else:
+                    start.assert_not_called()
+                    self.assertEqual(constants.ONLINE_REFRESH_STATE_FILE.read_bytes(), current_before)
+                if entry == "page":
+                    html = response.get_data(as_text=True)
+                    self.assertIn("结果未知", html)
+                    self.assertIn("检查当前缓存结果", html)
+                    self.assertIn("从历史重新同步", html)
+                    self.assertIn("original diagnosis", html)
+                if entry == "log":
+                    self.assertFalse(response.json["running"])
+                    self.assertTrue(response.json["terminal"])
+                    self.assertIn("refresh failed", response.json["log"])
+
+    def test_orphan_recovery_keeps_current_worker_running_and_is_idempotent(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import constants
+
+            original = self._orphaned_refresh(base_dir, active_current=True)
+            current_before = constants.ONLINE_REFRESH_STATE_FILE.read_bytes()
+            client = app.test_client()
+            response = client.get("/api/online-scripts/refresh-history", headers={"X-Token": TOKEN})
+            self.assertEqual(response.status_code, 200)
+            items = {value["request_id"]: value for value in response.json["items"]}
+            self.assertFalse(items[original]["running"])
+            self.assertEqual(items[original]["status"], "结果未知")
+            self.assertTrue(items["d" * 32]["running"])
+            history_after = constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes()
+            repeated = client.get(f"/api/online-scripts/refresh-status/{original}", headers={"X-Token": TOKEN})
+            self.assertEqual(repeated.status_code, 200)
+            self.assertEqual(constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes(), history_after)
+            self.assertEqual(constants.ONLINE_REFRESH_STATE_FILE.read_bytes(), current_before)
+            self.assertTrue(constants.ONLINE_REFRESH_STATE["running"])
+
+    def test_orphan_recovery_publication_failures_follow_actual_history_without_losing_current(self):
+        for after_publication in (False, True):
+            with self.subTest(after_publication=after_publication), isolated_app() as (app, base_dir):
+                from fls_manager.online_scripts import constants
+
+                original = self._orphaned_refresh(base_dir)
+                history_before = constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes()
+                current_before = constants.ONLINE_REFRESH_STATE_FILE.read_bytes()
+                real_replace = constants.os.replace
+
+                def fail_history(src, dst):
+                    if Path(dst) == constants.ONLINE_REFRESH_HISTORY_FILE:
+                        if after_publication:
+                            real_replace(src, dst)
+                        raise OSError("historical recovery publication denied")
+                    return real_replace(src, dst)
+
+                client = app.test_client()
+                with patch.object(constants.os, "replace", side_effect=fail_history):
+                    failed = client.get(f"/api/online-scripts/refresh-status/{original}", headers={"X-Token": TOKEN})
+                self.assertEqual(failed.status_code, 500)
+                self.assertIn("historical recovery publication denied", failed.json["error"])
+                if not after_publication:
+                    self.assertEqual(constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes(), history_before)
+                recovered = client.get(f"/api/online-scripts/refresh-status/{original}", headers={"X-Token": TOKEN})
+                self.assertEqual(recovered.status_code, 200)
+                self.assertFalse(recovered.json["running"])
+                self.assertEqual(recovered.json["status"], "结果未知")
+                self.assertIn("original diagnosis", recovered.json["error"])
+                self.assertEqual(constants.ONLINE_REFRESH_STATE_FILE.read_bytes(), current_before)
+                self.assertEqual(list(constants.ONLINE_REFRESH_HISTORY_FILE.parent.glob(".*.tmp")), [])
+
+    def test_orphan_history_query_and_retry_claim_do_not_overwrite_each_other(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import constants
+            from fls_manager.routes.online_scripts import refresh
+
+            original = self._orphaned_refresh(base_dir)
+            gate = threading.Barrier(3)
+            replies, errors = {}, []
+
+            def query(kind):
+                try:
+                    client = app.test_client()
+                    gate.wait(timeout=5)
+                    if kind == "retry":
+                        response = client.post(
+                            f"/api/online-scripts/refresh-retry/{original}",
+                            json={"retry_request_id": "e" * 32}, headers={"X-Token": TOKEN},
+                        )
+                    else:
+                        path = "/api/online-scripts/refresh-history" if kind == "history" else f"/api/online-scripts/refresh-status/{original}"
+                        response = client.get(path, headers={"X-Token": TOKEN})
+                    replies[kind] = response.status_code
+                except Exception as exc:
+                    errors.append(exc)
+
+            with patch.object(refresh, "start_refresh_thread") as start:
+                threads = [threading.Thread(target=query, args=(kind,), daemon=True) for kind in ("status", "history", "retry")]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=10)
+                self.assertFalse(any(thread.is_alive() for thread in threads))
+                self.assertEqual(errors, [])
+                self.assertEqual(replies, {"status": 200, "history": 200, "retry": 202})
+                replay = app.test_client().post(
+                    f"/api/online-scripts/refresh-retry/{original}", json={"retry_request_id": "e" * 32}, headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(replay.status_code, 200)
+                self.assertTrue(replay.json["replayed"])
+                start.assert_called_once()
+            history = json.loads(constants.ONLINE_REFRESH_HISTORY_FILE.read_text())
+            self.assertEqual(history[original]["status"], "结果未知")
+            self.assertFalse(history[original]["running"])
+            self.assertTrue(history["e" * 32]["running"])
+            self.assertEqual(history["e" * 32]["retry_of"], original)
+
+    def test_orphan_recovery_invalid_selection_auth_and_csrf_leave_history_unchanged(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import constants
+            from fls_manager.routes.online_scripts import refresh
+            from fls_manager.models import save_proxies
+
+            save_proxies([{"id": "wrong", "name": "Wrong binding", "type": "http", "host": "127.0.0.1", "port": "8080", "enabled": True}])
+            original = self._orphaned_refresh(base_dir)
+            before = constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes()
+            current_before = constants.ONLINE_REFRESH_STATE_FILE.read_bytes()
+            client = app.test_client()
+            with client.session_transaction() as session:
+                session.update(token=TOKEN, token_expire_at=4102444800, security_verified=True, csrf_token="orphan-csrf")
+            anonymous = app.test_client()
+            with anonymous.session_transaction() as session:
+                session["csrf_token"] = "anonymous-csrf"
+            retry_path = f"/api/online-scripts/refresh-retry/{original}"
+            with patch.object(refresh, "start_refresh_thread") as start:
+                denied = anonymous.post(retry_path, json={"retry_request_id": "e" * 32}, headers={"X-CSRF-Token": "anonymous-csrf"})
+                self.assertEqual(denied.status_code, 401)
+                csrf_denied = client.post(retry_path, json={"retry_request_id": "e" * 32})
+                self.assertEqual(csrf_denied.status_code, 400)
+                bound = client.post(retry_path, json={"retry_request_id": "e" * 32, "proxy_id": "wrong"}, headers={"X-Token": TOKEN})
+                self.assertEqual(bound.status_code, 409)
+                missing_proxy = client.post(retry_path, json={"retry_request_id": "e" * 32, "proxy_id": "missing"}, headers={"X-Token": TOKEN})
+                self.assertEqual(missing_proxy.status_code, 400)
+                invalid = client.post(retry_path, json={"retry_request_id": "invalid"}, headers={"X-Token": TOKEN})
+                self.assertEqual(invalid.status_code, 400)
+                with patch.object(refresh, "online_script_cache_fingerprint", return_value="f" * 64):
+                    stale = client.post(retry_path, json={"retry_request_id": "e" * 32}, headers={"X-Token": TOKEN})
+                    confirm = client.post(f"/api/online-scripts/refresh-confirm/{original}", headers={"X-Token": TOKEN})
+                self.assertEqual(stale.status_code, 409)
+                self.assertEqual(confirm.status_code, 409)
+                start.assert_not_called()
+            self.assertEqual(constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes(), before)
+            self.assertEqual(constants.ONLINE_REFRESH_STATE_FILE.read_bytes(), current_before)
+
+    def test_missing_selected_history_does_not_recover_unrelated_current_request(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import constants
+
+            self._state(base_dir)
+            constants.update_online_refresh_state(running=True, status="运行中")
+            constants.ONLINE_REFRESH_STATE.clear()
+            state_before = constants.ONLINE_REFRESH_STATE_FILE.read_bytes()
+            history_before = constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes()
+            client = app.test_client()
+            headers = {"X-Token": TOKEN}
+            for query, expected in (("invalid", 400), ("f" * 32, 404)):
+                for endpoint, key in (("/online-scripts", "refresh_request_id"), ("/api/online-scripts/refresh-history", "request_id")):
+                    response = client.get(f"{endpoint}?{key}={query}", headers=headers)
+                    self.assertEqual(response.status_code, expected)
+            self.assertEqual(constants.ONLINE_REFRESH_STATE_FILE.read_bytes(), state_before)
+            self.assertEqual(constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes(), history_before)
+            self.assertEqual(constants.ONLINE_REFRESH_STATE, {})
+
+    def test_orphaned_retry_child_replays_as_unknown_without_launching_again(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import constants
+            from fls_manager.routes.online_scripts import refresh
+
+            original = self._state(base_dir)
+            child = "e" * 32
+            constants.update_online_refresh_state(
+                request_id=child, id="f" * 32, retry_of=original, running=True, status="运行中",
+            )
+            self._state(base_dir, request_id="d" * 32, refresh_id="c" * 32)
+            constants.ONLINE_REFRESH_STATE.clear()
+            with patch.object(refresh, "start_refresh_thread") as start:
+                replay = app.test_client().post(
+                    f"/api/online-scripts/refresh-retry/{original}", json={"retry_request_id": child}, headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(replay.status_code, 200)
+            self.assertTrue(replay.json["replayed"])
+            self.assertEqual(replay.json["request_id"], child)
+            self.assertEqual(replay.json["retry_of"], original)
+            self.assertEqual(replay.json["status"], "结果未知")
+            self.assertFalse(replay.json["running"])
+            self.assertFalse(json.loads(constants.ONLINE_REFRESH_HISTORY_FILE.read_text())[child]["running"])
+            start.assert_not_called()
+
+    def test_orphaned_form_recovery_preserves_csrf_and_can_retry_failed_history_publication(self):
+        for action in ("retry", "confirm"):
+            for after_publication in (False, True):
+                with self.subTest(action=action, after_publication=after_publication), isolated_app() as (app, base_dir):
+                    from fls_manager.online_scripts import constants
+                    from fls_manager.routes.online_scripts import refresh
+
+                    original = self._orphaned_refresh(base_dir)
+                    client = app.test_client()
+                    with client.session_transaction() as session:
+                        session.update(token=TOKEN, token_expire_at=4102444800, security_verified=True, csrf_token="orphan-form-csrf")
+                    endpoint = f"/online-scripts/refresh-{action}/{original}"
+                    values = {"retry_request_id": "e" * 32, "proxy_id": ""}
+                    before = constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes()
+                    denied = client.post(endpoint, data=values)
+                    self.assertEqual(denied.status_code, 400)
+                    self.assertEqual(constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes(), before)
+                    real_replace = constants.os.replace
+
+                    def fail_history(src, dst):
+                        if Path(dst) == constants.ONLINE_REFRESH_HISTORY_FILE:
+                            if after_publication:
+                                real_replace(src, dst)
+                            raise OSError("form recovery publication denied")
+                        return real_replace(src, dst)
+
+                    values["csrf_token"] = "orphan-form-csrf"
+                    with patch.object(refresh, "start_refresh_thread") as start:
+                        with patch.object(constants.os, "replace", side_effect=fail_history):
+                            failed = client.post(endpoint, data=values)
+                        self.assertEqual(failed.status_code, 500)
+                        self.assertIn("form recovery publication denied", failed.get_data(as_text=True))
+                        self.assertIn(f"/online-scripts?refresh_request_id={original}#onlineRefreshHistory", failed.get_data(as_text=True))
+                        start.assert_not_called()
+                        recovered = client.post(endpoint, data=values)
+                        self.assertEqual(recovered.status_code, 302)
+                        replay = client.post(endpoint, data=values)
+                        self.assertEqual(replay.status_code, 200 if action == "retry" else 302)
+                        self.assertEqual(start.call_count, 1 if action == "retry" else 0)
+                    saved = json.loads(constants.ONLINE_REFRESH_HISTORY_FILE.read_text())[original]
+                    self.assertFalse(saved["running"])
+                    self.assertIn("original diagnosis", saved["error"])
+
+    def test_log_recovery_keeps_selected_receipt_outside_recent_history_window(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import constants
+
+            original = self._orphaned_refresh(base_dir)
+            for index in range(10):
+                constants.update_online_refresh_state(
+                    request_id=f"{index + 16:032x}", id=f"{index + 32:032x}",
+                    running=False, status="已完成", updated_at=f"2099-01-01 00:00:{index:02d}",
+                )
+            client = app.test_client()
+            headers = {"X-Token": TOKEN}
+            log_page = client.get(f"/online-scripts/refresh-log/{original}", headers=headers)
+            self.assertEqual(log_page.status_code, 200)
+            recovery_url = f"/online-scripts?refresh_request_id={original}#onlineRefreshHistory"
+            self.assertIn(f'href="{recovery_url}"', log_page.get_data(as_text=True))
+            recent = client.get("/api/online-scripts/refresh-history?limit=8", headers=headers)
+            self.assertNotIn(original, {item["request_id"] for item in recent.json["items"]})
+            selected = client.get(f"/api/online-scripts/refresh-history?limit=8&request_id={original}", headers=headers)
+            self.assertEqual(selected.status_code, 200)
+            self.assertEqual(len(selected.json["items"]), 8)
+            self.assertEqual(selected.json["items"][0]["request_id"], original)
+            page = client.get(recovery_url, headers=headers)
+            self.assertEqual(page.status_code, 200)
+            html = page.get_data(as_text=True)
+            self.assertIn(f'action="/online-scripts/refresh-retry/{original}"', html)
+            self.assertIn(f'refresh-history?limit=8&request_id={original}', html)
+            self.assertIn('name="csrf_token"', html)
+            before = constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes()
+            current_before = constants.ONLINE_REFRESH_STATE_FILE.read_bytes()
+            for query, status in (("bad", 400), ("f" * 32, 404)):
+                invalid = client.get(f"/api/online-scripts/refresh-history?request_id={query}", headers=headers)
+                self.assertEqual(invalid.status_code, status)
+                self.assertEqual(invalid.json["items"], [])
+                invalid_page = client.get(f"/online-scripts?refresh_request_id={query}", headers=headers)
+                self.assertEqual(invalid_page.status_code, status)
+                self.assertIn("重新选择", invalid_page.get_data(as_text=True))
+            self.assertEqual(constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes(), before)
+            self.assertEqual(constants.ONLINE_REFRESH_STATE_FILE.read_bytes(), current_before)
+
+    def test_missing_refresh_log_preserves_receipt_and_executable_recovery_urls(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import constants
+
+            request_id = self._state(base_dir)
+            constants.update_online_refresh_state(status="结果未知", error="original unknown result")
+            path = Path(constants.ONLINE_REFRESH_STATE["log_file"])
+            path.unlink()
+            state_before = constants.ONLINE_REFRESH_STATE_FILE.read_bytes()
+            history_before = constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes()
+            client = app.test_client()
+            headers = {"X-Token": TOKEN}
+            log_url = f"/online-scripts/refresh-log/{request_id}"
+            state_url = f"/api/online-scripts/refresh-status/{request_id}"
+            history_url = f"/online-scripts?refresh_request_id={request_id}#onlineRefreshHistory"
+            failed = client.get("/api" + log_url, headers=headers)
+            self.assertEqual(failed.status_code, 404)
+            self.assertEqual(failed.json["state_url"], state_url)
+            self.assertEqual(failed.json["log_url"], log_url)
+            self.assertEqual(failed.json["history_url"], history_url)
+            self.assertEqual(failed.json["refresh_state"]["status"], "结果未知")
+            self.assertEqual(failed.json["refresh_state"]["error"], "original unknown result")
+            page = client.get(log_url, headers=headers)
+            self.assertEqual(page.status_code, 404)
+            html = page.get_data(as_text=True)
+            self.assertIn(f'href="{log_url}"', html)
+            self.assertNotIn(f'href="/api{log_url}"', html)
+            self.assertIn(f'href="{history_url}"', html)
+            self.assertIn('id="refreshLogQuery"', html)
+            self.assertIn('onclick="flsRefreshCurrentPage()"', html)
+            self.assertIn("original unknown result", html)
+            self.assertEqual(constants.ONLINE_REFRESH_STATE_FILE.read_bytes(), state_before)
+            self.assertEqual(constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes(), history_before)
+            path.write_text("recovered original log\n", encoding="utf-8")
+            restored = client.get(log_url, headers=headers)
+            self.assertEqual(restored.status_code, 200)
+            self.assertIn("recovered original log", restored.get_data(as_text=True))
+
+    def test_missing_log_query_auth_and_invalid_identity_do_not_mutate_receipts(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import constants
+
+            request_id = self._state(base_dir)
+            Path(constants.ONLINE_REFRESH_STATE["log_file"]).unlink()
+            state_before = constants.ONLINE_REFRESH_STATE_FILE.read_bytes()
+            history_before = constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes()
+            client = app.test_client()
+            for endpoint in (f"/api/online-scripts/refresh-log/{request_id}", f"/api/online-scripts/refresh-status/{request_id}"):
+                self.assertEqual(client.get(endpoint).status_code, 401)
+            bad = client.get("/api/online-scripts/refresh-log/invalid-id", headers={"X-Token": TOKEN})
+            self.assertEqual(bad.status_code, 400)
+            self.assertEqual(bad.json["state_url"], "")
+            self.assertEqual(bad.json["retry_url"], "")
+            self.assertIsNone(bad.json["refresh_state"])
+            html = client.get("/online-scripts/refresh-log/invalid-id", headers={"X-Token": TOKEN})
+            self.assertEqual(html.status_code, 400)
+            self.assertNotIn('id="refreshLogQuery"', html.get_data(as_text=True))
+            self.assertEqual(constants.ONLINE_REFRESH_STATE_FILE.read_bytes(), state_before)
+            self.assertEqual(constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes(), history_before)
+
+    def test_unreadable_refresh_logs_keep_original_state_and_do_not_read_unsafe_paths(self):
+        for failure in ("symlink", "directory", "tail-error", "tail-diagnostic"):
+            with self.subTest(failure=failure), isolated_app() as (app, base_dir):
+                from fls_manager.online_scripts import constants
+                from fls_manager.routes.online_scripts import logs, refresh
+
+                request_id = self._state(base_dir)
+                constants.update_online_refresh_state(status="结果未知", error="original diagnosis")
+                path = Path(constants.ONLINE_REFRESH_STATE["log_file"])
+                outside = base_dir / "private-log.txt"
+                outside.write_text("private content", encoding="utf-8")
+                if failure in ("symlink", "directory"):
+                    path.unlink()
+                    if failure == "symlink":
+                        path.symlink_to(outside)
+                    else:
+                        path.mkdir()
+                state_before = constants.ONLINE_REFRESH_STATE_FILE.read_bytes()
+                history_before = constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes()
+                with patch.object(logs, "tail_file") as tail, patch.object(refresh, "start_refresh_thread") as start:
+                    if failure == "tail-error":
+                        tail.side_effect = PermissionError("refresh log access denied")
+                    else:
+                        tail.return_value = "读取日志失败: refresh log access denied"
+                    client = app.test_client()
+                    headers = {"X-Token": TOKEN}
+                    result = client.get(f"/api/online-scripts/refresh-log/{request_id}", headers=headers)
+                    page = client.get(f"/online-scripts/refresh-log/{request_id}", headers=headers)
+                    self.assertEqual(result.status_code, 500)
+                    self.assertEqual(page.status_code, 500)
+                    self.assertEqual(result.json["refresh_state"]["status"], "结果未知")
+                    self.assertEqual(result.json["refresh_state"]["error"], "original diagnosis")
+                    self.assertIn('id="refreshLogQuery"', page.get_data(as_text=True))
+                    self.assertNotIn("private content", page.get_data(as_text=True))
+                    if failure in ("symlink", "directory"):
+                        tail.assert_not_called()
+                    start.assert_not_called()
+                self.assertEqual(constants.ONLINE_REFRESH_STATE_FILE.read_bytes(), state_before)
+                self.assertEqual(constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes(), history_before)
+                self.assertEqual(outside.read_text(encoding="utf-8"), "private content")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise refresh receipt queries")
+    def test_missing_refresh_log_query_preserves_result_on_errors_and_merges_concurrent_clicks(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import constants
+
+            request_id = self._state(base_dir)
+            Path(constants.ONLINE_REFRESH_STATE["log_file"]).unlink()
+            html = app.test_client().get(f"/online-scripts/refresh-log/{request_id}", headers={"X-Token": TOKEN}).get_data(as_text=True)
+            script = next(script for script in re.findall(r"<script>(.*?)</script>", html, re.S) if "loadRefreshReceipt" in script)
+            static = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+            reader = static[static.index("async function flsReadJsonResponse("):static.index("async function flsReadTextResponse(")]
+            result = subprocess.run(["node", "-e", r'''
+const vm=require('node:vm'),assert=require('node:assert/strict');
+const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+(async()=>{
+ const elements={refreshLogQuery:{disabled:false},refreshLogQueryResult:{textContent:'original diagnosis'},refreshLogQueryError:{hidden:true,textContent:''},refreshLogQueryLogin:{hidden:true,href:''}};
+ let click,calls=0,finish;
+ elements.refreshLogQuery.addEventListener=(_name,fn)=>{click=fn;};
+ const context={document:{getElementById:id=>elements[id]},location:{pathname:'/online-scripts/refresh-log/'+input.request_id,search:''},encodeURIComponent,
+   flsResponseErrorDiagnostic:(_r,body)=>{try{return {payload:JSON.parse(body),message:'backend diagnostic'};}catch{return {payload:null,message:body};}}};
+ vm.createContext(context);vm.runInContext(input.reader+input.script,context);
+ for(const status of [401,403,404,409,500,503,200]){
+   context.fetch=async(url,options)=>{
+     assert.equal(url,'/api/online-scripts/refresh-status/'+input.request_id);
+     assert.equal(options.method,undefined);
+     return {ok:status===200,status,text:async()=>'<html>temporarily unavailable</html>'};
+   };
+   await click();
+   assert.equal(elements.refreshLogQuery.disabled,false);
+   assert.match(elements.refreshLogQueryError.textContent,/查询失败/);
+   assert.equal(elements.refreshLogQueryResult.textContent,'original diagnosis');
+   assert.equal(elements.refreshLogQueryLogin.hidden,status!==401&&status!==403);
+   if(status===401||status===403) assert.match(elements.refreshLogQueryLogin.href,/next=%2Fonline-scripts%2Frefresh-log%2F/);
+ }
+ context.fetch=async()=>({ok:true,status:200,json:async()=>({request_id:'f'.repeat(32),status:'已完成',running:false})});
+ await click();
+ assert.equal(elements.refreshLogQueryResult.textContent,'original diagnosis');
+ context.fetch=async()=>{calls++;return new Promise(resolve=>{finish=resolve;});};
+ const first=click();await click();assert.equal(calls,1);assert.equal(elements.refreshLogQuery.disabled,true);
+ finish({ok:true,status:200,json:async()=>({request_id:input.request_id,status:'结果未知',running:false,error:'original recovered diagnosis'})});
+ await first;
+ assert.equal(elements.refreshLogQuery.disabled,false);assert.equal(elements.refreshLogQueryError.hidden,true);
+ assert.equal(elements.refreshLogQueryResult.textContent,'原刷新状态：结果未知；original recovered diagnosis');
+ console.log('missing refresh log receipt query passed');
+})().catch(e=>{console.error(e);process.exitCode=1});
+'''], input=json.dumps({"script": script, "reader": reader, "request_id": request_id}), text=True, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_refresh_log_api_and_page_bind_request_and_bound_file(self):
         with isolated_app() as (app, base_dir):
             request_id = self._state(base_dir)
@@ -576,8 +1046,8 @@ const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
 (async()=>{
- const elements={refreshLogError:{hidden:true,textContent:''},refreshLogLogin:{hidden:true,href:''},refreshLogRetry:{disabled:false},refreshLogText:{textContent:'old'},refreshLogStatus:{textContent:'运行中'},refreshLogUpdatedAt:{textContent:'old'}};
- const timers=[]; let pagehide=null; let calls=0;
+ const elements={refreshLogError:{hidden:true,textContent:''},refreshLogLogin:{hidden:true,href:''},refreshLogRetry:{disabled:false},refreshLogText:{textContent:'old'},refreshLogStatus:{textContent:'运行中'},refreshLogUpdatedAt:{textContent:'old'},refreshLogConfirm:{hidden:true},refreshLogHistory:{hidden:true},refreshLogDiagnosis:{hidden:true,textContent:''}};
+ const timers=[]; let pagehide=null; let calls=0; let click=null;
  const responses=[
    {ok:true,status:200,body:{ok:true,log:'first line',status:'运行中',updated_at:'one',running:true,terminal:false}},
    {ok:true,status:200,body:{ok:true,log:'final line',status:'已完成',updated_at:'two',running:false,terminal:true}},
@@ -587,13 +1057,20 @@ const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
    fetch:async()=>{const item=responses[calls++];return {ok:item.ok,status:item.status,headers:{get:()=> 'application/json'},text:async()=>JSON.stringify(item.body)};},
    setTimeout:fakeSetTimeout,clearTimeout:fn=>{const index=timers.indexOf(fn);if(index>=0)timers.splice(index,1);},
    flsResponseErrorDiagnostic:(_r,b)=>({payload:JSON.parse(b),message:'backend diagnostic'})};
- elements.refreshLogRetry.addEventListener=()=>{};
+ elements.refreshLogRetry.addEventListener=(name,fn)=>{if(name==='click') click=fn;};
  vm.createContext(context);vm.runInContext(input.reader+input.script,context);
  await new Promise(resolve=>setImmediate(resolve));
  assert.equal(calls,1); assert.equal(timers.length,1); assert.equal(elements.refreshLogText.textContent,'first line');
  const timer=timers.shift(); timer(); await new Promise(resolve=>setImmediate(resolve));
  assert.equal(calls,2); assert.equal(timers.length,0); assert.equal(elements.refreshLogText.textContent,'final line');
  assert.equal(elements.refreshLogStatus.textContent,'已完成'); assert.equal(typeof pagehide,'function');
+ assert.equal(elements.refreshLogConfirm.hidden,true); assert.equal(elements.refreshLogHistory.hidden,true);
+ responses.push({ok:true,status:200,body:{ok:true,log:'original interrupted log',status:'结果未知',running:false,terminal:true,error:'original recovery diagnosis'}});
+ await click();
+ assert.equal(calls,3); assert.equal(timers.length,0);
+ assert.equal(elements.refreshLogConfirm.hidden,false); assert.equal(elements.refreshLogHistory.hidden,false);
+ assert.equal(elements.refreshLogDiagnosis.hidden,false); assert.equal(elements.refreshLogDiagnosis.textContent,'original recovery diagnosis');
+ assert.equal(elements.refreshLogText.textContent,'original interrupted log');
  console.log('refresh log polling passed');
 })().catch(error=>{console.error(error);process.exitCode=1});
 '''], input=json.dumps({"script": script, "reader": reader}), text=True, capture_output=True, timeout=5,

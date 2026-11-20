@@ -276,7 +276,11 @@ def api_online_refresh_history():
     except (TypeError, ValueError):
         return jsonify(ok=False, error="limit 必须为整数", items=[]), 400
     try:
-        items = get_online_refresh_history(limit)
+        items = get_online_refresh_history(limit, request_id=request.args.get("request_id", "").strip())
+    except ValueError as e:
+        return jsonify(ok=False, error=str(e), items=[]), 400
+    except LookupError as e:
+        return jsonify(ok=False, error=str(e), items=[]), 404
     except Exception as e:
         return jsonify(ok=False, error=f"读取在线脚本源刷新历史失败：{e}", items=[]), 500
     return jsonify(ok=True, items=items), 200
@@ -307,7 +311,11 @@ def online_refresh_retry(request_id):
             page_header_card(
                 "在线脚本源重试未启动",
                 help_html=h(payload.get("error") or "重试失败"),
-                actions_html='<a class="btn btn-gray" href="/online-scripts#online-status">返回刷新状态</a>',
+                actions_html=(
+                    f'<a class="btn btn-gray" href="/online-scripts?refresh_request_id={h(request_id)}#onlineRefreshHistory">返回原刷新记录</a>'
+                    if re.fullmatch(r"[a-f0-9]{32}", request_id) else
+                    '<a class="btn btn-gray" href="/online-scripts#online-status">返回刷新状态</a>'
+                ),
             ),
         ), status_code
     if payload.get("replayed"):
@@ -341,7 +349,11 @@ def online_refresh_confirm(request_id):
             page_header_card(
                 "刷新结果仍需核对",
                 help_html=h(payload.get("error") or "刷新结果无法确认"),
-                actions_html='<a class="btn btn-gray" href="/online-scripts#online-status">返回刷新状态</a>',
+                actions_html=(
+                    f'<a class="btn btn-gray" href="/online-scripts?refresh_request_id={h(request_id)}#onlineRefreshHistory">返回原刷新记录</a>'
+                    if re.fullmatch(r"[a-f0-9]{32}", request_id) else
+                    '<a class="btn btn-gray" href="/online-scripts#online-status">返回刷新状态</a>'
+                ),
             ),
         ), status_code
     return redirect(url_for("online_scripts.online_scripts_page", msg=f"在线脚本源刷新结果已确认：{payload.get('status')}"))

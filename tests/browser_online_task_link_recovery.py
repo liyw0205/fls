@@ -185,6 +185,44 @@ def main():
                 cache.mkdir()
             return jsonify(ok=True, refreshes=fault["refreshes"])
 
+        @app.route("/api/fixture/orphaned-refresh", methods=["POST"])
+        def orphaned_refresh_fixture():
+            fault["refreshes"] = 0
+            original, refresh_id = uuid.uuid4().hex, uuid.uuid4().hex
+            path = online_refresh_log_file(refresh_id)
+            path.write_text("orphaned original refresh log\n", encoding="utf-8")
+            update_online_refresh_state(
+                id=refresh_id, request_id=original, proxy_id="", running=True,
+                status="运行中", error="original orphan diagnosis", message="", task_link_failures=[],
+                cache_published=False, expected_cache_fingerprint=source.online_script_cache_fingerprint(),
+                published_cache_fingerprint="", source_fingerprint=source.online_script_source_fingerprint(),
+                retry_of="", confirmation="", confirmation_fingerprint="", log_file=str(path), updated_at="old",
+            )
+            update_online_refresh_state(
+                id=uuid.uuid4().hex, request_id=uuid.uuid4().hex, running=False,
+                status="已完成", error="", message="newer refresh finished", log_file="", updated_at="new",
+            )
+            for index in range(10):
+                update_online_refresh_state(
+                    id=uuid.uuid4().hex, request_id=uuid.uuid4().hex,
+                    running=False, status="已完成", updated_at=f"2099-01-01 00:00:{index:02d}",
+                )
+            constants.ONLINE_REFRESH_STATE.clear()
+            return jsonify(original=original)
+
+        @app.route("/api/fixture/refresh-log-file", methods=["POST"])
+        def refresh_log_file_fixture():
+            data = request.get_json() or {}
+            info = constants.get_online_refresh_request(data.get("request_id"))
+            if not info:
+                return jsonify(error="fixture refresh missing"), 404
+            path = online_refresh_log_file(info["id"])
+            if data.get("restore"):
+                path.write_text("restored original refresh log\n", encoding="utf-8")
+            else:
+                path.unlink(missing_ok=True)
+            return jsonify(refreshes=fault["refreshes"])
+
         server = make_server("127.0.0.1", 0, app, threaded=True)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         try:
@@ -425,6 +463,89 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    const restoredCache=await page.request.post(base+'/api/fixture/refresh-cache-unavailable',{headers,data:{restore:true}});
    assert.equal(restoredCache.status(),200);
    assert.equal((await restoredCache.json()).refreshes,1);
+
+   const orphanSetup=await page.request.post(base+'/api/fixture/orphaned-refresh',{headers});
+   assert.equal(orphanSetup.status(),200);
+   const orphanId=(await orphanSetup.json()).original;
+   let orphanLogPolls=0;
+   const countOrphanPolls=request=>{if(request.url().includes('/api/online-scripts/refresh-log/'+orphanId)) orphanLogPolls++;};
+   page.on('request',countOrphanPolls);
+   await page.goto(base+'/online-scripts/refresh-log/'+orphanId);
+   assert.equal(await page.locator('#refreshLogStatus').textContent(),'结果未知');
+   assert.match(await page.locator('#refreshLogDiagnosis').textContent(),/original orphan diagnosis/);
+   assert.match(await page.locator('#refreshLogText').textContent(),/orphaned original refresh log/);
+   await page.getByRole('button',{name:'检查当前缓存结果',exact:true}).waitFor();
+   await page.waitForTimeout(2300);
+   assert.equal(orphanLogPolls,0);
+   page.off('request',countOrphanPolls);
+   await page.screenshot({path:'/tmp/fls-orphan-refresh-'+viewport.width+'.png'});
+   await page.getByRole('link',{name:'从历史重新同步',exact:true}).click();
+   await page.waitForURL(url=>url.searchParams.get('refresh_request_id')===orphanId);
+   assert.equal(new URL(page.url()).searchParams.get('refresh_request_id'),orphanId);
+   const orphanRetryForm=page.locator('#onlineRefreshHistory form[data-refresh-retry-of="'+orphanId+'"]');
+   await orphanRetryForm.waitFor();
+   const orphanRetryId=await orphanRetryForm.locator('[name="retry_request_id"]').inputValue();
+   const orphanRetryEndpoint=base+'/api/online-scripts/refresh-retry/'+orphanId;
+   await page.route(orphanRetryEndpoint,async route=>{
+     const actual=await route.fetch();
+     assert.equal(actual.status(),202);
+     await route.abort('failed');
+   });
+   await orphanRetryForm.getByRole('button',{name:'明确重新同步',exact:true}).click();
+   await page.locator('#onlineRefreshQuery').waitFor({state:'visible'});
+   assert.equal(JSON.parse(await page.evaluate(()=>sessionStorage.getItem('fls-online-refresh-request'))).request_id,orphanRetryId);
+   await page.unroute(orphanRetryEndpoint);
+   await page.locator('#onlineRefreshQuery').click();
+   await page.waitForFunction(()=>!sessionStorage.getItem('fls-online-refresh-request'));
+   const orphanRecovered=await fixture({});
+   assert.equal(orphanRecovered.refreshes,1);
+   await page.locator('#onlineRefreshLogLink').click();
+   await page.waitForSelector('#refreshLogText');
+   assert.match(await page.locator('#refreshLogText').textContent(),/original retry completed/);
+   await page.goto(base+'/online-scripts/refresh-log/'+orphanId);
+   assert.equal(await page.locator('#refreshLogStatus').textContent(),'结果未知');
+   assert.match(await page.locator('#refreshLogText').textContent(),/orphaned original refresh log/);
+
+   const missingSetup=await page.request.post(base+'/api/fixture/orphaned-refresh',{headers});
+   assert.equal(missingSetup.status(),200);
+   const missingId=(await missingSetup.json()).original;
+   const missingLogUrl=base+'/online-scripts/refresh-log/'+missingId;
+   const missingStateUrl=base+'/api/online-scripts/refresh-status/'+missingId;
+   const logFile=async restore=>{
+     const response=await page.request.post(base+'/api/fixture/refresh-log-file',{headers,data:{request_id:missingId,restore}});
+     assert.equal(response.status(),200);return response.json();
+   };
+   assert.equal((await logFile(false)).refreshes,0);
+   const missingPage=await page.goto(missingLogUrl);
+   assert.equal(missingPage.status(),404);
+   assert.match(await page.locator('#refreshLogQueryResult').textContent(),/original orphan diagnosis/);
+   await page.route(missingStateUrl,route=>route.fulfill({status:503,contentType:'text/html',body:'state query temporarily unavailable'}));
+   await page.locator('#refreshLogQuery').click();
+   await page.waitForFunction(()=>document.querySelector('#refreshLogQueryError').textContent.includes('HTTP 503'));
+   assert.equal(await page.locator('#refreshLogQuery').isEnabled(),true);
+   assert.match(await page.locator('#refreshLogQueryResult').textContent(),/original orphan diagnosis/);
+   await page.unroute(missingStateUrl);
+   await page.locator('#refreshLogQuery').click();
+   await page.waitForFunction(()=>document.querySelector('#refreshLogQueryResult').textContent.startsWith('原刷新状态：结果未知'));
+   await page.screenshot({path:'/tmp/fls-missing-refresh-log-'+viewport.width+'.png'});
+   assert.equal((await logFile(true)).refreshes,0);
+   await page.getByRole('button',{name:'重新读取日志',exact:true}).click();
+   await page.locator('#refreshLogText').waitFor();
+   assert.equal(new URL(page.url()).pathname,'/online-scripts/refresh-log/'+missingId);
+   assert.match(await page.locator('#refreshLogText').textContent(),/restored original refresh log/);
+   assert.equal((await logFile(false)).refreshes,0);
+   await page.goto(missingLogUrl);
+   await page.getByRole('link',{name:'返回原刷新记录',exact:true}).click();
+   await page.waitForURL(url=>url.searchParams.get('refresh_request_id')===missingId);
+   const missingRetry=page.locator('#onlineRefreshHistory form[data-refresh-retry-of="'+missingId+'"]');
+   const missingRetryId=await missingRetry.locator('[name="retry_request_id"]').inputValue();
+   await missingRetry.getByRole('button',{name:'明确重新同步',exact:true}).click();
+   await page.waitForFunction(requestId=>document.querySelector('#onlineRefreshLogLink').getAttribute('href').endsWith('/'+requestId),missingRetryId);
+   await page.waitForFunction(()=>!sessionStorage.getItem('fls-online-refresh-request'));
+   assert.equal((await fixture({})).refreshes,1);
+   await page.locator('#onlineRefreshLogLink').click();
+   await page.locator('#refreshLogText').waitFor();
+   assert.match(await page.locator('#refreshLogText').textContent(),/original retry completed/);
    assert.deepEqual(errors,[]);
    console.log('online task-link recovery passed '+viewport.width);
    await context.close();
