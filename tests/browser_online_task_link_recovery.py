@@ -193,6 +193,34 @@ def main():
             })
             return jsonify(request_id=request_id, script_id=current["id"])
 
+        @app.route("/api/fixture/task-link-history", methods=["POST"])
+        def task_link_history_fixture():
+            mode = (request.get_json() or {}).get("mode")
+            request_id = "0" * 32
+            record = {
+                "request_id": request_id, "script_id": item["id"], "proxy_id": "",
+                "expected_version": source.online_task_link_version(source.normalize_online_scripts([item])[0]),
+                "state": "unknown", "added": 0, "total": 0, "error": "history original unknown diagnosis",
+                "updated_at": "2000-01-01 00:00:00", "expected_tasks_fingerprint": "1" * 64,
+                "published_tasks_fingerprint": "", "confirmation": "", "confirmation_fingerprint": "",
+            }
+            records = {}
+            constants.ONLINE_TASK_LINK_ACTIVE.clear()
+            if mode in ("full", "prune"):
+                records = {f"{index:032x}": source._task_link_request_snapshot(dict(
+                    record, request_id=f"{index:032x}", updated_at="2099-01-01 00:00:00",
+                    state="unknown" if mode == "full" else "completed",
+                )) for index in range(200)}
+                records[request_id] = source._task_link_request_snapshot(record)
+            if mode == "active_missing":
+                constants.ONLINE_TASK_LINK_ACTIVE.add(request_id)
+            if mode == "restore_active":
+                records[request_id] = source._task_link_request_snapshot(dict(record, state="completed"))
+            source.mutate_json(source.ONLINE_TASK_LINK_REQUESTS_FILE, {}, lambda _: records, strict=True)
+            if mode == "prune":
+                source.persist_task_link_request(dict(record, request_id="f" * 32, state="completed"))
+            return jsonify(request_id=request_id, count=len(source.list_task_link_requests(100)), fetches=fault["fetches"])
+
         @app.route("/api/fixture/refresh-retry", methods=["POST"])
         def refresh_retry_fixture():
             fault["refreshes"] = 0
@@ -309,6 +337,86 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    await page.goto(base+'/login');
    await page.locator('[name="token"]').fill(process.env.FLS_UI_TOKEN);
    await page.locator('button[type="submit"]').click();
+   const historyFixture=async mode=>{
+     const response=await page.request.post(base+'/api/fixture/task-link-history',{headers,data:{mode}});
+     assert.equal(response.status(),200);return response.json();
+   };
+   await fixture({reset:true,fail:false});
+   const pruned=await historyFixture('prune');
+   await page.goto(base+'/online-scripts/task-link-history?recovery=1');
+   await page.locator('a[href="/online-scripts/task-link-status/'+pruned.request_id+'"]').click();
+   await page.waitForURL(base+'/online-scripts/task-link-status/'+pruned.request_id);
+   assert.match(await page.locator('.content').textContent(),/history original unknown diagnosis/);
+   assert.equal((await fixture({})).fetches,0);
+   await historyFixture('full');
+   await page.goto(base+'/online-scripts');
+   const fullForm=page.locator('#online-list form[action="/online-scripts/task-link/browser-link"]');
+   await fullForm.locator('button[type="submit"]').click();
+   await page.getByRole('link',{name:'处理待恢复同步',exact:true}).waitFor();
+   assert.equal(await fullForm.locator('button[type="submit"]').isEnabled(),true);
+   assert.equal(await page.evaluate(()=>sessionStorage.getItem('fls-online-task-link-request')),null);
+   assert.equal((await fixture({})).fetches,0);
+   await page.getByRole('link',{name:'处理待恢复同步',exact:true}).click();
+   await page.waitForURL(base+'/online-scripts/task-link-history?recovery=1');
+   await page.getByRole('link',{name:'下一页',exact:true}).click();
+   await page.waitForURL(url=>url.searchParams.get('offset')==='50');
+   assert.ok(new URL(page.url()).searchParams.get('offset')==='50');
+   assert.ok(new URL(page.url()).searchParams.get('recovery')==='1');
+   await page.locator('a[href*="/online-scripts/task-link-status/"]').first().click();
+   await page.waitForURL(url=>url.pathname.startsWith('/online-scripts/task-link-status/'));
+   const archiveId=new URL(page.url()).pathname.split('/').pop();
+   const archiveForm=page.locator('form[action="/online-scripts/task-link-archive/'+archiveId+'"]');
+   await archiveForm.locator('[name="acknowledge"]').check();
+   const archiveLabelBox=await archiveForm.locator('label').boundingBox();
+   const archiveButtonBox=await archiveForm.locator('button').boundingBox();
+   assert.ok(archiveLabelBox.y+archiveLabelBox.height<=archiveButtonBox.y);
+   assert.ok(archiveLabelBox.x>=0&&archiveLabelBox.x+archiveLabelBox.width<=viewport.width);
+   assert.ok(archiveButtonBox.x>=0&&archiveButtonBox.x+archiveButtonBox.width<=viewport.width);
+   await page.screenshot({path:'/tmp/fls-task-link-archive-'+viewport.width+'.png'});
+   const archivePost=base+'/online-scripts/task-link-archive/'+archiveId;
+   await page.route(archivePost,async route=>{
+     const response=await route.fetch({maxRedirects:0});assert.equal(response.status(),302);
+     await route.fulfill({status:503,contentType:'text/html',body:'archive response lost after publication'});
+   });
+   await archiveForm.getByRole('button',{name:'归档原同步请求',exact:true}).click();
+   await page.waitForFunction(()=>document.body.textContent.includes('archive response lost after publication'));
+   await page.unroute(archivePost);
+   await page.goto(base+'/online-scripts/task-link-status/'+archiveId);
+   await page.getByRole('heading',{name:'已归档（原结果：结果未知）',exact:true}).waitFor();
+   assert.equal(await page.getByRole('button',{name:'继续原同步请求',exact:true}).count(),0);
+   assert.equal(await page.getByRole('button',{name:'检查当前任务合并',exact:true}).count(),0);
+   assert.equal((await fixture({})).fetches,0);
+   await page.evaluate(id=>sessionStorage.setItem('fls-online-task-link-request',JSON.stringify({request_id:id,script_id:'browser-link',proxy_id:''})),archiveId);
+   await page.goto(base+'/online-scripts');
+   await page.waitForURL(base+'/online-scripts/task-link-status/'+archiveId);
+   assert.equal(await page.evaluate(()=>sessionStorage.getItem('fls-online-task-link-request')),null);
+   await page.getByRole('link',{name:'核对当前任务',exact:true}).click();
+   await page.waitForURL(base+'/online-scripts');
+   const acceptedSync=page.waitForResponse(response=>response.url()===base+'/api/online-scripts/task-link/browser-link'&&response.request().method()==='POST');
+   await page.locator('#online-list form[action="/online-scripts/task-link/browser-link"] button[type="submit"]').click();
+   const acceptedResponse=await acceptedSync;
+   assert.equal(acceptedResponse.status(),200);
+   await page.waitForURL(url=>url.pathname==='/online-scripts'&&url.searchParams.has('msg'));
+   const acceptedState=await fixture({});
+   assert.equal(acceptedState.fetches,1);
+   assert.equal(acceptedState.cached[0].task_cron[0].name,'Browser task');
+   await page.screenshot({path:'/tmp/fls-task-link-history-'+viewport.width+'.png'});
+   const missing=await historyFixture('active_missing');
+   await page.evaluate(id=>sessionStorage.setItem('fls-online-task-link-request',JSON.stringify({request_id:id,script_id:'browser-link',proxy_id:''})),missing.request_id);
+   await page.goto(base+'/online-scripts');
+   await page.waitForFunction(()=>document.querySelector('#onlineTaskLinkRecovery').textContent.includes('回执暂时缺失'));
+   assert.equal(await page.getByRole('button',{name:'继续原同步请求',exact:true}).count(),0);
+   assert.equal((await fixture({})).fetches,1);
+   await historyFixture('restore_active');
+   await page.getByRole('button',{name:'重新读取同步状态',exact:true}).click();
+   await page.waitForURL(base+'/online-scripts/task-link-status/'+missing.request_id);
+   assert.equal(await page.evaluate(()=>sessionStorage.getItem('fls-online-task-link-request')),null);
+   assert.equal((await fixture({})).fetches,1);
+   await historyFixture('clear');
+   console.log('task-link protected history, full-capacity archive and missing receipt recovery passed '+viewport.width);
+   if(process.env.FLS_TASK_LINK_HISTORY_ONLY==='1'){
+     assert.deepEqual(errors,[]);await context.close();continue;
+   }
    await fixture({reset:true,fail:false});
    const preparedFixture=await page.request.post(base+'/api/fixture/task-link-confirmation',{headers,data:{prepared:true}});
    assert.equal(preparedFixture.status(),200);
@@ -356,7 +464,7 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
      await page.getByRole('button',{name:'继续原同步请求',exact:true}).waitFor();
      assert.match(await page.locator('#onlineTaskLinkRecovery').textContent(),/browser startup receipt unavailable/);
      await page.getByRole('button',{name:'继续原同步请求',exact:true}).click();
-     await page.waitForFunction(()=>document.body.textContent.includes('外部任务源同步完成'));
+     await page.waitForURL(url=>url.pathname==='/online-scripts'&&(url.searchParams.get('msg')||'').includes('外部任务源同步完成'));
      assert.equal((await fixture({})).fetches,1);
      const replay=await page.request.post(startupPost,{headers,data:{request_id:startupId}});
      assert.equal(replay.status(),200);assert.equal((await replay.json()).replayed,true);
@@ -383,7 +491,7 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    const retryAgain=page.getByRole('button',{name:'继续原同步请求',exact:true});
    await fixture({fail:false});
    await retryAgain.click();
-   await page.waitForFunction(()=>document.body.textContent.includes('外部任务源同步完成'));
+   await page.waitForURL(url=>url.pathname==='/online-scripts'&&(url.searchParams.get('msg')||'').includes('外部任务源同步完成'));
    const state=await fixture({});
    assert.equal(state.fetches,2);
    assert.equal(state.cached[0].task_cron[0].name,'Browser task');
@@ -507,7 +615,7 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    await fixture({fail:false});
    await dynamicRetry.click();
    await page.waitForURL('**/online-scripts?msg=*');
-   await page.waitForFunction(()=>document.body.textContent.includes('外部任务源同步完成'));
+   await page.waitForURL(url=>url.pathname==='/online-scripts'&&(url.searchParams.get('msg')||'').includes('外部任务源同步完成'));
    const dynamicState=await fixture({});
    assert.equal(dynamicState.fetches,2);
    const setup=await page.request.post(base+'/api/fixture/refresh-retry',{headers,data:{}});
@@ -710,8 +818,13 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    await page.getByRole('link',{name:'返回原刷新记录',exact:true}).click();
    await page.waitForURL(url=>url.searchParams.get('refresh_request_id')===missingId);
    const missingRetry=page.locator('#onlineRefreshHistory form[data-refresh-retry-of="'+missingId+'"]');
-   const missingRetryId=await missingRetry.locator('[name="retry_request_id"]').inputValue();
-   await missingRetry.getByRole('button',{name:'明确重新同步',exact:true}).click();
+   const [missingRetried]=await Promise.all([
+     page.waitForResponse(response=>response.url()===base+'/api/online-scripts/refresh-retry/'+missingId&&response.request().method()==='POST'),
+     missingRetry.getByRole('button',{name:'明确重新同步',exact:true}).click(),
+   ]);
+   assert.equal(missingRetried.status(),202);
+   const missingRetryId=(await missingRetried.json()).request_id;
+   assert.match(missingRetryId,/^[a-f0-9]{32}$/);
    await page.waitForFunction(requestId=>document.querySelector('#onlineRefreshLogLink').getAttribute('href').endsWith('/'+requestId),missingRetryId);
    await page.waitForFunction(()=>!sessionStorage.getItem('fls-online-refresh-request'));
    assert.equal((await fixture({})).refreshes,1);

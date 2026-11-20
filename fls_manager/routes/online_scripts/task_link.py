@@ -4,6 +4,8 @@ import uuid
 from ._common import *
 from ...online_scripts.source import (
     OnlineScriptCacheConflict,
+    TaskLinkHistoryFull,
+    TaskLinkReceiptMissing,
     get_task_link_request,
     claim_task_link_request,
     merge_task_link_tasks,
@@ -23,7 +25,7 @@ _STALE_TASK_LINK_CONFIRMATION = (
 )
 
 
-def _task_link_error(script_id, message, status_code, proxy_id="", request_id="", retry=False):
+def _task_link_error(script_id, message, status_code, proxy_id="", request_id="", retry=False, history_full=False):
     retry_form = ""
     if retry:
         hidden = f'<input type="hidden" name="request_id" value="{h(request_id)}">' if request_id else ""
@@ -43,6 +45,7 @@ def _task_link_error(script_id, message, status_code, proxy_id="", request_id=""
         actions_html=(
             retry_form
             + status_link
+            + ('<a class="btn btn-primary" href="/online-scripts/task-link-history?recovery=1">处理待恢复同步</a>' if history_full else "")
             + '<a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>'
             + '<a class="btn btn-blue" href="/online-scripts/source">检查脚本源数据</a>'
         ),
@@ -98,7 +101,7 @@ def _existing_task_link_result(record, script_id, proxy_id, expected_version="")
         return {"ok": False, "request_id": record["request_id"],
                 "msg": "同步请求已绑定其他脚本、代理或旧版本，请刷新页面后重新选择。",
                 "retry_allowed": False}, 409
-    if record.get("state") == "failed" and not record.get("active"):
+    if record.get("state") == "failed" and not record.get("active") and not record.get("archived"):
         return None
     request_id = record["request_id"]
     state = record["state"]
@@ -106,13 +109,15 @@ def _existing_task_link_result(record, script_id, proxy_id, expected_version="")
         "completed": "外部任务源同步已完成，未重复请求",
         "unknown": "该同步请求的发布结果未知，请先查询原同步请求和当前缓存，确认后再创建新的同步请求。",
     }
-    message = messages.get(state, "该同步请求仍在处理中，请查询原请求后再重试。")
+    message = ("原同步请求已归档，不能继续或重新确认；请核对当前任务。" if record.get("archived")
+               else messages.get(state, "该同步请求仍在处理中，请查询原请求后再重试。"))
     diagnostic = record.get("error") or ""
     return {
         "ok": state == "completed", "request_id": request_id, "state": state,
         "added": record.get("added", 0), "total": record.get("total", 0),
         "msg": message + ("；" + diagnostic if diagnostic else ""), "diagnostic": diagnostic,
         "retry_allowed": False, "replayed": True,
+        "archived": bool(record.get("archived")),
         "state_url": f"/api/online-scripts/task-link-status/{request_id}",
         "status_url": f"/online-scripts/task-link-status/{request_id}",
     }, 200 if state == "completed" else 409
@@ -149,7 +154,9 @@ def _task_link_status_record(request_id):
     with storage_transaction():
         record = get_task_link_request(request_id)
         if record:
-            record["retry_allowed"] = record.get("state") == "failed" and not record.get("active")
+            record["retry_allowed"] = record.get("state") == "failed" and not record.get("active") and not record.get("archived")
+        if record and record.get("archived"):
+            return record
         if not record or record.get("confirmation") != "not_merged":
             return record
         try:
@@ -165,6 +172,12 @@ def _task_link_status_record(request_id):
         return record
 
 
+def _missing_task_link_receipt(request_id, exc):
+    return {"ok": False, "request_id": request_id, "msg": str(exc), "active": True,
+            "receipt_missing": True, "retry_allowed": False,
+            "status_url": f"/online-scripts/task-link-status/{request_id}"}, 503
+
+
 def _submit_task_link(script_id, proxy_id, raw_request_id):
     try:
         request_id = _request_id(raw_request_id)
@@ -173,6 +186,8 @@ def _submit_task_link(script_id, proxy_id, raw_request_id):
 
     try:
         previous = get_task_link_request(request_id, script_id=script_id, proxy_id=proxy_id)
+    except TaskLinkReceiptMissing as exc:
+        return _missing_task_link_receipt(request_id, exc)
     except Exception as exc:
         return {"ok": False, "request_id": request_id,
                 "msg": f"同步回执无法读取，未发起外部请求：{exc}", "retry_allowed": False}, 500
@@ -229,6 +244,12 @@ def _submit_task_link(script_id, proxy_id, raw_request_id):
     }
     try:
         claimed_previous = claim_task_link_request(record)
+    except TaskLinkHistoryFull as exc:
+        return {"ok": False, "request_id": request_id, "msg": str(exc), "history_full": True,
+                "accepted": False, "retry_allowed": False,
+                "history_url": "/online-scripts/task-link-history?recovery=1"}, 409
+    except TaskLinkReceiptMissing as exc:
+        return _missing_task_link_receipt(request_id, exc)
     except Exception as exc:
         return {"ok": False, "request_id": request_id,
                 "msg": f"同步请求无法保存，未发起外部请求：{exc}", "retry_allowed": True}, 500
@@ -341,8 +362,9 @@ def _render_task_link_result(script_id, payload, status_code, proxy_id):
         payload.get("msg") or "外部任务源同步未完成",
         status_code,
         proxy_id=proxy_id,
-        request_id=payload.get("request_id", ""),
+        request_id="" if payload.get("history_full") else payload.get("request_id", ""),
         retry=bool(payload.get("retry_allowed")),
+        history_full=bool(payload.get("history_full")),
     )
 
 
@@ -357,10 +379,15 @@ def _confirm_task_link_locked(request_id):
     """Resolve an interrupted merge by comparing the bound cache fingerprints."""
     try:
         record = get_task_link_request(request_id)
+    except TaskLinkReceiptMissing as exc:
+        return _missing_task_link_receipt(request_id, exc)
     except Exception as exc:
         return {"ok": False, "request_id": request_id, "msg": f"同步回执无法读取：{exc}"}, 500
     if not record:
         return {"ok": False, "request_id": request_id, "msg": "同步请求不存在"}, 404
+    if record.get("archived") or record.get("active"):
+        return {"ok": False, "request_id": request_id, "archived": bool(record.get("archived")),
+                "msg": "原同步请求已归档或仍在处理中，不能确认。", "retry_allowed": False}, 409
 
     confirmation = record.get("confirmation")
     if confirmation in ("merged", "not_merged"):
@@ -454,6 +481,55 @@ def _confirm_task_link_locked(request_id):
     }, 200
 
 
+def _archive_task_link(request_id, choice):
+    if not re.fullmatch(r"[a-f0-9]{32}", request_id or "") or choice != "archive":
+        return {"ok": False, "msg": "请明确确认归档原同步请求；未修改回执或任务。"}, 400
+    with storage_transaction():
+        try:
+            record = get_task_link_request(request_id)
+        except TaskLinkReceiptMissing as exc:
+            return _missing_task_link_receipt(request_id, exc)
+        except Exception as exc:
+            return {"ok": False, "request_id": request_id, "msg": f"同步回执无法读取：{exc}"}, 500
+        if not record:
+            return {"ok": False, "request_id": request_id, "msg": "同步请求不存在"}, 404
+        if record.get("active") or record.get("state") not in ("failed", "unknown"):
+            return {"ok": False, "request_id": request_id,
+                    "msg": "只能归档已停止的失败或未知同步请求。", "retry_allowed": False}, 409
+        replayed = bool(record.get("archived"))
+        if not replayed:
+            record.update(archived=True, archived_at=now_str())
+            try:
+                persist_task_link_request(record)
+            except Exception as exc:
+                return {"ok": False, "request_id": request_id, "retry_allowed": False,
+                        "msg": f"归档结果无法确认，请查询原同步请求后重试：{exc}"}, 503
+        return {"ok": True, "request_id": request_id, "state": record["state"],
+                "archived": True, "replayed": replayed, "retry_allowed": False,
+                "msg": "原同步请求已归档，当前任务未修改。"}, 200
+
+
+@bp.route("/api/online-scripts/task-link-archive/<request_id>", methods=["POST"])
+def api_online_scripts_task_link_archive(request_id):
+    data = (request.get_json(silent=True) if request.is_json else request.form) or {}
+    choice = data.get("acknowledge") if hasattr(data, "get") else None
+    payload, status_code = _archive_task_link(request_id, choice)
+    return jsonify(payload), status_code
+
+
+@bp.route("/online-scripts/task-link-archive/<request_id>", methods=["POST"])
+def online_scripts_task_link_archive(request_id):
+    payload, status_code = _archive_task_link(request_id, request.form.get("acknowledge"))
+    if payload.get("ok"):
+        return redirect(url_for("online_scripts.online_scripts_task_link_status", request_id=request_id))
+    body = page_header_card(
+        "外部任务源归档未完成", help_html=h(payload.get("msg")),
+        actions_html=(f'<a class="btn btn-blue" href="/online-scripts/task-link-status/{h(request_id)}">查询原同步请求</a>'
+                      '<a class="btn btn-gray" href="/online-scripts/task-link-history?recovery=1">待恢复同步</a>'),
+    )
+    return layout("外部任务源归档", "online_scripts", body), status_code
+
+
 @bp.route("/online-scripts/task-link/<script_id>", methods=["POST"])
 def online_scripts_pull_task_link(script_id):
     proxy_id = request.form.get("proxy_id", "").strip()
@@ -479,6 +555,9 @@ def api_online_scripts_task_link_status(request_id):
         return jsonify(ok=False, msg="在线任务源同步请求标识无效"), 400
     try:
         record = _task_link_status_record(request_id)
+    except TaskLinkReceiptMissing as exc:
+        payload, status_code = _missing_task_link_receipt(request_id, exc)
+        return jsonify(payload), status_code
     except Exception as exc:
         return jsonify(ok=False, msg=f"同步回执无法读取：{exc}"), 500
     if not record:
@@ -489,15 +568,21 @@ def api_online_scripts_task_link_status(request_id):
 @bp.route("/api/online-scripts/task-link-history")
 def api_online_scripts_task_link_history():
     try:
-        items = list_task_link_requests(
-            request.args.get("limit", 50),
-            request.args.get("script_id", ""),
-        )
+        page = _task_link_history_page()
     except ValueError as exc:
         return jsonify(ok=False, msg=str(exc)), 400
     except Exception as exc:
         return jsonify(ok=False, msg=f"同步历史无法读取：{exc}"), 500
-    return jsonify(ok=True, items=items)
+    return jsonify(ok=True, **page)
+
+
+def _task_link_history_page():
+    recovery = request.args.get("recovery", "0")
+    if recovery not in ("0", "1"):
+        raise ValueError("待恢复同步筛选无效")
+    return list_task_link_requests(request.args.get("limit", 50), request.args.get("script_id", ""),
+                                   recovery=recovery == "1", offset=request.args.get("offset", 0),
+                                   with_pagination=True)
 
 
 @bp.route("/api/online-scripts/task-link-confirm/<request_id>", methods=["POST"])
@@ -545,7 +630,7 @@ def online_scripts_task_link_status(request_id):
                 '<a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>'
             ),
         )
-        return layout("外部任务源同步状态", "online_scripts", body), 500
+        return layout("外部任务源同步状态", "online_scripts", body), 503 if isinstance(exc, TaskLinkReceiptMissing) else 500
     if not record:
         body = page_header_card(
             "外部任务源同步状态",
@@ -565,12 +650,16 @@ def online_scripts_task_link_status(request_id):
         "completed": "同步已完成",
     }
     state_label = labels.get(state, state)
-    if confirmation_stale:
+    if record.get("archived"):
+        state_label = "已归档（原结果：" + ("请求失败" if state == "failed" else "结果未知") + "）"
+    elif confirmation_stale:
         state_label = "原未合并确认已失效，任务缓存已变化"
     elif confirmation_check_error:
         state_label = "原未合并确认暂时无法复核"
     action_html = ""
-    if confirmation_stale or confirmation_check_error:
+    if record.get("archived"):
+        action_html = '<a class="btn btn-primary" href="/online-scripts">核对当前任务</a>'
+    elif confirmation_stale or confirmation_check_error:
         action_html = (
             f'<a class="btn btn-blue" href="/online-scripts/task-link-status/{h(request_id)}">重新查询</a>'
             '<a class="btn btn-primary" href="/online-scripts">核对当前任务</a>'
@@ -592,6 +681,13 @@ def online_scripts_task_link_status(request_id):
 <a class="btn btn-blue" href="/online-scripts/task-link-status/{h(request_id)}">刷新查询</a>'''
     elif state in ("prepared", "running") or record.get("active"):
         action_html = f'<a class="btn btn-blue" href="/online-scripts/task-link-status/{h(request_id)}">刷新查询</a>'
+    archive_html = ""
+    if not record.get("archived") and not record.get("active") and state in ("failed", "unknown"):
+        archive_html = f'''
+<form class="task-link-archive-form" method="post" action="/online-scripts/task-link-archive/{h(request_id)}" style="display:grid;gap:12px;margin-top:16px">
+    <label style="display:flex;align-items:flex-start;gap:8px"><input type="checkbox" name="acknowledge" value="archive" required style="width:auto;flex:none"><span>保留当前任务并放弃此请求，允许清理其回执</span></label>
+    <button class="btn btn-gray" type="submit" style="justify-self:start">归档原同步请求</button>
+</form>'''
     action_html += '<a class="btn btn-gray" href="/online-scripts/task-link-history">同步历史</a><a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>'
     details = f'''
 <section class="section">
@@ -603,16 +699,19 @@ def online_scripts_task_link_status(request_id):
             <dt>代理</dt><dd>{h(record.get("proxy_id") or "直连")}</dd>
             <dt>任务数</dt><dd>{h(record.get("total", 0))}（新增 {h(record.get("added", 0))}）</dd>
             <dt>更新时间</dt><dd>{h(record.get("updated_at") or "-")}</dd>
+            {f'<dt>归档时间</dt><dd>{h(record.get("archived_at") or "-")}</dd>' if record.get("archived") else ''}
         </dl>
         {f'<p role="alert">{h(record.get("error"))}</p>' if record.get("error") else ''}
         {f'<p role="alert">{h(record.get("confirmation_error"))}</p>' if record.get("confirmation_error") else ''}
         {f'<p role="alert">原确认状态无法复核：{h(confirmation_check_error)}</p>' if confirmation_check_error else ''}
+        {archive_html}
     </div>
 </section>'''
     body = page_header_card(
         "外部任务源同步状态",
         help_html=(
-            _STALE_TASK_LINK_CONFIRMATION
+            "原同步请求已归档，保留原结果；不会继续请求、确认合并或修改当前任务。"
+            if record.get("archived") else _STALE_TASK_LINK_CONFIRMATION
             if confirmation_stale
             else "任务缓存暂时无法验证原确认；修复缓存后重新查询，期间不会继续原请求。"
             if confirmation_check_error
@@ -627,7 +726,7 @@ def online_scripts_task_link_status(request_id):
 def online_scripts_task_link_history():
     script_id = str(request.args.get("script_id") or "").strip()
     try:
-        items = list_task_link_requests(request.args.get("limit", 50), script_id)
+        page = _task_link_history_page()
     except ValueError as exc:
         body = page_header_card(
             "外部任务源同步历史",
@@ -639,7 +738,7 @@ def online_scripts_task_link_history():
         body = page_header_card(
             "外部任务源同步历史",
             help_html=f"同步历史无法读取：{h(exc)}。请修复回执存储后重试。",
-            actions_html='<a class="btn btn-blue" href="/online-scripts/task-link-history">重新读取</a><a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>',
+            actions_html=f'<a class="btn btn-blue" href="{h(request.full_path)}">重新读取</a><a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>',
         )
         return layout("外部任务源同步历史", "online_scripts", body), 500
 
@@ -651,7 +750,7 @@ def online_scripts_task_link_history():
         "completed": "已完成",
     }
     rows = []
-    for record in items:
+    for record in page["items"]:
         request_id = str(record.get("request_id") or "")
         state = str(record.get("state") or "unknown")
         actions = f'<a class="btn btn-blue" href="/online-scripts/task-link-status/{h(request_id)}">查看状态</a>'
@@ -661,7 +760,7 @@ def online_scripts_task_link_history():
             "<tr>"
             f"<td><code>{h(request_id)}</code></td>"
             f"<td>{h(record.get('script_id') or '-')}</td>"
-            f"<td>{h(labels.get(state, state))}</td>"
+            f"<td>{h(labels.get(state, state))}{'（已归档）' if record.get('archived') else ''}</td>"
             f"<td>{h(record.get('total', 0))}（新增 {h(record.get('added', 0))}）</td>"
             f"<td>{h(record.get('updated_at') or '-')}</td>"
             f"<td>{actions}</td>"
@@ -673,9 +772,16 @@ def online_scripts_task_link_history():
         + ("".join(rows) or '<tr><td colspan="6">暂无同步历史</td></tr>')
         + "</tbody></table></div>"
     )
+    recovery = request.args.get("recovery", "0")
+    links = '<a class="btn btn-blue" href="/online-scripts/task-link-history?recovery=1">待恢复同步</a><a class="btn btn-gray" href="/online-scripts/task-link-history">全部同步</a>'
+    for label, offset in (("上一页", max(0, page["offset"] - page["limit"])), ("下一页", page["offset"] + page["limit"])):
+        if (label == "上一页" and page["offset"]) or (label == "下一页" and page["has_more"]):
+            href = url_for("online_scripts.online_scripts_task_link_history", script_id=script_id,
+                           recovery=recovery, limit=page["limit"], offset=offset)
+            links += f'<a class="btn btn-blue" href="{h(href)}">{label}</a>'
     body = page_header_card(
         "外部任务源同步历史",
         help_html="历史只读取已保存回执，不会发起外部任务源请求；未知状态请进入详情检查当前任务合并。",
-        actions_html='<a class="btn btn-blue" href="/online-scripts">返回在线脚本</a>',
+        actions_html=links + '<a class="btn btn-blue" href="/online-scripts">返回在线脚本</a>',
     ) + f'<section class="section"><div class="card">{table}</div></section>'
     return layout("外部任务源同步历史", "online_scripts", body)

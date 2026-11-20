@@ -45,6 +45,385 @@ class OnlineTaskLinkTests(unittest.TestCase):
     def task(self, name):
         return {"name": name, "cron": "", "command": f"task {name}.sh"}
 
+    def seed_task_link_history(self, source, item, *, state="completed"):
+        records = {}
+        for index in range(200):
+            request_id = f"{index:032x}"
+            record = self._unknown_record(source, request_id, item, state=state)
+            record["updated_at"] = "2099-01-01 00:00:00"
+            records[request_id] = source._task_link_request_snapshot(record)
+        source.mutate_json(source.ONLINE_TASK_LINK_REQUESTS_FILE, {}, lambda _: records, strict=True)
+        return records
+
+    def test_history_pruning_keeps_recovery_and_current_receipts_even_with_older_timestamps(self):
+        for operation in ("persist", "claim"):
+            with self.subTest(operation=operation), isolated_app() as (_app, _base_dir):
+                from fls_manager.online_scripts import source
+
+                item = self.item()
+                source.save_online_script_cache([item])
+                records = self.seed_task_link_history(source, item)
+                oldest_id = "0" * 32
+                records[oldest_id].update(state="unknown", updated_at="2000-01-01 00:00:00")
+                source.mutate_json(source.ONLINE_TASK_LINK_REQUESTS_FILE, {}, lambda _: records, strict=True)
+                new_id = "f" * 32
+                new_record = self._unknown_record(source, new_id, item, state="completed" if operation == "persist" else "prepared")
+                try:
+                    if operation == "persist":
+                        source.persist_task_link_request(new_record)
+                    else:
+                        self.assertIsNone(source.claim_task_link_request(new_record))
+                    actual = json.loads(source.ONLINE_TASK_LINK_REQUESTS_FILE.read_text())
+                    self.assertEqual(len(actual), 200)
+                    self.assertIn(oldest_id, actual)
+                    self.assertIn(new_id, actual)
+                    self.assertEqual(actual[oldest_id]["state"], "unknown")
+                finally:
+                    source.ONLINE_TASK_LINK_ACTIVE.discard(new_id)
+
+    def test_full_recovery_history_blocks_new_api_and_form_requests_without_fetch_or_write(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import source
+            from fls_manager.routes.online_scripts import task_link
+
+            item = self.item()
+            source.save_online_script_cache([item])
+            self.seed_task_link_history(source, item, state="unknown")
+            before = source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes()
+            cache_before = source.ONLINE_SCRIPT_CACHE_FILE.read_bytes()
+            client = app.test_client()
+            with patch.object(task_link, "fetch_task_link_tasks", return_value=[self.task("unexpected")]) as fetch:
+                response = client.post("/api/online-scripts/task-link/demo", json={"request_id": "f" * 32}, headers={"X-Token": TOKEN})
+                self.assertEqual(response.status_code, 409)
+                self.assertTrue(response.json["history_full"])
+                self.assertFalse(response.json["retry_allowed"])
+                page = client.post("/online-scripts/task-link/demo", data={"request_id": "e" * 32}, headers={"X-Token": TOKEN})
+                self.assertEqual(page.status_code, 409)
+                self.assertIn('/online-scripts/task-link-history?recovery=1', page.get_data(as_text=True))
+                fetch.assert_not_called()
+            self.assertEqual(source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes(), before)
+            self.assertEqual(source.ONLINE_SCRIPT_CACHE_FILE.read_bytes(), cache_before)
+            self.assertNotIn("f" * 32, source.ONLINE_TASK_LINK_ACTIVE)
+
+    def test_active_request_with_missing_receipt_blocks_reclaim_and_exposes_query_recovery(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import source
+            from fls_manager.routes.online_scripts import task_link
+
+            item = self.item()
+            source.save_online_script_cache([item])
+            request_id = "f" * 32
+            source.mutate_json(source.ONLINE_TASK_LINK_REQUESTS_FILE, {}, lambda _: {}, strict=True)
+            before = source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes()
+            source.ONLINE_TASK_LINK_ACTIVE.add(request_id)
+            try:
+                with patch.object(task_link, "fetch_task_link_tasks", return_value=[self.task("unexpected")]) as fetch:
+                    client = app.test_client()
+                    response = client.post("/api/online-scripts/task-link/demo", json={"request_id": request_id}, headers={"X-Token": TOKEN})
+                    self.assertEqual(response.status_code, 503)
+                    self.assertTrue(response.json["receipt_missing"])
+                    self.assertFalse(response.json["retry_allowed"])
+                    status = client.get("/api/online-scripts/task-link-status/" + request_id, headers={"X-Token": TOKEN})
+                    self.assertEqual(status.status_code, 503)
+                    self.assertTrue(status.json["active"])
+                    page = client.get("/online-scripts/task-link-status/" + request_id, headers={"X-Token": TOKEN})
+                    self.assertEqual(page.status_code, 503)
+                    self.assertIn("重新查询", page.get_data(as_text=True))
+                    fetch.assert_not_called()
+                self.assertEqual(source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes(), before)
+                self.assertIn(request_id, source.ONLINE_TASK_LINK_ACTIVE)
+            finally:
+                source.ONLINE_TASK_LINK_ACTIVE.discard(request_id)
+
+    def test_retention_protects_all_unresolved_states_and_active_completed_receipts(self):
+        with isolated_app() as (_app, _base_dir):
+            from fls_manager.online_scripts import source
+
+            item = self.item()
+            records = self.seed_task_link_history(source, item)
+            protected = []
+            for index, state in enumerate(("prepared", "running", "failed", "unknown", "completed")):
+                request_id = f"{index:032x}"
+                records[request_id].update(state=state, updated_at="old")
+                protected.append(request_id)
+            source.ONLINE_TASK_LINK_ACTIVE.add(protected[-1])
+            source.mutate_json(source.ONLINE_TASK_LINK_REQUESTS_FILE, {}, lambda _: records, strict=True)
+            try:
+                for index in range(10):
+                    source.persist_task_link_request(self._unknown_record(source, f"{1000 + index:032x}", item, state="completed"))
+                actual = json.loads(source.ONLINE_TASK_LINK_REQUESTS_FILE.read_text())
+                self.assertEqual(len(actual), 200)
+                self.assertTrue(all(key in actual for key in protected))
+            finally:
+                source.ONLINE_TASK_LINK_ACTIVE.discard(protected[-1])
+
+    def test_new_claim_reserves_room_for_active_missing_receipt_and_allows_original_recovery(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import source
+            from fls_manager.routes.online_scripts import task_link
+
+            item, missing_id, new_id = self.item(), "a" * 32, "f" * 32
+            source.save_online_script_cache([item])
+            records = self.seed_task_link_history(source, item, state="unknown")
+            records.pop(f"{199:032x}")
+            source.mutate_json(source.ONLINE_TASK_LINK_REQUESTS_FILE, {}, lambda _: records, strict=True)
+            before = source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes()
+            source.ONLINE_TASK_LINK_ACTIVE.add(missing_id)
+            try:
+                with patch.object(task_link, "fetch_task_link_tasks") as fetch:
+                    rejected = app.test_client().post("/api/online-scripts/task-link/demo", json={"request_id": new_id}, headers={"X-Token": TOKEN})
+                    self.assertEqual(rejected.status_code, 409)
+                    self.assertTrue(rejected.json["history_full"])
+                    self.assertEqual(source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes(), before)
+                    fetch.assert_not_called()
+                source.persist_task_link_request(self._unknown_record(source, missing_id, item, state="completed"))
+                self.assertEqual(len(json.loads(source.ONLINE_TASK_LINK_REQUESTS_FILE.read_text())), 200)
+                self.assertEqual(source.get_task_link_request(missing_id)["state"], "completed")
+            finally:
+                source.ONLINE_TASK_LINK_ACTIVE.discard(missing_id)
+
+    def test_archive_frees_capacity_without_changing_unknown_result_or_tasks_and_blocks_replay(self):
+        for state, entry in (("unknown", "api"), ("failed", "form")):
+            with self.subTest(state=state, entry=entry), isolated_app() as (app, _base_dir):
+                from fls_manager.online_scripts import source
+                from fls_manager.routes.online_scripts import task_link
+
+                item = self.item()
+                source.save_online_script_cache([item])
+                records = self.seed_task_link_history(source, item, state=state)
+                original_id, new_id = "0" * 32, "f" * 32
+                records[original_id]["updated_at"] = "2000-01-01 00:00:00"
+                source.mutate_json(source.ONLINE_TASK_LINK_REQUESTS_FILE, {}, lambda _: records, strict=True)
+                original = dict(records[original_id])
+                cache_before = source.ONLINE_SCRIPT_CACHE_FILE.read_bytes()
+                client = app.test_client()
+                headers = {"X-Token": TOKEN}
+                with patch.object(task_link, "fetch_task_link_tasks", return_value=[self.task("new")]) as fetch:
+                    url = ("/api" if entry == "api" else "") + "/online-scripts/task-link-archive/" + original_id
+                    archived = client.post(url, data={"acknowledge": "archive"}, headers=headers)
+                    self.assertEqual(archived.status_code, 200 if entry == "api" else 302)
+                    actual = source.get_task_link_request(original_id)
+                    self.assertTrue(actual["archived"])
+                    self.assertEqual(actual["state"], state)
+                    for key in original:
+                        if key not in ("archived", "archived_at"):
+                            self.assertEqual(actual[key], original[key], key)
+                    self.assertEqual(source.ONLINE_SCRIPT_CACHE_FILE.read_bytes(), cache_before)
+                    archived_bytes = source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes()
+                    repeated = client.post("/api/online-scripts/task-link-archive/" + original_id, json={"acknowledge": "archive"}, headers=headers)
+                    self.assertTrue(repeated.json["replayed"])
+                    self.assertEqual(source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes(), archived_bytes)
+                    status = client.get("/api/online-scripts/task-link-status/" + original_id, headers=headers)
+                    self.assertFalse(status.json["retry_allowed"])
+                    page = client.get("/online-scripts/task-link-status/" + original_id, headers=headers).get_data(as_text=True)
+                    self.assertIn("已归档", page)
+                    self.assertNotIn('<form', page.split('<main', 1)[-1].split('</main>', 1)[0])
+                    self.assertEqual(client.post("/api/online-scripts/task-link/demo", json={"request_id": original_id}, headers=headers).status_code, 409)
+                    self.assertEqual(client.post("/api/online-scripts/task-link-confirm/" + original_id, headers=headers).status_code, 409)
+                    fetch.assert_not_called()
+                    self.assertEqual(source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes(), archived_bytes)
+                    accepted = client.post("/api/online-scripts/task-link/demo", json={"request_id": new_id}, headers=headers)
+                    self.assertEqual(accepted.status_code, 200)
+                    fetch.assert_called_once()
+                actual = json.loads(source.ONLINE_TASK_LINK_REQUESTS_FILE.read_text())
+                self.assertEqual(len(actual), 200)
+                self.assertNotIn(original_id, actual)
+                self.assertEqual(actual[new_id]["state"], "completed")
+
+    def test_archive_invalid_choice_auth_csrf_and_ineligible_states_have_zero_side_effects(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import source
+            from fls_manager.routes.online_scripts import task_link
+
+            source.save_online_script_cache([self.item()])
+            request_id = "a" * 32
+            source.persist_task_link_request(self._unknown_record(source, request_id, self.item()))
+            client = app.test_client()
+            headers = {"X-Token": TOKEN}
+            api = "/api/online-scripts/task-link-archive/" + request_id
+            form = "/online-scripts/task-link-archive/" + request_id
+            before = source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes()
+            cache_before = source.ONLINE_SCRIPT_CACHE_FILE.read_bytes()
+            with client.session_transaction() as session:
+                session["csrf_token"] = "archive-csrf"
+            with patch.object(task_link, "fetch_task_link_tasks") as fetch, patch("fls_manager.app.dispatch_frontend_open_event"):
+                self.assertEqual(client.post(api, json={"acknowledge": "archive"}, headers={"X-CSRF-Token": "archive-csrf"}).status_code, 401)
+                for choice in (None, "", "yes", True, ["archive"]):
+                    self.assertEqual(client.post(api, json={"acknowledge": choice}, headers=headers).status_code, 400)
+                self.assertEqual(client.post(form, data={"acknowledge": "wrong"}, headers=headers).status_code, 400)
+                self.assertEqual(client.post("/api/online-scripts/task-link-archive/invalid", json={"acknowledge": "archive"}, headers=headers).status_code, 400)
+                self.assertEqual(client.post("/api/online-scripts/task-link-archive/" + "b" * 32, json={"acknowledge": "archive"}, headers=headers).status_code, 404)
+                with client.session_transaction() as session:
+                    session.update(token=TOKEN, token_expire_at=int(time.time()) + 3600,
+                                   security_verified=True, csrf_token="archive-csrf")
+                for csrf in ("", "wrong"):
+                    self.assertEqual(client.post(api, json={"acknowledge": "archive"}, headers={"X-CSRF-Token": csrf}).status_code, 400)
+                    self.assertEqual(client.post(form, data={"acknowledge": "archive", "csrf_token": csrf}).status_code, 400)
+                self.assertEqual(client.post(api + "?token=blocked", json={"acknowledge": "archive"}, headers={"X-CSRF-Token": "archive-csrf"}).status_code, 403)
+                source.ONLINE_TASK_LINK_ACTIVE.add(request_id)
+                try:
+                    self.assertEqual(client.post(api, json={"acknowledge": "archive"}, headers=headers).status_code, 409)
+                finally:
+                    source.ONLINE_TASK_LINK_ACTIVE.discard(request_id)
+                self.assertEqual(source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes(), before)
+                self.assertEqual(source.ONLINE_SCRIPT_CACHE_FILE.read_bytes(), cache_before)
+                fetch.assert_not_called()
+                completed_id = "c" * 32
+                source.persist_task_link_request(self._unknown_record(source, completed_id, self.item(), state="completed"))
+                before_completed = source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes()
+                rejected = client.post("/api/online-scripts/task-link-archive/" + completed_id, json={"acknowledge": "archive"}, headers=headers)
+                self.assertEqual(rejected.status_code, 409)
+                self.assertEqual(source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes(), before_completed)
+                page = client.get("/online-scripts/task-link-status/" + request_id).get_data(as_text=True)
+                parser = TaskLinkFormParser()
+                parser.feed(page)
+                archive_form = next(value for value in parser.forms if value["attrs"]["action"] == form)
+                csrf = next(attrs["value"] for tag, attrs in archive_form["controls"] if attrs.get("name") == "csrf_token")
+                self.assertEqual(csrf, "archive-csrf")
+                success = client.post(form, data={"csrf_token": csrf, "acknowledge": "archive"})
+                self.assertEqual(success.status_code, 302)
+
+    def test_archive_publication_failures_preserve_real_state_and_allow_idempotent_recovery(self):
+        for after in (False, True):
+            with self.subTest(after=after), isolated_app() as (app, _base_dir):
+                from fls_manager.online_scripts import source
+                from fls_manager.routes.online_scripts import task_link
+
+                item, request_id = self.item(), "a" * 32
+                source.save_online_script_cache([item])
+                source.persist_task_link_request(self._unknown_record(source, request_id, item))
+                original_cache = source.ONLINE_SCRIPT_CACHE_FILE.read_bytes()
+                real_persist = task_link.persist_task_link_request
+
+                def failing_persist(record):
+                    if after:
+                        real_persist(record)
+                    raise OSError("archive acknowledgement unavailable")
+
+                client, headers = app.test_client(), {"X-Token": TOKEN}
+                url = "/api/online-scripts/task-link-archive/" + request_id
+                with patch.object(task_link, "persist_task_link_request", side_effect=failing_persist), patch.object(task_link, "fetch_task_link_tasks") as fetch:
+                    failed = client.post(url, json={"acknowledge": "archive"}, headers=headers)
+                    self.assertEqual(failed.status_code, 503)
+                    self.assertIn("archive acknowledgement unavailable", failed.json["msg"])
+                    status = client.get("/api/online-scripts/task-link-status/" + request_id, headers=headers)
+                    self.assertEqual(status.json["state"], "unknown")
+                    self.assertEqual(status.json["archived"], after)
+                    fetch.assert_not_called()
+                recovered = client.post(url, json={"acknowledge": "archive"}, headers=headers)
+                self.assertEqual(recovered.status_code, 200)
+                self.assertEqual(recovered.json["replayed"], after)
+                self.assertEqual(source.ONLINE_SCRIPT_CACHE_FILE.read_bytes(), original_cache)
+
+    def test_archive_and_retry_serialize_without_restarting_archived_request(self):
+        for archive_first in (True, False):
+            with self.subTest(archive_first=archive_first), isolated_app() as (app, _base_dir):
+                from fls_manager.online_scripts import source
+                from fls_manager.routes.online_scripts import task_link
+
+                item, request_id = self.item(), "a" * 32
+                source.save_online_script_cache([item])
+                source.persist_task_link_request(self._unknown_record(source, request_id, item, state="failed"))
+                entered, release = threading.Event(), threading.Event()
+                real = task_link.persist_task_link_request if archive_first else task_link.claim_task_link_request
+
+                def hold(record):
+                    result = real(record)
+                    entered.set()
+                    if not release.wait(5):
+                        raise TimeoutError("test did not release task-link operation")
+                    return result
+
+                def submit(archive):
+                    url = "/api/online-scripts/task-link-archive/" + request_id if archive else "/api/online-scripts/task-link/demo"
+                    data = {"acknowledge": "archive"} if archive else {"request_id": request_id}
+                    return app.test_client().post(url, json=data, headers={"X-Token": TOKEN})
+
+                target = "persist_task_link_request" if archive_first else "claim_task_link_request"
+                with patch.object(task_link, target, side_effect=hold), patch.object(task_link, "fetch_task_link_tasks", return_value=[self.task("new")]) as fetch, ThreadPoolExecutor(max_workers=2) as pool:
+                    first = pool.submit(submit, archive_first)
+                    try:
+                        self.assertTrue(entered.wait(5))
+                        second = pool.submit(submit, not archive_first)
+                        if not archive_first:
+                            self.assertEqual(second.result(timeout=5).status_code, 409)
+                    finally:
+                        release.set()
+                    self.assertEqual(first.result(timeout=5).status_code, 200)
+                    self.assertEqual(second.result(timeout=5).status_code, 409)
+                    self.assertEqual(fetch.call_count, 0 if archive_first else 1)
+                actual = source.get_task_link_request(request_id)
+                self.assertEqual(actual["archived"], archive_first)
+                self.assertNotIn(request_id, source.ONLINE_TASK_LINK_ACTIVE)
+
+    def test_recovery_history_pagination_reaches_older_receipts_and_rejects_invalid_filters(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import source
+
+            item = self.item()
+            source.save_online_script_cache([item])
+            records = self.seed_task_link_history(source, item, state="unknown")
+            records["0" * 32].update(archived=True, archived_at="old")
+            source.mutate_json(source.ONLINE_TASK_LINK_REQUESTS_FILE, {}, lambda _: records, strict=True)
+            client, headers = app.test_client(), {"X-Token": TOKEN}
+            found = []
+            for offset in (0, 100):
+                response = client.get(f"/api/online-scripts/task-link-history?recovery=1&limit=100&offset={offset}", headers=headers)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json["total"], 199)
+                self.assertEqual(response.json["has_more"], offset == 0)
+                found.extend(value["request_id"] for value in response.json["items"])
+            self.assertEqual(len(set(found)), 199)
+            self.assertNotIn("0" * 32, found)
+            page = client.get("/online-scripts/task-link-history?recovery=1&script_id=demo&limit=100", headers=headers).get_data(as_text=True)
+            self.assertIn("offset=100", page)
+            self.assertIn("script_id=demo", page)
+            before = source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes()
+            for query in ("recovery=bad", "offset=-1", "offset=201", "offset=nan", "limit=101"):
+                for prefix in ("", "/api"):
+                    self.assertEqual(client.get(prefix + "/online-scripts/task-link-history?" + query, headers=headers).status_code, 400)
+            self.assertEqual(source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes(), before)
+
+    def test_missing_active_receipt_and_corrupt_archive_storage_do_not_write_or_fetch(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import source
+            from fls_manager.routes.online_scripts import task_link
+
+            item, request_id = self.item(), "a" * 32
+            source.save_online_script_cache([item])
+            source.ONLINE_TASK_LINK_ACTIVE.add(request_id)
+            client, headers = app.test_client(), {"X-Token": TOKEN}
+            try:
+                with self.assertRaises(source.TaskLinkReceiptMissing):
+                    source.claim_task_link_request(self._unknown_record(source, request_id, item, state="prepared"))
+                self.assertFalse(source.ONLINE_TASK_LINK_REQUESTS_FILE.exists())
+                with patch.object(task_link, "fetch_task_link_tasks") as fetch:
+                    for suffix in ("archive", "confirm"):
+                        failed = client.post(f"/api/online-scripts/task-link-{suffix}/{request_id}", json={"acknowledge": "archive"}, headers=headers)
+                        self.assertEqual(failed.status_code, 503)
+                    fetch.assert_not_called()
+            finally:
+                source.ONLINE_TASK_LINK_ACTIVE.discard(request_id)
+            for kind in ("corrupt", "symlink", "invalid_archive"):
+                with self.subTest(kind=kind):
+                    receipt = source.ONLINE_TASK_LINK_REQUESTS_FILE
+                    receipt.unlink(missing_ok=True)
+                    if kind == "symlink":
+                        target = base_dir / "original-receipt.json"
+                        target.write_text("{}", encoding="utf-8")
+                        receipt.symlink_to(target)
+                    elif kind == "invalid_archive":
+                        record = self._unknown_record(source, request_id, item)
+                        record["archived"] = "yes"
+                        receipt.write_text(json.dumps({request_id: record}), encoding="utf-8")
+                    else:
+                        receipt.write_text("broken JSON", encoding="utf-8")
+                    before = receipt.read_bytes()
+                    for prefix in ("", "/api"):
+                        failed = client.post(prefix + "/online-scripts/task-link-archive/" + request_id, data={"acknowledge": "archive"}, headers=headers)
+                        self.assertEqual(failed.status_code, 500)
+                    self.assertEqual(receipt.read_bytes(), before)
+
     def test_upstream_errors_and_empty_tasks_preserve_cache_and_offer_retry(self):
         for ajax in (False, True):
             for status, text in ((500, "upstream offline"), (200, "not JSON"), (200, "[]")):
@@ -1616,6 +1995,12 @@ async function scenario(status,payload,expected){
  if(expected==='completed'){
    assert.equal(storage.value,null);
    assert.equal(context.window.location.href,'/online-scripts/task-link-status/'+requestId);
+ }else if(expected==='history'){
+   assert.equal(storage.value,null);
+   assert.equal(button.disabled,false);
+   assert.equal(context.window.location.href,'');
+   assert.equal(recovery.children[1].href,'/online-scripts/task-link-history?recovery=1');
+   assert.equal(recovery.children.length,2);
  }else{
    assert.equal(JSON.parse(storage.value).request_id,requestId);
    assert.equal(button.disabled,false);
@@ -1634,6 +2019,10 @@ async function scenario(status,payload,expected){
    await scenario(status,'<html>temporarily unavailable</html>',status===401||status===403?'login':'query');
  }
  await scenario(0,null,'query');
+ await scenario(409,{ok:false,request_id:requestId,history_full:true,accepted:false,retry_allowed:false,msg:'recovery history full'},'history');
+ await scenario(409,{ok:false,request_id:'b'.repeat(32),history_full:true,accepted:false,retry_allowed:false},'query');
+ await scenario(503,{ok:false,request_id:requestId,receipt_missing:true,active:true,retry_allowed:false},'query');
+ await scenario(409,{ok:false,request_id:requestId,state:'unknown',archived:true,retry_allowed:false},'query');
  await scenario(409,{ok:false,request_id:requestId,state:'unknown',retry_allowed:false,msg:'original unknown diagnosis'},'confirm');
  await scenario(409,{ok:false,request_id:requestId,state:'running',retry_allowed:false,msg:'still running'},'query');
  await scenario(502,{ok:false,request_id:requestId,retry_allowed:true,msg:'upstream failed'},'retry');

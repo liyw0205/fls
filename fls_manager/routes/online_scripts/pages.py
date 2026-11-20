@@ -764,13 +764,21 @@ function readPending(){{
     }}catch(_error){{ return null; }}
 }}
 
-function writeMessage(text, denied, pending, allowContinue, allowConfirm){{
+function writeMessage(text, denied, pending, allowContinue, allowConfirm, historyFull){{
     if(!recovery || !pending || !/^[a-f0-9]{{32}}$/.test(String(pending.request_id || ""))) return;
     recovery.hidden = false;
     recovery.textContent = "";
     const message = document.createElement("span");
     message.textContent = String(text || "外部任务源同步未完成");
     recovery.appendChild(message);
+    if(historyFull){{
+        const history = document.createElement("a");
+        history.className = "btn btn-primary";
+        history.href = "/online-scripts/task-link-history?recovery=1";
+        history.textContent = "处理待恢复同步";
+        recovery.appendChild(history);
+        return;
+    }}
     const status = document.createElement("a");
     status.className = "btn btn-blue";
     status.href = "/online-scripts/task-link-status/" + encodeURIComponent(pending.request_id);
@@ -849,7 +857,7 @@ async function confirmPending(pending, button){{
         const denied = error && (error.status === 401 || error.status === 403);
         const payload = error && error.payload;
         const stale = payload && payload.request_id === pending.request_id && payload.confirmation_stale === true;
-        writeMessage("任务合并确认失败：" + (error && error.message || String(error || "请求失败")), denied, pending, false, !stale);
+        writeMessage("任务合并确认失败：" + (error && error.message || String(error || "请求失败")), denied, pending, false, !stale && !(payload && payload.archived));
     }}finally{{ pending.confirming = false; }}
 }}
 
@@ -862,7 +870,7 @@ async function queryPending(pending){{
             writeMessage(json.confirmation_error || ("原同步请求确认状态无法复核：" + json.confirmation_check_error), false, pending, false, false);
             return;
         }}
-        if(json.state === "completed"){{
+        if(json.state === "completed" || json.archived === true){{
             sessionStorage.removeItem(storageKey);
             window.location.href = "/online-scripts/task-link-status/" + encodeURIComponent(pending.request_id);
             return;
@@ -909,8 +917,10 @@ async function submitTaskLinkForm(form, event){{
             const denied = error && (error.status === 401 || error.status === 403);
             const payload = error && error.payload;
             const bound = payload && payload.request_id === requestId;
+            const historyFull = bound && payload.history_full === true && payload.accepted === false;
+            if(historyFull){{ try{{ sessionStorage.removeItem(storageKey); }}catch(_error){{}} }}
             writeMessage("外部任务源同步失败：" + (error && error.message || String(error || "请求失败")), denied, pending,
-                bound && payload.retry_allowed === true, bound && payload.state === "unknown");
+                bound && payload.retry_allowed === true, bound && !payload.archived && payload.state === "unknown", historyFull);
         }}finally{{ form.__flsTaskLinkPending = false; }}
 }}
 
