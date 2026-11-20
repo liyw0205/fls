@@ -912,6 +912,7 @@ async function flsCheckRestoreHistory(source, offset){{
         if(!json||json.ok!==true||!Array.isArray(json.items)||!Number.isInteger(json.total)||json.total<0
             ||json.offset!==offset||json.limit!==100||typeof json.has_more!=="boolean"||typeof json.active!=="boolean"
             ||json.maintenance_error!==undefined&&typeof json.maintenance_error!=="string"
+            ||json.maintenance_required!==undefined&&typeof json.maintenance_required!=="boolean"
             ||typeof json.snapshot!=="string"||!/^[a-f0-9]{{64}}$/.test(json.snapshot)
             ||json.items.some(item=>!flsRestoreHistoryItemValid(item))
             ||offset+json.items.length>json.total||json.has_more!==(offset+json.items.length<json.total))
@@ -922,13 +923,15 @@ async function flsCheckRestoreHistory(source, offset){{
         verification.snapshot=json.snapshot;
         verification.active=json.active;verification.complete=!json.has_more&&verification.items.length===json.total;
         verification.maintenance_error=json.maintenance_error||"";
-        verification.safe=verification.complete&&!json.active&&verification.items.every(item=>
+        verification.safe=verification.complete&&!json.active&&json.maintenance_required!==true&&verification.items.every(item=>
             item.state!=="committing"&&item.state!=="unknown"&&!item.restore_outcome_unknown
             &&!item.scheduler_reload_required&&!item.dependencies_failed);
         verification.error="";
         flsRestoreRecovery(verification.safe
             ?"完整恢复历史中没有运行中、未知或待恢复的目录操作；可确认清理损坏状态。"
-            :verification.complete
+            :verification.complete&&json.maintenance_required===true
+                ?"恢复历史可读取，但归档索引冗余修复尚未完成；重新核对前不能清理损坏状态。"
+                :verification.complete
                 ?"恢复历史含有尚未完成或结果未知的操作；先核对对应请求，不允许新覆盖。"
                 :"恢复历史尚未完整读取；继续核对后才能清理本地状态。",{{}});
     }}catch(error){{

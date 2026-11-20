@@ -1,4 +1,5 @@
 """Real HTTP/Chromium recovery for idempotent online task-link sync."""
+import json
 import os
 import tempfile
 import threading
@@ -258,6 +259,44 @@ def main():
                 log_file=str(path), updated_at="zz-original",
             )
             return jsonify(ok=True, original=original)
+
+        @app.route("/api/fixture/refresh-history-capacity", methods=["POST"])
+        def refresh_history_capacity_fixture():
+            fault["refreshes"] = 0
+            cache_fingerprint = source.online_script_cache_fingerprint()
+            source_fingerprint = source.online_script_source_fingerprint()
+            records = {}
+            previous_id = ""
+            for number in range(1, constants.ONLINE_REFRESH_HISTORY_LIMIT + 1):
+                request_id = f"{number:032x}"
+                status = "失败" if number == constants.ONLINE_REFRESH_HISTORY_LIMIT else "已完成"
+                records[request_id] = {
+                    "id": request_id,
+                    "request_id": request_id,
+                    "proxy_id": "",
+                    "running": False,
+                    "status": status,
+                    "message": "",
+                    "error": "upstream timeout" if status == "失败" else "",
+                    "cache_published": status == "已完成",
+                    "task_link_failures": [],
+                    "updated_at": f"2026-01-{number:03d}",
+                    "log_file": "",
+                    "retry_of": previous_id,
+                    "expected_cache_fingerprint": cache_fingerprint,
+                    "published_cache_fingerprint": cache_fingerprint if status == "已完成" else "",
+                    "source_fingerprint": source_fingerprint,
+                    "confirmation": "",
+                    "confirmation_fingerprint": "",
+                }
+                previous_id = request_id
+            update_online_refresh_state(
+                id="", request_id="", proxy_id="", running=False, status="", message="", error="",
+                cache_published=False, task_link_failures=[], updated_at="", log_file="",
+            )
+            constants.ONLINE_REFRESH_HISTORY_FILE.write_text(json.dumps(records), encoding="utf-8")
+            update_online_refresh_state(**records[previous_id])
+            return jsonify(original=previous_id, count=len(records))
 
         @app.route("/api/fixture/refresh-publication-failure", methods=["POST"])
         def refresh_publication_failure_fixture():
@@ -713,6 +752,45 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    assert.equal((await retriedAfterStartFailure.json()).request_id,failedRetryId);
    await page.waitForFunction(id=>!sessionStorage.getItem('fls-online-refresh-request')&&
      document.querySelector('#onlineRefreshLogLink').getAttribute('href').endsWith('/'+id),failedRetryId);
+   assert.equal((await fixture({})).refreshes,1);
+
+   const capacitySetup=await page.request.post(base+'/api/fixture/refresh-history-capacity',{headers,data:{}});
+   assert.equal(capacitySetup.status(),200);
+   const capacityOriginal=(await capacitySetup.json()).original;
+   await page.goto(base+'/online-scripts?refresh_request_id='+capacityOriginal+'#onlineRefreshHistory');
+   const capacityForm=page.locator('#onlineRefreshHistory form[data-refresh-retry-of="'+capacityOriginal+'"]');
+   await capacityForm.waitFor();
+   const rejectedRetryId=await capacityForm.locator('[name="retry_request_id"]').inputValue();
+   const capacityRetryEndpoint=base+'/api/online-scripts/refresh-retry/'+capacityOriginal;
+   const [capacityRejected]=await Promise.all([
+     page.waitForResponse(response=>response.url()===capacityRetryEndpoint&&response.request().method()==='POST'),
+     capacityForm.getByRole('button',{name:'明确重新同步',exact:true}).click(),
+   ]);
+   assert.equal(capacityRejected.status(),409);
+   assert.equal((await capacityRejected.json()).retry_not_started,true);
+   await page.waitForFunction(()=>document.querySelector('#onlineRefreshHistoryError').textContent.includes('此次重试未启动'));
+   assert.equal(await page.evaluate(()=>sessionStorage.getItem('fls-online-refresh-request')),null);
+   assert.notEqual(await capacityForm.locator('[name="retry_request_id"]').inputValue(),rejectedRetryId);
+   assert.equal(await page.locator('#onlineRefreshQuery').isHidden(),true);
+   const fullSyncLink=page.getByRole('link',{name:'发起新的完整同步',exact:true});
+   await fullSyncLink.scrollIntoViewIfNeeded();
+   const fullSyncLinkBox=await fullSyncLink.boundingBox();
+   assert.ok(fullSyncLinkBox.x>=0&&fullSyncLinkBox.x+fullSyncLinkBox.width<=viewport.width);
+   assert.ok(fullSyncLinkBox.y>=0&&fullSyncLinkBox.y+fullSyncLinkBox.height<=viewport.height);
+   await page.screenshot({path:'/tmp/fls-refresh-chain-capacity-'+viewport.width+'.png'});
+   assert.equal((await fixture({})).refreshes,0);
+   assert.equal(await fullSyncLink.getAttribute('href'),'/online-scripts#online-status');
+   await fullSyncLink.click();
+   await page.waitForURL(url=>url.pathname==='/online-scripts');
+   const fullSyncEndpoint=base+'/api/online-scripts/refresh';
+   const [fullSyncResponse]=await Promise.all([
+     page.waitForResponse(response=>response.url()===fullSyncEndpoint&&response.request().method()==='POST'),
+     page.locator('#onlineRefreshBtn').click(),
+   ]);
+   assert.equal(fullSyncResponse.status(),202);
+   const fullSyncReceipt=await fullSyncResponse.json();
+   assert.notEqual(fullSyncReceipt.request_id,rejectedRetryId);
+   await page.waitForFunction(()=>document.body.textContent.includes('fixture retry completed'));
    assert.equal((await fixture({})).refreshes,1);
 
    const publicationSetup=await page.request.post(base+'/api/fixture/refresh-publication-failure',{headers});

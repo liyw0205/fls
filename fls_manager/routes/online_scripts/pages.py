@@ -434,13 +434,33 @@ async function submitOnlineRefreshRetryForm(form, event){{
         await updateOnlineRefreshHistory();
     }}catch(error){{
         if(button) button.disabled = false;
+        const retryNotStarted = !!(error && error.status === 409 && error.payload && error.payload.retry_not_started === true);
+        if(retryNotStarted){{
+            const current = readOnlineRefreshPending();
+            if(current && current.request_id === retryId) clearOnlineRefreshPending();
+            const savedRetry = readOnlineRefreshRetry(original);
+            if(savedRetry && savedRetry.request_id === retryId){{
+                try{{ sessionStorage.removeItem(onlineRefreshRetryStorageKey(original)); }}catch(_error){{}}
+            }}
+            if(input) input.value = randomOnlineRefreshRequestId();
+        }}
         const errorEl = document.getElementById("onlineRefreshHistoryError");
         const denied = error && (error.status === 401 || error.status === 403);
-        if(errorEl){{ errorEl.hidden = false; errorEl.textContent = (denied ? "登录状态已失效" : "在线脚本源重试未确认") + "：" + (error && error.message || String(error || "请求失败")) + "。请先查询原重试状态，原历史未覆盖。"; }}
+        if(errorEl){{
+            errorEl.hidden = false;
+            errorEl.textContent = (denied ? "登录状态已失效" : retryNotStarted ? "此次重试未启动" : "在线脚本源重试未确认") + "：" + (error && error.message || String(error || "请求失败")) + (retryNotStarted ? "。可发起新的完整同步。" : "。请先查询原重试状态，原历史未覆盖。");
+            if(retryNotStarted){{
+                const link = document.createElement("a");
+                link.href = "/online-scripts#online-status";
+                link.textContent = "发起新的完整同步";
+                errorEl.appendChild(document.createTextNode(" "));
+                errorEl.appendChild(link);
+            }}
+        }}
         const query = document.getElementById("onlineRefreshQuery");
         const card = document.getElementById("onlineRefreshStatusCard");
         if(card) card.style.display = "block";
-        if(query){{ query.hidden = false; query.disabled = false; }}
+        if(query){{ query.hidden = retryNotStarted; query.disabled = false; }}
         const login = document.getElementById("onlineRefreshLogin");
         if(login){{ login.hidden = !denied; if(denied) login.href = "/login?next=" + encodeURIComponent(location.pathname + location.search); }}
     }}

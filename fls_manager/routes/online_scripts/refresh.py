@@ -5,6 +5,7 @@ from ._common import *
 from ...online_scripts.constants import (
     ONLINE_REFRESH_LOCK,
     ONLINE_REFRESH_STATE,
+    OnlineRefreshHistoryFull,
     claim_online_refresh_retry,
     confirm_online_refresh_result,
     get_online_refresh_history,
@@ -45,6 +46,9 @@ def _submit_online_refresh(proxy_id, raw_request_id=""):
             cache_fingerprint = online_script_cache_fingerprint()
             source_fingerprint = online_script_source_fingerprint()
             info = reserve_online_refresh(proxy_id, request_id, cache_fingerprint, source_fingerprint)
+    except OnlineRefreshHistoryFull as exc:
+        return {"ok": False, "status": "历史已满", "request_id": request_id,
+                "retry_not_started": True, "error": str(exc)}, 409
     except Exception as e:
         return {
             "ok": False, "status": "启动失败",
@@ -116,6 +120,9 @@ def _submit_online_refresh_retry(original_request_id, proxy_id, raw_request_id="
             info = claim_online_refresh_retry(
                 original_request_id, proxy_id, request_id, cache_fingerprint, source_fingerprint,
             )
+    except OnlineRefreshHistoryFull as exc:
+        return {"ok": False, "status": "历史已满", "request_id": request_id,
+                "retry_of": original_request_id, "retry_not_started": True, "error": str(exc)}, 409
     except ValueError as exc:
         return {"ok": False, "status": "参数错误", "request_id": request_id, "error": str(exc)}, 400
     except Exception as exc:
@@ -320,6 +327,9 @@ def online_refresh_retry(request_id):
                     f'<a class="btn btn-gray" href="/online-scripts?refresh_request_id={h(request_id)}#onlineRefreshHistory">返回原刷新记录</a>'
                     if re.fullmatch(r"[a-f0-9]{32}", request_id) else
                     '<a class="btn btn-gray" href="/online-scripts#online-status">返回刷新状态</a>'
+                ) + (
+                    '<a class="btn btn-primary" href="/online-scripts#online-status">发起新的完整同步</a>'
+                    if payload.get("retry_not_started") else ""
                 ),
             ),
         ), status_code

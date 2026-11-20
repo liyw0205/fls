@@ -190,8 +190,8 @@ class BackupRestoreIdempotencyTests(unittest.TestCase):
                     self.assertIn(request_id, {item["request_id"] for item in response.json["items"]})
 
     def test_archive_failure_keeps_details_and_history_retries_maintenance(self):
-        for fail_after_archive in (False, True):
-            with self.subTest(fail_after_archive=fail_after_archive), isolated_app() as (app, base):
+        for failure_point in ("backup_index", "primary_index", "backup_dir_sync", "primary_dir_sync", "detail_cleanup"):
+            with self.subTest(failure_point=failure_point), isolated_app() as (app, base):
                 from fls_manager.routes.backup import restore
 
                 directory = base / ".backup_restore_requests"
@@ -212,7 +212,7 @@ class BackupRestoreIdempotencyTests(unittest.TestCase):
                     })
 
                 with patch.object(restore, "RESTORE_RECEIPT_DETAIL_LIMIT", 1):
-                    if fail_after_archive:
+                    if failure_point == "detail_cleanup":
                         unlink = Path.unlink
                         target = restore._restore_request_path(ids[0])
 
@@ -223,14 +223,20 @@ class BackupRestoreIdempotencyTests(unittest.TestCase):
 
                         patcher = patch.object(Path, "unlink", fail_unlink)
                     else:
-                        write_json = restore.write_json
+                        write_index = restore._write_restore_archive_index_file
+                        target = (restore._restore_archive_backup_path() if failure_point.startswith("backup")
+                                  else restore._restore_archive_index_path())
 
-                        def fail_index(path, record):
-                            if path == restore._restore_archive_index_path():
-                                raise OSError("fixture archive index write failure")
-                            return write_json(path, record)
+                        def fail_index(path, index):
+                            if path == target:
+                                if failure_point.endswith("dir_sync"):
+                                    with patch.object(restore, "_sync_restore_archive_directory",
+                                                      side_effect=OSError("fixture directory fsync failure")):
+                                        return write_index(path, index)
+                                raise OSError(f"fixture {failure_point} write failure")
+                            return write_index(path, index)
 
-                        patcher = patch.object(restore, "write_json", fail_index)
+                        patcher = patch.object(restore, "_write_restore_archive_index_file", fail_index)
 
                     with patcher:
                         response = app.test_client().get(
@@ -238,28 +244,184 @@ class BackupRestoreIdempotencyTests(unittest.TestCase):
                         )
                     self.assertEqual(response.status_code, 200)
                     self.assertTrue(response.json["maintenance_error"])
+                    self.assertEqual(response.json["maintenance_required"], failure_point in (
+                        "primary_index", "backup_dir_sync", "primary_dir_sync",
+                    ))
                     archived = [item for item in response.json["items"] if item["archived"]]
-                    self.assertEqual(len(archived), int(fail_after_archive))
-                    if not fail_after_archive:
+                    self.assertEqual(len(archived), int(failure_point != "backup_index"))
+                    self.assertTrue(all(restore._restore_request_path(request_id).exists() for request_id in ids))
+
+                    if failure_point == "primary_dir_sync":
+                        with patch.object(restore, "_sync_restore_archive_directory",
+                                          side_effect=OSError("fixture directory fsync still unavailable")):
+                            pending = app.test_client().get(
+                                "/api/backup/restore-history?limit=20", headers={"X-Token": TOKEN},
+                            )
+                        self.assertEqual(pending.status_code, 200)
+                        self.assertIn("fsync still unavailable", pending.json["maintenance_error"])
                         self.assertTrue(all(restore._restore_request_path(request_id).exists() for request_id in ids))
 
                     recovered = app.test_client().get(
                         "/api/backup/restore-history?limit=20", headers={"X-Token": TOKEN},
                     )
                     self.assertEqual(recovered.status_code, 200)
-                    self.assertEqual(recovered.json["maintenance_error"], "")
+                    self.assertFalse(recovered.json["maintenance_required"])
+                    if failure_point in ("primary_index", "backup_dir_sync"):
+                        self.assertIn("自动合并并修复", recovered.json["maintenance_error"])
+                    else:
+                        self.assertEqual(recovered.json["maintenance_error"], "")
                     self.assertEqual(sum(item["archived"] for item in recovered.json["items"]), 1)
                     self.assertEqual(sum(restore._restore_request_path(request_id).exists() for request_id in ids), 1)
+                    primary = restore._read_restore_archive_index()
+                    backup = restore._read_restore_archive_index_file(restore._restore_archive_backup_path())
+                    self.assertEqual(primary, backup)
+                    settled = app.test_client().get(
+                        "/api/backup/restore-history?limit=20", headers={"X-Token": TOKEN},
+                    )
+                    self.assertEqual(settled.json["maintenance_error"], "")
+
+    def test_corrupt_index_copy_recovers_from_valid_peer_and_reports_maintenance(self):
+        for corrupt, damage in ((copy, mode) for copy in ("primary", "backup")
+                                for mode in ("invalid_json", "invalid_shape", "missing")):
+            with self.subTest(corrupt=corrupt, damage=damage), isolated_app() as (app, base):
+                from fls_manager.routes.backup import restore
+
+                raw = restore_test_archive().getvalue()
+                directory = base / ".backup_restore_requests"
+                directory.mkdir()
+                request_ids = ("a" * 32, "b" * 32)
+                for number, request_id in enumerate(request_ids, 1):
+                    restore._save_restore_request({
+                        "request_id": request_id,
+                        "archive_sha256": hashlib.sha256(raw).hexdigest(),
+                        "filename": "restore.tar.gz",
+                        "restore_items": ["data", "scripts"],
+                        "restore_deps": False,
+                        "state": "restored",
+                        "scheduler_reload_required": False,
+                        "scheduler_reloaded": True,
+                        "dependencies_failed": False,
+                        "created_at": f"2026-11-{number:02d} 00:00:00",
+                    })
+                with patch.object(restore, "RESTORE_RECEIPT_DETAIL_LIMIT", 1):
+                    self.assertEqual(restore._compact_restore_receipts(), 1)
+                corrupt_path = (restore._restore_archive_index_path() if corrupt == "primary"
+                                else restore._restore_archive_backup_path())
+                if damage == "missing":
+                    corrupt_path.unlink()
+                else:
+                    corrupt_path.write_text("{damaged" if damage == "invalid_json" else
+                                            json.dumps({"version": 2, "records": {}}), encoding="utf-8")
+
+                query = app.test_client().get(
+                    "/api/backup/restore/" + request_ids[0], headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(query.status_code, 410)
+                self.assertTrue(query.json["archived"])
+
+                history = app.test_client().get(
+                    "/api/backup/restore-history?limit=20", headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(history.status_code, 200)
+                self.assertIn("自动合并并修复", history.json["maintenance_error"])
+                archived_ids = {item["request_id"] for item in history.json["items"] if item["archived"]}
+                self.assertEqual(archived_ids, {request_ids[0]})
+                self.assertEqual(restore._read_restore_archive_index(),
+                                 restore._read_restore_archive_index_file(restore._restore_archive_backup_path()))
+
+                with patch.object(restore, "_commit_restore_directories") as commit:
+                    replay = self.post(app.test_client(), raw, restore_request_id=request_ids[0])
+                self.assertEqual(replay.status_code, 410)
+                commit.assert_not_called()
+
+    def test_unrepairable_index_symlink_keeps_details_and_reports_maintenance(self):
+        for linked_copy in ("primary", "backup"):
+            with self.subTest(linked_copy=linked_copy):
+                self.check_unrepairable_index_symlink(linked_copy)
+
+    def check_unrepairable_index_symlink(self, linked_copy):
+        with isolated_app() as (app, base):
+            from fls_manager.routes.backup import restore
+
+            directory = base / ".backup_restore_requests"
+            directory.mkdir()
+            request_id = "a" * 32
+            restore._save_restore_request({
+                "request_id": request_id,
+                "archive_sha256": "1" * 64,
+                "filename": "restore.tar.gz",
+                "restore_items": ["scripts"],
+                "restore_deps": False,
+                "state": "restored",
+                "scheduler_reload_required": False,
+                "scheduler_reloaded": True,
+                "dependencies_failed": False,
+            })
+            valid_index = {"version": 1, "records": {}}
+            valid_path, linked_path = restore._restore_archive_index_path(), restore._restore_archive_backup_path()
+            if linked_copy == "primary":
+                valid_path, linked_path = linked_path, valid_path
+            restore._write_restore_archive_index_file(valid_path, valid_index)
+            target = base / "archive-index-target.json"
+            target.write_text(json.dumps({"version": 1, "records": {}}), encoding="utf-8")
+            linked_path.symlink_to(target)
+
+            history = app.test_client().get(
+                "/api/backup/restore-history?limit=20", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(history.status_code, 200)
+            self.assertIn("冗余副本修复尚未完成", history.json["maintenance_error"])
+            self.assertTrue(history.json["maintenance_required"])
+            self.assertTrue(restore._restore_request_path(request_id).exists())
+            self.assertTrue(linked_path.is_symlink())
+            self.assertEqual(json.loads(target.read_text(encoding="utf-8")), valid_index)
+
+    def test_concurrent_history_compaction_keeps_archive_indexes_identical(self):
+        with isolated_app() as (app, base), patch(
+            "fls_manager.routes.backup.restore.RESTORE_RECEIPT_DETAIL_LIMIT", 2,
+        ):
+            from fls_manager.routes.backup import restore
+
+            directory = base / ".backup_restore_requests"
+            directory.mkdir()
+            for number in range(1, 8):
+                request_id = f"{number:032x}"
+                restore._save_restore_request({
+                    "request_id": request_id,
+                    "archive_sha256": f"{number:064x}",
+                    "filename": "restore.tar.gz",
+                    "restore_items": ["scripts"],
+                    "restore_deps": False,
+                    "state": "restored",
+                    "scheduler_reload_required": False,
+                    "scheduler_reloaded": True,
+                    "dependencies_failed": False,
+                    "created_at": f"2026-11-{number:02d} 00:00:00",
+                })
+            clients = [app.test_client() for _ in range(4)]
+            with ThreadPoolExecutor(4) as pool:
+                responses = list(pool.map(
+                    lambda client: client.get("/api/backup/restore-history?limit=20", headers={"X-Token": TOKEN}),
+                    clients,
+                ))
+            self.assertEqual([response.status_code for response in responses], [200] * 4)
+            self.assertTrue(all(response.json["maintenance_error"] == "" for response in responses))
+            self.assertTrue(all(response.json["total"] == 7 for response in responses))
+            primary = restore._read_restore_archive_index()
+            backup = restore._read_restore_archive_index_file(restore._restore_archive_backup_path())
+            self.assertEqual(primary, backup)
+            self.assertEqual(sum(restore._restore_request_path(f"{number:032x}").exists()
+                                 for number in range(1, 8)), 2)
 
     def test_corrupt_or_symlinked_archive_index_fails_closed(self):
-        for mode in ("invalid_json", "invalid_shape", "symlink"):
+        for mode in ("invalid_json", "invalid_shape", "symlink", "both_invalid"):
             with self.subTest(mode=mode), isolated_app() as (app, base):
                 from fls_manager.routes.backup import restore
 
                 directory = base / ".backup_restore_requests"
                 directory.mkdir()
                 index_path = restore._restore_archive_index_path()
-                if mode == "invalid_json":
+                if mode in ("invalid_json", "both_invalid"):
                     index_path.write_text("{broken", encoding="utf-8")
                 elif mode == "invalid_shape":
                     index_path.write_text(json.dumps({"version": 2, "records": {}}), encoding="utf-8")
@@ -267,6 +429,10 @@ class BackupRestoreIdempotencyTests(unittest.TestCase):
                     target = base / "archive-index-target.json"
                     target.write_text(json.dumps({"version": 1, "records": {}}), encoding="utf-8")
                     index_path.symlink_to(target)
+                if mode == "both_invalid":
+                    restore._restore_archive_backup_path().write_text(
+                        json.dumps({"version": 2, "records": {}}), encoding="utf-8",
+                    )
 
                 client = app.test_client()
                 history = client.get("/api/backup/restore-history?limit=20", headers={"X-Token": TOKEN})
@@ -277,6 +443,72 @@ class BackupRestoreIdempotencyTests(unittest.TestCase):
                     commit.assert_not_called()
 
                 self.assertTrue(index_path.is_symlink() if mode == "symlink" else index_path.exists())
+
+    def test_archive_index_file_fsync_failure_does_not_publish_or_leave_temp_file(self):
+        with isolated_app() as (_app, base):
+            from fls_manager.routes.backup import restore
+
+            directory = base / ".backup_restore_requests"
+            directory.mkdir()
+            path = restore._restore_archive_index_path()
+            with patch.object(restore.os, "fsync", side_effect=OSError("fixture fsync failure")):
+                with self.assertRaisesRegex(OSError, "fixture fsync failure"):
+                    restore._write_restore_archive_index_file(path, {"version": 1, "records": {}})
+            self.assertFalse(path.exists())
+            self.assertFalse(path.with_name(path.name + ".tmp").exists())
+
+    def test_index_repair_unions_partial_publications_and_rejects_identity_conflicts(self):
+        for conflict in (False, True):
+            with self.subTest(conflict=conflict), isolated_app() as (app, base):
+                from fls_manager.routes.backup import restore
+
+                directory = base / ".backup_restore_requests"
+                directory.mkdir()
+                summaries = {}
+                for number in (1, 2):
+                    request_id = f"{number:032x}"
+                    summaries[request_id] = restore._restore_archive_summary({
+                        "request_id": request_id, "archive_sha256": f"{number:064x}",
+                        "restore_items": ["scripts"], "restore_deps": False,
+                        "state": "restored", "scheduler_reload_required": False, "dependencies_failed": False,
+                    })
+                first_id, second_id = summaries
+                primary = {"version": 1, "records": {first_id: summaries[first_id]}}
+                backup = {"version": 1, "records": {second_id: summaries[second_id]}}
+                if conflict:
+                    backup["records"][first_id] = dict(summaries[first_id], archive_sha256="f" * 64)
+                restore._write_restore_archive_index_file(restore._restore_archive_index_path(), primary)
+                restore._write_restore_archive_index_file(restore._restore_archive_backup_path(), backup)
+                original_files = {path: path.read_bytes() for path in directory.iterdir()}
+
+                history = app.test_client().get("/api/backup/restore-history", headers={"X-Token": TOKEN})
+                self.assertEqual(history.status_code, 500 if conflict else 200)
+                if conflict:
+                    self.assertEqual({path: path.read_bytes() for path in directory.iterdir()}, original_files)
+                    with patch.object(restore, "_commit_restore_directories") as commit:
+                        self.assertEqual(self.post(app.test_client(), restore_test_archive().getvalue()).status_code, 500)
+                    commit.assert_not_called()
+                else:
+                    self.assertEqual({item["request_id"] for item in history.json["items"]}, set(summaries))
+                    self.assertIn("自动合并并修复", history.json["maintenance_error"])
+                    self.assertEqual(restore._read_restore_archive_index_file(restore._restore_archive_index_path()),
+                                     restore._read_restore_archive_index_file(restore._restore_archive_backup_path()))
+
+    def test_symlinked_index_temporary_file_is_never_followed(self):
+        with isolated_app() as (_app, base):
+            from fls_manager.routes.backup import restore
+
+            restore.BACKUP_RESTORE_REQUESTS_DIR.mkdir()
+            target = base / "index-temp-target"
+            target.write_text("preserve target", encoding="utf-8")
+            path = restore._restore_archive_index_path()
+            temp = path.with_name(path.name + ".tmp")
+            temp.symlink_to(target)
+            with self.assertRaisesRegex(RuntimeError, "临时文件必须是普通文件"):
+                restore._write_restore_archive_index_file(path, {"version": 1, "records": {}})
+            self.assertEqual(target.read_text(encoding="utf-8"), "preserve target")
+            self.assertTrue(temp.is_symlink())
+            self.assertFalse(path.exists())
 
     def test_archived_request_replay_is_rejected_for_api_and_form_without_directory_changes(self):
         with isolated_app() as (app, base):

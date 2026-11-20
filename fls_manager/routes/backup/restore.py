@@ -27,27 +27,27 @@ def _restore_archive_index_path():
     return BACKUP_RESTORE_REQUESTS_DIR / ".archive"
 
 
-def _read_restore_archive_index():
-    directory = BACKUP_RESTORE_REQUESTS_DIR
-    if directory.is_symlink():
-        raise RuntimeError("备份恢复回执目录不能是符号链接")
-    if not directory.exists():
-        return {"version": 1, "records": {}}
-    if not directory.is_dir():
-        raise RuntimeError("备份恢复回执目录无效")
-    path = _restore_archive_index_path()
+def _restore_archive_backup_path():
+    return BACKUP_RESTORE_REQUESTS_DIR / ".archive.bak"
+
+
+RESTORE_ARCHIVE_MAINTENANCE_NOTICE = ""
+RESTORE_ARCHIVE_MAINTENANCE_REQUIRED = False
+
+
+def _read_restore_archive_index_file(path):
     if path.is_symlink() or path.exists() and not path.is_file():
-        raise RuntimeError("恢复归档索引必须是普通文件")
+        raise RuntimeError("恢复归档索引副本必须是普通文件")
     try:
         index = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return {"version": 1, "records": {}}
+        return None
     except (OSError, ValueError) as exc:
-        raise RuntimeError(f"恢复归档索引无法读取：{exc}") from exc
+        raise RuntimeError(f"恢复归档索引副本无法读取：{exc}") from exc
     if not isinstance(index, dict) or index.get("version") != 1 or not isinstance(index.get("records"), dict):
-        raise RuntimeError("恢复归档索引损坏")
+        raise RuntimeError("恢复归档索引副本损坏")
     for request_id, record in index["records"].items():
-        if (not re.fullmatch(r"[a-f0-9]{32}", request_id)
+        if (not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id)
             or not isinstance(record, dict) or record.get("request_id") != request_id
             or record.get("archived") is not True
             or not isinstance(record.get("archive_sha256"), str)
@@ -57,8 +57,134 @@ def _read_restore_archive_index():
             or record.get("state") not in ("restored", "failed")
             or type(record.get("scheduler_reload_required")) is not bool
             or type(record.get("dependencies_failed")) is not bool):
-            raise RuntimeError("恢复归档索引记录损坏")
+            raise RuntimeError("恢复归档索引副本记录损坏")
     return index
+
+
+def _merge_restore_archive_indexes(indexes):
+    records = {}
+    for index in indexes:
+        if index is None:
+            continue
+        for request_id, record in index["records"].items():
+            existing = records.get(request_id)
+            if existing and not _restore_request_identity_matches(existing, record):
+                raise RuntimeError("主备恢复归档索引包含冲突的请求身份")
+            if existing is None or str(record.get("archived_at") or "") > str(existing.get("archived_at") or ""):
+                records[request_id] = record
+    return {"version": 1, "records": records}
+
+
+def _sync_restore_archive_directory():
+    if os.name == "nt":
+        return
+    directory_fd = os.open(
+        BACKUP_RESTORE_REQUESTS_DIR,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _write_restore_archive_index_file(path, index):
+    global RESTORE_ARCHIVE_MAINTENANCE_NOTICE, RESTORE_ARCHIVE_MAINTENANCE_REQUIRED
+    directory = BACKUP_RESTORE_REQUESTS_DIR
+    if directory.is_symlink() or not directory.is_dir():
+        raise RuntimeError("备份恢复回执目录无效")
+    if path.is_symlink() or path.exists() and not path.is_file():
+        raise RuntimeError("恢复归档索引副本必须是普通文件")
+    temp = path.with_name(path.name + ".tmp")
+    if temp.is_symlink() or temp.exists() and not temp.is_file():
+        raise RuntimeError("恢复归档索引临时文件必须是普通文件")
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
+    fd = os.open(temp, flags, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            fd = -1
+            json.dump(index, stream, ensure_ascii=False, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
+        try:
+            _sync_restore_archive_directory()
+        except Exception as exc:
+            RESTORE_ARCHIVE_MAINTENANCE_NOTICE = f"恢复归档索引副本目录同步尚未完成：{exc}"
+            RESTORE_ARCHIVE_MAINTENANCE_REQUIRED = True
+            raise
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        temp.unlink(missing_ok=True)
+
+
+def _write_restore_archive_index_pair(index):
+    # Publish the redundant copy first; details are never removed until both are durable.
+    _write_restore_archive_index_file(_restore_archive_backup_path(), index)
+    _write_restore_archive_index_file(_restore_archive_index_path(), index)
+
+
+def _read_restore_archive_index(*, require_redundancy=False):
+    global RESTORE_ARCHIVE_MAINTENANCE_NOTICE, RESTORE_ARCHIVE_MAINTENANCE_REQUIRED
+    directory = BACKUP_RESTORE_REQUESTS_DIR
+    if directory.is_symlink():
+        raise RuntimeError("备份恢复回执目录不能是符号链接")
+    if not directory.exists():
+        RESTORE_ARCHIVE_MAINTENANCE_REQUIRED = False
+        return {"version": 1, "records": {}}
+    if not directory.is_dir():
+        raise RuntimeError("备份恢复回执目录无效")
+    primary_path, backup_path = _restore_archive_index_path(), _restore_archive_backup_path()
+    parsed, errors = [], []
+    for path in (primary_path, backup_path):
+        try:
+            parsed.append(_read_restore_archive_index_file(path))
+        except Exception as exc:
+            parsed.append(None)
+            errors.append(f"{path.name}: {exc}")
+    if all(index is None for index in parsed):
+        if errors:
+            raise RuntimeError("主备恢复归档索引均不可用：" + "；".join(errors))
+        RESTORE_ARCHIVE_MAINTENANCE_REQUIRED = False
+        return {"version": 1, "records": {}}
+
+    index = _merge_restore_archive_indexes(parsed)
+    needs_repair = any(candidate is None or candidate != index for candidate in parsed)
+    if needs_repair:
+        sources = "主索引" if parsed[0] is not None else "备份索引"
+        notice = f"恢复归档索引副本不完整，正在从有效{sources}恢复。"
+        try:
+            _write_restore_archive_index_pair(index)
+        except Exception as exc:
+            RESTORE_ARCHIVE_MAINTENANCE_NOTICE = f"{notice}冗余副本修复尚未完成：{exc}"
+            RESTORE_ARCHIVE_MAINTENANCE_REQUIRED = True
+            if require_redundancy:
+                raise RuntimeError(RESTORE_ARCHIVE_MAINTENANCE_NOTICE) from exc
+        else:
+            RESTORE_ARCHIVE_MAINTENANCE_NOTICE = f"恢复归档索引副本不完整，已从有效{sources}自动合并并修复。"
+            RESTORE_ARCHIVE_MAINTENANCE_REQUIRED = False
+    elif require_redundancy:
+        # A previous replace may have succeeded before directory fsync failed.
+        try:
+            _sync_restore_archive_directory()
+        except Exception as exc:
+            RESTORE_ARCHIVE_MAINTENANCE_NOTICE = f"恢复归档索引副本目录同步尚未完成：{exc}"
+            RESTORE_ARCHIVE_MAINTENANCE_REQUIRED = True
+            raise
+        if RESTORE_ARCHIVE_MAINTENANCE_REQUIRED:
+            RESTORE_ARCHIVE_MAINTENANCE_NOTICE = ""
+        RESTORE_ARCHIVE_MAINTENANCE_REQUIRED = False
+    return index
+
+
+def _take_restore_archive_maintenance_notice():
+    global RESTORE_ARCHIVE_MAINTENANCE_NOTICE
+    notice = RESTORE_ARCHIVE_MAINTENANCE_NOTICE
+    RESTORE_ARCHIVE_MAINTENANCE_NOTICE = ""
+    return notice
 
 
 def _restore_request_identity_matches(left, right):
@@ -95,7 +221,7 @@ def _compact_restore_receipts():
         if not directory.is_dir():
             raise RuntimeError("备份恢复回执目录无效")
 
-        index = _read_restore_archive_index()
+        index = _read_restore_archive_index(require_redundancy=True)
         details = {}
         for path in directory.iterdir():
             if not path.name.endswith(".json"):
@@ -133,7 +259,7 @@ def _compact_restore_receipts():
             if existing and not _restore_request_identity_matches(existing, summary):
                 raise RuntimeError("恢复归档请求标识冲突")
             index["records"][request_id] = existing or summary
-        write_json(_restore_archive_index_path(), index)
+        _write_restore_archive_index_pair(index)
         for record in selected:
             _restore_request_path(record["request_id"]).unlink()
         return len(selected)
@@ -246,11 +372,14 @@ def api_backup_restore_history():
 
     try:
         with storage_transaction(), BACKUP_RESTORE_REQUEST_LOCK:
-            maintenance_error = ""
+            maintenance_notices = []
             try:
                 _compact_restore_receipts()
             except Exception as exc:
-                maintenance_error = _bounded_restore_diagnostic(str(exc))
+                maintenance_notices.append(_bounded_restore_diagnostic(str(exc)))
+            previous_notice = _take_restore_archive_maintenance_notice()
+            if previous_notice:
+                maintenance_notices.append(previous_notice)
 
             directory = BACKUP_RESTORE_REQUESTS_DIR
             if directory.is_symlink():
@@ -282,6 +411,10 @@ def api_backup_restore_history():
                         _save_restore_request(record)
                     records_by_id[request_id] = record
 
+            repair_notice = _take_restore_archive_maintenance_notice()
+            if repair_notice:
+                maintenance_notices.append(repair_notice)
+
             records = []
             for record in records_by_id.values():
                 payload, _ = _restore_request_response(record)
@@ -305,7 +438,8 @@ def api_backup_restore_history():
                 offset=offset,
                 has_more=offset + len(items) < total,
                 active=bool(backup_state.RESTORE_ACTIVE),
-                maintenance_error=maintenance_error,
+                maintenance_error="；".join(dict.fromkeys(filter(None, maintenance_notices))),
+                maintenance_required=RESTORE_ARCHIVE_MAINTENANCE_REQUIRED,
             )
     except Exception:
         return jsonify(ok=False, msg="备份恢复历史无法完整读取，请修复回执后重试"), 500
