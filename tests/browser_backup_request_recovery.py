@@ -470,6 +470,27 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    assert.equal(pendingAfterRestart.job_id,'a'.repeat(32));assert.equal(pendingAfterRestart.result_unknown,true);
    await page.evaluate(()=>sessionStorage.removeItem('fls-backup-request'));
    await page.goto(base+'/backup');
+   const workersBeforeCorrupt=(await state()).workers.length;
+   for(const [index,raw] of ['{broken','[]','', '{"request_id":"bad","items":["scripts"]}'].entries()){
+    await page.evaluate(value=>sessionStorage.setItem('fls-backup-request',value),raw);
+    await page.reload();
+    const recoverCorrupt=()=>page.getByRole('button',{name:'刷新备份列表并清理无效请求',exact:true});
+    await recoverCorrupt().waitFor();assert.equal(await create().isEnabled(),false);
+    if(index===0){
+     await page.route('**/api/backup/list',route=>route.fulfill({status:503,contentType:'text/plain',body:'fixture list failure'}),{times:1});
+     await recoverCorrupt().click();
+     assert.equal(await page.evaluate(()=>sessionStorage.getItem('fls-backup-request')),raw);
+     assert.equal(await create().isEnabled(),false);
+     await page.route('**/api/backup/list',route=>route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({ok:true,items:{}})}),{times:1});
+     await recoverCorrupt().click();
+     assert.equal(await page.evaluate(()=>sessionStorage.getItem('fls-backup-request')),raw);
+     assert.equal(await create().isEnabled(),false);
+    }
+    await recoverCorrupt().click();
+    await page.waitForFunction(()=>sessionStorage.getItem('fls-backup-request')===null);
+    assert.equal(await create().isEnabled(),true);
+    assert.equal((await state()).workers.length,workersBeforeCorrupt);
+   }
    const initial=(await state()).workers.length;
    const fields=await page.locator('#backupCreateForm').evaluate(f=>({request_id:f.elements.request_id.value,items:['scripts']}));
    assert.equal((await page.request.post(base+'/api/backup/create',{data:fields,headers:{'X-CSRF-Token':'bad'}})).status(),400);
