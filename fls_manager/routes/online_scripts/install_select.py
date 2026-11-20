@@ -1137,6 +1137,11 @@ def online_scripts_install_select(script_id):
 <button class="btn btn-primary" id="onlineInstallRecoveryConfirm" type="button" hidden>检查原导入结果</button>
 <button class="btn btn-primary" id="onlineInstallRecoveryReload" type="button" hidden>仅重新加载调度器</button>
 <button class="btn btn-gray" id="onlineInstallRecoveryRetry" type="button" hidden>重新读取安装状态</button>
+<button class="btn btn-orange" id="onlineInstallRecoveryResume" type="button" hidden>沿原请求重试导入</button>
+<a class="btn btn-gray" id="onlineInstallRecoveryInstallHistory" href="/online-scripts/install-history" hidden>查看安装历史</a>
+<button class="btn btn-blue" id="onlineInstallRecoveryCheckHistory" type="button" hidden>核对安装历史</button>
+<div id="onlineInstallRecoveryHistoryItems" class="help"></div>
+<button class="btn btn-orange" id="onlineInstallRecoveryClear" type="button" hidden>确认核对后清理原请求</button>
 
 <section class="section fls-form-section fls-save-section">
     <div class="row-actions" aria-label="在线脚本导入操作">
@@ -1300,11 +1305,222 @@ document.querySelectorAll(".fls-install-task-checkbox").forEach(function(input){
     input.addEventListener("change", flsSyncVisibleCheckboxesToExcluded);
 }});
 
+const ONLINE_INSTALL_STORAGE_KEY = "fls-online-install-request";
+const ONLINE_INSTALL_TERMINAL_STATUSES = new Set(["已完成", "失败", "已停止", "启动失败", "超时"]);
+
+function flsInstallStorageState(){{
+    let raw;
+    try{{ raw = sessionStorage.getItem(ONLINE_INSTALL_STORAGE_KEY); }}
+    catch(error){{ return {{kind:"unavailable", error:String(error)}}; }}
+    if(raw === null || raw === undefined) return {{kind:"empty", raw:null}};
+    let value;
+    try{{ value = JSON.parse(raw); }}
+    catch(error){{ return {{kind:"corrupt", raw, error:String(error)}}; }}
+    const requestId = value && typeof value === "object" && !Array.isArray(value)
+        ? String(value.install_id || value.request_id || "") : "";
+    const action = value && typeof value.action === "string" ? value.action : "";
+    const validAction = !action || action.startsWith("/online-scripts/install/")
+        || action.startsWith("/online-scripts/import-tasks/");
+    if(!value || typeof value !== "object" || Array.isArray(value)
+        || !/^[a-f0-9]{{32}}$/.test(requestId)
+        || typeof value.script_id !== "string" || !value.script_id || value.script_id.length > 200
+        || !validAction
+        || (value.excluded_task_indexes !== undefined && typeof value.excluded_task_indexes !== "string")
+        || (value.enable_task !== undefined && typeof value.enable_task !== "boolean")
+        || (value.import_task !== undefined && typeof value.import_task !== "boolean")
+        || (value.proxy_id !== undefined && typeof value.proxy_id !== "string")
+        || (value.force !== undefined && typeof value.force !== "boolean")){{
+        return {{kind:"corrupt", raw}};
+    }}
+    return {{kind:"valid", raw, value, request_id:requestId}};
+}}
+
+function flsInstallWritePending(value, expectedRaw){{
+    const current = flsInstallStorageState();
+    if(current.kind === "unavailable") throw new Error("无法读取本地安装请求状态");
+    if(expectedRaw === undefined ? current.kind !== "empty" : current.raw !== expectedRaw)
+        throw new Error("本地安装请求状态已变化");
+    const raw = JSON.stringify(value);
+    sessionStorage.setItem(ONLINE_INSTALL_STORAGE_KEY, raw);
+    if(sessionStorage.getItem(ONLINE_INSTALL_STORAGE_KEY) !== raw) throw new Error("本地安装请求状态读回校验失败");
+    return raw;
+}}
+
+function flsInstallClearKnownRejected(expectedRaw){{
+    const current = flsInstallStorageState();
+    if(current.kind === "unavailable" || current.raw !== expectedRaw) throw new Error("本地安装请求状态已变化");
+    sessionStorage.removeItem(ONLINE_INSTALL_STORAGE_KEY);
+    if(sessionStorage.getItem(ONLINE_INSTALL_STORAGE_KEY) !== null) throw new Error("本地请求状态未能清理");
+}}
+
+function flsInstallLockForm(locked){{
+    const form = document.getElementById("onlineInstallSelectForm");
+    if(!form) return;
+    form.__flsInstallRecoveryLocked = !!locked;
+    form.querySelectorAll('button[type="submit"]').forEach(button => {{ button.disabled = !!locked; }});
+}}
+
+function flsInstallSetStatus(message){{
+    const status = document.getElementById("onlineInstallRecoveryStatus");
+    if(status){{ status.hidden = false; status.textContent = message; }}
+}}
+
+function flsInstallShowHistory(pending){{
+    const link = document.getElementById("onlineInstallRecoveryInstallHistory");
+    const check = document.getElementById("onlineInstallRecoveryCheckHistory");
+    const clear = document.getElementById("onlineInstallRecoveryClear");
+    if(link){{
+        link.hidden = false;
+        link.href = pending && pending.script_id
+            ? "/online-scripts/install-history?script_id=" + encodeURIComponent(pending.script_id)
+            : "/online-scripts/install-history";
+    }}
+    if(check){{ check.hidden = false; check.onclick = flsInstallCheckHistory; }}
+    if(clear) clear.hidden = true;
+    window.__FLS_INSTALL_VERIFIED_RAW__ = null;
+}}
+
+function flsInstallEnableClear(raw){{
+    const clear = document.getElementById("onlineInstallRecoveryClear");
+    if(clear){{ clear.hidden = false; clear.onclick = () => flsInstallClearPending(raw); }}
+    window.__FLS_INSTALL_VERIFIED_RAW__ = raw;
+}}
+
+function flsInstallRenderHistory(items, summary){{
+    const box = document.getElementById("onlineInstallRecoveryHistoryItems");
+    if(!box) return;
+    box.replaceChildren();
+    const message = document.createElement("div");
+    message.textContent = summary;
+    box.appendChild(message);
+    items.slice(0, 8).forEach(item => {{
+        const row = document.createElement("div");
+        const link = document.createElement("a");
+        link.href = "/online-scripts/log/" + encodeURIComponent(item.id);
+        link.textContent = String(item.script_id || "-") + " | " + String(item.status || "-") + " | " + String(item.id || "-");
+        row.appendChild(link);
+        box.appendChild(row);
+    }});
+}}
+
+function flsInstallHistoryItemValid(item){{
+    return !!item && typeof item === "object" && !Array.isArray(item)
+        && typeof item.id === "string" && /^[A-Za-z0-9_-]{{1,80}}$/.test(item.id)
+        && typeof item.script_id === "string" && item.script_id.length > 0
+        && typeof item.status === "string" && item.status.length > 0
+        && typeof item.running === "boolean"
+        && (item.scheduler_reload_pending === undefined || item.scheduler_reload_pending === null
+            || typeof item.scheduler_reload_pending === "boolean");
+}}
+
+function flsInstallHistoryItemSafe(item){{
+    return flsInstallHistoryItemValid(item) && !item.running
+        && !item.scheduler_reload_pending && ONLINE_INSTALL_TERMINAL_STATUSES.has(item.status);
+}}
+
+async function flsInstallCheckHistory(){{
+    const state = flsInstallStorageState();
+    if(state.kind === "unavailable" || state.kind === "empty"){{
+        flsInstallRenderHistory([], "无法读取待处理请求状态；未清理本地记录。请检查浏览器存储后重试。");
+        return;
+    }}
+    const pending = state.kind === "valid" ? state.value : null;
+    const query = "?limit=100" + (pending && pending.script_id
+        ? "&script_id=" + encodeURIComponent(pending.script_id) : "");
+    const check = document.getElementById("onlineInstallRecoveryCheckHistory");
+    if(check) check.disabled = true;
+    flsInstallSetStatus("正在读取完整安装历史；在核对完成前不会启动新请求。");
+    try{{
+        const response = await fetch("/api/online-scripts/install-history" + query,
+            {{cache:"no-store", credentials:"same-origin"}});
+        const json = await flsReadJsonResponse(response);
+        if(!json || json.ok !== true || !Array.isArray(json.items)
+            || !Number.isInteger(json.total) || json.total < 0
+            || json.offset !== 0 || json.limit !== 100 || typeof json.has_more !== "boolean"
+            || json.items.some(item => !flsInstallHistoryItemValid(item))){{
+            throw new Error("安装历史响应无效或结构不完整");
+        }}
+        const complete = json.has_more === false && json.total === json.items.length;
+        const installId = pending && (pending.install_id || pending.request_id);
+        const original = installId ? json.items.find(item => item.id === installId) : null;
+        const safe = complete && json.items.every(item => flsInstallHistoryItemSafe(item))
+            && (pending ? (!original || (original.script_id === pending.script_id
+                && flsInstallHistoryItemSafe(original))) : true);
+        flsInstallRenderHistory(json.items, complete
+            ? "已读取 " + json.items.length + " 条相关安装记录。"
+            : "安装历史未完整读取，当前仅显示已返回记录，不能确认请求可以清理。");
+        if(pending && original && !flsInstallHistoryItemSafe(original)){{
+            flsInstallSetStatus("原安装仍处于 " + original.status + " 状态或需要恢复；保留原请求，不允许新安装。");
+        }}else if(!safe){{
+            flsInstallSetStatus(complete
+                ? "历史中存在运行中、未知、部分完成或结构未识别的安装；请先处理原记录。"
+                : "安装历史不完整，未清理原请求；请稍后重新核对。");
+        }}else{{
+            flsInstallSetStatus(pending && original
+                ? "原安装已确认处于终态，可以确认清理本地请求。"
+                : pending ? "完整历史中未发现原请求且无未决安装，可以确认清理本地请求。"
+                    : "完整安装历史均为已知终态，可以确认清理损坏状态。");
+            const clear = document.getElementById("onlineInstallRecoveryClear");
+            if(clear){{ clear.hidden = false; clear.onclick = () => flsInstallClearPending(state.raw); }}
+            window.__FLS_INSTALL_VERIFIED_RAW__ = state.raw;
+        }}
+    }}catch(error){{
+        flsInstallRenderHistory([], "安装历史读取失败：" + String(error && error.message || error));
+        flsInstallSetStatus("安装历史未能核实；原始本地状态仍保留，不能启动新请求。");
+        const login = document.getElementById("onlineInstallApiLogin");
+        const denied = error && (error.status === 401 || error.status === 403);
+        if(login){{
+            login.hidden = !denied;
+            if(denied) login.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
+        }}
+    }}finally{{ if(check) check.disabled = false; }}
+}}
+
+async function flsInstallClearPending(verifiedRaw){{
+    if(window.__FLS_INSTALL_VERIFIED_RAW__ !== verifiedRaw){{
+        flsInstallSetStatus("本地安装请求在核对后发生变化，请重新查询安装历史。");
+        return;
+    }}
+    if(!confirm("已核对完整安装历史。确认清理原本地请求状态并重新选择吗？")) return;
+    try{{
+        const current = flsInstallStorageState();
+        if(current.kind === "unavailable" || current.raw !== verifiedRaw) throw new Error("本地安装请求状态已变化");
+        sessionStorage.removeItem(ONLINE_INSTALL_STORAGE_KEY);
+        if(sessionStorage.getItem(ONLINE_INSTALL_STORAGE_KEY) !== null) throw new Error("本地请求状态未能清理");
+        window.__FLS_INSTALL_VERIFIED_RAW__ = null;
+        flsInstallSetStatus("已清理已核对的本地请求，正在重新载入选择页面。");
+        if(window.location && typeof window.location.reload === "function") window.location.reload();
+        else flsInstallLockForm(true);
+    }}catch(error){{
+        flsInstallSetStatus("未能清理原请求，原始状态仍保留：" + String(error && error.message || error));
+    }}
+}}
+
+function flsInstallRestoreForm(pending){{
+    const form = document.getElementById("onlineInstallSelectForm");
+    if(!form || pending.script_id !== window.FLS_INSTALL_SCRIPT_ID) return;
+    const request = form.querySelector('[name="request_id"]');
+    if(request) request.value = pending.request_id || pending.install_id;
+    if(typeof pending.excluded_task_indexes === "string")
+        document.getElementById("excludedTaskIndexes").value = pending.excluded_task_indexes;
+    const enable = form.querySelector('[name="enable_task"]');
+    if(enable && typeof pending.enable_task === "boolean") enable.checked = pending.enable_task;
+    const importTask = form.querySelector('[name="import_task"]');
+    if(importTask && typeof pending.import_task === "boolean") importTask.checked = pending.import_task;
+    const proxy = form.querySelector('[name="proxy_id"]');
+    if(proxy && typeof pending.proxy_id === "string") proxy.value = pending.proxy_id;
+}}
+
 function flsInstallGoTaskPage(page){{
     window.location.href = flsInstallBuildUrl(String(page || 1));
 }}
 
 document.getElementById("onlineInstallSelectForm").addEventListener("submit", function(e){{
+    if(this.__flsInstallRecoveryLocked){{
+        e.preventDefault();
+        flsInstallSetStatus("原安装请求尚未核实；请先查询原状态或安装历史，不会启动新请求。");
+        return false;
+    }}
     flsSyncVisibleCheckboxesToExcluded();
 
     const submitter = e.submitter;
@@ -1325,7 +1541,7 @@ document.getElementById("onlineInstallSelectForm").addEventListener("submit", fu
     flsInstallSubmitApi(action, this, submitter);
 }});
 
-async function flsInstallSubmitApi(action, form, submitter){{
+async function flsInstallSubmitApi(action, form, submitter, allowOriginalRetry){{
     const errorEl = document.getElementById("onlineInstallApiError");
     const loginEl = document.getElementById("onlineInstallApiLogin");
     const csrf = typeof flsGetCsrfToken === "function" ? flsGetCsrfToken() : "";
@@ -1339,13 +1555,50 @@ async function flsInstallSubmitApi(action, form, submitter){{
     const requestIdInput = form.querySelector('input[name="request_id"]');
     const requestId = requestIdInput ? requestIdInput.value : "";
     const importMode = action.indexOf("/online-scripts/import-tasks/") >= 0;
+    let requestState = null;
+    let pendingValue = null;
     try{{
-        if(requestId) sessionStorage.setItem("fls-online-install-request", JSON.stringify({{
-            request_id: requestId, script_id: window.FLS_INSTALL_SCRIPT_ID, action: action,
-            excluded_task_indexes: document.getElementById("excludedTaskIndexes").value || "",
-            enable_task: !!(form.querySelector('[name="enable_task"]') || {{}}).checked
-        }}));
-    }}catch(_error){{}}
+        if(!/^[a-f0-9]{{32}}$/.test(requestId)) throw new Error("安装请求标识无效，未发送请求");
+        const current = flsInstallStorageState();
+        if(current.kind === "unavailable") throw new Error("无法读取本地安装请求状态，未发送请求");
+        if(current.kind === "corrupt"){{
+            flsInstallLockForm(true);
+            flsInstallShowHistory(null);
+            flsInstallSetStatus("本地安装请求状态损坏；原始值已保留，先核对安装历史。");
+            throw new Error("本地安装请求状态损坏，未发送请求");
+        }}
+        if(current.kind === "valid"){{
+            const sameRequest = allowOriginalRetry && current.request_id === requestId
+                && current.value.script_id === window.FLS_INSTALL_SCRIPT_ID
+                && current.value.action === action && importMode;
+            if(!sameRequest){{
+                flsInstallLockForm(true);
+                flsInstallShowHistory(current.value);
+                flsInstallSetStatus("已有原安装请求尚未确认；不会用新请求覆盖其身份。");
+                throw new Error("请先恢复或核对原安装请求");
+            }}
+            pendingValue = current.value;
+            requestState = current.raw;
+        }}else{{
+            const enableInput = form.querySelector('[name="enable_task"]');
+            const importInput = form.querySelector('[name="import_task"]');
+            const proxyInput = form.querySelector('[name="proxy_id"]');
+            const excludedInput = document.getElementById("excludedTaskIndexes");
+            pendingValue = {{
+                request_id:requestId, script_id:window.FLS_INSTALL_SCRIPT_ID, action,
+                import_task:!!(importInput && importInput.checked),
+                excluded_task_indexes:excludedInput ? excludedInput.value || "" : "",
+                enable_task:!!(enableInput && enableInput.checked),
+                proxy_id:proxyInput ? proxyInput.value || "" : "", force:false
+            }};
+            requestState = flsInstallWritePending(pendingValue);
+        }}
+    }}catch(error){{
+        if(errorEl){{ errorEl.hidden = false; errorEl.textContent = error && error.message || "无法保存安装请求状态"; }}
+        if(button) button.disabled = !!form.__flsInstallRecoveryLocked;
+        form.__flsInstallSubmitting = false;
+        return;
+    }}
     const data = new FormData(form);
     data.delete("visible_task_indexes");
     const apiAction = action.replace("/online-scripts/install/", "/api/online-scripts/install/")
@@ -1363,26 +1616,26 @@ async function flsInstallSubmitApi(action, form, submitter){{
         }}
         if(response.status === 409 && json && json.confirm_required){{
             if(!window.confirm("目标文件已存在，确定覆盖并继续安装吗？")){{
+                flsInstallClearKnownRejected(requestState);
+                flsInstallLockForm(false);
                 if(button) button.disabled = false;
                 if(errorEl){{ errorEl.hidden = false; errorEl.textContent = "已取消覆盖，未启动安装。"; }}
                 return;
             }}
             data.set("force", "1");
+            pendingValue = Object.assign({{}}, pendingValue, {{force:true}});
+            requestState = flsInstallWritePending(pendingValue, requestState);
             response = await fetch(apiAction, {{method:"POST", body:data, headers, credentials:"same-origin"}});
             json = await flsReadJsonResponse(response);
         }}
         if(!json || json.ok !== true) throw Object.assign(new Error(json && json.msg || "安装请求未完成"), {{status:response.status, payload:json}});
+        if(json.request_id !== requestId) throw new Error("安装响应身份与原请求不一致，请查询原安装记录");
         if(importMode){{
-            if(json.request_id !== requestId) throw new Error("导入响应无效，请查询原请求");
-            try{{ sessionStorage.removeItem("fls-online-install-request"); }}catch(_error){{}}
             window.location.href = "/online-scripts/import-tasks-status/" + encodeURIComponent(requestId);
             return;
         }}
-        if(json.install_id) sessionStorage.setItem("fls-online-install-request", JSON.stringify({{
-            request_id: json.request_id || requestId, install_id: json.install_id,
-            script_id: window.FLS_INSTALL_SCRIPT_ID
-        }}));
-        window.location.href = "/online-scripts/log/" + encodeURIComponent(json.install_id || json.request_id);
+        if(json.install_id !== requestId) throw new Error("安装响应标识无效，请查询原请求");
+        window.location.href = "/online-scripts/log/" + encodeURIComponent(requestId);
     }}catch(error){{
         const denied = error && (error.status === 401 || error.status === 403);
         const message = error && error.message ? error.message : String(error || "安装请求失败");
@@ -1398,13 +1651,32 @@ async function flsInstallSubmitApi(action, form, submitter){{
         if(importMode){{
             const rejected = error && error.payload && error.payload.accepted === false;
             const full = rejected && error.payload.history_full === true;
-            if(rejected){{ try{{ sessionStorage.removeItem("fls-online-install-request"); }}catch(_error){{}} }}
+            if(rejected){{
+                try{{ flsInstallClearKnownRejected(requestState); flsInstallLockForm(false); }}
+                catch(_error){{ flsInstallLockForm(true); }}
+            }}else{{
+                flsInstallLockForm(true);
+                flsInstallShowHistory(pendingValue);
+            }}
             const history = document.getElementById("onlineInstallRecoveryHistory");
             if(history) history.hidden = !full;
             const statusLink = document.getElementById("onlineInstallRecoveryStatusLink");
             if(statusLink){{ statusLink.hidden = rejected; statusLink.href = "/online-scripts/import-tasks-status/" + encodeURIComponent(requestId); }}
             const query = document.getElementById("onlineInstallRecoveryRetry");
             if(query){{ query.hidden = rejected; query.onclick = flsInstallRecoverPending; }}
+        }}else{{
+            const rejected = error && error.payload && error.payload.accepted === false;
+            if(rejected){{
+                try{{ flsInstallClearKnownRejected(requestState); flsInstallLockForm(false); }}
+                catch(_error){{ flsInstallLockForm(true); }}
+            }}else{{
+                flsInstallLockForm(true);
+                flsInstallShowHistory(pendingValue);
+                if(error && error.payload && error.payload.log_url){{
+                    const link = document.getElementById("onlineInstallRecoveryLog");
+                    if(link){{ link.hidden = false; link.href = error.payload.log_url.replace("/api/online-scripts/log/", "/online-scripts/log/"); }}
+                }}
+            }}
         }}
     }}finally{{ form.__flsInstallSubmitting = false; }}
 }}
@@ -1417,13 +1689,29 @@ async function flsInstallRecoverPending(){{
     const reloadSchedulerEl = document.getElementById("onlineInstallRecoveryReload");
     const confirmImportEl = document.getElementById("onlineInstallRecoveryConfirm");
     const retryEl = document.getElementById("onlineInstallRecoveryRetry");
-    let pending;
-    try{{ pending = JSON.parse(sessionStorage.getItem("fls-online-install-request") || "null"); }}catch(_error){{ pending = null; }}
-    const pendingId = pending && (pending.install_id || pending.request_id);
-    const installId = /^[a-f0-9]{{32}}$/.test(String(pendingId || "")) ? String(pendingId) : "";
-    if(!installId) return;
-    const importMode = !!(pending && String(pending.action || "").indexOf("/import-tasks/") >= 0);
+    const local = flsInstallStorageState();
+    if(local.kind === "empty"){{ flsInstallLockForm(false); return; }}
+    flsInstallLockForm(true);
+    if(local.kind === "unavailable"){{
+        flsInstallShowHistory(null);
+        flsInstallSetStatus("无法读取本地安装请求状态；不会启动新请求。请检查浏览器存储权限后重试。");
+        return;
+    }}
+    if(local.kind === "corrupt"){{
+        flsInstallShowHistory(null);
+        flsInstallSetStatus("本地安装请求状态损坏；原始值已保留，请先核对完整安装历史。");
+        return;
+    }}
+    const pending = local.value;
+    flsInstallRestoreForm(pending);
+    flsApplyExcludedToVisible();
+    const installId = local.request_id;
+    const importMode = String(pending.action || "").indexOf("/import-tasks/") >= 0;
+    flsInstallShowHistory(pending);
     if(importMode && importStatusEl){{ importStatusEl.hidden = false; importStatusEl.href = "/online-scripts/import-tasks-status/" + encodeURIComponent(installId); }}
+    if(logEl && !importMode){{ logEl.hidden = false; logEl.href = "/online-scripts/log/" + encodeURIComponent(installId); }}
+    const resumeEl = document.getElementById("onlineInstallRecoveryResume");
+    if(resumeEl) resumeEl.hidden = true;
 
     async function read(){{
         if(retryEl) retryEl.disabled = true;
@@ -1431,19 +1719,21 @@ async function flsInstallRecoverPending(){{
         if(loginEl) loginEl.hidden = true;
         if(reloadSchedulerEl) reloadSchedulerEl.hidden = true;
         if(confirmImportEl) confirmImportEl.hidden = true;
+        if(resumeEl) resumeEl.hidden = true;
         try{{
             const response = await fetch(
                 importMode
                     ? "/api/online-scripts/import-tasks-status/" + encodeURIComponent(installId)
-                    : "/api/online-scripts/log/" + encodeURIComponent(installId) + "?lines=80",
+                    : "/api/online-scripts/log/" + encodeURIComponent(installId) + "?state_only=1",
                 {{cache:"no-store", credentials:"same-origin"}}
             );
             const json = await flsReadJsonResponse(response);
             if(importMode){{
-                if(!json || !json.state || json.request_id !== installId) throw new Error("导入状态响应无效");
+                if(!json || json.ok !== true || !json.state || json.request_id !== installId) throw new Error("导入状态响应无效");
                 if(importStatusEl){{ importStatusEl.hidden = false; importStatusEl.href = "/online-scripts/import-tasks-status/" + encodeURIComponent(installId); }}
                 if(json.state === "completed"){{
-                    try{{ sessionStorage.removeItem("fls-online-install-request"); }}catch(_error){{}}
+                    flsInstallClearKnownRejected(local.raw);
+                    flsInstallLockForm(false);
                     if(statusEl) statusEl.textContent = json.message || "原任务导入已完成，未重复写入";
                     window.location.href = "/online-scripts?msg=" + encodeURIComponent(json.message || "任务导入已完成");
                     return;
@@ -1451,6 +1741,17 @@ async function flsInstallRecoverPending(){{
                 if(statusEl) statusEl.textContent = "原任务导入请求：" + (json.archived ? "已归档，不能继续导入或恢复调度器；" : "") + (json.message || json.state || "未知");
                 if(json.confirmation_stale || json.confirmation_check_error){{
                     if(statusEl) statusEl.textContent += "。原未写入确认已失效或无法复核，请检查当前任务。";
+                }}
+                if(json.state === "failed" && json.retry_allowed && !json.archived && resumeEl){{
+                    resumeEl.hidden = false;
+                    resumeEl.onclick = () => {{
+                        const form = document.getElementById("onlineInstallSelectForm");
+                        if(!form) return;
+                        const retryButton = Array.from(form.querySelectorAll('button[type="submit"]'))
+                            .find(button => String(button.getAttribute("formaction") || "").indexOf("/online-scripts/import-tasks/") >= 0);
+                        flsInstallRestoreForm(pending);
+                        return flsInstallSubmitApi(pending.action, form, retryButton, true);
+                    }};
                 }}
                 async function recoverImport(action, button, label){{
                     if(button.__flsRecovering) return;
@@ -1483,12 +1784,17 @@ async function flsInstallRecoverPending(){{
                 }}
                 return;
             }}
-            if(!json || typeof json.running !== "boolean") throw new Error("安装状态响应无效");
+            if(!json || json.ok !== true || json.install_id !== installId
+                || typeof json.running !== "boolean" || typeof json.status !== "string") throw new Error("安装状态响应无效");
             if(statusEl) statusEl.textContent = "原安装请求：" + (json.status || "未知") + (json.phase ? "（" + json.phase + "）" : "");
             if(logEl){{ logEl.hidden = false; logEl.href = "/online-scripts/log/" + encodeURIComponent(installId); }}
             if(retryEl) retryEl.hidden = false;
-            if(json.running || json.recovery){{
-                if(statusEl) statusEl.textContent += "，请查看原安装日志继续恢复。";
+            if(!json.running && ONLINE_INSTALL_TERMINAL_STATUSES.has(json.status)
+                && !(json.recovery && json.recovery.available) && !json.scheduler_reload_pending){{
+                flsInstallSetStatus("原安装已明确结束（" + json.status + "），可确认清理本地请求后重新选择。");
+                flsInstallEnableClear(local.raw);
+            }}else{{
+                if(statusEl) statusEl.textContent += "；请先查看原安装日志或安装历史继续恢复。";
             }}
         }}catch(error){{
             const denied = error && (error.status === 401 || error.status === 403);
@@ -1505,16 +1811,6 @@ async function flsInstallRecoverPending(){{
     await read();
 }}
 
-try{{
-    const saved = JSON.parse(sessionStorage.getItem("fls-online-install-request") || "null");
-    if(saved && saved.script_id === window.FLS_INSTALL_SCRIPT_ID && String(saved.action || "").indexOf("/import-tasks/") >= 0 && /^[a-f0-9]{{32}}$/.test(saved.request_id || "")){{
-        const form = document.getElementById("onlineInstallSelectForm");
-        form.querySelector('[name="request_id"]').value = saved.request_id;
-        if(typeof saved.excluded_task_indexes === "string") document.getElementById("excludedTaskIndexes").value = saved.excluded_task_indexes;
-        const enable = form.querySelector('[name="enable_task"]');
-        if(enable && typeof saved.enable_task === "boolean") enable.checked = saved.enable_task;
-    }}
-}}catch(_error){{}}
 flsApplyExcludedToVisible();
 flsInstallRecoverPending();
 </script>

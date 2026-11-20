@@ -608,6 +608,41 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true);
    await page.screenshot({path:'/tmp/fls-install-task-recovery-'+viewport.width+'.png',fullPage:true});
 
+   const taskScriptId='browser-task-recovery-'+viewport.width;
+   const pendingInstall={request_id:taskRecoveryId,install_id:taskRecoveryId,script_id:taskScriptId,
+    action:'/online-scripts/install/'+taskScriptId};
+   await page.evaluate(value=>sessionStorage.setItem('fls-online-install-request',JSON.stringify(value)),pendingInstall);
+   await page.goto(base+'/online-scripts/install-select/'+taskScriptId);
+   await page.locator('#onlineInstallRecoveryClear').waitFor({state:'visible'});
+   assert.match(await page.locator('#onlineInstallRecoveryStatus').textContent(),/已明确结束/);
+   assert.equal(await page.locator('#onlineInstallSelectForm [name="request_id"]').inputValue(),taskRecoveryId);
+   assert.equal(await page.locator('#onlineInstallSelectForm button[type="submit"]').first().isDisabled(),true);
+   const clearTerminal=page.locator('#onlineInstallRecoveryClear');
+   await Promise.all([page.waitForNavigation(),clearTerminal.click()]);
+   await page.locator('#onlineInstallSelectForm').waitFor();
+   const freshRequestId=await page.locator('#onlineInstallSelectForm [name="request_id"]').inputValue();
+   assert.notEqual(freshRequestId,taskRecoveryId);
+   assert.equal(await page.evaluate(()=>sessionStorage.getItem('fls-online-install-request')),null);
+
+   const corruptInstallState='{broken-install-state';
+   await page.evaluate(value=>sessionStorage.setItem('fls-online-install-request',value),corruptInstallState);
+   await page.reload();
+   await page.waitForFunction(()=>document.querySelector('#onlineInstallRecoveryStatus').textContent.includes('状态损坏'));
+   assert.equal(await page.locator('#onlineInstallSelectForm button[type="submit"]').first().isDisabled(),true);
+   await page.route('**/api/online-scripts/install-history*',route=>route.fulfill({
+    status:503,contentType:'text/html',body:'history unavailable'}),{times:1});
+   await page.locator('#onlineInstallRecoveryCheckHistory').click();
+   await page.waitForFunction(()=>document.querySelector('#onlineInstallRecoveryStatus').textContent.includes('未能核实'));
+   assert.equal(await page.evaluate(()=>sessionStorage.getItem('fls-online-install-request')),corruptInstallState);
+   assert.equal(await page.locator('#onlineInstallRecoveryClear').isHidden(),true);
+   await page.locator('#onlineInstallRecoveryCheckHistory').click();
+   await page.locator('#onlineInstallRecoveryClear').waitFor({state:'visible'});
+   await Promise.all([page.waitForNavigation(),page.locator('#onlineInstallRecoveryClear').click()]);
+   await page.locator('#onlineInstallSelectForm').waitFor();
+   assert.equal(await page.evaluate(()=>sessionStorage.getItem('fls-online-install-request')),null);
+   assert.notEqual(await page.locator('#onlineInstallSelectForm [name="request_id"]').inputValue(),freshRequestId);
+   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true);
+
    await page.goto(historyUrl.href);
    assert.equal((await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)),true);
    await page.screenshot({path:'/tmp/fls-online-install-history-'+viewport.width+'.png',fullPage:true});
