@@ -528,6 +528,55 @@ vm.runInContext(input.reader + input.script, context);
             page = app.test_client().get("/online-scripts", headers={"X-Token": TOKEN}).get_data(as_text=True)
             self.assertIn("缓存已发布", page)
 
+    def test_cache_publish_crash_can_be_confirmed_after_process_restart(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import constants, source
+            from fls_manager.online_scripts.constants import update_online_refresh_state
+
+            request_id = "b" * 32
+            refresh_id = "a" * 32
+            original = [{"id": "old", "name": "Old", "type": "raw", "link": "x"}]
+            published = [{"id": "new", "name": "New", "type": "raw", "link": "x"}]
+            source.save_online_script_cache(original)
+            update_online_refresh_state(
+                id=refresh_id, request_id=request_id, running=True, status="运行中",
+                expected_cache_fingerprint=source.online_script_cache_fingerprint(),
+                source_fingerprint=source.online_script_source_fingerprint(), updated_at="before",
+            )
+            real_save = source.save_online_script_cache
+            fetch = Mock(return_value=published)
+
+            def publish_then_terminate(items):
+                real_save(items)
+                raise SystemExit("simulated worker termination after cache replacement")
+
+            with patch.object(source, "fetch_online_scripts", fetch), patch.object(
+                source, "save_online_script_cache", side_effect=publish_then_terminate,
+            ):
+                with self.assertRaisesRegex(SystemExit, "simulated worker termination"):
+                    source.refresh_worker(refresh_id, log_file=str(base_dir / "refresh.log"))
+
+            persisted = json.loads(constants.ONLINE_REFRESH_STATE_FILE.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["status"], "发布中")
+            self.assertEqual(persisted["published_cache_fingerprint"], source.online_script_cache_fingerprint())
+            constants.ONLINE_REFRESH_STATE.clear()
+            constants.ONLINE_REFRESH_STATE.update(constants._refresh_snapshot({}))
+
+            status = app.test_client().get(
+                f"/api/online-scripts/refresh-status/{request_id}", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(status.status_code, 200)
+            self.assertEqual(status.json["status"], "结果未知")
+            self.assertTrue(status.json["running"] is False)
+            confirmed = app.test_client().post(
+                f"/api/online-scripts/refresh-confirm/{request_id}", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(confirmed.status_code, 200)
+            self.assertEqual(confirmed.json["confirmation"], "published")
+            self.assertEqual(confirmed.json["status"], "已确认发布")
+            self.assertEqual([item["id"] for item in source.load_online_script_cache()], ["new"])
+            fetch.assert_called_once()
+
     def test_terminal_success_remains_recoverable_when_history_publication_fails(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.online_scripts import constants, source
