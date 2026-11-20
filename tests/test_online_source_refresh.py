@@ -176,6 +176,7 @@ const elements = {
   onlineRefreshTaskLinkFailures: {innerHTML: '', querySelectorAll: () => [retryButton]},
   onlineRefreshLogLink: {hidden: true, href: ''},
   onlineRefreshBtn: {disabled: true, textContent: '正在同步中...'},
+  onlineRefreshHistoryError: {hidden: true, textContent: ''},
   onlineRefreshLogin: {hidden: true, href: ''},
   onlineRefreshQuery: {hidden: true, disabled: false},
   onlineRefreshPersistence: {innerHTML: ''},
@@ -310,6 +311,18 @@ setImmediate(async () => {
   assert.equal(posts, 2);
   assert.equal(elements.onlineRefreshQuery.hidden, true);
   assert.equal(JSON.parse(storage.value).request_id, retryId);
+  let retryAttempts = 0;
+  context.fetch = async (url, options) => {
+    assert.equal(url, '/api/online-scripts/refresh-retry/' + originalId);
+    assert.equal(options.method, 'POST');
+    retryAttempts++;
+    return {ok:false, status:500, text:async()=>JSON.stringify({error:'thread quota exhausted'})};
+  };
+  await context.submitOnlineRefreshRetryForm(retryForm);
+  assert.equal(retryAttempts, 1);
+  assert.equal(retryInput.value, retryId);
+  assert.equal(JSON.parse(storage.getItem('fls-online-refresh-retry:' + originalId)).request_id, retryId);
+  assert.match(elements.onlineRefreshHistoryError.textContent, /thread quota exhausted/);
   const recoveryId = '7'.repeat(32);
   const recoverButton = {disabled:false};
   const recoverForm = {dataset:{}, getAttribute:()=>recoveryId, querySelector:()=>recoverButton};
@@ -1119,6 +1132,84 @@ vm.runInContext(input.reader + input.script, context);
                         self.assertEqual(previous["status"], "启动失败")
                         self.assertFalse(previous["running"])
                         self.assertIn("thread quota exhausted", previous["error"])
+
+    def test_refresh_retry_start_failure_keeps_terminal_state_and_reuses_same_request_id(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import constants, source
+            from fls_manager.routes.online_scripts import refresh
+
+            original_id = "a" * 32
+            retry_id = "b" * 32
+            source.save_online_script_cache([{"id": "stable", "name": "Stable", "type": "raw", "link": "x"}])
+            constants.update_online_refresh_state(
+                id="c" * 32, request_id=original_id, running=False, status="失败", error="upstream timeout",
+                expected_cache_fingerprint=source.online_script_cache_fingerprint(),
+                source_fingerprint=source.online_script_source_fingerprint(), updated_at="before",
+            )
+            real_persist = constants.persist_online_refresh
+
+            def fail_startup_receipt(info):
+                if info.get("request_id") == retry_id and info.get("status") == "启动失败":
+                    raise OSError("retry status disk full")
+                return real_persist(info)
+
+            client = app.test_client()
+            endpoint = f"/api/online-scripts/refresh-retry/{original_id}"
+            payload = {"retry_request_id": retry_id, "proxy_id": ""}
+            with patch.object(constants, "persist_online_refresh", side_effect=fail_startup_receipt), patch.object(
+                refresh, "start_refresh_thread", side_effect=RuntimeError("thread quota exhausted"),
+            ) as first_start:
+                failed = client.post(endpoint, json=payload, headers={"X-Token": TOKEN})
+            self.assertEqual(failed.status_code, 500)
+            self.assertEqual(failed.json["request_id"], retry_id)
+            self.assertIn("thread quota exhausted", failed.json["error"])
+            self.assertIn("retry status disk full", failed.json["error"])
+            first_start.assert_called_once()
+
+            state = constants.get_online_refresh_state()
+            self.assertEqual(state["request_id"], retry_id)
+            self.assertEqual(state["retry_of"], original_id)
+            self.assertEqual(state["status"], "启动失败")
+            self.assertFalse(state["running"])
+            self.assertIn("retry status disk full", state["persistence_error"])
+            self.assertEqual(state["persistence_recovery"]["api_action"], f"/api/online-scripts/refresh-recover/{retry_id}")
+
+            starter_entered = threading.Event()
+            release_starter = threading.Event()
+            responses = []
+
+            def blocked_start(*_args):
+                starter_entered.set()
+                if not release_starter.wait(timeout=5):
+                    raise RuntimeError("retry test starter was not released")
+
+            first_client = app.test_client()
+            concurrent_client = app.test_client()
+            with patch.object(refresh, "start_refresh_thread", side_effect=blocked_start) as retry_start:
+                worker = threading.Thread(
+                    target=lambda: responses.append(first_client.post(endpoint, json=payload, headers={"X-Token": TOKEN})),
+                    daemon=True,
+                )
+                worker.start()
+                try:
+                    self.assertTrue(starter_entered.wait(timeout=3))
+                    replayed = concurrent_client.post(endpoint, json=payload, headers={"X-Token": TOKEN})
+                    self.assertEqual(replayed.status_code, 200)
+                    self.assertTrue(replayed.json["replayed"])
+                    self.assertTrue(replayed.json["running"])
+                    self.assertEqual(replayed.json["request_id"], retry_id)
+                    retry_start.assert_called_once()
+                finally:
+                    release_starter.set()
+                    worker.join(timeout=5)
+                self.assertFalse(worker.is_alive())
+            self.assertEqual(len(responses), 1)
+            retried = responses[0]
+            self.assertEqual(retried.status_code, 202)
+            self.assertEqual(retried.json["request_id"], retry_id)
+            self.assertEqual(retried.json["retry_of"], original_id)
+            self.assertEqual(constants.get_online_refresh_state()["request_id"], retry_id)
+            self.assertTrue(constants.get_online_refresh_state()["running"])
 
     def test_form_and_api_share_conflict_admission_without_starting_a_second_worker(self):
         for first_path, next_path in (

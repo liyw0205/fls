@@ -33,12 +33,27 @@ def main():
             "task_link": "https://fixture.invalid/browser-link.json",
         }
         source.save_online_script_cache([item])
-        fault = {"fail": True, "fetches": 0, "refreshes": 0, "fail_history_publication": False}
+        fault = {"fail": True, "fetches": 0, "refreshes": 0, "fail_history_publication": False,
+                 "fail_retry_start": False, "fail_retry_receipt": False}
         real_fetch = task_link.fetch_task_link_tasks
         real_persist = task_link.persist_task_link_request
         real_refresh_start = refresh.start_refresh_thread
 
         def start_refresh(refresh_id, _proxy_id, log_file):
+            if fault["fail_retry_start"]:
+                fault["fail_retry_start"] = False
+                if fault["fail_retry_receipt"]:
+                    fault["fail_retry_receipt"] = False
+                    real_persist_refresh = constants.persist_online_refresh
+
+                    def fail_startup_receipt(info):
+                        if info.get("status") == "启动失败" and info.get("request_id") == constants.ONLINE_REFRESH_STATE.get("request_id"):
+                            raise OSError("browser retry status disk full")
+                        return real_persist_refresh(info)
+
+                    constants.persist_online_refresh = fail_startup_receipt
+                    g.refresh_persist = real_persist_refresh
+                raise RuntimeError("browser retry thread unavailable")
             fault["refreshes"] += 1
             source.save_online_script_cache([dict(item, name="Recovered refresh script")])
             Path(log_file).write_text("original retry completed\n", encoding="utf-8")
@@ -91,6 +106,9 @@ def main():
             original_replace = getattr(g, "refresh_replace", None)
             if original_replace is not None:
                 constants.os.replace = original_replace
+            original_persist = getattr(g, "refresh_persist", None)
+            if original_persist is not None:
+                constants.persist_online_refresh = original_persist
 
         @app.route("/api/fixture/task-link", methods=["GET", "POST"])
         def fixture():
@@ -224,6 +242,9 @@ def main():
         @app.route("/api/fixture/refresh-retry", methods=["POST"])
         def refresh_retry_fixture():
             fault["refreshes"] = 0
+            data = request.get_json() or {}
+            fault["fail_retry_start"] = bool(data.get("fail_start"))
+            fault["fail_retry_receipt"] = bool(data.get("fail_receipt"))
             original = uuid.uuid4().hex
             refresh_id = uuid.uuid4().hex
             path = online_refresh_log_file(refresh_id)
@@ -576,7 +597,7 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    await page.request.post(base+'/api/fixture/online-refresh',{headers,data:{request_id:'f'.repeat(32),refresh_id:'g'.repeat(32),running:false}});
    await page.goto(base+'/online-scripts/refresh-log/'+'d'.repeat(32));
    assert.match(await page.locator('#refreshLogText').textContent(),/refresh running|refresh failed/);
-   await page.goto(base+'/online-scripts');
+   await page.goto(base+'/online-scripts?refresh_request_id='+'d'.repeat(32));
    await page.locator('#onlineRefreshHistory a[href="/online-scripts/refresh-log/'+'d'.repeat(32)+'"]').waitFor();
    const historyRetry=page.locator('#onlineRefreshHistory form[data-refresh-retry-of="'+'d'.repeat(32)+'"]');
    await historyRetry.getByRole('button',{name:'明确重新同步',exact:true}).waitFor();
@@ -655,6 +676,44 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    assert.match(await page.locator('#refreshLogText').textContent(),/original retry completed/);
    const current=await fixture({});
    assert.equal(current.refreshes,1);
+
+   const failedRetrySetup=await page.request.post(base+'/api/fixture/refresh-retry',{headers,data:{fail_start:true,fail_receipt:true}});
+   assert.equal(failedRetrySetup.status(),200);
+   const failedRetryOriginal=(await failedRetrySetup.json()).original;
+   await page.goto(base+'/online-scripts');
+   const failedRetryForm=page.locator('#onlineRefreshHistory form[data-refresh-retry-of="'+failedRetryOriginal+'"]');
+   await failedRetryForm.waitFor();
+   const failedRetryEndpoint=base+'/api/online-scripts/refresh-retry/'+failedRetryOriginal;
+   const [failedRetryResponse]=await Promise.all([
+     page.waitForResponse(response=>response.url()===failedRetryEndpoint&&response.request().method()==='POST'),
+     failedRetryForm.getByRole('button',{name:'明确重新同步',exact:true}).click(),
+   ]);
+   assert.equal(failedRetryResponse.status(),500);
+   const failedRetryId=(await failedRetryResponse.json()).request_id;
+   assert.match(failedRetryId,/^[a-f0-9]{32}$/);
+   await page.waitForFunction(()=>document.querySelector('#onlineRefreshHistoryError').textContent.includes('browser retry thread unavailable'));
+   assert.equal(await page.evaluate(id=>JSON.parse(sessionStorage.getItem('fls-online-refresh-request')).request_id,failedRetryId),failedRetryId);
+   const failedRetryState=await page.request.get(base+'/api/online-scripts/refresh-status/'+failedRetryId,{headers});
+   assert.equal(failedRetryState.status(),200);
+   assert.equal((await failedRetryState.json()).running,false);
+   assert.equal((await failedRetryState.json()).status,'启动失败');
+   assert.match((await failedRetryState.json()).persistence_error,/browser retry status disk full/);
+   await page.screenshot({path:'/tmp/fls-refresh-retry-start-failure-'+viewport.width+'.png'});
+   await page.locator('#onlineRefreshQuery').click();
+   await page.waitForFunction(id=>{
+     const pending=JSON.parse(sessionStorage.getItem('fls-online-refresh-request')||'null');
+     return pending&&pending.request_id===id;
+   },failedRetryId);
+   assert.equal(await failedRetryForm.locator('[name="retry_request_id"]').inputValue(),failedRetryId);
+   const [retriedAfterStartFailure]=await Promise.all([
+     page.waitForResponse(response=>response.url()===failedRetryEndpoint&&response.request().method()==='POST'),
+     failedRetryForm.getByRole('button',{name:'明确重新同步',exact:true}).click(),
+   ]);
+   assert.equal(retriedAfterStartFailure.status(),202);
+   assert.equal((await retriedAfterStartFailure.json()).request_id,failedRetryId);
+   await page.waitForFunction(id=>!sessionStorage.getItem('fls-online-refresh-request')&&
+     document.querySelector('#onlineRefreshLogLink').getAttribute('href').endsWith('/'+id),failedRetryId);
+   assert.equal((await fixture({})).refreshes,1);
 
    const publicationSetup=await page.request.post(base+'/api/fixture/refresh-publication-failure',{headers});
    assert.equal(publicationSetup.status(),200);
