@@ -55,6 +55,7 @@ def _task_import_snapshot(info):
     snapshot = {field: info.get(field, "") for field in fields}
     snapshot["archived"] = info.get("archived", False)
     snapshot["archived_at"] = info.get("archived_at", "")
+    snapshot["task_count"] = info.get("task_count", 0)
     selected = snapshot["selected_task_indexes"]
     if (
         not isinstance(snapshot["request_id"], str)
@@ -66,6 +67,7 @@ def _task_import_snapshot(info):
         or type(snapshot["enable_task"]) is not bool
         or snapshot["state"] not in ("prepared", "running", "failed", "scheduler_pending", "completed", "unknown")
         or type(snapshot["archived"]) is not bool
+        or type(snapshot["task_count"]) is not int or snapshot["task_count"] < 0
         or not isinstance(snapshot["archived_at"], str)
         or (snapshot["archived"] and snapshot["state"] not in ("failed", "unknown", "scheduler_pending"))
         or any(not isinstance(snapshot[field], str) for field in ("message", "scheduler_reload_error", "updated_at"))
@@ -131,7 +133,7 @@ def _recover_stale_task_imports(data, *, only_request_id=None):
     return changed
 
 
-def get_online_task_import_request(request_id, *, binding=None):
+def get_online_task_import_request(request_id, *, binding=None, recover=True):
     if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
         return None
     with ONLINE_TASK_IMPORT_LOCK, storage_transaction():
@@ -141,7 +143,7 @@ def get_online_task_import_request(request_id, *, binding=None):
             raise TaskImportReceiptMissing("原导入仍在处理中，但回执暂时缺失；请查询原请求，不能重新提交。")
         if value and binding and any(value.get(field) != expected for field, expected in binding.items()):
             return dict(value)
-        if _recover_stale_task_imports(data, only_request_id=request_id):
+        if recover and _recover_stale_task_imports(data, only_request_id=request_id):
             mutate_json(ONLINE_TASK_IMPORT_REQUESTS_FILE, {}, lambda _: data, strict=True)
         value = data.get(request_id)
         return {**value, "active": request_id in ONLINE_TASK_IMPORT_ACTIVE} if value else None

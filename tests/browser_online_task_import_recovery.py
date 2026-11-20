@@ -68,6 +68,9 @@ def main():
                 return jsonify(ok=True)
             if data.get("inspect"):
                 return jsonify(ok=True, tasks=load_tasks(), reloads=fault["reloads"])
+            if data.get("damage_cache"):
+                constants.ONLINE_SCRIPT_CACHE_FILE.write_text("broken browser cache", encoding="utf-8")
+                return jsonify(ok=True)
             source.save_online_script_cache([item])
             save_tasks([])
             constants.ONLINE_TASK_IMPORT_ACTIVE.clear()
@@ -261,7 +264,30 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    assert.equal(final.tasks.length,1);assert.equal(final.reloads,1);
    const history=await page.request.get(base+'/api/online-scripts/import-tasks-history?recovery=1&limit=100',{headers});
    assert.equal((await history.json()).total,199);
+   await fixture({fail:false});
+   await page.evaluate(()=>sessionStorage.removeItem('fls-online-install-request'));
+   await page.goto(selectUrl);
+   await page.locator('.fls-install-task-checkbox[data-index="2"]').uncheck();
+   const durableId=await page.locator('#onlineInstallSelectForm [name="request_id"]').inputValue();
+   const durablePost=base+'/api/online-scripts/import-tasks/browser-import';
+   await page.route(durablePost,async route=>{
+     const response=await route.fetch();assert.equal(response.status(),200);
+     await fixture({damage_cache:true});await route.abort('connectionfailed');
+   });
+   await page.locator('button[formaction="/online-scripts/import-tasks/browser-import"]').click();
+   await page.locator('#onlineInstallApiError').waitFor({state:'visible'});
+   await page.unroute(durablePost);
+   await page.reload();
+   await page.getByRole('link',{name:'查询原导入请求',exact:true}).waitFor({state:'visible'});
+   assert.equal(await page.evaluate(()=>JSON.parse(sessionStorage.getItem('fls-online-install-request')).request_id),durableId);
+   await page.getByRole('link',{name:'查询原导入请求',exact:true}).click();
+   await page.waitForURL(base+'/online-scripts/import-tasks-status/'+durableId);
+   await page.waitForFunction(()=>document.body.textContent.includes('任务导入已完成'));
+   const replay=await page.request.post(durablePost,{headers,data:{request_id:durableId,select_mode:'all',excluded_task_indexes:'2'}});
+   assert.equal(replay.status(),200);assert.equal((await replay.json()).replayed,true);
+   const durable=await fixture({inspect:true});assert.equal(durable.tasks.length,1);assert.equal(durable.reloads,1);
    assert.deepEqual(errors,[]);
+   console.log('original import replay and lost response recovery with corrupt current cache passed '+viewport.width);
    console.log('full import history, pagination, archive lost response and capacity recovery passed '+viewport.width);
    console.log('online task import recovery passed '+viewport.width);
    await context.close();
