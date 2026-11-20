@@ -39,12 +39,22 @@ class InstallHistoryLimitError(RuntimeError):
     pass
 
 
+class TaskImportHistoryFull(RuntimeError):
+    pass
+
+
+class TaskImportReceiptMissing(RuntimeError):
+    pass
+
+
 def _task_import_snapshot(info):
     fields = (
         "request_id", "script_id", "expected_version", "selected_task_indexes",
         "enable_task", "state", "message", "scheduler_reload_error", "updated_at",
     )
     snapshot = {field: info.get(field, "") for field in fields}
+    snapshot["archived"] = info.get("archived", False)
+    snapshot["archived_at"] = info.get("archived_at", "")
     selected = snapshot["selected_task_indexes"]
     if (
         not isinstance(snapshot["request_id"], str)
@@ -55,10 +65,29 @@ def _task_import_snapshot(info):
         or any(not isinstance(value, str) for value in selected)
         or type(snapshot["enable_task"]) is not bool
         or snapshot["state"] not in ("prepared", "running", "failed", "scheduler_pending", "completed", "unknown")
+        or type(snapshot["archived"]) is not bool
+        or not isinstance(snapshot["archived_at"], str)
+        or (snapshot["archived"] and snapshot["state"] not in ("failed", "unknown", "scheduler_pending"))
         or any(not isinstance(snapshot[field], str) for field in ("message", "scheduler_reload_error", "updated_at"))
     ):
         raise RuntimeError("在线任务导入回执损坏，未覆盖原文件")
     return snapshot
+
+
+def _task_import_needs_recovery(value):
+    return (value.get("request_id") in ONLINE_TASK_IMPORT_ACTIVE
+            or (not value.get("archived") and value.get("state") != "completed"))
+
+
+def _prune_task_import_requests(records, current_id):
+    protected = {key for key, value in records.items() if _task_import_needs_recovery(value)}
+    protected.add(current_id)
+    capacity = 200 - len(ONLINE_TASK_IMPORT_ACTIVE - records.keys())
+    if len(protected) > capacity:
+        raise TaskImportHistoryFull("待恢复的导入请求已达上限，请先处理或归档原请求；未接受新的导入请求。")
+    ordered = sorted(records, key=lambda key: str(records[key].get("updated_at") or ""), reverse=True)
+    retained = protected | set([key for key in ordered if key not in protected][:capacity - len(protected)])
+    return {key: records[key] for key in ordered if key in retained}
 
 
 def _read_task_import_requests():
@@ -108,6 +137,8 @@ def get_online_task_import_request(request_id, *, binding=None):
     with ONLINE_TASK_IMPORT_LOCK, storage_transaction():
         data = _read_task_import_requests()
         value = data.get(request_id)
+        if not value and request_id in ONLINE_TASK_IMPORT_ACTIVE:
+            raise TaskImportReceiptMissing("原导入仍在处理中，但回执暂时缺失；请查询原请求，不能重新提交。")
         if value and binding and any(value.get(field) != expected for field, expected in binding.items()):
             return dict(value)
         if _recover_stale_task_imports(data, only_request_id=request_id):
@@ -116,22 +147,33 @@ def get_online_task_import_request(request_id, *, binding=None):
         return {**value, "active": request_id in ONLINE_TASK_IMPORT_ACTIVE} if value else None
 
 
-def list_online_task_import_requests(limit=50, script_id=""):
+def list_online_task_import_requests(limit=50, script_id="", *, recovery=False, offset=0, with_pagination=False):
     try:
         limit = int(limit)
     except (TypeError, ValueError) as exc:
         raise ValueError("在线任务导入历史数量无效") from exc
     if not 1 <= limit <= 100:
         raise ValueError("在线任务导入历史数量必须在 1 到 100 之间")
+    try:
+        offset = int(offset)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("在线任务导入历史起始位置无效") from exc
+    if not 0 <= offset <= 200:
+        raise ValueError("在线任务导入历史起始位置必须在 0 到 200 之间")
     script_id = str(script_id or "").strip()
     with ONLINE_TASK_IMPORT_LOCK, storage_transaction():
         records = _read_task_import_requests()
         if _recover_stale_task_imports(records):
             mutate_json(ONLINE_TASK_IMPORT_REQUESTS_FILE, {}, lambda _: records, strict=True)
         items = [{**value, "active": value.get("request_id") in ONLINE_TASK_IMPORT_ACTIVE}
-                 for value in records.values() if not script_id or value.get("script_id") == script_id]
+                 for value in records.values() if (not script_id or value.get("script_id") == script_id)
+                 and (not recovery or _task_import_needs_recovery(value))]
         items.sort(key=lambda value: str(value.get("updated_at") or ""), reverse=True)
-        return items[:limit]
+        page = items[offset:offset + limit]
+        if with_pagination:
+            return {"items": page, "total": len(items), "offset": offset, "limit": limit,
+                    "has_more": offset + limit < len(items)}
+        return page
 
 
 def persist_online_task_import_request(info):
@@ -148,8 +190,7 @@ def persist_online_task_import_request(info):
                     raise RuntimeError("在线任务导入回执标识损坏，未覆盖原文件")
                 _task_import_snapshot(value)
             data[snapshot["request_id"]] = snapshot
-            ordered = sorted(data.items(), key=lambda pair: str(pair[1].get("updated_at") or ""), reverse=True)
-            return dict(ordered[:200])
+            return _prune_task_import_requests(data, snapshot["request_id"])
 
         mutate_json(ONLINE_TASK_IMPORT_REQUESTS_FILE, {}, update, strict=True)
 
@@ -171,7 +212,10 @@ def claim_online_task_import_request(info):
                     raise RuntimeError("在线任务导入回执标识损坏，未覆盖原文件")
                 _task_import_snapshot(value)
             current = data.get(snapshot["request_id"])
-            if current and (current.get("state") != "failed" or snapshot["request_id"] in ONLINE_TASK_IMPORT_ACTIVE):
+            if not current and snapshot["request_id"] in ONLINE_TASK_IMPORT_ACTIVE:
+                raise TaskImportReceiptMissing("原导入仍在处理中，但回执暂时缺失；请查询原请求，不能重新提交。")
+            if current and (current.get("state") != "failed" or current.get("archived")
+                            or snapshot["request_id"] in ONLINE_TASK_IMPORT_ACTIVE):
                 observed["value"] = {**current, "active": snapshot["request_id"] in ONLINE_TASK_IMPORT_ACTIVE}
                 return None
             if current and any(current.get(field) != snapshot.get(field) for field in ("script_id", "expected_version", "selected_task_indexes", "enable_task")):
@@ -179,8 +223,7 @@ def claim_online_task_import_request(info):
                 return None
             data[snapshot["request_id"]] = snapshot
             observed["value"] = None
-            ordered = sorted(data.items(), key=lambda pair: str(pair[1].get("updated_at") or ""), reverse=True)
-            return dict(ordered[:200])
+            return _prune_task_import_requests(data, snapshot["request_id"])
 
         mutate_json(ONLINE_TASK_IMPORT_REQUESTS_FILE, {}, update, strict=True)
         if observed.get("value") is None:

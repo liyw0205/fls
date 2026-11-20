@@ -74,6 +74,21 @@ def main():
             constants.mutate_json(constants.ONLINE_TASK_IMPORT_REQUESTS_FILE, {}, lambda _: {}, strict=True)
             fault.update(fail=data.get("fail", True), startup_failure=data.get("startup_failure", ""), reloads=0)
             request_id = uuid.uuid4().hex
+            if data.get("capacity"):
+                normalized = source.load_online_script_cache()[0]
+                records = {}
+                for index in range(200):
+                    key = f"{index:032x}"
+                    records[key] = constants._task_import_snapshot({
+                        "request_id": key, "script_id": item["id"],
+                        "expected_version": tasks.online_task_import_version(normalized),
+                        "selected_task_indexes": ["1"], "enable_task": False,
+                        "state": "unknown" if index == 0 else "failed",
+                        "message": "original unresolved browser import", "scheduler_reload_error": "",
+                        "updated_at": "1970-01-01" if index == 0 else "2099-01-01",
+                    })
+                constants.mutate_json(constants.ONLINE_TASK_IMPORT_REQUESTS_FILE, {}, lambda _: records, strict=True)
+                return jsonify(ok=True, request_id="0" * 32)
             if data.get("prepared"):
                 normalized = source.load_online_script_cache()[0]
                 real_persist({
@@ -203,7 +218,51 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    assert.equal(await reload.count(),1);
    await reload.click();
    await page.waitForFunction(()=>document.body.textContent.includes('任务已保存，调度器已恢复'));
+   const full=await fixture({capacity:true,fail:false});
+   await page.evaluate(()=>sessionStorage.removeItem('fls-online-install-request'));
+   await page.goto(selectUrl);
+   await page.locator('.fls-install-task-checkbox[data-index="2"]').uncheck();
+   await page.locator('button[formaction="/online-scripts/import-tasks/browser-import"]').click();
+   await page.waitForFunction(()=>document.querySelector('#onlineInstallApiError').textContent.includes('待恢复的导入请求已达上限'));
+   assert.equal(await page.evaluate(()=>sessionStorage.getItem('fls-online-install-request')),null);
+   assert.equal((await fixture({inspect:true})).tasks.length,0);
+   assert.equal((await fixture({inspect:true})).reloads,0);
+   await page.getByRole('link',{name:'处理待恢复导入',exact:true}).click();
+   await page.waitForURL(url=>url.pathname==='/online-scripts/import-tasks-history'&&url.searchParams.get('recovery')==='1');
+   await page.goto(base+'/online-scripts/import-tasks-history?recovery=1&limit=100&script_id=browser-import');
+   await page.getByRole('link',{name:'下一页',exact:true}).click();
+   await page.waitForURL(url=>url.searchParams.get('offset')==='100');
+   const originalState=base+'/online-scripts/import-tasks-status/'+full.request_id;
+   await page.locator('a[href="/online-scripts/import-tasks-status/'+full.request_id+'"]').click();
+   await page.waitForURL(originalState);
+   const archive=page.locator('form[action="/online-scripts/import-tasks-archive/'+full.request_id+'"]');
+   await archive.locator('[name="acknowledge"]').check();
+   const labelBox=await archive.locator('label').boundingBox(),buttonBox=await archive.locator('button').boundingBox();
+   assert.ok(labelBox.y+labelBox.height<=buttonBox.y);
+   assert.ok(labelBox.x>=0&&labelBox.x+labelBox.width<=viewport.width);
+   await page.screenshot({path:'/tmp/fls-import-archive-'+viewport.width+'.png'});
+   const archivePost=base+'/online-scripts/import-tasks-archive/'+full.request_id;
+   await page.route(archivePost,async route=>{
+     const response=await route.fetch({maxRedirects:0});assert.equal(response.status(),302);
+     await route.fulfill({status:503,contentType:'text/html',body:'import archive response lost after publication'});
+   });
+   await archive.getByRole('button',{name:'归档原导入请求',exact:true}).click();
+   await page.waitForFunction(()=>document.body.textContent.includes('import archive response lost after publication'));
+   await page.unroute(archivePost);
+   await page.goto(originalState);
+   await page.waitForFunction(()=>document.body.textContent.includes('（已归档）'));
+   assert.equal(await page.getByRole('button',{name:'继续原导入请求',exact:true}).count(),0);
+   assert.equal((await fixture({inspect:true})).tasks.length,0);
+   await page.goto(selectUrl);
+   await page.locator('.fls-install-task-checkbox[data-index="2"]').uncheck();
+   await page.locator('button[formaction="/online-scripts/import-tasks/browser-import"]').click();
+   await page.waitForURL(url=>url.pathname.startsWith('/online-scripts/import-tasks-status/'));
+   const final=await fixture({inspect:true});
+   assert.equal(final.tasks.length,1);assert.equal(final.reloads,1);
+   const history=await page.request.get(base+'/api/online-scripts/import-tasks-history?recovery=1&limit=100',{headers});
+   assert.equal((await history.json()).total,199);
    assert.deepEqual(errors,[]);
+   console.log('full import history, pagination, archive lost response and capacity recovery passed '+viewport.width);
    console.log('online task import recovery passed '+viewport.width);
    await context.close();
   }

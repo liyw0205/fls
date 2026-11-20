@@ -11,13 +11,16 @@ from ...online_scripts.constants import (
     persist_online_task_import_request,
     ONLINE_TASK_IMPORT_LOCK,
     ONLINE_TASK_IMPORT_ACTIVE,
+    TaskImportHistoryFull,
+    TaskImportReceiptMissing,
 )
 from ...online_scripts.tasks import online_task_import_version
 from ...online_scripts.source import get_task_link_request, online_task_link_version
+from ...storage import storage_transaction
 from ...utils import now_str
 
 
-def _task_import_error(script_id, message, status_code, persisted=False, request_id="", selected_task_indexes=None, enable_task=False):
+def _task_import_error(script_id, message, status_code, persisted=False, request_id="", selected_task_indexes=None, enable_task=False, history_full=False):
     scheduler_action = ""
     if persisted:
         reload_url = f"/online-scripts/import-tasks-reload/{h(request_id)}" if request_id else "/scheduler/reload?back=/tasks"
@@ -47,6 +50,7 @@ def _task_import_error(script_id, message, status_code, persisted=False, request
         actions_html=(
             retry_form
             + status_link
+            + ('<a class="btn btn-primary" href="/online-scripts/import-tasks-history?recovery=1">处理待恢复导入</a>' if history_full else "")
             +
             f'<a class="btn btn-gray" href="/online-scripts/install-select/{h(script_id)}">重新选择任务</a>'
             '<a class="btn btn-blue" href="/tasks">查看已保存任务</a>'
@@ -174,6 +178,12 @@ def _run_online_task_import(record, item, enable_task, selected_task_indexes, re
         ONLINE_TASK_IMPORT_ACTIVE.discard(request_id)
 
 
+def _missing_import_receipt(request_id, exc):
+    return {"ok": False, "request_id": request_id, "msg": str(exc), "active": True,
+            "receipt_missing": True, "retry_allowed": False,
+            "status_url": f"/online-scripts/import-tasks-status/{request_id}"}, 503
+
+
 def _submit_online_task_import(script_id, data):
     try:
         request_id = _import_request_id(data.get("request_id"))
@@ -207,9 +217,14 @@ def _submit_online_task_import(script_id, data):
             "script_id": script_id, "expected_version": expected_version,
             "selected_task_indexes": selected_task_indexes, "enable_task": enable_task,
         })
+    except TaskImportReceiptMissing as exc:
+        return _missing_import_receipt(request_id, exc)
     except Exception as exc:
         return {"ok": False, "request_id": request_id, "msg": f"导入回执无法读取，未写入任务：{exc}", "retry_allowed": False}, 500
     if previous:
+        if previous.get("archived"):
+            return {"ok": False, "request_id": request_id, "archived": True,
+                    "msg": "原导入请求已归档，不能继续导入；请核对已保存任务。", "retry_allowed": False}, 409
         if (previous.get("script_id") != script_id
                 or previous.get("expected_version") != expected_version
                 or previous.get("selected_task_indexes") != selected_task_indexes
@@ -235,9 +250,18 @@ def _submit_online_task_import(script_id, data):
     }
     try:
         claimed_previous = claim_online_task_import_request(record)
+    except TaskImportHistoryFull as exc:
+        return {"ok": False, "request_id": request_id, "msg": str(exc), "accepted": False,
+                "history_full": True, "retry_allowed": False,
+                "history_url": "/online-scripts/import-tasks-history?recovery=1"}, 409
+    except TaskImportReceiptMissing as exc:
+        return _missing_import_receipt(request_id, exc)
     except Exception as exc:
         return {"ok": False, "request_id": request_id, "msg": f"导入请求无法保存，未写入任务：{exc}", "retry_allowed": True}, 500
     if claimed_previous:
+        if claimed_previous.get("archived"):
+            return {"ok": False, "request_id": request_id, "archived": True,
+                    "msg": "原导入请求已归档，不能继续导入；请核对已保存任务。", "retry_allowed": False}, 409
         if (claimed_previous.get("script_id") != script_id
                 or claimed_previous.get("expected_version") != expected_version
                 or claimed_previous.get("selected_task_indexes") != selected_task_indexes
@@ -275,9 +299,10 @@ def _render_import_result(script_id, payload, status_code, data):
         payload.get("msg") or "任务导入未完成",
         status_code,
         persisted=bool(payload.get("scheduler_reload_required")),
-        request_id=payload.get("request_id", ""),
+        request_id="" if payload.get("accepted") is False else payload.get("request_id", ""),
         selected_task_indexes=selected if payload.get("retry_allowed") else [],
         enable_task=data.get("enable_task") in (True, 1, "1", "true", "True"),
+        history_full=bool(payload.get("history_full")),
     )
 
 
@@ -301,6 +326,9 @@ def api_online_scripts_import_tasks_status(request_id):
         return jsonify(ok=False, msg="在线任务导入请求标识无效"), 400
     try:
         record = get_online_task_import_request(request_id)
+    except TaskImportReceiptMissing as exc:
+        payload, status_code = _missing_import_receipt(request_id, exc)
+        return jsonify(payload), status_code
     except Exception as exc:
         return jsonify(ok=False, msg=f"导入回执无法读取：{exc}"), 500
     if not record:
@@ -311,15 +339,21 @@ def api_online_scripts_import_tasks_status(request_id):
 @bp.route("/api/online-scripts/import-tasks-history")
 def api_online_scripts_import_tasks_history():
     try:
-        items = list_online_task_import_requests(
-            request.args.get("limit", 50),
-            request.args.get("script_id", ""),
-        )
+        page = _import_history_page()
     except ValueError as exc:
         return jsonify(ok=False, msg=str(exc)), 400
     except Exception as exc:
         return jsonify(ok=False, msg=f"导入历史无法读取：{exc}"), 500
-    return jsonify(ok=True, items=items)
+    return jsonify(ok=True, **page)
+
+
+def _import_history_page():
+    recovery = request.args.get("recovery", "0")
+    if recovery not in ("0", "1"):
+        raise ValueError("待恢复导入筛选无效")
+    return list_online_task_import_requests(request.args.get("limit", 50), request.args.get("script_id", ""),
+                                           recovery=recovery == "1", offset=request.args.get("offset", 0),
+                                           with_pagination=True)
 
 
 @bp.route("/api/online-scripts/import-tasks-reload/<request_id>", methods=["POST"])
@@ -334,10 +368,15 @@ def _reload_import_scheduler(request_id):
     with ONLINE_TASK_IMPORT_LOCK:
         try:
             record = get_online_task_import_request(request_id)
+        except TaskImportReceiptMissing as exc:
+            return _missing_import_receipt(request_id, exc)
         except Exception as exc:
             return {"ok": False, "msg": f"导入回执无法读取：{exc}"}, 500
         if not record:
             return {"ok": False, "msg": "导入请求不存在"}, 404
+        if record.get("archived") or record.get("active"):
+            return {"ok": False, "request_id": request_id, "script_id": record.get("script_id", ""),
+                    "msg": "原导入仍在处理中或已归档，不能执行调度器恢复。", "retry_allowed": False}, 409
         if record.get("state") == "completed":
             return {"ok": True, "request_id": request_id, "script_id": record.get("script_id", ""), "msg": "调度器已恢复，未重复导入", "replayed": True}, 200
         if record.get("state") != "scheduler_pending":
@@ -354,6 +393,50 @@ def _reload_import_scheduler(request_id):
     return {"ok": True, "request_id": request_id, "script_id": record.get("script_id", ""), "msg": "任务已保存，调度器已恢复"}, 200
 
 
+def _archive_task_import(request_id, choice):
+    if not re.fullmatch(r"[a-f0-9]{32}", request_id or "") or choice != "archive":
+        return {"ok": False, "msg": "请明确确认归档原导入请求；未修改回执或任务。"}, 400
+    with ONLINE_TASK_IMPORT_LOCK, storage_transaction():
+        try:
+            record = get_online_task_import_request(request_id)
+        except TaskImportReceiptMissing as exc:
+            return _missing_import_receipt(request_id, exc)
+        except Exception as exc:
+            return {"ok": False, "request_id": request_id, "msg": f"导入回执无法读取：{exc}"}, 500
+        if not record:
+            return {"ok": False, "request_id": request_id, "msg": "导入请求不存在"}, 404
+        if record.get("active") or record.get("state") not in ("failed", "unknown", "scheduler_pending"):
+            return {"ok": False, "request_id": request_id, "retry_allowed": False,
+                    "msg": "只能归档已停止的失败、未知或调度器待恢复导入。"}, 409
+        replayed = bool(record.get("archived"))
+        if not replayed:
+            record.update(archived=True, archived_at=now_str())
+            try:
+                persist_online_task_import_request(record)
+            except Exception as exc:
+                return {"ok": False, "request_id": request_id, "retry_allowed": False,
+                        "msg": f"归档结果无法确认，请查询原导入请求后重试：{exc}"}, 503
+        return {"ok": True, "request_id": request_id, "state": record["state"], "archived": True,
+                "replayed": replayed, "retry_allowed": False, "msg": "原导入请求已归档，任务和调度器未修改。"}, 200
+
+
+@bp.route("/api/online-scripts/import-tasks-archive/<request_id>", methods=["POST"])
+def api_online_scripts_import_tasks_archive(request_id):
+    data = (request.get_json(silent=True) if request.is_json else request.form) or {}
+    choice = data.get("acknowledge") if hasattr(data, "get") else None
+    payload, status_code = _archive_task_import(request_id, choice)
+    return jsonify(payload), status_code
+
+
+@bp.route("/online-scripts/import-tasks-archive/<request_id>", methods=["POST"])
+def online_scripts_import_tasks_archive(request_id):
+    payload, status_code = _archive_task_import(request_id, request.form.get("acknowledge"))
+    if payload.get("ok"):
+        return redirect(url_for("online_scripts.online_scripts_import_tasks_status", request_id=request_id))
+    return _task_import_error("", payload.get("msg") or "归档失败", status_code, request_id=request_id,
+                              history_full=True)
+
+
 @bp.route("/online-scripts/import-tasks-reload/<request_id>", methods=["POST"])
 def online_scripts_import_tasks_reload(request_id):
     payload, status_code = _reload_import_scheduler(request_id)
@@ -368,6 +451,8 @@ def online_scripts_import_tasks_status(request_id):
         return _task_import_error("", "在线任务导入请求标识无效", 400)
     try:
         record = get_online_task_import_request(request_id)
+    except TaskImportReceiptMissing as exc:
+        return _task_import_error("", str(exc), 503, request_id=request_id)
     except Exception as exc:
         return _task_import_error("", f"导入回执无法读取：{exc}", 500, request_id=request_id)
     if not record:
@@ -382,13 +467,15 @@ def online_scripts_import_tasks_status(request_id):
         "completed": "任务导入已完成",
     }
     actions = '<a class="btn btn-gray" href="/online-scripts/import-tasks-history">导入历史</a><a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>'
-    if state == "failed" and not record.get("active"):
+    if record.get("archived"):
+        labels[state] = {"failed": "导入失败", "unknown": "导入结果未知", "scheduler_pending": "任务已保存，调度器未确认恢复"}[state] + "（已归档）"
+    elif state == "failed" and not record.get("active"):
         fields = f'<input type="hidden" name="request_id" value="{h(request_id)}">'
         fields += "".join(f'<input type="hidden" name="task_indexes" value="{h(index)}">' for index in record.get("selected_task_indexes", []))
         if record.get("enable_task"):
             fields += '<input type="hidden" name="enable_task" value="1">'
         actions = f'<form class="inline-form" method="post" action="/online-scripts/import-tasks/{h(record.get("script_id", ""))}">{fields}<button class="btn btn-primary" type="submit">继续原导入请求</button></form>' + actions
-    elif state == "scheduler_pending":
+    elif state == "scheduler_pending" and not record.get("active"):
         actions = f'<form class="inline-form" method="post" action="/online-scripts/import-tasks-reload/{h(request_id)}"><button class="btn btn-primary" type="submit">仅重新加载调度器</button></form>' + actions
     elif state in ("prepared", "running", "unknown"):
         actions = f'<a class="btn btn-blue" href="/online-scripts/import-tasks-status/{h(request_id)}">刷新查询</a>' + actions
@@ -398,6 +485,12 @@ def online_scripts_import_tasks_status(request_id):
         actions_html=actions,
     )
     body += f'''<section class="section"><div class="card"><h2 class="section-title">{h(labels.get(state, state))}</h2><p>请求标识：<code>{h(request_id)}</code></p><p>脚本：{h(record.get("script_id"))}</p><p>更新时间：{h(record.get("updated_at"))}</p><p>{h(record.get("message") or record.get("scheduler_reload_error") or "-")}</p></div></section>'''
+    if not record.get("active") and not record.get("archived") and state in ("failed", "unknown", "scheduler_pending"):
+        body += f'''<form method="post" action="/online-scripts/import-tasks-archive/{h(request_id)}" style="display:grid;gap:12px;margin:16px 0">
+<label style="display:flex;align-items:flex-start;gap:8px"><input type="checkbox" name="acknowledge" value="archive" required style="width:auto;flex:none"><span>已核对任务，保留当前任务和调度器状态并放弃此请求，允许清理其回执</span></label>
+<div><button class="btn btn-gray" type="submit">归档原导入请求</button></div></form>'''
+    elif record.get("archived"):
+        body += '<p>已放弃此请求，不能继续导入或恢复调度器；原任务和诊断保持不变。</p>'
     return layout("在线任务导入状态", "online_scripts", body)
 
 
@@ -405,7 +498,7 @@ def online_scripts_import_tasks_status(request_id):
 def online_scripts_import_tasks_history():
     script_id = str(request.args.get("script_id") or "").strip()
     try:
-        items = list_online_task_import_requests(request.args.get("limit", 50), script_id)
+        page = _import_history_page()
     except ValueError as exc:
         body = page_header_card(
             "在线任务导入历史",
@@ -417,7 +510,7 @@ def online_scripts_import_tasks_history():
         body = page_header_card(
             "在线任务导入历史",
             help_html=f"导入历史无法读取：{h(exc)}。请修复回执存储后重试。",
-            actions_html='<a class="btn btn-blue" href="/online-scripts/import-tasks-history">重新读取</a><a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>',
+            actions_html=f'<a class="btn btn-blue" href="{h(request.full_path)}">重新读取</a><a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>',
         )
         return layout("在线任务导入历史", "online_scripts", body), 500
 
@@ -430,13 +523,14 @@ def online_scripts_import_tasks_history():
         "completed": "已完成",
     }
     rows = []
-    for record in items:
+    for record in page["items"]:
         request_id = str(record.get("request_id") or "")
         state = str(record.get("state") or "unknown")
+        status_label = "失败" if state == "failed" and record.get("archived") else labels.get(state, state)
         actions = f'<a class="btn btn-blue" href="/online-scripts/import-tasks-status/{h(request_id)}">查看状态</a>'
-        if state == "scheduler_pending":
+        if state == "scheduler_pending" and not record.get("active") and not record.get("archived"):
             actions += f'<form class="inline-form" method="post" action="/online-scripts/import-tasks-reload/{h(request_id)}"><button class="btn btn-primary" type="submit">仅重载调度器</button></form>'
-        elif state == "failed" and not record.get("active"):
+        elif state == "failed" and not record.get("active") and not record.get("archived"):
             fields = f'<input type="hidden" name="request_id" value="{h(request_id)}">'
             fields += "".join(f'<input type="hidden" name="task_indexes" value="{h(index)}">' for index in record.get("selected_task_indexes", []))
             if record.get("enable_task"):
@@ -446,7 +540,7 @@ def online_scripts_import_tasks_history():
             "<tr>"
             f"<td><code>{h(request_id)}</code></td>"
             f"<td>{h(record.get('script_id') or '-')}</td>"
-            f"<td>{h(labels.get(state, state))}</td>"
+            f"<td>{h(status_label)}{'（已归档）' if record.get('archived') else ''}</td>"
             f"<td>{h(','.join(record.get('selected_task_indexes') or []) or '-')}</td>"
             f"<td>{h(record.get('updated_at') or '-')}</td>"
             f"<td>{actions}</td>"
@@ -458,10 +552,17 @@ def online_scripts_import_tasks_history():
         + ("".join(rows) or '<tr><td colspan="6">暂无导入历史</td></tr>')
         + "</tbody></table></div>"
     )
+    recovery = request.args.get("recovery", "0")
+    links = '<a class="btn btn-blue" href="/online-scripts/import-tasks-history?recovery=1">待恢复导入</a><a class="btn btn-gray" href="/online-scripts/import-tasks-history">全部导入</a>'
+    for label, offset in (("上一页", max(0, page["offset"] - page["limit"])), ("下一页", page["offset"] + page["limit"])):
+        if (label == "上一页" and page["offset"]) or (label == "下一页" and page["has_more"]):
+            href = url_for("online_scripts.online_scripts_import_tasks_history", script_id=script_id,
+                           recovery=recovery, limit=page["limit"], offset=offset)
+            links += f'<a class="btn btn-blue" href="{h(href)}">{label}</a>'
     body = page_header_card(
         "在线任务导入历史",
         help_html="历史只读取已保存回执，不会重复写入任务；调度器待恢复时只执行重载。",
-        actions_html='<a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>',
+        actions_html=links + '<a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>',
     ) + f'<section class="section"><div class="card">{table}</div></section>'
     return layout("在线任务导入历史", "online_scripts", body)
 
@@ -859,6 +960,7 @@ def online_scripts_install_select(script_id):
 <div class="notice blue" id="onlineInstallRecoveryStatus" role="status" hidden></div>
 <a class="btn btn-orange" id="onlineInstallRecoveryLog" href="#" hidden>查看原安装日志</a>
 <a class="btn btn-blue" id="onlineInstallRecoveryStatusLink" href="#" hidden>查询原导入请求</a>
+<a class="btn btn-primary" id="onlineInstallRecoveryHistory" href="/online-scripts/import-tasks-history?recovery=1" hidden>处理待恢复导入</a>
 <button class="btn btn-primary" id="onlineInstallRecoveryReload" type="button" hidden>仅重新加载调度器</button>
 <button class="btn btn-gray" id="onlineInstallRecoveryRetry" type="button" hidden>重新读取安装状态</button>
 
@@ -1120,10 +1222,15 @@ async function flsInstallSubmitApi(action, form, submitter){{
         }}
         if(button) button.disabled = false;
         if(importMode){{
+            const rejected = error && error.payload && error.payload.accepted === false;
+            const full = rejected && error.payload.history_full === true;
+            if(rejected){{ try{{ sessionStorage.removeItem("fls-online-install-request"); }}catch(_error){{}} }}
+            const history = document.getElementById("onlineInstallRecoveryHistory");
+            if(history) history.hidden = !full;
             const statusLink = document.getElementById("onlineInstallRecoveryStatusLink");
-            if(statusLink){{ statusLink.hidden = false; statusLink.href = "/online-scripts/import-tasks-status/" + encodeURIComponent(requestId); }}
+            if(statusLink){{ statusLink.hidden = rejected; statusLink.href = "/online-scripts/import-tasks-status/" + encodeURIComponent(requestId); }}
             const query = document.getElementById("onlineInstallRecoveryRetry");
-            if(query){{ query.hidden = false; query.onclick = flsInstallRecoverPending; }}
+            if(query){{ query.hidden = rejected; query.onclick = flsInstallRecoverPending; }}
         }}
     }}finally{{ form.__flsInstallSubmitting = false; }}
 }}
@@ -1165,8 +1272,8 @@ async function flsInstallRecoverPending(){{
                     window.location.href = "/online-scripts?msg=" + encodeURIComponent(json.message || "任务导入已完成");
                     return;
                 }}
-                if(statusEl) statusEl.textContent = "原任务导入请求：" + (json.message || json.state || "未知");
-                if(reloadSchedulerEl && json.state === "scheduler_pending"){{
+                if(statusEl) statusEl.textContent = "原任务导入请求：" + (json.archived ? "已归档，不能继续导入或恢复调度器；" : "") + (json.message || json.state || "未知");
+                if(reloadSchedulerEl && json.state === "scheduler_pending" && !json.archived && !json.active){{
                     reloadSchedulerEl.hidden = false;
                     reloadSchedulerEl.onclick = async function(){{
                         reloadSchedulerEl.disabled = true;
