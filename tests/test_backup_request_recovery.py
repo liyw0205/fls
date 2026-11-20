@@ -77,6 +77,36 @@ class BackupRequestRecoveryTests(unittest.TestCase):
                     self.assertEqual(app.test_client().post("/api/backup/create", data={"items": items}, headers={"X-Token": TOKEN}).status_code, 400)
                 start.assert_not_called()
 
+    def test_api_urlencoded_creation_requires_identity_and_replays_same_job(self):
+        with isolated_app() as (app, base), self.inline_worker() as start:
+            from fls_manager.routes.backup import _common as backup
+            client = app.test_client()
+            data = self.values(request_id="c" * 32)
+
+            first = client.post("/api/backup/create", data=data, headers={"X-Token": TOKEN})
+            self.assertEqual(first.status_code, 200)
+            job_id = first.json["job_id"]
+            self.assertEqual(backup.get_backup_job(job_id)["status"], "已完成")
+
+            replay = client.post("/api/backup/create", data=data, headers={"X-Token": TOKEN})
+            self.assertEqual(replay.status_code, 200)
+            self.assertEqual(replay.json["job_id"], job_id)
+            start.assert_called_once()
+
+            missing_identity = client.post(
+                "/api/backup/create", data={"items": ["scripts"]}, headers={"X-Token": TOKEN}
+            )
+            self.assertEqual(missing_identity.status_code, 400)
+            invalid_selection = client.post(
+                "/api/backup/create",
+                data={"request_id": "d" * 32, "items": ["scripts", "bad"]},
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(invalid_selection.status_code, 400)
+            self.assertEqual(start.call_count, 1)
+            self.assertFalse((base / "data/backup_requests" / ("d" * 32 + ".json")).exists())
+            self.assertEqual(set(backup.BACKUP_JOBS), {job_id})
+
     def test_job_publication_failures_and_thread_failure_report_actual_state(self):
         for mode in ("before", "after", "thread"):
             with self.subTest(mode=mode), isolated_app() as (app, _):
