@@ -734,18 +734,20 @@ class BackupIsolationTests(unittest.TestCase):
     def test_backup_create_api_registers_job_without_starting_worker(self):
         with isolated_app() as (app, _base_dir):
             with patch(
-                "fls_manager.routes.backup.api.start_backup_job",
+                "fls_manager.routes.backup._common.start_backup_job",
                 return_value="job-fixture",
             ) as start_backup_job:
                 response = app.test_client().post(
                     "/api/backup/create",
-                    data={"items": ["data", "scripts"]},
+                    data={"request_id": "a" * 32, "items": ["data", "scripts"]},
                     headers={"X-Token": TOKEN},
                 )
 
             self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.get_json(), {"ok": True, "job_id": "job-fixture"})
-            start_backup_job.assert_called_once_with(["data", "scripts"])
+            self.assertEqual(response.get_json(), {
+                "ok": True, "msg": "备份已提交", "resolved": True, "job_id": "a" * 32,
+            })
+            start_backup_job.assert_called_once_with(["data", "scripts"], job_id="a" * 32)
 
     def test_backup_cancel_api_sets_the_job_cancel_event(self):
         with isolated_app() as (app, _base_dir):
@@ -781,14 +783,15 @@ class BackupIsolationTests(unittest.TestCase):
             ):
                 response = app.test_client().post(
                     "/api/backup/create",
-                    data={"items": ["data"]},
+                    data={"request_id": "b" * 32, "items": ["data"]},
                     headers={"X-Token": TOKEN},
                 )
 
             payload = response.get_json()
             self.assertEqual(response.status_code, 500)
             self.assertFalse(payload["ok"])
-            self.assertIn("backup state disk full", payload["msg"])
+            self.assertFalse(payload["resolved"])
+            self.assertIn("任务未启动", payload["msg"])
             self.assertEqual(backup_common.BACKUP_JOBS, {})
             self.assertEqual(backup_common.BACKUP_CANCEL_EVENTS, {})
 
@@ -803,15 +806,15 @@ class BackupIsolationTests(unittest.TestCase):
             ):
                 response = app.test_client().post(
                     "/api/backup/create",
-                    data={"items": ["data"]},
+                    data={"request_id": "c" * 32, "items": ["data"]},
                     headers={"X-Token": TOKEN},
                 )
 
             payload = response.get_json()
-            self.assertEqual(response.status_code, 500)
+            self.assertEqual(response.status_code, 503)
             self.assertFalse(payload["ok"])
-            self.assertIn("worker limit reached", payload["msg"])
-            self.assertIn("job_id", payload)
+            self.assertTrue(payload["resolved"])
+            self.assertEqual(payload["job_id"], "c" * 32)
             info = backup_common.BACKUP_JOBS[payload["job_id"]]
             self.assertFalse(info["running"])
             self.assertEqual(info["status"], "启动失败")

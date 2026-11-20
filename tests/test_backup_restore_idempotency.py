@@ -1,9 +1,11 @@
 import io
+import hashlib
 import json
 import os
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from unittest.mock import patch
 
 from tests.test_bulk_workflows import TOKEN
@@ -143,6 +145,182 @@ class BackupRestoreIdempotencyTests(unittest.TestCase):
                 self.assertEqual(self.post(app.test_client(), raw).status_code, 503)
                 commit.assert_not_called()
             self.assertEqual((base / "scripts/demo.py").read_text(), "later")
+
+    def test_retention_archives_only_resolved_successes_and_keeps_recovery_receipts(self):
+        with isolated_app() as (app, base):
+            from fls_manager.routes.backup import restore
+            request_ids = [f"{number:032x}" for number in range(1, 11)]
+            states = (
+                ("restored", False, False), ("restored", False, False),
+                ("restored", False, False), ("restored", False, False),
+                ("failed", False, False), ("unknown", False, False),
+                ("restored", True, False), ("restored", False, True),
+                ("received", False, False), ("committing", False, False),
+            )
+            directory = base / ".backup_restore_requests"
+            directory.mkdir()
+            with patch.object(restore, "RESTORE_RECEIPT_DETAIL_LIMIT", 2):
+                for number, (request_id, (state, reload_required, dependencies_failed)) in enumerate(zip(request_ids, states), 1):
+                    restore._save_restore_request({
+                        "request_id": request_id,
+                        "archive_sha256": f"{number:064x}",
+                        "filename": f"restore-{number}.tar.gz",
+                        "restore_items": ["data", "scripts"],
+                        "restore_deps": False,
+                        "state": state,
+                        "scheduler_reload_required": reload_required,
+                        "scheduler_reloaded": not reload_required,
+                        "dependencies_failed": dependencies_failed,
+                        "created_at": f"2026-11-{number:02d} 00:00:00",
+                    })
+                self.assertEqual(restore._compact_restore_receipts(), 2)
+                for request_id in request_ids[:2]:
+                    self.assertFalse(restore._restore_request_path(request_id).exists())
+                for request_id in request_ids[2:]:
+                    self.assertTrue(restore._restore_request_path(request_id).exists())
+
+                response = app.test_client().get(
+                    "/api/backup/restore-history?limit=20", headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json["total"], 10)
+                archived = {item["request_id"] for item in response.json["items"] if item["archived"]}
+                self.assertEqual(archived, set(request_ids[:2]))
+                for request_id in request_ids[4:]:
+                    self.assertIn(request_id, {item["request_id"] for item in response.json["items"]})
+
+    def test_archive_failure_keeps_details_and_history_retries_maintenance(self):
+        for fail_after_archive in (False, True):
+            with self.subTest(fail_after_archive=fail_after_archive), isolated_app() as (app, base):
+                from fls_manager.routes.backup import restore
+
+                directory = base / ".backup_restore_requests"
+                directory.mkdir()
+                ids = ("a" * 32, "b" * 32)
+                for number, request_id in enumerate(ids, 1):
+                    restore._save_restore_request({
+                        "request_id": request_id,
+                        "archive_sha256": f"{number:064x}",
+                        "filename": "restore.tar.gz",
+                        "restore_items": ["scripts"],
+                        "restore_deps": False,
+                        "state": "restored",
+                        "scheduler_reload_required": False,
+                        "scheduler_reloaded": True,
+                        "dependencies_failed": False,
+                        "created_at": f"2026-11-{number:02d} 00:00:00",
+                    })
+
+                with patch.object(restore, "RESTORE_RECEIPT_DETAIL_LIMIT", 1):
+                    if fail_after_archive:
+                        unlink = Path.unlink
+                        target = restore._restore_request_path(ids[0])
+
+                        def fail_unlink(path, *args, **kwargs):
+                            if path == target:
+                                raise OSError("fixture archived detail cleanup failure")
+                            return unlink(path, *args, **kwargs)
+
+                        patcher = patch.object(Path, "unlink", fail_unlink)
+                    else:
+                        write_json = restore.write_json
+
+                        def fail_index(path, record):
+                            if path == restore._restore_archive_index_path():
+                                raise OSError("fixture archive index write failure")
+                            return write_json(path, record)
+
+                        patcher = patch.object(restore, "write_json", fail_index)
+
+                    with patcher:
+                        response = app.test_client().get(
+                            "/api/backup/restore-history?limit=20", headers={"X-Token": TOKEN},
+                        )
+                    self.assertEqual(response.status_code, 200)
+                    self.assertTrue(response.json["maintenance_error"])
+                    archived = [item for item in response.json["items"] if item["archived"]]
+                    self.assertEqual(len(archived), int(fail_after_archive))
+                    if not fail_after_archive:
+                        self.assertTrue(all(restore._restore_request_path(request_id).exists() for request_id in ids))
+
+                    recovered = app.test_client().get(
+                        "/api/backup/restore-history?limit=20", headers={"X-Token": TOKEN},
+                    )
+                    self.assertEqual(recovered.status_code, 200)
+                    self.assertEqual(recovered.json["maintenance_error"], "")
+                    self.assertEqual(sum(item["archived"] for item in recovered.json["items"]), 1)
+                    self.assertEqual(sum(restore._restore_request_path(request_id).exists() for request_id in ids), 1)
+
+    def test_corrupt_or_symlinked_archive_index_fails_closed(self):
+        for mode in ("invalid_json", "invalid_shape", "symlink"):
+            with self.subTest(mode=mode), isolated_app() as (app, base):
+                from fls_manager.routes.backup import restore
+
+                directory = base / ".backup_restore_requests"
+                directory.mkdir()
+                index_path = restore._restore_archive_index_path()
+                if mode == "invalid_json":
+                    index_path.write_text("{broken", encoding="utf-8")
+                elif mode == "invalid_shape":
+                    index_path.write_text(json.dumps({"version": 2, "records": {}}), encoding="utf-8")
+                else:
+                    target = base / "archive-index-target.json"
+                    target.write_text(json.dumps({"version": 1, "records": {}}), encoding="utf-8")
+                    index_path.symlink_to(target)
+
+                client = app.test_client()
+                history = client.get("/api/backup/restore-history?limit=20", headers={"X-Token": TOKEN})
+                self.assertEqual(history.status_code, 500)
+                with patch.object(restore, "_commit_restore_directories") as commit:
+                    replay = self.post(client, restore_test_archive().getvalue())
+                    self.assertEqual(replay.status_code, 500)
+                    commit.assert_not_called()
+
+                self.assertTrue(index_path.is_symlink() if mode == "symlink" else index_path.exists())
+
+    def test_archived_request_replay_is_rejected_for_api_and_form_without_directory_changes(self):
+        with isolated_app() as (app, base):
+            from fls_manager.routes.backup import restore
+
+            request_id = "a" * 32
+            raw = restore_test_archive().getvalue()
+            directory = base / ".backup_restore_requests"
+            directory.mkdir()
+            for number, receipt_id in enumerate((request_id, "b" * 32), 1):
+                restore._save_restore_request({
+                    "request_id": receipt_id,
+                    "archive_sha256": hashlib.sha256(raw).hexdigest(),
+                    "filename": "restore.tar.gz",
+                    "restore_items": ["data", "scripts"],
+                    "restore_deps": False,
+                    "state": "restored",
+                    "scheduler_reload_required": False,
+                    "scheduler_reloaded": True,
+                    "dependencies_failed": False,
+                    "created_at": f"2026-11-{number:02d} 00:00:00",
+                })
+            with patch.object(restore, "RESTORE_RECEIPT_DETAIL_LIMIT", 1):
+                restore._compact_restore_receipts()
+            self.assertFalse(restore._restore_request_path(request_id).exists())
+            with patch.object(restore, "_commit_restore_directories") as commit:
+                for api in (True, False):
+                    client = app.test_client()
+                    headers = {"X-Token": TOKEN}
+                    data = {
+                        "file": (io.BytesIO(raw), "restore.tar.gz"),
+                        "restore_request_id": request_id,
+                        "restore_items": ["data", "scripts"],
+                    }
+                    if not api:
+                        self.authenticate(client)
+                        data["csrf_token"] = "proxy-csrf"
+                        headers = {}
+                    response = client.post("/api/backup/import" if api else "/backup/import", data=data, headers=headers)
+                    self.assertEqual(response.status_code, 410)
+                    if api:
+                        self.assertTrue(response.json["archived"])
+                        self.assertIn("不会再次覆盖", response.json["msg"])
+                commit.assert_not_called()
 
     def test_reload_receipt_failure_can_be_queried_and_retried_without_directory_write(self):
         for published in (False, True):
