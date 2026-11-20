@@ -419,6 +419,63 @@ def _read_online_refresh_history_file():
     return data
 
 
+ONLINE_REFRESH_HISTORY_LIMIT = 200
+
+
+class OnlineRefreshHistoryFull(RuntimeError):
+    pass
+
+
+def _prune_online_refresh_history(history, current_request_id):
+    neighbours = {request_id: set() for request_id in history}
+    for request_id, info in history.items():
+        parent = info.get("retry_of")
+        if parent in neighbours:
+            neighbours[request_id].add(parent)
+            neighbours[parent].add(request_id)
+
+    components = []
+    unseen = set(history)
+    while unseen:
+        first = unseen.pop()
+        component = {first}
+        pending = [first]
+        while pending:
+            request_id = pending.pop()
+            for adjacent in neighbours[request_id] & unseen:
+                unseen.remove(adjacent)
+                component.add(adjacent)
+                pending.append(adjacent)
+        components.append(component)
+
+    current = next((component for component in components if current_request_id in component), None)
+    if current is not None and len(current) > ONLINE_REFRESH_HISTORY_LIMIT:
+        raise OnlineRefreshHistoryFull(
+            "在线脚本源刷新重试链已达到 200 条历史上限；未启动此次重试。"
+            "请检查原日志后，从刷新状态明确发起新的完整同步。"
+        )
+
+    def component_key(component):
+        running = any(history[request_id].get("running") is True for request_id in component)
+        linked = any(history[request_id].get("retry_of") for request_id in component) or any(
+            neighbours[request_id] for request_id in component
+        )
+        latest = max(str(history[request_id].get("updated_at") or "") for request_id in component)
+        return (component is current, running, linked, latest)
+
+    components.sort(key=component_key, reverse=True)
+    retained = set()
+    for component in components:
+        if len(retained) + len(component) > ONLINE_REFRESH_HISTORY_LIMIT:
+            if component is current or any(history[request_id].get("running") for request_id in component):
+                raise OnlineRefreshHistoryFull(
+                    "在线脚本源刷新历史已满，仍有活动请求无法安全裁剪；未启动新的同步。"
+                )
+            continue
+        retained.update(component)
+    return {request_id: history[request_id] for request_id in history if request_id in retained}
+
+
 class RefreshPublicationError(RuntimeError):
     def __init__(self, error, published_snapshot=None):
         super().__init__(str(error))
@@ -455,19 +512,15 @@ def persist_online_refresh(info):
         try:
             try:
                 previous_id = previous_snapshot.get("request_id")
-                if previous_id and history.get(previous_id) != previous_snapshot:
-                    # Preserve a receipt left behind by a partial publication before replacing it.
-                    history[previous_id] = previous_snapshot
-                    _publish_refresh_history(history)
+                publish_history_first = bool(previous_id and history.get(previous_id) != previous_snapshot)
                 for candidate in (previous_snapshot, snapshot):
                     if candidate.get("request_id"):
                         history[candidate["request_id"]] = candidate
                 if snapshot["request_id"]:
-                    history = dict(sorted(
-                        history.items(),
-                        key=lambda pair: (pair[0] == snapshot["request_id"], str(pair[1].get("updated_at") or "")),
-                        reverse=True,
-                    )[:200])
+                    history = _prune_online_refresh_history(history, snapshot["request_id"])
+                if publish_history_first:
+                    # Publish the bounded complete history before replacing its current-state pointer.
+                    _publish_refresh_history(history)
                 temp.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
                 history_temp.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
                 os.replace(temp, ONLINE_REFRESH_STATE_FILE)
@@ -475,6 +528,8 @@ def persist_online_refresh(info):
             finally:
                 temp.unlink(missing_ok=True)
                 history_temp.unlink(missing_ok=True)
+        except OnlineRefreshHistoryFull:
+            raise
         except Exception as exc:
             try:
                 published = snapshot if _read_online_refresh_file() == snapshot else None
@@ -763,6 +818,8 @@ def claim_online_refresh_retry(original_request_id, proxy_id="", request_id="", 
         }
         try:
             persist_online_refresh(info)
+        except OnlineRefreshHistoryFull:
+            raise
         except Exception as exc:
             _retain_unlaunched_refresh(exc)
             raise
@@ -860,6 +917,10 @@ def reserve_online_refresh(proxy_id="", request_id="", cache_fingerprint="", sou
         ONLINE_REFRESH_STATE.update(info)
         try:
             persist_online_refresh(info)
+        except OnlineRefreshHistoryFull:
+            ONLINE_REFRESH_STATE.clear()
+            ONLINE_REFRESH_STATE.update(previous)
+            raise
         except Exception as exc:
             ONLINE_REFRESH_STATE.clear()
             ONLINE_REFRESH_STATE.update(previous)

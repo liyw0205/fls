@@ -176,7 +176,7 @@ const elements = {
   onlineRefreshTaskLinkFailures: {innerHTML: '', querySelectorAll: () => [retryButton]},
   onlineRefreshLogLink: {hidden: true, href: ''},
   onlineRefreshBtn: {disabled: true, textContent: '正在同步中...'},
-  onlineRefreshHistoryError: {hidden: true, textContent: ''},
+  onlineRefreshHistoryError: {hidden: true, textContent: '', children:[], appendChild(node){this.children.push(node);}},
   onlineRefreshLogin: {hidden: true, href: ''},
   onlineRefreshQuery: {hidden: true, disabled: false},
   onlineRefreshPersistence: {innerHTML: ''},
@@ -188,7 +188,9 @@ let submitHandlers=0;
 const context = {
   window: {},
   location: {pathname: '/online-scripts', search: ''},
-  document: {getElementById: id => elements[id], querySelectorAll: () => [], addEventListener: name => {if(name==='submit') submitHandlers++;}},
+  document: {getElementById: id => elements[id], querySelectorAll: () => [],
+    createElement: name => ({tagName:name,href:'',textContent:''}), createTextNode: text => ({textContent:text}),
+    addEventListener: name => {if(name==='submit') submitHandlers++;}},
   sessionStorage: storage,
   flsGetCsrfToken: () => 'refresh-repair-csrf',
   flsResponseErrorDiagnostic: (_response, body) => ({payload: null, message: body}),
@@ -323,6 +325,20 @@ setImmediate(async () => {
   assert.equal(retryInput.value, retryId);
   assert.equal(JSON.parse(storage.getItem('fls-online-refresh-retry:' + originalId)).request_id, retryId);
   assert.match(elements.onlineRefreshHistoryError.textContent, /thread quota exhausted/);
+  context.fetch = async () => ({ok:false, status:409, text:async()=>JSON.stringify({
+    retry_not_started:true, error:'refresh retry chain reached capacity', request_id:retryId,
+  })});
+  context.flsResponseErrorDiagnostic = (_response, body) => {
+    try { const payload=JSON.parse(body); return {payload, message:payload.error || body}; }
+    catch(_error) { return {payload:null, message:body}; }
+  };
+  await context.submitOnlineRefreshRetryForm(retryForm);
+  assert.equal(storage.getItem('fls-online-refresh-retry:' + originalId), null);
+  assert.equal(storage.getItem('fls-online-refresh-request'), null);
+  assert.notEqual(retryInput.value, retryId);
+  assert.equal(elements.onlineRefreshQuery.hidden, true);
+  assert.match(elements.onlineRefreshHistoryError.textContent, /此次重试未启动/);
+  assert.equal(elements.onlineRefreshHistoryError.children.at(-1).href, '/online-scripts#online-status');
   const recoveryId = '7'.repeat(32);
   const recoverButton = {disabled:false};
   const recoverForm = {dataset:{}, getAttribute:()=>recoveryId, querySelector:()=>recoverButton};
@@ -901,6 +917,166 @@ vm.runInContext(input.reader + input.script, context);
             self.assertEqual(invalid.status_code, 400)
             self.assertEqual(invalid.json["request_id"], "")
             start.assert_called_once()
+
+    def test_refresh_history_pruning_keeps_retry_parent_discoverable(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import constants
+
+            parent_id = "a" * 32
+            retry_id = "b" * 32
+            records = {}
+
+            def record(request_id, updated_at, *, status="已完成", retry_of=""):
+                return {
+                    "id": request_id,
+                    "request_id": request_id,
+                    "proxy_id": "",
+                    "running": False,
+                    "status": status,
+                    "message": "",
+                    "error": "",
+                    "cache_published": status == "已完成",
+                    "task_link_failures": [],
+                    "updated_at": updated_at,
+                    "log_file": "",
+                    "retry_of": retry_of,
+                    "expected_cache_fingerprint": "c" * 64,
+                    "published_cache_fingerprint": "d" * 64 if status == "已完成" else "",
+                    "source_fingerprint": "e" * 64,
+                    "confirmation": "",
+                    "confirmation_fingerprint": "",
+                }
+
+            records[parent_id] = record(parent_id, "2020-01-01", status="失败")
+            records[retry_id] = record(retry_id, "2020-01-02", retry_of=parent_id)
+            for number in range(1, 199):
+                request_id = f"{number:032x}"
+                records[request_id] = record(request_id, f"2026-01-{number:03d}")
+            self.assertEqual(len(records), 200)
+            constants.ONLINE_REFRESH_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+            constants.ONLINE_REFRESH_HISTORY_FILE.write_text(
+                json.dumps(records), encoding="utf-8",
+            )
+
+            constants.persist_online_refresh(record("c" * 32, "2026-11-21"))
+
+            client = app.test_client()
+            parent = client.get(
+                "/api/online-scripts/refresh-history?request_id=" + parent_id,
+                headers={"X-Token": TOKEN},
+            )
+            retry = client.get(
+                "/api/online-scripts/refresh-history?request_id=" + retry_id,
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(parent.status_code, 200)
+            self.assertEqual(parent.json["items"][0]["request_id"], parent_id)
+            self.assertEqual(retry.status_code, 200)
+            self.assertEqual(retry.json["items"][0]["retry_of"], parent_id)
+            saved = constants._read_online_refresh_history_file()
+            self.assertLessEqual(len(saved), 200)
+
+    def test_refresh_retry_at_chain_capacity_is_rejected_before_claim_or_worker(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import constants, source
+            from fls_manager.routes.online_scripts import refresh
+
+            source.save_online_script_cache([{
+                "id": "stable", "name": "Stable", "type": "raw", "link": "x",
+            }])
+            cache_fingerprint = source.online_script_cache_fingerprint()
+            source_fingerprint = source.online_script_source_fingerprint()
+            records = {}
+            previous_id = ""
+            for number in range(1, constants.ONLINE_REFRESH_HISTORY_LIMIT + 1):
+                request_id = f"{number:032x}"
+                status = "失败" if number == constants.ONLINE_REFRESH_HISTORY_LIMIT else "已完成"
+                records[request_id] = {
+                    "id": request_id,
+                    "request_id": request_id,
+                    "proxy_id": "",
+                    "running": False,
+                    "status": status,
+                    "message": "",
+                    "error": "upstream timeout" if status == "失败" else "",
+                    "cache_published": status == "已完成",
+                    "task_link_failures": [],
+                    "updated_at": f"2026-01-{number:03d}",
+                    "log_file": "",
+                    "retry_of": previous_id,
+                    "expected_cache_fingerprint": cache_fingerprint,
+                    "published_cache_fingerprint": cache_fingerprint if status == "已完成" else "",
+                    "source_fingerprint": source_fingerprint,
+                    "confirmation": "",
+                    "confirmation_fingerprint": "",
+                }
+                previous_id = request_id
+            constants.ONLINE_REFRESH_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+            original_bytes = json.dumps(records).encode("utf-8")
+            constants.ONLINE_REFRESH_HISTORY_FILE.write_bytes(original_bytes)
+            state_before = dict(constants.ONLINE_REFRESH_STATE)
+
+            client = app.test_client()
+            retry_id = "f" * 32
+            with patch.object(refresh, "start_refresh_thread") as start:
+                response = client.post(
+                    f"/api/online-scripts/refresh-retry/{previous_id}",
+                    json={"retry_request_id": retry_id, "proxy_id": ""},
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 409, response.get_data(as_text=True))
+            self.assertTrue(response.json["retry_not_started"])
+            self.assertIn("未启动此次重试", response.json["error"])
+            start.assert_not_called()
+
+            form_client = app.test_client()
+            with form_client.session_transaction() as session:
+                session.update(
+                    token=TOKEN, token_expire_at=4102444800, security_verified=True,
+                    csrf_token="refresh-chain-csrf",
+                )
+            anonymous = app.test_client()
+            with anonymous.session_transaction() as session:
+                session["csrf_token"] = "anonymous-csrf"
+            with patch.object(refresh, "start_refresh_thread") as form_start:
+                unauthorized = anonymous.post(
+                    f"/online-scripts/refresh-retry/{previous_id}",
+                    data={"retry_request_id": "e" * 32, "proxy_id": "", "csrf_token": "anonymous-csrf"},
+                )
+                csrf_denied = form_client.post(
+                    f"/online-scripts/refresh-retry/{previous_id}",
+                    data={"retry_request_id": "e" * 32, "proxy_id": ""},
+                )
+                html = form_client.post(
+                    f"/online-scripts/refresh-retry/{previous_id}",
+                    data={"retry_request_id": "e" * 32, "proxy_id": "", "csrf_token": "refresh-chain-csrf"},
+                )
+                form_start.assert_not_called()
+            self.assertEqual(unauthorized.status_code, 302)
+            self.assertIn("/login", unauthorized.headers.get("Location", ""))
+            self.assertEqual(csrf_denied.status_code, 400)
+            self.assertEqual(html.status_code, 409)
+            self.assertIn("未启动此次重试", html.get_data(as_text=True))
+            self.assertIn('href="/online-scripts#online-status"', html.get_data(as_text=True))
+            self.assertEqual(constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes(), original_bytes)
+            self.assertNotIn(retry_id, constants._read_online_refresh_history_file())
+            self.assertNotIn("e" * 32, constants._read_online_refresh_history_file())
+            self.assertEqual(source.online_script_cache_fingerprint(), cache_fingerprint)
+            self.assertEqual(constants.ONLINE_REFRESH_STATE, state_before)
+            self.assertNotIn("persistence_error", constants.ONLINE_REFRESH_STATE)
+
+            fresh_request_id = "d" * 32
+            with patch.object(refresh, "start_refresh_thread") as fresh_start:
+                fresh = client.post(
+                    "/api/online-scripts/refresh",
+                    json={"request_id": fresh_request_id, "proxy_id": ""},
+                    headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(fresh.status_code, 202, fresh.get_data(as_text=True))
+            fresh_start.assert_called_once()
+            self.assertEqual(constants.ONLINE_REFRESH_STATE["request_id"], fresh_request_id)
+            self.assertNotIn("persistence_error", constants.ONLINE_REFRESH_STATE)
 
     def test_original_refresh_replays_terminal_receipt_before_reading_changed_inputs(self):
         for status in ("已完成", "部分完成", "失败", "结果未知"):
