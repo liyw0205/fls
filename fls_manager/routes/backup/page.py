@@ -766,14 +766,66 @@ setTimeout(function(){{
 </script>
 <script>
 function flsRestorePending(){{
-    const raw=sessionStorage.getItem("fls-backup-restore");
-    return raw ? JSON.parse(raw) : null;
+    let raw;
+    try{{ raw=sessionStorage.getItem("fls-backup-restore"); }}
+    catch(error){{ return {{invalid:true,storage_error:true,message:"无法读取本地恢复状态"}}; }}
+    if(raw===null) return null;
+    let pending;
+    try{{ pending=JSON.parse(raw); }}
+    catch(error){{ return {{invalid:true,raw,message:"本地恢复状态损坏"}}; }}
+    const validId=value=>typeof value==="string"&&/^[a-f0-9]{{32}}$/.test(value);
+    const validItems=Array.isArray(pending&&pending.restore_items)
+        && pending.restore_items.length>0 && pending.restore_items.length<=2
+        && pending.restore_items.every(item=>item==="data"||item==="scripts")
+        && new Set(pending.restore_items).size===pending.restore_items.length;
+    if(!pending||typeof pending!=="object"||Array.isArray(pending)
+        || !validId(pending.restore_request_id) || !validItems
+        || typeof pending.restore_deps!=="boolean"
+        || pending.continue_upload!==undefined&&typeof pending.continue_upload!=="boolean"){{
+        return {{invalid:true,raw,message:"本地恢复状态结构无效"}};
+    }}
+    return pending;
+}}
+
+function flsRestoreLocalRecoveryState(){{
+    const pending=flsRestorePending();
+    let preserved;
+    try{{
+        preserved=sessionStorage.getItem("fls-backup-restore-corrupt");
+    }}catch(error){{ return {{invalid:true,storage_error:true,message:"无法读取本地恢复状态"}}; }}
+    if(pending&&pending.invalid){{
+        return Object.assign({{}},pending,{{
+            recovery_required:preserved!==null,
+            preserved_raw:preserved,
+            primary_raw:pending.storage_error?null:pending.raw,
+            fingerprint:JSON.stringify([pending.raw===undefined?null:pending.raw,preserved]),
+        }});
+    }}
+    if(preserved!==null) return {{invalid:true,raw:preserved,recovery_required:true,preserved_raw:preserved,
+        primary_raw:null,selected:pending,fingerprint:JSON.stringify([preserved,pending&&pending.restore_request_id||null])}};
+    return pending;
+}}
+
+function flsPreserveRestoreCorruptRaw(local){{
+    let existing;
+    try{{
+        existing=sessionStorage.getItem("fls-backup-restore-corrupt");
+        const raw=existing!==null&&local.primary_raw!==null&&local.primary_raw!==undefined&&local.primary_raw!==existing
+            ? JSON.stringify({{primary:local.primary_raw,preserved:existing}})
+            : existing===null ? local.raw : existing;
+        if(existing===null||raw!==existing) sessionStorage.setItem("fls-backup-restore-corrupt",raw);
+        if(sessionStorage.getItem("fls-backup-restore-corrupt")!==raw) throw new Error("损坏状态保留校验失败");
+    }}catch(error){{ throw new Error("无法保留原损坏状态："+String(error)); }}
 }}
 
 function flsRestoreRecovery(message, payload){{
     const box=document.getElementById("backupRestoreRecovery");
     if(!box) return;
-    let html="<p>"+flsEscapeHtml(message)+"</p><button class='btn btn-primary' type='button' onclick='flsQueryRestoreRequest(this)'>查询原恢复请求</button> ";
+    const local=flsRestoreLocalRecoveryState();
+    const locked=!!(local&&local.invalid);
+    let html="<p>"+flsEscapeHtml(message)+"</p>";
+    if(locked) html+="<button class='btn btn-primary' type='button' onclick='flsCheckRestoreHistory(this,0)'>核对恢复历史</button> ";
+    if(!locked) html+="<button class='btn btn-primary' type='button' onclick='flsQueryRestoreRequest(this)'>查询原恢复请求</button> ";
     if(payload && payload.error) html+="<pre class='section backup-restore-diagnostic' style='white-space:pre-wrap;overflow-wrap:anywhere;'>"+flsEscapeHtml(payload.error)+"</pre> ";
     if(payload && payload.scheduler_error) html+="<pre class='section backup-restore-diagnostic' style='white-space:pre-wrap;overflow-wrap:anywhere;'>"+flsEscapeHtml(payload.scheduler_error)+"</pre> ";
     if(payload && payload.scheduler_reload_required){{
@@ -783,13 +835,170 @@ function flsRestoreRecovery(message, payload){{
     if(payload && (payload.state==='received' || payload.state==='failed')){{
         html+="<button class='btn btn-orange' type='button' onclick='flsContinueRestoreRequest(this)'>选择原文件继续恢复</button> ";
     }}
-    html+="<button class='btn btn-gray' type='button' onclick='flsResetRestoreRequest()'>核对后开始新的恢复</button> <a class='btn btn-gray' href='/login?next=%2Fbackup'>重新登录</a>";
+    const verification=window.flsRestoreHistoryVerification;
+    if(locked&&!local.storage_error&&verification&&verification.fingerprint===local.fingerprint&&verification.complete&&verification.safe)
+        html+="<button class='btn btn-orange' type='button' onclick='flsClearInvalidRestoreState()'>确认清理已核对状态</button> ";
+    if(!locked) html+="<button class='btn btn-gray' type='button' onclick='flsResetRestoreRequest()'>核对后开始新的恢复</button> ";
+    html+="<a class='btn btn-gray' href='/login?next=%2Fbackup'>重新登录</a>";
+    if(locked) html+="<div id='backupRestoreHistoryItems' class='backup-restore-history'></div>";
     box.innerHTML=html;
+    if(locked) flsRenderRestoreHistory();
+}}
+
+function flsRestoreHistoryItemValid(item){{
+    return !!item&&typeof item==="object"&&!Array.isArray(item)
+        &&typeof item.request_id==="string"&&/^[a-f0-9]{{32}}$/.test(item.request_id)
+        &&["received","committing","restored","failed","unknown"].includes(item.state)
+        &&typeof item.filename==="string"
+        &&Array.isArray(item.restored_items)&&item.restored_items.length>0
+        &&item.restored_items.length<=2&&item.restored_items.every(value=>value==="data"||value==="scripts")
+        &&new Set(item.restored_items).size===item.restored_items.length
+        &&typeof item.restore_deps==="boolean"
+        &&typeof item.scheduler_reload_required==="boolean"
+        &&typeof item.dependencies_failed==="boolean"
+        &&typeof item.restore_outcome_unknown==="boolean"
+        &&typeof item.resolved==="boolean";
+}}
+
+function flsRenderRestoreHistory(){{
+    const target=document.getElementById("backupRestoreHistoryItems");
+    const verification=window.flsRestoreHistoryVerification;
+    const local=flsRestoreLocalRecoveryState();
+    if(!target||!verification||!local||verification.fingerprint!==local.fingerprint) return;
+    target.replaceChildren();
+    const summary=document.createElement("p");
+    summary.textContent=verification.error||(
+        verification.complete
+            ? "已核对全部 "+verification.items.length+" 条恢复回执。"
+            : "已读取 "+verification.items.length+" / "+verification.total+" 条恢复回执。"
+    );
+    target.appendChild(summary);
+    verification.items.forEach(item=>{{
+        const row=document.createElement("div");
+        const text=document.createElement("span");
+        text.textContent=item.filename+" | "+item.state+" | "+item.request_id;
+        row.appendChild(text);
+        const inspect=document.createElement("button");
+        inspect.type="button";inspect.className="btn btn-gray";inspect.textContent="核对此请求";
+        inspect.addEventListener("click",()=>flsQueryRestoreHistoryRequest(item.request_id,inspect));
+        row.appendChild(inspect);target.appendChild(row);
+    }});
+    if(verification.has_more){{
+        const next=document.createElement("button");
+        next.type="button";next.className="btn btn-gray";next.textContent="继续核对历史";
+        next.addEventListener("click",()=>flsCheckRestoreHistory(next,verification.items.length));
+        target.appendChild(next);
+    }}
+}}
+
+async function flsCheckRestoreHistory(source, offset){{
+    const local=flsRestoreLocalRecoveryState();
+    if(!local||!local.invalid){{
+        flsRestoreRecovery("本地恢复状态已变化，请重新查询。",{{}});return;
+    }}
+    const existing=window.flsRestoreHistoryVerification;
+    if(offset>0&&(!existing||existing.fingerprint!==local.fingerprint||existing.items.length!==offset)){{
+        flsRestoreRecovery("本地恢复状态或历史分页已变化，请从第一页重新核对。",{{}});return;
+    }}
+    if(source&&!flsMarkButtonBusy(source,"核对中...")) return;
+    if(offset===0) window.flsRestoreHistoryVerification={{fingerprint:local.fingerprint,items:[],total:null,has_more:true,complete:false,safe:false,error:""}};
+    try{{
+        const response=await fetch("/api/backup/restore-history?limit=100&offset="+offset,{{cache:"no-store",credentials:"same-origin"}});
+        const json=await flsReadJsonResponse(response);
+        if(!json||json.ok!==true||!Array.isArray(json.items)||!Number.isInteger(json.total)||json.total<0
+            ||json.offset!==offset||json.limit!==100||typeof json.has_more!=="boolean"||typeof json.active!=="boolean"
+            ||typeof json.snapshot!=="string"||!/^[a-f0-9]{{64}}$/.test(json.snapshot)
+            ||json.items.some(item=>!flsRestoreHistoryItemValid(item))
+            ||offset+json.items.length>json.total||json.has_more!==(offset+json.items.length<json.total))
+            throw new Error("恢复历史响应无效或分页不完整");
+        const verification=window.flsRestoreHistoryVerification;
+        if(offset>0&&json.snapshot!==verification.snapshot) throw new Error("恢复历史在分页期间发生变化，请从第一页重新核对");
+        verification.items.push(...json.items);verification.total=json.total;verification.has_more=json.has_more;
+        verification.snapshot=json.snapshot;
+        verification.active=json.active;verification.complete=!json.has_more&&verification.items.length===json.total;
+        verification.safe=verification.complete&&!json.active&&verification.items.every(item=>
+            item.state!=="committing"&&item.state!=="unknown"&&!item.restore_outcome_unknown
+            &&!item.scheduler_reload_required&&!item.dependencies_failed);
+        verification.error="";
+        flsRestoreRecovery(verification.safe
+            ?"完整恢复历史中没有运行中、未知或待恢复的目录操作；可确认清理损坏状态。"
+            :verification.complete
+                ?"恢复历史含有尚未完成或结果未知的操作；先核对对应请求，不允许新覆盖。"
+                :"恢复历史尚未完整读取；继续核对后才能清理本地状态。",{{}});
+    }}catch(error){{
+        window.flsRestoreHistoryVerification={{fingerprint:local.fingerprint,items:[],total:null,has_more:false,complete:false,safe:false,
+            error:"恢复历史读取失败："+String(error&&error.message||error)}};
+        flsRestoreRecovery("恢复历史未能完整核实；原始本地状态保留，不能开始新恢复。",{{}});
+    }}finally{{if(source)flsRestoreButton(source);}}
+}}
+
+async function flsQueryRestoreHistoryRequest(requestId, source){{
+    const local=flsRestoreLocalRecoveryState();
+    if(!local||!local.invalid||!(/^[a-f0-9]{{32}}$/).test(String(requestId||""))) return;
+    if(source&&!flsMarkButtonBusy(source,"查询中...")) return;
+    try{{
+        const response=await fetch("/api/backup/restore/"+encodeURIComponent(requestId),{{cache:"no-store",credentials:"same-origin"}});
+        let payload;
+        try{{payload=await flsReadJsonResponse(response);}}
+        catch(error){{payload=error&&error.payload;if(!payload||payload.request_id!==requestId) throw error;}}
+        if(!payload||payload.request_id!==requestId||!Array.isArray(payload.restored_items)
+            ||typeof payload.restore_deps!=="boolean") throw new Error("原恢复回执无效");
+        const current=flsRestoreLocalRecoveryState();
+        if(!current||!current.invalid||current.fingerprint!==local.fingerprint) throw new Error("本地恢复状态已变化");
+        if(!current.storage_error) flsPreserveRestoreCorruptRaw(current);
+        const pending={{restore_request_id:requestId,restore_items:payload.restored_items,restore_deps:payload.restore_deps}};
+        const raw=JSON.stringify(pending);
+        sessionStorage.setItem("fls-backup-restore",raw);
+        if(sessionStorage.getItem("fls-backup-restore")!==raw) throw new Error("原恢复请求保存校验失败");
+        const form=document.querySelector('form[action="/backup/import"]');
+        if(form){{
+            form.elements.restore_request_id.value=requestId;
+            Array.from(form.querySelectorAll('[name="restore_items"]')).forEach(input=>input.checked=payload.restored_items.includes(input.value));
+            form.elements.restore_deps.checked=payload.restore_deps;
+        }}
+        if(payload.resolved){{
+            sessionStorage.removeItem("fls-backup-restore");
+            if(sessionStorage.getItem("fls-backup-restore")!==null) throw new Error("已完成请求状态未能清理");
+            if(form) form.elements.restore_request_id.value=flsNewBackupRequest();
+            flsRestoreRecovery(payload.msg+"；损坏状态仍保留，需完成全部历史核对后才能开始新恢复。",payload);
+        }}else{{
+            flsRestoreRecovery(payload.msg,payload);
+        }}
+    }}catch(error){{
+        flsRestoreRecovery("原恢复请求核对失败："+String(error&&error.message||error)+"。损坏状态仍保留。",{{}});
+    }}finally{{if(source)flsRestoreButton(source);}}
+}}
+
+async function flsClearInvalidRestoreState(){{
+    const local=flsRestoreLocalRecoveryState();
+    const verification=window.flsRestoreHistoryVerification;
+    if(!local||!local.invalid||local.storage_error||!verification||verification.fingerprint!==local.fingerprint
+        ||!verification.complete||!verification.safe){{
+        flsRestoreRecovery("完整恢复历史或本地状态已变化，不能清理。请重新核对。",{{}});return;
+    }}
+    if(!confirm("已读取全部恢复回执，且没有未完成或未知目录操作。确认清理损坏的本地状态并重新选择吗？")) return;
+    try{{
+        const current=flsRestoreLocalRecoveryState();
+        if(!current||!current.invalid||current.storage_error||current.fingerprint!==verification.fingerprint) throw new Error("本地恢复状态已变化");
+        flsPreserveRestoreCorruptRaw(current);
+        sessionStorage.removeItem("fls-backup-restore");
+        if(sessionStorage.getItem("fls-backup-restore")!==null) throw new Error("损坏主状态未能清理");
+        sessionStorage.removeItem("fls-backup-restore-corrupt");
+        if(sessionStorage.getItem("fls-backup-restore-corrupt")!==null) throw new Error("损坏状态备份未能清理");
+        window.flsRestoreHistoryVerification=null;
+        const form=document.querySelector('form[action="/backup/import"]');
+        if(form) form.elements.restore_request_id.value=flsNewBackupRequest();
+        document.getElementById("backupRestoreRecovery").textContent="全部恢复历史已核对，损坏状态已清理。可以重新选择备份文件。";
+    }}catch(error){{
+        flsRestoreRecovery("未能清理损坏状态，原记录仍保留："+String(error&&error.message||error),{{}});
+    }}
 }}
 
 async function flsQueryRestoreRequest(source){{
     const pending=flsRestorePending();
-    if(!pending) return;
+    if(!pending||pending.invalid){{
+        flsRestoreRecovery("原请求标识不可用，请先核对完整恢复历史。",{{}});return;
+    }}
     if(!flsMarkButtonBusy(source, "查询中...")) return;
     try{{
         const res=await fetch("/api/backup/restore/"+encodeURIComponent(pending.restore_request_id),{{cache:"no-store",credentials:"same-origin"}});
@@ -801,8 +1010,11 @@ async function flsQueryRestoreRequest(source){{
         }}
         if(payload.resolved){{
             sessionStorage.removeItem("fls-backup-restore");
+            if(sessionStorage.getItem("fls-backup-restore")!==null) throw new Error("已完成请求状态未能清理");
             document.querySelector('form[action="/backup/import"] [name="restore_request_id"]').value=flsNewBackupRequest();
-            document.getElementById("backupRestoreRecovery").textContent=payload.msg;
+            if(flsRestoreLocalRecoveryState()&&flsRestoreLocalRecoveryState().invalid)
+                flsRestoreRecovery(payload.msg+"；损坏状态仍保留，需完成全部历史核对后才能开始新恢复。",payload);
+            else document.getElementById("backupRestoreRecovery").textContent=payload.msg;
         }}else{{
             flsRestoreRecovery(payload.msg,payload);
         }}
@@ -813,9 +1025,13 @@ async function flsQueryRestoreRequest(source){{
 
 function flsContinueRestoreRequest(source){{
     const pending=flsRestorePending();
-    if(!pending) return;
+    if(!pending||pending.invalid) return;
     pending.continue_upload=true;
-    sessionStorage.setItem("fls-backup-restore",JSON.stringify(pending));
+    const raw=JSON.stringify(pending);
+    try{{
+        sessionStorage.setItem("fls-backup-restore",raw);
+        if(sessionStorage.getItem("fls-backup-restore")!==raw) throw new Error("原恢复请求保存校验失败");
+    }}catch(error){{flsRestoreRecovery("无法保存原恢复请求："+String(error),{{}});return;}}
     const form=document.querySelector('form[action="/backup/import"]');
     form.elements.restore_request_id.value=pending.restore_request_id;
     Array.from(form.querySelectorAll('[name="restore_items"]')).forEach(input=>input.checked=pending.restore_items.includes(input.value));
@@ -825,11 +1041,16 @@ function flsContinueRestoreRequest(source){{
 }}
 
 function flsResetRestoreRequest(){{
+    const local=flsRestoreLocalRecoveryState();
+    if(local&&local.invalid){{flsRestoreRecovery("本地恢复状态尚未核实，请先检查完整恢复历史。",{{}});return;}}
     if(!confirm("已检查任务、脚本和调度器状态，确认开始新的恢复请求吗？")) return;
-    sessionStorage.removeItem("fls-backup-restore");
-    const form=document.querySelector('form[action="/backup/import"]');
-    form.elements.restore_request_id.value=flsNewBackupRequest();
-    document.getElementById("backupRestoreRecovery").textContent="";
+    try{{
+        sessionStorage.removeItem("fls-backup-restore");
+        if(sessionStorage.getItem("fls-backup-restore")!==null) throw new Error("本地恢复状态未能清理");
+        const form=document.querySelector('form[action="/backup/import"]');
+        form.elements.restore_request_id.value=flsNewBackupRequest();
+        document.getElementById("backupRestoreRecovery").textContent="";
+    }}catch(error){{flsRestoreRecovery("本地恢复状态未能清理，不能开始新请求："+String(error),{{}});}}
 }}
 
 async function flsReloadRestoredTasks(source){{
@@ -844,7 +1065,10 @@ async function flsReloadRestoredTasks(source){{
 }}
 
 setTimeout(function(){{
-    if(flsRestorePending()) flsRestoreRecovery("原恢复请求结果未确认，请先查询，避免再次覆盖目录。");
+    const pending=flsRestoreLocalRecoveryState();
+    if(pending) flsRestoreRecovery(pending.invalid
+        ?"本地恢复状态损坏或无法读取；请核对完整恢复历史后再处理，期间不会提交新的目录覆盖。"
+        :"原恢复请求结果未确认，请先查询，避免再次覆盖目录。",{{}});
 }},0);
 </script>
 """

@@ -2451,6 +2451,14 @@ if (document.readyState === "loading") {
 
                 if(url.pathname === "/backup/import" && typeof flsRestorePending === "function"){
                     const previous=flsRestorePending();
+                    const recovery=typeof flsRestoreLocalRecoveryState === "function"
+                        ? flsRestoreLocalRecoveryState() : previous;
+                    if(previous && previous.invalid || recovery && recovery.invalid
+                        && !(previous && previous.continue_upload === true)){
+                        flsRestoreRecovery("本地恢复状态尚未核实；请先核对完整恢复历史，不会提交新的目录覆盖。", {});
+                        setLoading(false);
+                        return;
+                    }
                     if(previous && !previous.continue_upload){
                         flsRestoreRecovery("原恢复请求结果未确认，请先查询原请求。");
                         restoreFormSubmission(form,submitter);setLoading(false);return;
