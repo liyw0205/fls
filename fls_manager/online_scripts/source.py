@@ -156,6 +156,14 @@ class OnlineScriptCacheConflict(RuntimeError):
     pass
 
 
+class TaskLinkHistoryFull(RuntimeError):
+    pass
+
+
+class TaskLinkReceiptMissing(RuntimeError):
+    pass
+
+
 def online_task_link_version(item):
     metadata = {key: value for key, value in (item or {}).items() if key != "task_cron"}
     payload = json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -182,6 +190,10 @@ def _validate_task_link_requests(data):
             raise RuntimeError("在线任务源同步任务指纹损坏，未覆盖原文件")
         if value.get("confirmation") not in ("", "merged", "not_merged"):
             raise RuntimeError("在线任务源同步确认状态损坏，未覆盖原文件")
+        if (type(value.get("archived", False)) is not bool
+                or not isinstance(value.get("archived_at", ""), str)
+                or (value.get("archived") and value.get("state") not in ("failed", "unknown"))):
+            raise RuntimeError("在线任务源同步归档状态损坏，未覆盖原文件")
     return data
 
 
@@ -192,6 +204,8 @@ def _task_link_request_snapshot(info):
         "published_tasks_fingerprint", "confirmation", "confirmation_fingerprint",
     )
     snapshot = {field: info.get(field, 0 if field in ("added", "total") else "") for field in fields}
+    snapshot["archived"] = info.get("archived", False)
+    snapshot["archived_at"] = info.get("archived_at", "")
     if type(snapshot["added"]) is not int or type(snapshot["total"]) is not int:
         raise RuntimeError("在线任务源同步回执计数损坏，未覆盖原文件")
     for field in ("expected_tasks_fingerprint", "published_tasks_fingerprint", "confirmation_fingerprint"):
@@ -199,7 +213,23 @@ def _task_link_request_snapshot(info):
             raise RuntimeError("在线任务源同步任务指纹损坏，未覆盖原文件")
     if snapshot["confirmation"] not in ("", "merged", "not_merged"):
         raise RuntimeError("在线任务源同步确认状态损坏，未覆盖原文件")
+    _validate_task_link_requests({snapshot["request_id"]: snapshot})
     return snapshot
+
+
+def _task_link_needs_recovery(value):
+    return (value.get("request_id") in ONLINE_TASK_LINK_ACTIVE
+            or (not value.get("archived") and value.get("state") != "completed"))
+
+
+def _prune_task_link_requests(records, current_id, *, capacity=200):
+    protected = {key for key, value in records.items() if _task_link_needs_recovery(value)}
+    protected.add(current_id)
+    if len(protected) > capacity:
+        raise TaskLinkHistoryFull("待恢复的同步请求已达上限，请先处理或归档原请求；未接受新的同步请求。")
+    ordered = sorted(records, key=lambda key: str(records[key].get("updated_at") or ""), reverse=True)
+    retained = protected | set([key for key in ordered if key not in protected][:capacity - len(protected)])
+    return {key: records[key] for key in ordered if key in retained}
 
 
 def online_script_task_fingerprint(item):
@@ -208,13 +238,34 @@ def online_script_task_fingerprint(item):
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _recover_task_link_request(value):
+    if value.get("request_id") in ONLINE_TASK_LINK_ACTIVE:
+        return False
+    state = value.get("state")
+    if state not in ("prepared", "running"):
+        return False
+    value["state"] = "failed" if state == "prepared" else "unknown"
+    value["error"] = (
+        "同步准备阶段已中断，未发起外部请求，可继续原同步请求"
+        + ("；原诊断：" + value["error"] if value.get("error") else "")
+        if state == "prepared"
+        else "面板重启或请求中断后无法确认任务是否已合并，请核对当前任务列表"
+    )
+    value["updated_at"] = now_str()
+    return True
+
+
 def get_task_link_request(request_id, *, script_id=None, proxy_id=None):
     if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
         return None
     with storage_transaction():
+        if ONLINE_TASK_LINK_REQUESTS_FILE.is_symlink():
+            raise RuntimeError("在线任务源同步回执不能是符号链接，未覆盖原文件")
         try:
             raw = ONLINE_TASK_LINK_REQUESTS_FILE.read_text(encoding="utf-8")
         except FileNotFoundError:
+            if request_id in ONLINE_TASK_LINK_ACTIVE:
+                raise TaskLinkReceiptMissing("原同步请求仍在处理中，但回执暂时缺失；请重新查询，不能重新提交。")
             return None
         try:
             data = _validate_task_link_requests(json.loads(raw))
@@ -222,21 +273,21 @@ def get_task_link_request(request_id, *, script_id=None, proxy_id=None):
             raise RuntimeError(f"在线任务源同步回执损坏，未覆盖原文件：{exc}") from exc
         value = data.get(request_id)
         if not isinstance(value, dict):
+            if request_id in ONLINE_TASK_LINK_ACTIVE:
+                raise TaskLinkReceiptMissing("原同步请求仍在处理中，但回执暂时缺失；请重新查询，不能重新提交。")
             return None
         value = dict(value)
         if ((script_id is not None and value.get("script_id") != script_id)
                 or (proxy_id is not None and value.get("proxy_id") != proxy_id)):
             return value
-        if value.get("state") == "running" and request_id not in ONLINE_TASK_LINK_ACTIVE:
-            value["state"] = "unknown"
-            value["error"] = "面板重启或请求中断后无法确认任务是否已合并，请核对当前任务列表"
-            value["updated_at"] = now_str()
+        if _recover_task_link_request(value):
             data[request_id] = _task_link_request_snapshot(value)
             mutate_json(ONLINE_TASK_LINK_REQUESTS_FILE, {}, lambda _: data, strict=True)
+        value["active"] = request_id in ONLINE_TASK_LINK_ACTIVE
         return value
 
 
-def list_task_link_requests(limit=50, script_id=""):
+def list_task_link_requests(limit=50, script_id="", *, recovery=False, offset=0, with_pagination=False):
     """Return bounded, newest-first task-link receipts without creating records."""
     try:
         limit = int(limit)
@@ -244,33 +295,41 @@ def list_task_link_requests(limit=50, script_id=""):
         raise ValueError("在线任务源历史数量无效") from exc
     if not 1 <= limit <= 100:
         raise ValueError("在线任务源历史数量必须在 1 到 100 之间")
+    try:
+        offset = int(offset)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("在线任务源历史起始位置无效") from exc
+    if not 0 <= offset <= 200:
+        raise ValueError("在线任务源历史起始位置必须在 0 到 200 之间")
     script_id = str(script_id or "").strip()
     with storage_transaction():
+        if ONLINE_TASK_LINK_REQUESTS_FILE.is_symlink():
+            raise RuntimeError("在线任务源同步回执不能是符号链接，未覆盖原文件")
         try:
             raw = ONLINE_TASK_LINK_REQUESTS_FILE.read_text(encoding="utf-8")
         except FileNotFoundError:
-            return []
+            raw = "{}"
         try:
             records = _validate_task_link_requests(json.loads(raw))
         except (TypeError, ValueError) as exc:
             raise RuntimeError(f"在线任务源同步回执损坏，未覆盖原文件：{exc}") from exc
         changed = False
         for request_id, value in records.items():
-            if value.get("state") == "running" and request_id not in ONLINE_TASK_LINK_ACTIVE:
-                value = dict(value)
-                value["state"] = "unknown"
-                value["error"] = "面板重启或请求中断后无法确认任务是否已合并，请核对当前任务列表"
-                value["updated_at"] = now_str()
+            value = dict(value)
+            if _recover_task_link_request(value):
                 records[request_id] = _task_link_request_snapshot(value)
                 changed = True
         if changed:
             mutate_json(ONLINE_TASK_LINK_REQUESTS_FILE, {}, lambda _: records, strict=True)
-        items = [dict(value) for value in records.values() if not script_id or value.get("script_id") == script_id]
+        items = [{**value, "active": value.get("request_id") in ONLINE_TASK_LINK_ACTIVE}
+                 for value in records.values() if (not script_id or value.get("script_id") == script_id)
+                 and (not recovery or _task_link_needs_recovery(value))]
         items.sort(key=lambda value: str(value.get("updated_at") or ""), reverse=True)
-        result = []
-        for value in items[:limit]:
-            result.append(value)
-        return result
+        page = items[offset:offset + limit]
+        if with_pagination:
+            return {"items": page, "total": len(items), "offset": offset, "limit": limit,
+                    "has_more": offset + limit < len(items)}
+        return page
 
 
 def persist_task_link_request(info):
@@ -284,19 +343,16 @@ def persist_task_link_request(info):
 
         def update(data):
             records = _validate_task_link_requests(data)
+            existed = request_id in records
             records[request_id] = snapshot
-            ordered = sorted(
-                records.items(),
-                key=lambda pair: str(pair[1].get("updated_at") or ""),
-                reverse=True,
-            )
-            return dict(ordered[:200])
+            capacity = 200 if existed else 200 - len(ONLINE_TASK_LINK_ACTIVE - records.keys())
+            return _prune_task_link_requests(records, request_id, capacity=capacity)
 
         mutate_json(ONLINE_TASK_LINK_REQUESTS_FILE, {}, update, strict=True)
 
 
 def claim_task_link_request(info):
-    """Atomically reserve a request id before making the external request."""
+    """Reserve and mark a live request before releasing the storage lock."""
     snapshot = _task_link_request_snapshot(info)
     request_id = snapshot["request_id"]
     if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
@@ -310,14 +366,17 @@ def claim_task_link_request(info):
         def update(data):
             records = _validate_task_link_requests(data)
             current = records.get(request_id)
-            if current and current.get("state") != "failed":
-                observed["value"] = dict(current)
-                return records
+            if not current and request_id in ONLINE_TASK_LINK_ACTIVE:
+                raise TaskLinkReceiptMissing("原同步请求仍在处理中，但回执暂时缺失；请重新查询，不能重新提交。")
+            if current and (current.get("state") != "failed" or current.get("archived")
+                            or request_id in ONLINE_TASK_LINK_ACTIVE):
+                observed["value"] = {**current, "active": request_id in ONLINE_TASK_LINK_ACTIVE}
+                return None
             if current and any(current.get(field) != snapshot.get(field) for field in (
                 "script_id", "proxy_id", "expected_version",
             )):
                 observed["value"] = dict(current)
-                return records
+                return None
             if current and current.get("confirmation") == "not_merged":
                 try:
                     current_item = next((item for item in load_online_script_cache()
@@ -335,14 +394,12 @@ def claim_task_link_request(info):
                     return None
             records[request_id] = snapshot
             observed["value"] = None
-            ordered = sorted(
-                records.items(),
-                key=lambda pair: str(pair[1].get("updated_at") or ""),
-                reverse=True,
-            )
-            return dict(ordered[:200])
+            capacity = 200 if current else 200 - len(ONLINE_TASK_LINK_ACTIVE - records.keys())
+            return _prune_task_link_requests(records, request_id, capacity=capacity)
 
         mutate_json(ONLINE_TASK_LINK_REQUESTS_FILE, {}, update, strict=True)
+        if observed.get("value") is None:
+            ONLINE_TASK_LINK_ACTIVE.add(request_id)
     return observed.get("value")
 
 

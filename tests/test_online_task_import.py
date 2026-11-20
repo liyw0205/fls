@@ -39,6 +39,224 @@ class OnlineTaskImportConcurrencyTests(unittest.TestCase):
             "task_cron": [{"name": task_name, "command": f"task {script_id}"}],
         }
 
+    def import_record(self, item, request_id="a" * 32, state="prepared"):
+        from fls_manager.online_scripts import source, tasks
+
+        normalized = source.normalize_online_scripts([item])[0]
+        return {
+            "request_id": request_id, "script_id": normalized["id"],
+            "expected_version": tasks.online_task_import_version(normalized),
+            "selected_task_indexes": ["1"], "enable_task": False, "state": state,
+            "message": "original preparation diagnosis", "scheduler_reload_error": "", "updated_at": "old",
+        }
+
+    def test_orphaned_prepared_import_recovers_original_selection_via_api_history_and_form(self):
+        for entry in ("status", "history", "form"):
+            with self.subTest(entry=entry), isolated_app() as (app, _base_dir):
+                from fls_manager.models import load_tasks
+                from fls_manager.online_scripts import constants, source, tasks
+
+                item, request_id = self.task_item("demo", "Daily"), "a" * 32
+                source.save_online_script_cache([item])
+                constants.persist_online_task_import_request(self.import_record(item, request_id))
+                client, headers = app.test_client(), {"X-Token": TOKEN}
+                url = {"status": "/api/online-scripts/import-tasks-status/" + request_id,
+                       "history": "/api/online-scripts/import-tasks-history",
+                       "form": "/online-scripts/import-tasks-status/" + request_id}[entry]
+                with patch.object(tasks, "reload_scheduler") as reload:
+                    response = client.get(url, headers=headers)
+                    self.assertEqual(response.status_code, 200)
+                    record = constants.get_online_task_import_request(request_id)
+                    self.assertEqual(record["state"], "failed")
+                    self.assertIn("未写入任务", record["message"])
+                    self.assertIn("original preparation diagnosis", record["message"])
+                    self.assertEqual(record["selected_task_indexes"], ["1"])
+                    self.assertEqual(load_tasks(), [])
+                    reload.assert_not_called()
+                    page = client.get("/online-scripts/import-tasks-status/" + request_id, headers=headers).get_data(as_text=True)
+                    self.assertIn("继续原导入请求", page)
+                    self.assertIn('name="task_indexes" value="1"', page)
+                    form = {"request_id": request_id, "task_indexes": "1"}
+                    self.assertEqual(client.post("/online-scripts/import-tasks/demo", data=form, headers=headers).status_code, 302)
+                    self.assertEqual(client.post("/api/online-scripts/import-tasks/demo", json=form, headers=headers).status_code, 200)
+                    self.assertEqual(len(load_tasks()), 1)
+                    reload.assert_called_once()
+                self.assertNotIn(request_id, constants.ONLINE_TASK_IMPORT_ACTIVE)
+
+    def test_claimed_prepared_import_remains_active_during_queries_and_concurrent_submit(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.models import load_tasks
+            from fls_manager.online_scripts import constants, source, tasks
+            from fls_manager.routes.online_scripts import install_select
+
+            item, request_id = self.task_item("demo", "Daily"), "a" * 32
+            source.save_online_script_cache([item])
+            real_claim = install_select.claim_online_task_import_request
+            entered, release = threading.Event(), threading.Event()
+            responses = []
+
+            def claim(record):
+                result = real_claim(record)
+                entered.set()
+                if not release.wait(5):
+                    raise TimeoutError("test did not release prepared import")
+                return result
+
+            data, headers = {"request_id": request_id, "task_indexes": ["1"]}, {"X-Token": TOKEN}
+            with patch.object(install_select, "claim_online_task_import_request", side_effect=claim), patch.object(tasks, "reload_scheduler") as reload:
+                worker = threading.Thread(target=lambda: responses.append(app.test_client().post("/api/online-scripts/import-tasks/demo", json=data, headers=headers)))
+                worker.start()
+                try:
+                    self.assertTrue(entered.wait(5))
+                    self.assertIn(request_id, constants.ONLINE_TASK_IMPORT_ACTIVE)
+                    before = constants.ONLINE_TASK_IMPORT_REQUESTS_FILE.read_bytes()
+                    client = app.test_client()
+                    for url in ("/api/online-scripts/import-tasks-status/" + request_id, "/api/online-scripts/import-tasks-history"):
+                        response = client.get(url, headers=headers)
+                        record = response.json if "status/" in url else response.json["items"][0]
+                        self.assertEqual(record["state"], "prepared")
+                        self.assertTrue(record["active"])
+                    self.assertEqual(client.post("/api/online-scripts/import-tasks/demo", json=data, headers=headers).status_code, 409)
+                    self.assertEqual(constants.ONLINE_TASK_IMPORT_REQUESTS_FILE.read_bytes(), before)
+                    self.assertEqual(load_tasks(), [])
+                finally:
+                    release.set()
+                    worker.join(timeout=5)
+                    self.assertFalse(worker.is_alive())
+                self.assertEqual(responses[0].status_code, 200)
+                self.assertEqual(len(load_tasks()), 1)
+                reload.assert_called_once()
+            self.assertNotIn(request_id, constants.ONLINE_TASK_IMPORT_ACTIVE)
+
+    def test_running_receipt_failure_before_task_write_recovers_same_import_without_duplicate_tasks(self):
+        for after in (False, True):
+            with self.subTest(after=after), isolated_app() as (app, _base_dir):
+                from fls_manager.models import load_tasks
+                from fls_manager.online_scripts import constants, source, tasks
+                from fls_manager.routes.online_scripts import install_select
+
+                item, request_id = self.task_item("demo", "Daily"), "a" * 32
+                source.save_online_script_cache([item])
+                original = install_select.persist_online_task_import_request
+
+                def persist(record):
+                    if record["state"] == "running":
+                        if after:
+                            original(record)
+                        raise OSError("startup receipt unavailable")
+                    return original(record)
+
+                client, headers = app.test_client(), {"X-Token": TOKEN}
+                data = {"request_id": request_id, "task_indexes": ["1"]}
+                with patch.object(install_select, "persist_online_task_import_request", side_effect=persist), patch.object(tasks, "reload_scheduler") as reload:
+                    failed = client.post("/api/online-scripts/import-tasks/demo", json=data, headers=headers)
+                    self.assertEqual(failed.status_code, 500)
+                    self.assertIn("未写入任务", failed.json["msg"])
+                    self.assertTrue(failed.json["retry_allowed"])
+                    self.assertEqual(load_tasks(), [])
+                    self.assertEqual(constants.get_online_task_import_request(request_id)["state"], "failed")
+                    reload.assert_not_called()
+                self.assertNotIn(request_id, constants.ONLINE_TASK_IMPORT_ACTIVE)
+                with patch.object(tasks, "reload_scheduler") as reload:
+                    self.assertEqual(client.post("/api/online-scripts/import-tasks/demo", json=data, headers=headers).status_code, 200)
+                    self.assertTrue(client.post("/api/online-scripts/import-tasks/demo", json=data, headers=headers).json["replayed"])
+                    reload.assert_called_once()
+                    self.assertEqual(len(load_tasks()), 1)
+
+    def test_import_prepared_recovery_preserves_binding_auth_csrf_and_invalid_selection_boundaries(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.models import load_tasks
+            from fls_manager.online_scripts import constants, source, tasks
+
+            item, request_id = self.task_item("demo", "Daily"), "a" * 32
+            item["task_cron"].append({"name": "Second", "command": "echo second"})
+            source.save_online_script_cache([item, self.task_item("other", "Other")])
+            constants.persist_online_task_import_request(self.import_record(item, request_id))
+            before = constants.ONLINE_TASK_IMPORT_REQUESTS_FILE.read_bytes()
+            client = app.test_client()
+            data = {"request_id": request_id, "task_indexes": ["1"]}
+            with client.session_transaction() as session:
+                session.update(token=TOKEN, token_expire_at=int(time.time()) + 3600,
+                               security_verified=True, csrf_token="import-startup-csrf")
+            with patch.object(tasks, "import_task_if_needed") as importer, patch.object(tasks, "reload_scheduler") as reload, patch("fls_manager.app.dispatch_frontend_open_event"):
+                for indexes in (["0"], ["999"], ["bad"], []):
+                    failed = client.post("/api/online-scripts/import-tasks/demo", json=dict(data, task_indexes=indexes), headers={"X-CSRF-Token": "import-startup-csrf"})
+                    self.assertEqual(failed.status_code, 400)
+                for script_id, extra in (("other", {}), ("demo", {"task_indexes": ["2"]}), ("demo", {"enable_task": True})):
+                    failed = client.post("/api/online-scripts/import-tasks/" + script_id, json=dict(data, **extra), headers={"X-CSRF-Token": "import-startup-csrf"})
+                    self.assertEqual(failed.status_code, 409)
+                for csrf in ("", "wrong"):
+                    self.assertEqual(client.post("/api/online-scripts/import-tasks/demo", json=data, headers={"X-CSRF-Token": csrf}).status_code, 400)
+                with client.session_transaction() as session:
+                    session["token_expire_at"] = 1
+                self.assertEqual(client.post("/api/online-scripts/import-tasks/demo", json=data, headers={"X-CSRF-Token": "import-startup-csrf"}).status_code, 401)
+                self.assertEqual(constants.ONLINE_TASK_IMPORT_REQUESTS_FILE.read_bytes(), before)
+                self.assertEqual(load_tasks(), [])
+                importer.assert_not_called()
+                reload.assert_not_called()
+                with client.session_transaction() as session:
+                    session.update(token=TOKEN, token_expire_at=int(time.time()) + 3600,
+                                   security_verified=True, csrf_token="import-startup-csrf")
+                self.assertEqual(client.get("/api/online-scripts/import-tasks-status/" + request_id).json["state"], "failed")
+
+    def test_import_source_recheck_and_failure_receipt_faults_release_claim_and_keep_real_startup_state(self):
+        for recheck in (False, True):
+            for after in (False, True):
+                with self.subTest(recheck=recheck, after=after), isolated_app() as (app, _base_dir):
+                    from fls_manager.models import load_tasks
+                    from fls_manager.online_scripts import constants, source, tasks
+                    from fls_manager.routes.online_scripts import install_select
+
+                    item, request_id = self.task_item("demo", "Daily"), "a" * 32
+                    source.save_online_script_cache([item])
+                    normalized = source.load_online_script_cache()[0]
+                    real_persist = install_select.persist_online_task_import_request
+
+                    def fail_receipts(record):
+                        if after and (record["state"] == "running" or recheck):
+                            real_persist(record)
+                        raise OSError("startup and recovery receipts unavailable")
+
+                    gets = [normalized, OSError("source recheck unavailable")] if recheck else [normalized, normalized]
+                    client, headers = app.test_client(), {"X-Token": TOKEN}
+                    data = {"request_id": request_id, "task_indexes": ["1"]}
+                    with patch.object(install_select, "get_online_script", side_effect=gets), patch.object(install_select, "persist_online_task_import_request", side_effect=fail_receipts), patch.object(install_select, "import_task_if_needed") as importer:
+                        failed = client.post("/api/online-scripts/import-tasks/demo", json=data, headers=headers)
+                        self.assertEqual(failed.status_code, 503)
+                        self.assertFalse(failed.json["retry_allowed"])
+                        self.assertNotIn(request_id, constants.ONLINE_TASK_IMPORT_ACTIVE)
+                        self.assertEqual(load_tasks(), [])
+                        importer.assert_not_called()
+                    status = client.get("/api/online-scripts/import-tasks-status/" + request_id, headers=headers)
+                    expected = "unknown" if after and not recheck else "failed"
+                    self.assertEqual(status.json["state"], expected)
+                    with patch.object(tasks, "reload_scheduler") as reload:
+                        retried = client.post("/api/online-scripts/import-tasks/demo", json=data, headers=headers)
+                        self.assertEqual(retried.status_code, 409 if expected == "unknown" else 200)
+                        self.assertEqual(reload.call_count, 0 if expected == "unknown" else 1)
+
+    def test_import_prepared_symlink_or_corrupt_receipts_do_not_recover_or_overwrite(self):
+        for kind in ("symlink", "corrupt"):
+            with self.subTest(kind=kind), isolated_app() as (app, base_dir):
+                from fls_manager.online_scripts import constants, source
+
+                item, request_id = self.task_item("demo", "Daily"), "a" * 32
+                source.save_online_script_cache([item])
+                path = constants.ONLINE_TASK_IMPORT_REQUESTS_FILE
+                if kind == "symlink":
+                    target = base_dir / "original.json"
+                    target.write_text(json.dumps({request_id: self.import_record(item, request_id)}), encoding="utf-8")
+                    path.symlink_to(target)
+                else:
+                    path.write_text("corrupt", encoding="utf-8")
+                before = path.read_bytes()
+                client, headers = app.test_client(), {"X-Token": TOKEN}
+                for url in ("/api/online-scripts/import-tasks-status/" + request_id, "/api/online-scripts/import-tasks-history", "/online-scripts/import-tasks-status/" + request_id):
+                    failed = client.get(url, headers=headers)
+                    self.assertEqual(failed.status_code, 500)
+                    self.assertEqual(path.read_bytes(), before)
+                self.assertNotIn(request_id, constants.ONLINE_TASK_IMPORT_ACTIVE)
+
     def test_concurrent_same_script_import_is_idempotent(self):
         with isolated_app() as (_app, base_dir):
             from fls_manager.models import load_tasks

@@ -183,10 +183,11 @@ const elements = {
 const storage = {data:{}, get value(){return this.getItem('fls-online-refresh-request');},
   set value(value){this.setItem('fls-online-refresh-request', value);},
   getItem(key){return this.data[key] || null;}, setItem(key,value){this.data[key]=value;}, removeItem(key){delete this.data[key];}};
+let submitHandlers=0;
 const context = {
   window: {},
   location: {pathname: '/online-scripts', search: ''},
-  document: {getElementById: id => elements[id], querySelectorAll: () => [], addEventListener: () => {}},
+  document: {getElementById: id => elements[id], querySelectorAll: () => [], addEventListener: name => {if(name==='submit') submitHandlers++;}},
   sessionStorage: storage,
   flsGetCsrfToken: () => 'refresh-repair-csrf',
   flsResponseErrorDiagnostic: (_response, body) => ({payload: null, message: body}),
@@ -357,6 +358,21 @@ setImmediate(async () => {
   await lateRepair;
   assert.equal(elements.onlineRefreshStatusText.textContent,'new request');
   assert.equal(JSON.parse(storage.value).request_id,'5'.repeat(32));
+  let finishOldQuery;
+  context.fetch=async()=>new Promise(resolve=>{finishOldQuery=resolve;});
+  const oldPageQuery=elements.onlineRefreshQuery.onclick();
+  context.fetch=async url=>({ok:true,status:200,json:async()=>url.includes('refresh-history')
+    ? {ok:true,items:[]}
+    : {id:'4'.repeat(32),request_id:'5'.repeat(32),running:false,status:'结果未知',error:'current page diagnosis'}});
+  vm.runInContext(input.script,context);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(submitHandlers,5);
+  assert.match(elements.onlineRefreshStatusText.innerHTML,/current page diagnosis/);
+  const currentPageText=elements.onlineRefreshStatusText.innerHTML;
+  finishOldQuery({ok:true,status:200,json:async()=>({id:'4'.repeat(32),request_id:'5'.repeat(32),running:true,status:'运行中',error:'stale page diagnosis'})});
+  await oldPageQuery;
+  assert.equal(elements.onlineRefreshStatusText.innerHTML,currentPageText);
+  assert.equal(elements.onlineRefreshQuery.disabled,false);
   console.log('partial refresh retry action passed');
 });
 '''],
