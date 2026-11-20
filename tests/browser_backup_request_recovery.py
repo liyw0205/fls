@@ -38,6 +38,7 @@ def main():
         release = threading.Event()
         release.set()
         persist, receipt, worker = backup.persist_backup_job, actions.write_json, backup._create_backup_worker
+        write_archive_index = restore._write_restore_archive_index_file
         extracted_limit = backup.MAX_BACKUP_EXTRACTED_BYTES
         reload, commit = scheduler._reload_scheduler_locked, restore._commit_restore_directories
         restore_receipt = restore._save_restore_request
@@ -166,6 +167,7 @@ def main():
                         for path in restore.BACKUP_RESTORE_REQUESTS_DIR.glob("*.json"):
                             path.unlink(missing_ok=True)
                         (backup.BACKUP_RESTORE_REQUESTS_DIR / ".archive").unlink(missing_ok=True)
+                        (backup.BACKUP_RESTORE_REQUESTS_DIR / ".archive.bak").unlink(missing_ok=True)
                 if fault.get("seed_archive_candidate"):
                     request_id = "0" * 32
                     record = {
@@ -183,6 +185,21 @@ def main():
                     }
                     backup.write_json(restore._restore_request_path(request_id), record)
                     restore.RESTORE_RECEIPT_DETAIL_LIMIT = 1
+                if fault.get("corrupt_archive_index"):
+                    mode = fault["corrupt_archive_index"]
+                    paths = ([restore._restore_archive_index_path(), restore._restore_archive_backup_path()]
+                             if mode == "both" else [restore._restore_archive_backup_path() if mode == "backup"
+                                                      else restore._restore_archive_index_path()])
+                    for path in paths:
+                        path.write_text("{broken index", encoding="utf-8")
+                if fault.get("fail_index_repair"):
+                    def fail_index_repair(path, index):
+                        if path in (restore._restore_archive_index_path(), restore._restore_archive_backup_path()):
+                            raise OSError("fixture archive index repair unavailable")
+                        return write_archive_index(path, index)
+                    restore._write_restore_archive_index_file = fail_index_repair
+                else:
+                    restore._write_restore_archive_index_file = write_archive_index
                 if fault.get("atomic_block"):
                     archive_paused.clear()
                     archive_release.clear()
@@ -270,7 +287,7 @@ def main():
         env = dict(os.environ, FLS_UI_BASE=f"http://127.0.0.1:{server.server_port}", FLS_UI_TOKEN=TOKEN,
                    FLS_PLAYWRIGHT_CORE=str(playwright), FLS_CHROMIUM=str(chromium), FLS_RESTORE_ARCHIVE=base64.b64encode(archive.getvalue()).decode())
         try:
-            script = ATOMIC_SCRIPT if os.environ.get("FLS_BACKUP_ATOMIC") else ROLLBACK_SCRIPT if os.environ.get("FLS_BACKUP_ROLLBACK_RECOVERY") else LIMIT_SCRIPT if os.environ.get("FLS_BACKUP_LIMIT_RECOVERY") else CANCEL_SCRIPT if os.environ.get("FLS_BACKUP_CANCEL") else IDENTITY_SCRIPT if os.environ.get("FLS_RESTORE_IDENTITY") else LOCAL_RESTORE_STATE_SCRIPT if os.environ.get("FLS_BACKUP_RESTORE_LOCAL_STATE") else RESTORE_SCRIPT if os.environ.get("FLS_BACKUP_RESTORE") else SCRIPT
+            script = ARCHIVE_INDEX_SCRIPT if os.environ.get("FLS_BACKUP_ARCHIVE_INDEX") else ATOMIC_SCRIPT if os.environ.get("FLS_BACKUP_ATOMIC") else ROLLBACK_SCRIPT if os.environ.get("FLS_BACKUP_ROLLBACK_RECOVERY") else LIMIT_SCRIPT if os.environ.get("FLS_BACKUP_LIMIT_RECOVERY") else CANCEL_SCRIPT if os.environ.get("FLS_BACKUP_CANCEL") else IDENTITY_SCRIPT if os.environ.get("FLS_RESTORE_IDENTITY") else LOCAL_RESTORE_STATE_SCRIPT if os.environ.get("FLS_BACKUP_RESTORE_LOCAL_STATE") else RESTORE_SCRIPT if os.environ.get("FLS_BACKUP_RESTORE") else SCRIPT
             result = subprocess.run(["node", "-e", script], env=env, timeout=180)
             if result.returncode:
                 raise SystemExit(result.returncode)
@@ -280,6 +297,61 @@ def main():
             tarfile.TarFile.add = add_archive
             server.shutdown()
             scheduler.scheduler.shutdown(wait=False)
+
+
+ARCHIVE_INDEX_SCRIPT = r'''
+const assert=require('node:assert/strict');
+const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
+(async()=>{
+ const browser=await chromium.launch({executablePath:process.env.FLS_CHROMIUM,args:['--no-sandbox']});
+ try{
+  for(const [viewport,indexCopy] of [[{width:390,height:844},'primary'],[{width:1280,height:800},'backup']]){
+   const context=await browser.newContext({viewport}),page=await context.newPage();
+   page.on('dialog',dialog=>dialog.accept());const errors=[];page.on('pageerror',error=>errors.push(error.message));
+   const base=process.env.FLS_UI_BASE,headers={'X-Token':process.env.FLS_UI_TOKEN};
+   const fixture=async data=>{const response=await page.request.post(base+'/api/fixture/backup',{headers,data});assert.equal(response.status(),200);return response.json();};
+   const state=async()=>(await page.request.get(base+'/api/fixture/backup',{headers})).json();
+   const form=()=>page.locator('form[action="/backup/import"]');
+   const history=()=>page.locator('#backupRestoreHistoryItems');
+   const recovery=()=>page.locator('#backupRestoreRecovery');
+   const archive={name:'restore.tar.gz',mimeType:'application/gzip',buffer:Buffer.from(process.env.FLS_RESTORE_ARCHIVE,'base64')};
+   await page.goto(base+'/login');await page.locator('[name="token"]').fill(process.env.FLS_UI_TOKEN);
+   await page.locator('button[type="submit"]').click();await page.waitForURL(url=>url.pathname!=='/login');
+   const archivedRequestId='0'.repeat(32),archiveHash=require('node:crypto').createHash('sha256').update(archive.buffer).digest('hex');
+   await fixture({reset_restore_history:true,seed_archive_candidate:true,archive_sha256:archiveHash});
+   await page.goto(base+'/backup');const before=(await state()).restores;
+   await form().locator('[name="file"]').setInputFiles(archive);
+   const restoreRequestId=await form().locator('[name="restore_request_id"]').inputValue();
+   const submitted=page.waitForResponse(response=>new URL(response.url()).pathname==='/backup/import'&&response.request().method()==='POST');
+   await form().locator('button[type="submit"]').click();assert.equal((await submitted).status(),200);
+   assert.equal((await state()).restores,before+1);
+   await page.goto(base+'/backup');
+   await page.getByRole('button',{name:'查询恢复历史',exact:true}).click();
+   await history().getByText(new RegExp(archivedRequestId)).waitFor();
+   await history().getByText(new RegExp(restoreRequestId)).waitFor();
+   await fixture({corrupt_archive_index:indexCopy});
+   await page.reload();await page.getByRole('button',{name:'查询恢复历史',exact:true}).click();
+   await history().getByText(/恢复归档索引副本不完整，已从有效.*自动合并并修复/).waitFor();
+   const archivedRow=history().locator(':scope > div').filter({hasText:archivedRequestId});
+   await archivedRow.getByRole('button',{name:'核对此请求',exact:true}).click();
+   await recovery().getByText(/已归档，不会再次覆盖目录/).waitFor();
+   assert.equal((await state()).restores,before+1);
+   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
+   await page.evaluate(()=>sessionStorage.setItem('fls-backup-restore','{broken local state'));
+   await fixture({corrupt_archive_index:indexCopy,fail_index_repair:true});
+   await page.reload();
+   await page.getByRole('button',{name:'核对恢复历史',exact:true}).click();
+   await history().getByText(/冗余副本修复尚未完成/).waitFor();
+   await assert.rejects(page.getByRole('button',{name:'确认清理已核对状态',exact:true}).waitFor({timeout:250}));
+   await recovery().getByText(/归档索引冗余修复尚未完成/).waitFor();
+   assert.equal((await state()).restores,before+1);
+   if(process.env.FLS_BULK_SCREENSHOTS) await page.screenshot({path:process.env.FLS_BULK_SCREENSHOTS+'/backup-archive-index-'+viewport.width+'.png',fullPage:true});
+   assert.deepEqual(errors,[]);console.log('backup archive index recovery passed '+viewport.width+' '+indexCopy);
+   await context.close();
+  }
+ }finally{await browser.close();}
+})().catch(error=>{console.error(error);process.exit(1)});
+'''
 
 
 ATOMIC_SCRIPT = r'''
