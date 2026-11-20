@@ -3,7 +3,7 @@ import json
 import uuid
 from pathlib import PureWindowsPath
 
-from ..models import mutate_tasks, TaskSchedulerReloadError
+from ..models import mutate_tasks, normalize_task, TASK_FILE, TaskSchedulerReloadError
 from ..paths import SCRIPT_DIR
 from ..scheduler import reload_scheduler, cron_to_trigger
 from ..utils import now_str
@@ -153,6 +153,92 @@ class OnlineTaskValidationError(ValueError):
     pass
 
 
+class OnlineTaskPreparationError(RuntimeError):
+    pass
+
+
+class OnlineTaskConfirmationStale(OnlineTaskPreparationError):
+    pass
+
+
+def _read_import_task_file(*, allow_missing=False):
+    if TASK_FILE.is_symlink():
+        raise RuntimeError("任务文件不能是符号链接，未修改任务")
+    try:
+        before = TASK_FILE.stat()
+        raw = TASK_FILE.read_bytes()
+        after = TASK_FILE.stat()
+    except FileNotFoundError as exc:
+        if allow_missing:
+            return [], ""
+        raise RuntimeError("任务文件缺失，无法确认原导入结果") from exc
+    before_signature = (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_size)
+    after_signature = (after.st_dev, after.st_ino, after.st_mtime_ns, after.st_size)
+    if before_signature != after_signature:
+        raise RuntimeError("任务文件正在变化，请重新检查原导入结果")
+    data = json.loads(raw)
+    if (not isinstance(data, list) or any(not isinstance(task, dict) or not isinstance(task.get("id"), str)
+                                         or not task["id"] for task in data)
+            or len({task["id"] for task in data}) != len(data)):
+        raise RuntimeError("任务文件结构或任务标识损坏，未修改任务")
+    signature = f"{after.st_dev}:{after.st_ino}:{after.st_mtime_ns}:{after.st_size}:".encode()
+    return data, hashlib.sha256(signature + raw).hexdigest()
+
+
+def task_import_file_signature():
+    _tasks, signature = _read_import_task_file(allow_missing=True)
+    return signature
+
+
+def _import_tasks_fingerprint(tasks):
+    definitions = []
+    for task in tasks:
+        normalized = normalize_task(task)
+        # Execution counters do not change the task definition being confirmed.
+        fields = {key: value for key, value in normalized.items() if key not in ("run_count", "last_run_at")}
+        if any(key in fields and value != fields[key] for key, value in task.items()):
+            raise RuntimeError("原导入任务内容无效，未修改任务")
+        definitions.append(fields)
+    definitions.sort(key=lambda task: task["id"])
+    payload = json.dumps(definitions, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _publication_tasks(tasks, script_id, publication):
+    return [task for task in tasks if task.get("online_script_task_key") in publication["keys"]
+            or task.get("id") in publication["task_ids"]
+            or (publication["single_task"] and task.get("online_script_id") == script_id)]
+
+
+def task_import_publication_state(record):
+    publication = record.get("publication")
+    if not publication:
+        if record.get("task_baseline_captured"):
+            _tasks, signature = _read_import_task_file(allow_missing=True)
+            if signature == record.get("task_baseline"):
+                return "not_published", signature
+        raise RuntimeError("原回执没有写入前任务证据，不能自动确认；请核对任务或从备份恢复")
+    tasks, signature = _read_import_task_file()
+    if signature == publication["before_source"]:
+        return "not_published", signature
+    matching = _publication_tasks(tasks, record["script_id"], publication)
+    if _import_tasks_fingerprint(matching) == publication["after"]:
+        return "published", signature
+    raise RuntimeError("原选择对应的任务已变化或只写入部分任务，无法确认；未修改任务或调度器")
+
+
+def task_import_retry_matches(record):
+    if record.get("confirmation") != "not_published":
+        return True
+    _tasks, signature = _read_import_task_file()
+    return signature == record.get("confirmation_source")
+
+
+def task_import_publication_matches(record):
+    confirmation, _signature = task_import_publication_state(record)
+    return confirmation == "published"
+
+
 def validate_online_task_import(item, selected_task_indexes=None):
     task_crons = online_script_task_crons(item)
     if not task_crons:
@@ -210,6 +296,7 @@ def validate_online_task_import(item, selected_task_indexes=None):
 
 def import_task_if_needed(
     item, log_file=None, enable_task=False, selected_task_indexes=None, raise_on_reload_error=False,
+    before_publish=None,
 ):
     """
     导入在线脚本任务。
@@ -231,6 +318,7 @@ def import_task_if_needed(
 
     def add_selected_tasks(tasks):
         nonlocal imported, skipped
+        original_tasks = list(tasks)
 
         for idx, task_cron in selected:
             name = task_cron["name"]
@@ -276,7 +364,7 @@ def import_task_if_needed(
             if config_path:
                 task["config_path"] = config_path
 
-            tasks.append(task)
+            tasks.append(normalize_task(task))
             imported += 1
             env_msg = f" / 变量 {len(task_env)} 个" if task_env else ""
             config_msg = f" / 配置 {config_path}" if config_path else ""
@@ -286,6 +374,20 @@ def import_task_if_needed(
                 f"{env_msg}{config_msg}"
             )
 
+        if before_publish:
+            try:
+                _original, signature = _read_import_task_file(allow_missing=True)
+                publication = {"keys": [f"{online_id}:{idx}:{task['name']}" for idx, task in selected],
+                               "single_task": len(task_crons) == 1, "task_ids": []}
+                matching = _publication_tasks(tasks, online_id, publication)
+                publication.update(before=_import_tasks_fingerprint(_publication_tasks(original_tasks, online_id, publication)),
+                                   after=_import_tasks_fingerprint(matching), before_source=signature,
+                                   task_ids=[task["id"] for task in matching])
+                before_publish(publication)
+            except OnlineTaskConfirmationStale:
+                raise
+            except Exception as exc:
+                raise OnlineTaskPreparationError(f"导入写入前证据无法保存，未写入任务：{exc}") from exc
         return imported > 0
 
     try:

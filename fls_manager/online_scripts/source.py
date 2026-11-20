@@ -646,13 +646,14 @@ def refresh_worker(refresh_id, proxy_id="", log_file=""):
             current_cache_fingerprint = online_script_cache_fingerprint()
             if retry_of and expected_cache_fingerprint and current_cache_fingerprint != expected_cache_fingerprint:
                 raise RuntimeError("在线脚本源缓存在抓取期间已变化，未覆盖后来缓存")
+            published_cache_fingerprint = online_script_cache_fingerprint_for_items(items)
             update_online_refresh_state(
                 status="发布中",
                 message="已获取脚本源，正在原子发布本地缓存",
+                published_cache_fingerprint=published_cache_fingerprint,
                 updated_at=now_str(),
             )
             save_online_script_cache(items)
-            published_cache_fingerprint = online_script_cache_fingerprint_for_items(items)
             if online_script_cache_fingerprint() != published_cache_fingerprint:
                 raise RuntimeError("缓存发布后指纹与预期不一致，结果未知")
         # Cache replacement is a separate durable side effect; retain that

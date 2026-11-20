@@ -56,6 +56,13 @@ def _task_import_snapshot(info):
     snapshot["archived"] = info.get("archived", False)
     snapshot["archived_at"] = info.get("archived_at", "")
     snapshot["task_count"] = info.get("task_count", 0)
+    snapshot["publication_tracking"] = info.get("publication_tracking", False)
+    snapshot["task_baseline_captured"] = info.get("task_baseline_captured", False)
+    snapshot["task_baseline"] = info.get("task_baseline", "")
+    snapshot["publication"] = info.get("publication")
+    snapshot["confirmation"] = info.get("confirmation", "")
+    snapshot["confirmation_source"] = info.get("confirmation_source", "")
+    snapshot["retry_source"] = info.get("retry_source", "")
     selected = snapshot["selected_task_indexes"]
     if (
         not isinstance(snapshot["request_id"], str)
@@ -68,12 +75,63 @@ def _task_import_snapshot(info):
         or snapshot["state"] not in ("prepared", "running", "failed", "scheduler_pending", "completed", "unknown")
         or type(snapshot["archived"]) is not bool
         or type(snapshot["task_count"]) is not int or snapshot["task_count"] < 0
+        or type(snapshot["publication_tracking"]) is not bool
+        or type(snapshot["task_baseline_captured"]) is not bool
+        or not isinstance(snapshot["task_baseline"], str)
+        or (snapshot["task_baseline"] and not re.fullmatch(r"[a-f0-9]{64}", snapshot["task_baseline"]))
+        or (snapshot["task_baseline_captured"] and not snapshot["publication_tracking"])
         or not isinstance(snapshot["archived_at"], str)
         or (snapshot["archived"] and snapshot["state"] not in ("failed", "unknown", "scheduler_pending"))
         or any(not isinstance(snapshot[field], str) for field in ("message", "scheduler_reload_error", "updated_at"))
     ):
         raise RuntimeError("在线任务导入回执损坏，未覆盖原文件")
+    publication = snapshot["publication"]
+    if (snapshot["confirmation"] not in ("", "published", "not_published")
+            or not isinstance(snapshot["confirmation_source"], str)
+            or not isinstance(snapshot["retry_source"], str)
+            or (snapshot["retry_source"] and not re.fullmatch(r"[a-f0-9]{64}", snapshot["retry_source"]))
+            or (snapshot["confirmation_source"] and not re.fullmatch(r"[a-f0-9]{64}", snapshot["confirmation_source"]))):
+        raise RuntimeError("在线任务导入确认状态损坏，未覆盖原文件")
+    if publication is not None:
+        if (not isinstance(publication, dict)
+                or type(publication.get("single_task")) is not bool
+                or any(not isinstance(publication.get(field), str) or not re.fullmatch(r"[a-f0-9]{64}", publication[field])
+                       for field in ("before", "after"))
+                or not isinstance(publication.get("before_source"), str)
+                or (publication["before_source"] and not re.fullmatch(r"[a-f0-9]{64}", publication["before_source"]))
+                or any(not isinstance(publication.get(field), list) or not publication[field]
+                       or any(not isinstance(value, str) or not value for value in publication[field])
+                       or len(set(publication[field])) != len(publication[field]) for field in ("keys", "task_ids"))
+                or len(publication["keys"]) != len(selected)
+                or any(not any(key.startswith(f"{snapshot['script_id']}:{index}:") for key in publication["keys"])
+                       for index in selected)):
+            raise RuntimeError("在线任务导入写入证据损坏，未覆盖原文件")
+    if snapshot["confirmation"] and (not publication or not snapshot["confirmation_source"]):
+        raise RuntimeError("在线任务导入确认缺少写入证据，未覆盖原文件")
     return snapshot
+
+
+def _task_import_recovery_info(value):
+    record = {**value, "active": value["request_id"] in ONLINE_TASK_IMPORT_ACTIVE}
+    record["retry_allowed"] = record["state"] == "failed" and not record["active"] and not record.get("archived")
+    if record["retry_allowed"] and record.get("confirmation") == "not_published":
+        from .tasks import task_import_retry_matches
+
+        try:
+            record["confirmation_stale"] = not task_import_retry_matches(record)
+        except Exception as exc:
+            record["confirmation_check_error"] = str(exc)
+        if record.get("confirmation_stale") or record.get("confirmation_check_error"):
+            record["retry_allowed"] = False
+    if record["state"] == "scheduler_pending" and record.get("confirmation") == "published":
+        from .tasks import task_import_publication_matches
+
+        try:
+            if not task_import_publication_matches(record):
+                record["confirmation_stale"] = True
+        except Exception as exc:
+            record["confirmation_check_error"] = str(exc)
+    return record
 
 
 def _task_import_needs_recovery(value):
@@ -125,7 +183,8 @@ def _recover_stale_task_imports(data, *, only_request_id=None):
                 "导入准备阶段已中断，未写入任务，可继续原导入请求"
                 + ("；原诊断：" + value["message"] if value.get("message") else "")
                 if state == "prepared"
-                else "面板重启或请求中断后无法确认任务是否已导入，请查询任务列表"
+                else "面板重启或请求中断后无法确认任务是否已导入，请检查原导入结果"
+                + ("；原诊断：" + value["message"] if value.get("message") else "")
             )
             value["updated_at"] = now_str()
             data[request_id] = _task_import_snapshot(value)
@@ -146,7 +205,7 @@ def get_online_task_import_request(request_id, *, binding=None, recover=True):
         if recover and _recover_stale_task_imports(data, only_request_id=request_id):
             mutate_json(ONLINE_TASK_IMPORT_REQUESTS_FILE, {}, lambda _: data, strict=True)
         value = data.get(request_id)
-        return {**value, "active": request_id in ONLINE_TASK_IMPORT_ACTIVE} if value else None
+        return _task_import_recovery_info(value) if value else None
 
 
 def list_online_task_import_requests(limit=50, script_id="", *, recovery=False, offset=0, with_pagination=False):
@@ -167,7 +226,7 @@ def list_online_task_import_requests(limit=50, script_id="", *, recovery=False, 
         records = _read_task_import_requests()
         if _recover_stale_task_imports(records):
             mutate_json(ONLINE_TASK_IMPORT_REQUESTS_FILE, {}, lambda _: records, strict=True)
-        items = [{**value, "active": value.get("request_id") in ONLINE_TASK_IMPORT_ACTIVE}
+        items = [_task_import_recovery_info(value)
                  for value in records.values() if (not script_id or value.get("script_id") == script_id)
                  and (not recovery or _task_import_needs_recovery(value))]
         items.sort(key=lambda value: str(value.get("updated_at") or ""), reverse=True)
@@ -180,7 +239,9 @@ def list_online_task_import_requests(limit=50, script_id="", *, recovery=False, 
 
 def persist_online_task_import_request(info):
     snapshot = _task_import_snapshot(info)
-    with ONLINE_TASK_IMPORT_LOCK, storage_transaction():
+    # A task mutator saves its evidence while holding the storage lock. Taking
+    # the import lock here would invert the archive/confirmation lock order.
+    with storage_transaction():
         if ONLINE_TASK_IMPORT_REQUESTS_FILE.is_symlink():
             raise RuntimeError("在线任务导入回执不能是符号链接，未覆盖原文件")
 
@@ -223,6 +284,12 @@ def claim_online_task_import_request(info):
             if current and any(current.get(field) != snapshot.get(field) for field in ("script_id", "expected_version", "selected_task_indexes", "enable_task")):
                 observed["value"] = dict(current)
                 return None
+            if current and current.get("confirmation") == "not_published":
+                recovery = _task_import_recovery_info(current)
+                if not recovery["retry_allowed"]:
+                    observed["value"] = recovery
+                    return None
+                snapshot["retry_source"] = current["confirmation_source"]
             data[snapshot["request_id"]] = snapshot
             observed["value"] = None
             return _prune_task_import_requests(data, snapshot["request_id"])
@@ -230,6 +297,7 @@ def claim_online_task_import_request(info):
         mutate_json(ONLINE_TASK_IMPORT_REQUESTS_FILE, {}, update, strict=True)
         if observed.get("value") is None:
             ONLINE_TASK_IMPORT_ACTIVE.add(snapshot["request_id"])
+            info.update(snapshot)
     return observed.get("value")
 
 ONLINE_REFRESH_STATE = {

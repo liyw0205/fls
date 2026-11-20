@@ -228,7 +228,7 @@ class OnlineTaskImportConcurrencyTests(unittest.TestCase):
                         self.assertEqual(load_tasks(), [])
                         importer.assert_not_called()
                     status = client.get("/api/online-scripts/import-tasks-status/" + request_id, headers=headers)
-                    expected = "unknown" if after and not recheck else "failed"
+                    expected = "failed"
                     self.assertEqual(status.json["state"], expected)
                     with patch.object(tasks, "reload_scheduler") as reload:
                         retried = client.post("/api/online-scripts/import-tasks/demo", json=data, headers=headers)
