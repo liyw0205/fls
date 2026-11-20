@@ -62,6 +62,8 @@ def _task_import_snapshot(info):
 
 
 def _read_task_import_requests():
+    if ONLINE_TASK_IMPORT_REQUESTS_FILE.is_symlink():
+        raise RuntimeError("在线任务导入回执不能是符号链接，未覆盖原文件")
     try:
         raw = ONLINE_TASK_IMPORT_REQUESTS_FILE.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -79,27 +81,39 @@ def _read_task_import_requests():
     return data
 
 
-def _recover_stale_task_imports(data):
+def _recover_stale_task_imports(data, *, only_request_id=None):
     changed = False
     for request_id, value in data.items():
-        if value.get("state") == "running" and request_id not in ONLINE_TASK_IMPORT_ACTIVE:
+        if only_request_id is not None and request_id != only_request_id:
+            continue
+        state = value.get("state")
+        if state in ("prepared", "running") and request_id not in ONLINE_TASK_IMPORT_ACTIVE:
             value = dict(value)
-            value["state"] = "unknown"
-            value["message"] = "面板重启或请求中断后无法确认任务是否已导入，请查询任务列表"
+            value["state"] = "failed" if state == "prepared" else "unknown"
+            value["message"] = (
+                "导入准备阶段已中断，未写入任务，可继续原导入请求"
+                + ("；原诊断：" + value["message"] if value.get("message") else "")
+                if state == "prepared"
+                else "面板重启或请求中断后无法确认任务是否已导入，请查询任务列表"
+            )
             value["updated_at"] = now_str()
             data[request_id] = _task_import_snapshot(value)
             changed = True
     return changed
 
 
-def get_online_task_import_request(request_id):
+def get_online_task_import_request(request_id, *, binding=None):
     if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
         return None
     with ONLINE_TASK_IMPORT_LOCK, storage_transaction():
         data = _read_task_import_requests()
-        if _recover_stale_task_imports(data):
+        value = data.get(request_id)
+        if value and binding and any(value.get(field) != expected for field, expected in binding.items()):
+            return dict(value)
+        if _recover_stale_task_imports(data, only_request_id=request_id):
             mutate_json(ONLINE_TASK_IMPORT_REQUESTS_FILE, {}, lambda _: data, strict=True)
-        return dict(data.get(request_id) or {}) or None
+        value = data.get(request_id)
+        return {**value, "active": request_id in ONLINE_TASK_IMPORT_ACTIVE} if value else None
 
 
 def list_online_task_import_requests(limit=50, script_id=""):
@@ -114,7 +128,8 @@ def list_online_task_import_requests(limit=50, script_id=""):
         records = _read_task_import_requests()
         if _recover_stale_task_imports(records):
             mutate_json(ONLINE_TASK_IMPORT_REQUESTS_FILE, {}, lambda _: records, strict=True)
-        items = [dict(value) for value in records.values() if not script_id or value.get("script_id") == script_id]
+        items = [{**value, "active": value.get("request_id") in ONLINE_TASK_IMPORT_ACTIVE}
+                 for value in records.values() if not script_id or value.get("script_id") == script_id]
         items.sort(key=lambda value: str(value.get("updated_at") or ""), reverse=True)
         return items[:limit]
 
@@ -156,18 +171,20 @@ def claim_online_task_import_request(info):
                     raise RuntimeError("在线任务导入回执标识损坏，未覆盖原文件")
                 _task_import_snapshot(value)
             current = data.get(snapshot["request_id"])
-            if current and current.get("state") != "failed":
-                observed["value"] = dict(current)
-                return data
+            if current and (current.get("state") != "failed" or snapshot["request_id"] in ONLINE_TASK_IMPORT_ACTIVE):
+                observed["value"] = {**current, "active": snapshot["request_id"] in ONLINE_TASK_IMPORT_ACTIVE}
+                return None
             if current and any(current.get(field) != snapshot.get(field) for field in ("script_id", "expected_version", "selected_task_indexes", "enable_task")):
                 observed["value"] = dict(current)
-                return data
+                return None
             data[snapshot["request_id"]] = snapshot
             observed["value"] = None
             ordered = sorted(data.items(), key=lambda pair: str(pair[1].get("updated_at") or ""), reverse=True)
             return dict(ordered[:200])
 
         mutate_json(ONLINE_TASK_IMPORT_REQUESTS_FILE, {}, update, strict=True)
+        if observed.get("value") is None:
+            ONLINE_TASK_IMPORT_ACTIVE.add(snapshot["request_id"])
     return observed.get("value")
 
 ONLINE_REFRESH_STATE = {
