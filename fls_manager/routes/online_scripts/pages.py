@@ -266,7 +266,8 @@ def online_scripts_page():
 <script>
 window.__FLS_ONLINE_REFRESH_WAS_RUNNING__ = false;
 window.__FLS_ONLINE_REFRESH_RELOADED__ = false;
-const refreshStorageKey = "fls-online-refresh-request";
+// AJAX navigation can execute this page script again in the same document.
+var refreshStorageKey = "fls-online-refresh-request";
 
 function readOnlineRefreshPending(){{
     try{{
@@ -284,11 +285,11 @@ function clearOnlineRefreshPending(){{
     try{{ sessionStorage.removeItem(refreshStorageKey); }}catch(_error){{}}
 }}
 
-const onlineRefreshPending = readOnlineRefreshPending();
+var onlineRefreshPending = readOnlineRefreshPending();
 if(onlineRefreshPending) window.__FLS_ONLINE_REFRESH_WAS_RUNNING__ = true;
-let onlineRefreshStatusPending = false;
-let onlineRefreshStatusGeneration = 0;
-let onlineRefreshMissingRequest = false;
+var onlineRefreshStatusPending = false;
+var onlineRefreshStatusGeneration = typeof onlineRefreshStatusGeneration === "number" ? onlineRefreshStatusGeneration + 1 : 0;
+var onlineRefreshMissingRequest = false;
 
 function invalidateOnlineRefreshStatus(){{
     onlineRefreshStatusGeneration++;
@@ -655,7 +656,7 @@ async function updateOnlineRefreshStatus(){{
     }}
 }}
 
-const onlineRefreshQuery = document.getElementById("onlineRefreshQuery");
+var onlineRefreshQuery = document.getElementById("onlineRefreshQuery");
 if(onlineRefreshQuery) onlineRefreshQuery.onclick = updateOnlineRefreshStatus;
 updateOnlineRefreshStatus();
 updateOnlineRefreshHistory();
@@ -728,7 +729,8 @@ if(document.querySelectorAll){{
         }};
     }});
 }}
-if(document.addEventListener){{
+if(!window.__FLS_ONLINE_REFRESH_SUBMIT_BOUND__ && document.addEventListener){{
+    window.__FLS_ONLINE_REFRESH_SUBMIT_BOUND__ = true;
     document.addEventListener("submit", function(event){{
         const form = event.target && event.target.closest ? event.target.closest(".fls-online-refresh-form") : null;
         if(form) return submitOnlineRefreshForm(form, event);
@@ -865,7 +867,8 @@ async function queryPending(pending){{
             window.location.href = "/online-scripts/task-link-status/" + encodeURIComponent(pending.request_id);
             return;
         }}
-        writeMessage("原同步请求：" + (json.error || json.state || "未知"), false, pending, json.state === "failed", json.state === "unknown");
+        writeMessage("原同步请求：" + (json.error || json.state || "未知"), false, pending,
+            json.state === "failed" && json.retry_allowed !== false, json.state === "unknown");
     }}catch(error){{
         const denied = error && (error.status === 401 || error.status === 403);
         writeMessage("原同步状态读取失败：" + (error && error.message || String(error || "查询失败")), denied, pending);
@@ -927,14 +930,15 @@ function bindOnlineTaskLinkForms(root){{
 }}
 
 window.__FLS_BIND_ONLINE_TASK_LINK_FORMS__ = bindOnlineTaskLinkForms;
+window.__FLS_SUBMIT_ONLINE_TASK_LINK_FORM__ = submitTaskLinkForm;
+bindOnlineTaskLinkForms(document);
 
 if(!window.__FLS_TASK_LINK_RECOVERY_BOUND__ && document.addEventListener){{
     window.__FLS_TASK_LINK_RECOVERY_BOUND__ = true;
     document.addEventListener("submit", function(event){{
         const form = event.target && event.target.closest ? event.target.closest(".fls-online-task-link-form") : null;
-        if(form) return submitTaskLinkForm(form, event);
+        if(form) return window.__FLS_SUBMIT_ONLINE_TASK_LINK_FORM__(form, event);
     }}, true);
-    bindOnlineTaskLinkForms(document);
 }}
 
 const pending = readPending();

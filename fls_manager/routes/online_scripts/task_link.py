@@ -98,7 +98,7 @@ def _existing_task_link_result(record, script_id, proxy_id, expected_version="")
         return {"ok": False, "request_id": record["request_id"],
                 "msg": "同步请求已绑定其他脚本、代理或旧版本，请刷新页面后重新选择。",
                 "retry_allowed": False}, 409
-    if record.get("state") == "failed":
+    if record.get("state") == "failed" and not record.get("active"):
         return None
     request_id = record["request_id"]
     state = record["state"]
@@ -148,6 +148,8 @@ def _task_link_confirmation_matches_current_cache(record):
 def _task_link_status_record(request_id):
     with storage_transaction():
         record = get_task_link_request(request_id)
+        if record:
+            record["retry_allowed"] = record.get("state") == "failed" and not record.get("active")
         if not record or record.get("confirmation") != "not_merged":
             return record
         try:
@@ -157,7 +159,7 @@ def _task_link_status_record(request_id):
             record["retry_allowed"] = False
             return record
         record["confirmation_stale"] = not matches
-        record["retry_allowed"] = matches
+        record["retry_allowed"] = matches and not record.get("active")
         if not matches:
             record["confirmation_error"] = _STALE_TASK_LINK_CONFIRMATION
         return record
@@ -240,14 +242,11 @@ def _submit_task_link(script_id, proxy_id, raw_request_id):
         return _existing_task_link_result(claimed_previous, script_id, proxy_id, expected_version)
 
     try:
-        _record_update(record, "running")
-        persist_task_link_request(record)
-    except Exception as exc:
-        return {"ok": False, "request_id": request_id,
-                "msg": f"同步请求无法保存，未发起外部请求：{exc}", "retry_allowed": True}, 500
-
-    ONLINE_TASK_LINK_ACTIVE.add(request_id)
-    try:
+        try:
+            _record_update(record, "running")
+            persist_task_link_request(record)
+        except Exception as exc:
+            return _persist_failure(record, f"同步请求无法保存，未发起外部请求：{exc}", 500)
         try:
             linked_tasks = fetch_task_link_tasks(item, proxy_id=proxy_id, timeout=20)
         except Exception as exc:
@@ -576,7 +575,7 @@ def online_scripts_task_link_status(request_id):
             f'<a class="btn btn-blue" href="/online-scripts/task-link-status/{h(request_id)}">重新查询</a>'
             '<a class="btn btn-primary" href="/online-scripts">核对当前任务</a>'
         )
-    elif state == "failed" and (
+    elif state == "failed" and not record.get("active") and (
         record.get("confirmation") != "not_merged" or record.get("retry_allowed") is True
     ):
         action_html = f'''
@@ -591,7 +590,7 @@ def online_scripts_task_link_status(request_id):
     <button class="btn btn-primary" type="submit">检查当前任务合并</button>
 </form>
 <a class="btn btn-blue" href="/online-scripts/task-link-status/{h(request_id)}">刷新查询</a>'''
-    elif state in ("prepared", "running"):
+    elif state in ("prepared", "running") or record.get("active"):
         action_html = f'<a class="btn btn-blue" href="/online-scripts/task-link-status/{h(request_id)}">刷新查询</a>'
     action_html += '<a class="btn btn-gray" href="/online-scripts/task-link-history">同步历史</a><a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>'
     details = f'''

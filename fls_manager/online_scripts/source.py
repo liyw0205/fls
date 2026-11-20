@@ -208,10 +208,29 @@ def online_script_task_fingerprint(item):
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _recover_task_link_request(value):
+    if value.get("request_id") in ONLINE_TASK_LINK_ACTIVE:
+        return False
+    state = value.get("state")
+    if state not in ("prepared", "running"):
+        return False
+    value["state"] = "failed" if state == "prepared" else "unknown"
+    value["error"] = (
+        "同步准备阶段已中断，未发起外部请求，可继续原同步请求"
+        + ("；原诊断：" + value["error"] if value.get("error") else "")
+        if state == "prepared"
+        else "面板重启或请求中断后无法确认任务是否已合并，请核对当前任务列表"
+    )
+    value["updated_at"] = now_str()
+    return True
+
+
 def get_task_link_request(request_id, *, script_id=None, proxy_id=None):
     if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
         return None
     with storage_transaction():
+        if ONLINE_TASK_LINK_REQUESTS_FILE.is_symlink():
+            raise RuntimeError("在线任务源同步回执不能是符号链接，未覆盖原文件")
         try:
             raw = ONLINE_TASK_LINK_REQUESTS_FILE.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -227,12 +246,10 @@ def get_task_link_request(request_id, *, script_id=None, proxy_id=None):
         if ((script_id is not None and value.get("script_id") != script_id)
                 or (proxy_id is not None and value.get("proxy_id") != proxy_id)):
             return value
-        if value.get("state") == "running" and request_id not in ONLINE_TASK_LINK_ACTIVE:
-            value["state"] = "unknown"
-            value["error"] = "面板重启或请求中断后无法确认任务是否已合并，请核对当前任务列表"
-            value["updated_at"] = now_str()
+        if _recover_task_link_request(value):
             data[request_id] = _task_link_request_snapshot(value)
             mutate_json(ONLINE_TASK_LINK_REQUESTS_FILE, {}, lambda _: data, strict=True)
+        value["active"] = request_id in ONLINE_TASK_LINK_ACTIVE
         return value
 
 
@@ -246,6 +263,8 @@ def list_task_link_requests(limit=50, script_id=""):
         raise ValueError("在线任务源历史数量必须在 1 到 100 之间")
     script_id = str(script_id or "").strip()
     with storage_transaction():
+        if ONLINE_TASK_LINK_REQUESTS_FILE.is_symlink():
+            raise RuntimeError("在线任务源同步回执不能是符号链接，未覆盖原文件")
         try:
             raw = ONLINE_TASK_LINK_REQUESTS_FILE.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -256,16 +275,14 @@ def list_task_link_requests(limit=50, script_id=""):
             raise RuntimeError(f"在线任务源同步回执损坏，未覆盖原文件：{exc}") from exc
         changed = False
         for request_id, value in records.items():
-            if value.get("state") == "running" and request_id not in ONLINE_TASK_LINK_ACTIVE:
-                value = dict(value)
-                value["state"] = "unknown"
-                value["error"] = "面板重启或请求中断后无法确认任务是否已合并，请核对当前任务列表"
-                value["updated_at"] = now_str()
+            value = dict(value)
+            if _recover_task_link_request(value):
                 records[request_id] = _task_link_request_snapshot(value)
                 changed = True
         if changed:
             mutate_json(ONLINE_TASK_LINK_REQUESTS_FILE, {}, lambda _: records, strict=True)
-        items = [dict(value) for value in records.values() if not script_id or value.get("script_id") == script_id]
+        items = [{**value, "active": value.get("request_id") in ONLINE_TASK_LINK_ACTIVE}
+                 for value in records.values() if not script_id or value.get("script_id") == script_id]
         items.sort(key=lambda value: str(value.get("updated_at") or ""), reverse=True)
         result = []
         for value in items[:limit]:
@@ -296,7 +313,7 @@ def persist_task_link_request(info):
 
 
 def claim_task_link_request(info):
-    """Atomically reserve a request id before making the external request."""
+    """Reserve and mark a live request before releasing the storage lock."""
     snapshot = _task_link_request_snapshot(info)
     request_id = snapshot["request_id"]
     if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
@@ -310,8 +327,8 @@ def claim_task_link_request(info):
         def update(data):
             records = _validate_task_link_requests(data)
             current = records.get(request_id)
-            if current and current.get("state") != "failed":
-                observed["value"] = dict(current)
+            if current and (current.get("state") != "failed" or request_id in ONLINE_TASK_LINK_ACTIVE):
+                observed["value"] = {**current, "active": request_id in ONLINE_TASK_LINK_ACTIVE}
                 return records
             if current and any(current.get(field) != snapshot.get(field) for field in (
                 "script_id", "proxy_id", "expected_version",
@@ -343,6 +360,8 @@ def claim_task_link_request(info):
             return dict(ordered[:200])
 
         mutate_json(ONLINE_TASK_LINK_REQUESTS_FILE, {}, update, strict=True)
+        if observed.get("value") is None:
+            ONLINE_TASK_LINK_ACTIVE.add(request_id)
     return observed.get("value")
 
 
