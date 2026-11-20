@@ -17,6 +17,128 @@ class BackupRestoreWriteError(RuntimeError):
         self.live_state_unchanged = live_state_unchanged
 
 
+try:
+    RESTORE_RECEIPT_DETAIL_LIMIT = max(1, int(os.environ.get("FLS_BACKUP_RESTORE_RECEIPT_LIMIT", "200")))
+except (TypeError, ValueError):
+    RESTORE_RECEIPT_DETAIL_LIMIT = 200
+
+
+def _restore_archive_index_path():
+    return BACKUP_RESTORE_REQUESTS_DIR / ".archive"
+
+
+def _read_restore_archive_index():
+    directory = BACKUP_RESTORE_REQUESTS_DIR
+    if directory.is_symlink():
+        raise RuntimeError("备份恢复回执目录不能是符号链接")
+    if not directory.exists():
+        return {"version": 1, "records": {}}
+    if not directory.is_dir():
+        raise RuntimeError("备份恢复回执目录无效")
+    path = _restore_archive_index_path()
+    if path.is_symlink() or path.exists() and not path.is_file():
+        raise RuntimeError("恢复归档索引必须是普通文件")
+    try:
+        index = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"version": 1, "records": {}}
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"恢复归档索引无法读取：{exc}") from exc
+    if not isinstance(index, dict) or index.get("version") != 1 or not isinstance(index.get("records"), dict):
+        raise RuntimeError("恢复归档索引损坏")
+    for request_id, record in index["records"].items():
+        if (not re.fullmatch(r"[a-f0-9]{32}", request_id)
+            or not isinstance(record, dict) or record.get("request_id") != request_id
+            or record.get("archived") is not True
+            or not isinstance(record.get("archive_sha256"), str)
+            or not re.fullmatch(r"[a-f0-9]{64}", record["archive_sha256"])
+            or record.get("restore_items") not in (["data"], ["scripts"], ["data", "scripts"])
+            or type(record.get("restore_deps")) is not bool
+            or record.get("state") not in ("restored", "failed")
+            or type(record.get("scheduler_reload_required")) is not bool
+            or type(record.get("dependencies_failed")) is not bool):
+            raise RuntimeError("恢复归档索引记录损坏")
+    return index
+
+
+def _restore_request_identity_matches(left, right):
+    return (left.get("request_id") == right.get("request_id")
+        and left.get("archive_sha256") == right.get("archive_sha256")
+        and left.get("restore_items") == right.get("restore_items")
+        and bool(left.get("restore_deps", False)) == bool(right.get("restore_deps", False)))
+
+
+def _restore_request_archivable(record):
+    return record.get("state") == "restored" and not record.get("scheduler_reload_required") \
+        and not record.get("dependencies_failed") and record.get("scheduler_reloaded", True)
+
+
+def _restore_archive_summary(record):
+    if not _restore_request_archivable(record):
+        raise RuntimeError("恢复请求仍待处理，不能归档")
+    return {
+        key: record.get(key)
+        for key in ("request_id", "archive_sha256", "filename", "restore_items", "restore_deps",
+                    "state", "scheduler_reload_required", "dependencies_failed", "scheduler_reloaded",
+                    "created_at", "updated_at", "restored_at")
+        if key in record
+    } | {"archived": True, "archived_at": now_str()}
+
+
+def _compact_restore_receipts():
+    with storage_transaction(), BACKUP_RESTORE_REQUEST_LOCK:
+        directory = BACKUP_RESTORE_REQUESTS_DIR
+        if directory.is_symlink():
+            raise RuntimeError("备份恢复回执目录不能是符号链接")
+        if not directory.exists():
+            return 0
+        if not directory.is_dir():
+            raise RuntimeError("备份恢复回执目录无效")
+
+        index = _read_restore_archive_index()
+        details = {}
+        for path in directory.iterdir():
+            if not path.name.endswith(".json"):
+                continue
+            request_id = path.name[:-5]
+            if not re.fullmatch(r"[a-f0-9]{32}", request_id):
+                raise RuntimeError("备份恢复历史中存在无效回执文件")
+            if path.is_symlink() or not path.is_file():
+                raise RuntimeError("备份恢复回执必须是普通文件")
+            record = _read_restore_request(request_id)
+            if record is None:
+                raise RuntimeError("备份恢复历史在读取期间发生变化，请重试")
+            details[request_id] = record
+
+        # The index is committed before detail files are removed, so interrupted cleanup is repeatable.
+        for request_id, archived in index["records"].items():
+            record = details.get(request_id)
+            if record is not None:
+                if not _restore_request_identity_matches(record, archived):
+                    raise RuntimeError("归档回执与原恢复请求身份不一致")
+                _restore_request_path(request_id).unlink()
+                details.pop(request_id)
+
+        candidates = [record for record in details.values() if _restore_request_archivable(record)]
+        candidates.sort(key=lambda item: (item.get("updated_at", item.get("created_at", "")), item["request_id"]))
+        excess = max(0, len(candidates) - RESTORE_RECEIPT_DETAIL_LIMIT)
+        selected = candidates[:excess]
+        if not selected:
+            return 0
+
+        for record in selected:
+            request_id = record["request_id"]
+            summary = _restore_archive_summary(record)
+            existing = index["records"].get(request_id)
+            if existing and not _restore_request_identity_matches(existing, summary):
+                raise RuntimeError("恢复归档请求标识冲突")
+            index["records"][request_id] = existing or summary
+        write_json(_restore_archive_index_path(), index)
+        for record in selected:
+            _restore_request_path(record["request_id"]).unlink()
+        return len(selected)
+
+
 def _restore_request_path(request_id):
     if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
         raise ValueError("恢复请求标识无效")
@@ -61,6 +183,7 @@ def _bounded_restore_diagnostic(value):
 def _restore_request_response(record):
     restored = record.get("state") == "restored"
     unknown = record.get("state") == "unknown"
+    archived = record.get("archived") is True
     filename = record.get("filename", "")
     updated_at = record.get("updated_at", record.get("created_at", ""))
     if not isinstance(filename, str):
@@ -70,8 +193,10 @@ def _restore_request_response(record):
     reload_required = bool(record.get("scheduler_reload_required")) or unknown and not record.get("scheduler_reloaded", False)
     dependencies_failed = bool(record.get("dependencies_failed"))
     resolved = restored and not reload_required and not dependencies_failed
-    status = 200 if resolved or record.get("state") == "received" else 503 if restored or unknown else 409 if record.get("state") == "committing" else 500
-    if unknown:
+    status = 410 if archived else 200 if resolved or record.get("state") == "received" else 503 if restored or unknown else 409 if record.get("state") == "committing" else 500
+    if archived:
+        message = "该恢复请求已归档，不会再次覆盖目录；如需恢复请创建新的请求。"
+    elif unknown:
         message = "恢复期间连接中断，无法确认目录是否已替换。请检查任务和脚本；不要重新导入。"
     elif reload_required:
         message = "目录已恢复，调度器尚未确认加载。请仅重新加载调度器，不要重新导入。"
@@ -88,6 +213,7 @@ def _restore_request_response(record):
     return {
         "ok": resolved, "resolved": resolved, "msg": message,
         "request_id": record["request_id"], "state": record["state"],
+        "archived": archived,
         "filename": _bounded_restore_diagnostic(filename)[:240],
         "updated_at": updated_at,
         "restore_deps": bool(record.get("restore_deps", False)),
@@ -120,10 +246,17 @@ def api_backup_restore_history():
 
     try:
         with storage_transaction(), BACKUP_RESTORE_REQUEST_LOCK:
+            maintenance_error = ""
+            try:
+                _compact_restore_receipts()
+            except Exception as exc:
+                maintenance_error = _bounded_restore_diagnostic(str(exc))
+
             directory = BACKUP_RESTORE_REQUESTS_DIR
             if directory.is_symlink():
                 raise RuntimeError("备份恢复回执目录不能是符号链接")
-            paths = []
+            index = _read_restore_archive_index()
+            records_by_id = dict(index["records"])
             if directory.exists():
                 if not directory.is_dir():
                     raise RuntimeError("备份恢复回执目录无效")
@@ -133,19 +266,24 @@ def api_backup_restore_history():
                     request_id = path.name[:-5]
                     if not re.fullmatch(r"[a-f0-9]{32}", request_id):
                         raise RuntimeError("备份恢复历史中存在无效回执文件")
-                    paths.append((request_id, path))
+                    if path.is_symlink() or not path.is_file():
+                        raise RuntimeError("备份恢复回执必须是普通文件")
+                    record = _read_restore_request(request_id)
+                    if record is None:
+                        raise RuntimeError("备份恢复历史在读取期间发生变化，请重试")
+                    archived = records_by_id.get(request_id)
+                    if archived:
+                        if not _restore_request_identity_matches(record, archived):
+                            raise RuntimeError("归档回执与原恢复请求身份不一致")
+                        continue
+                    if record["state"] == "committing" and not backup_state.RESTORE_ACTIVE:
+                        record["state"] = "unknown"
+                        record["restore_outcome_unknown"] = True
+                        _save_restore_request(record)
+                    records_by_id[request_id] = record
 
             records = []
-            for request_id, path in paths:
-                if path.is_symlink() or not path.is_file():
-                    raise RuntimeError("备份恢复回执必须是普通文件")
-                record = _read_restore_request(request_id)
-                if record is None:
-                    raise RuntimeError("备份恢复历史在读取期间发生变化，请重试")
-                if record["state"] == "committing" and not backup_state.RESTORE_ACTIVE:
-                    record["state"] = "unknown"
-                    record["restore_outcome_unknown"] = True
-                    _save_restore_request(record)
+            for record in records_by_id.values():
                 payload, _ = _restore_request_response(record)
                 records.append(payload)
 
@@ -167,6 +305,7 @@ def api_backup_restore_history():
                 offset=offset,
                 has_more=offset + len(items) < total,
                 active=bool(backup_state.RESTORE_ACTIVE),
+                maintenance_error=maintenance_error,
             )
     except Exception:
         return jsonify(ok=False, msg="备份恢复历史无法完整读取，请修复回执后重试"), 500
@@ -178,7 +317,12 @@ def api_backup_restore_request(request_id):
         return jsonify(ok=False, msg="恢复请求标识无效"), 400
     try:
         with storage_transaction(), BACKUP_RESTORE_REQUEST_LOCK:
+            archived = _read_restore_archive_index()["records"].get(request_id)
             record = _read_restore_request(request_id)
+            if archived:
+                if record and not _restore_request_identity_matches(record, archived):
+                    raise RuntimeError("归档回执与原恢复请求身份不一致")
+                record = archived
             if record and record["state"] == "committing" and not backup_state.RESTORE_ACTIVE:
                 record["state"] = "unknown"
                 record["restore_outcome_unknown"] = True
@@ -459,7 +603,18 @@ def backup_import():
 
         if request_id:
             with storage_transaction(), BACKUP_RESTORE_REQUEST_LOCK:
+                archived = _read_restore_archive_index()["records"].get(request_id)
                 restore_record = _read_restore_request(request_id)
+                if archived:
+                    if restore_record and not _restore_request_identity_matches(restore_record, archived):
+                        return restore_error("归档请求标识已绑定其他文件或恢复范围，未覆盖任何目录。", 409,
+                                             request_id=request_id, request_conflict=True)
+                    payload, status = _restore_request_response(archived)
+                    if request.path.startswith("/api/"):
+                        return jsonify(payload), status
+                    return restore_error(payload["msg"], status, restored=payload["restored"],
+                                         restored_items=payload["restored_items"], request_id=request_id,
+                                         state=payload["state"], archived=True)
                 if restore_record:
                     if (restore_record["archive_sha256"] != digest.hexdigest()
                         or restore_record["restore_items"] != restore_items
@@ -633,6 +788,12 @@ def backup_import():
             return restore_error("目录已恢复，依赖恢复未完成，请检查依赖日志并修复依赖，不要重复导入目录。", 503,
                                  restored=True, restored_items=restore_items, scheduler_reload_required=False,
                                  dependencies_failed=True, dependencies=deps_msg, dependency_log=deps_log)
+
+        if restore_record and _restore_request_archivable(restore_record):
+            try:
+                _compact_restore_receipts()
+            except Exception as exc:
+                print(f"[备份恢复] 回执归档未完成，保留明细供后续重试: {exc}")
 
         if request.path.startswith("/api/"):
             return jsonify(ok=True, msg="备份导入完成", restored=True, restored_items=restore_items,

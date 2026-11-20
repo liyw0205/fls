@@ -1,6 +1,7 @@
 """Real HTTP/Chromium checks for recoverable backup creation and restore."""
 import os
 import base64
+import hashlib
 import io
 import json
 import tarfile
@@ -164,6 +165,24 @@ def main():
                     with backup.BACKUP_RESTORE_REQUEST_LOCK:
                         for path in restore.BACKUP_RESTORE_REQUESTS_DIR.glob("*.json"):
                             path.unlink(missing_ok=True)
+                        (backup.BACKUP_RESTORE_REQUESTS_DIR / ".archive").unlink(missing_ok=True)
+                if fault.get("seed_archive_candidate"):
+                    request_id = "0" * 32
+                    record = {
+                        "request_id": request_id,
+                        "archive_sha256": fault["archive_sha256"],
+                        "filename": "older-restore.tar.gz",
+                        "restore_items": ["data", "scripts"],
+                        "restore_deps": False,
+                        "state": "restored",
+                        "scheduler_reload_required": False,
+                        "scheduler_reloaded": True,
+                        "dependencies_failed": False,
+                        "created_at": "2000-01-01 00:00:00",
+                        "updated_at": "2000-01-01 00:00:00",
+                    }
+                    backup.write_json(restore._restore_request_path(request_id), record)
+                    restore.RESTORE_RECEIPT_DETAIL_LIMIT = 1
                 if fault.get("atomic_block"):
                     archive_paused.clear()
                     archive_release.clear()
@@ -582,16 +601,25 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    const state=async()=>(await page.request.get(base+'/api/fixture/backup',{headers})).json();
    const form=()=>page.locator('form[action="/backup/import"]');
    const recovery=()=>page.locator('#backupRestoreRecovery');
+   const history=()=>page.locator('#backupRestoreHistoryItems');
    const archive={name:'restore.tar.gz',mimeType:'application/gzip',buffer:Buffer.from(process.env.FLS_RESTORE_ARCHIVE,'base64')};
    await page.goto(base+'/login');await page.locator('[name="token"]').fill(process.env.FLS_UI_TOKEN);
    await page.locator('button[type="submit"]').click();await page.waitForURL(u=>u.pathname!='/login');
-   await fixture({reset_restore_history:true});await page.goto(base+'/backup');const initial=(await state()).restores;
+   const archivedRequestId='0'.repeat(32);
+   const archiveHash=require('node:crypto').createHash('sha256').update(archive.buffer).digest('hex');
+   await fixture({reset_restore_history:true,seed_archive_candidate:true,archive_sha256:archiveHash});await page.goto(base+'/backup');const initial=(await state()).restores;
    await form().locator('[name="file"]').setInputFiles(archive);
    const requestId=await form().locator('[name="restore_request_id"]').inputValue();
    let response=page.waitForResponse(r=>new URL(r.url()).pathname==='/backup/import'&&r.request().method()==='POST');
    await form().locator('button[type="submit"]').click();assert.equal((await response).status(),200);
    assert.equal((await state()).restores,initial+1);
    await page.goto(base+'/backup');
+   await page.getByRole('button',{name:'查询恢复历史',exact:true}).click();
+   await history().getByText(/older-restore\.tar\.gz \| restored \| 已归档/).waitFor();
+   await page.locator('#backupRestoreHistoryItems > div').filter({hasText:archivedRequestId})
+    .getByRole('button',{name:'核对此请求',exact:true}).click();
+   await recovery().getByText(/已归档，不会再次覆盖目录/).waitFor();
+   assert.equal((await state()).restores,initial+1);
 
    await page.evaluate(()=>sessionStorage.setItem('fls-backup-restore','{broken'));
    await page.reload();await recovery().getByRole('button',{name:'核对恢复历史',exact:true}).waitFor();
@@ -600,8 +628,8 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    await form().locator('button[type="submit"]').click();await recovery().getByText(/不会提交新的目录覆盖/).waitFor();
    assert.equal(restorePosts,0);assert.equal((await state()).restores,initial+1);
    await recovery().getByRole('button',{name:'核对恢复历史',exact:true}).click();
-   await recovery().getByText(new RegExp(requestId)).waitFor();
-   await recovery().locator('#backupRestoreHistoryItems > div').filter({hasText:requestId})
+   await history().getByText(new RegExp(requestId)).waitFor();
+   await page.locator('#backupRestoreHistoryItems > div').filter({hasText:requestId})
     .getByRole('button',{name:'核对此请求',exact:true}).click();
    await recovery().getByText(/损坏状态仍保留/).waitFor();
    await recovery().getByRole('button',{name:'核对恢复历史',exact:true}).click();
@@ -615,9 +643,9 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    await page.evaluate(()=>sessionStorage.setItem('fls-backup-restore',JSON.stringify({restore_request_id:'invalid',restore_items:['data'],restore_deps:false})));
    await page.reload();await recovery().getByRole('button',{name:'核对恢复历史',exact:true}).waitFor();
    await recovery().getByRole('button',{name:'核对恢复历史',exact:true}).click();
-   await recovery().getByText(/restore\.tar\.gz \| unknown/).waitFor();
+   await history().getByText(/restore\.tar\.gz \| unknown/).waitFor();
    assert.equal(await recovery().getByRole('button',{name:'确认清理已核对状态',exact:true}).count(),0);
-   await recovery().locator('#backupRestoreHistoryItems > div').filter({hasText:requestId})
+   await page.locator('#backupRestoreHistoryItems > div').filter({hasText:requestId})
     .getByRole('button',{name:'核对此请求',exact:true}).click();
    await recovery().getByRole('button',{name:'仅重新加载调度器',exact:true}).waitFor();
    await recovery().getByRole('button',{name:'核对恢复历史',exact:true}).click();
