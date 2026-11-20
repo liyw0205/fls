@@ -1,4 +1,5 @@
 import contextlib
+import json
 import tarfile
 import threading
 import unittest
@@ -106,6 +107,65 @@ class BackupRequestRecoveryTests(unittest.TestCase):
             self.assertEqual(start.call_count, 1)
             self.assertFalse((base / "data/backup_requests" / ("d" * 32 + ".json")).exists())
             self.assertEqual(set(backup.BACKUP_JOBS), {job_id})
+
+    def test_bounded_history_keeps_active_unknown_and_cleanup_jobs_recoverable(self):
+        with isolated_app() as (app, base):
+            from fls_manager.routes.backup import _common as backup
+            def job(job_id, *, running, status, updated_at, **extra):
+                return {
+                    "id": job_id,
+                    "items": ["scripts"],
+                    "type_text": "仅脚本",
+                    "running": running,
+                    "status": status,
+                    "filename": "",
+                    "size": 0,
+                    "size_text": "-",
+                    "error": "",
+                    "created_at": "2020-01-01 00:00:00",
+                    "updated_at": updated_at,
+                    **extra,
+                }
+
+            protected = {
+                "active": job("active", running=True, status="正在压缩", updated_at="2020-01-01 00:00:00"),
+                "unknown": job("unknown", running=False, status="结果未知", updated_at="2020-01-02 00:00:00"),
+                "cleanup": job(
+                    "cleanup", running=False, status="失败", updated_at="2020-01-03 00:00:00",
+                    staged_cleanup_pending=True, staged_cleanup_error="权限不足",
+                ),
+            }
+            for info in protected.values():
+                backup.persist_backup_job(info)
+            terminal_ids = []
+            for index in range(backup.BACKUP_JOB_LIMIT + 1):
+                job_id = f"terminal-{index:03d}"
+                terminal_ids.append(job_id)
+                backup.persist_backup_job(job(
+                    job_id, running=False, status="已完成", updated_at=f"2026-01-{index + 1:03d} 00:00:00"
+                ))
+
+            persisted = json.loads(backup.BACKUP_JOBS_FILE.read_text(encoding="utf-8"))
+            self.assertTrue(set(protected).issubset(persisted))
+            self.assertEqual(len(persisted), backup.BACKUP_JOB_LIMIT + len(protected))
+            self.assertNotIn(terminal_ids[0], persisted)
+            self.assertIn(terminal_ids[-1], persisted)
+
+            backup.BACKUP_JOBS.clear()
+            backup.BACKUP_CANCEL_EVENTS.clear()
+            with patch.object(backup, "_remove_orphaned_backup_staging", return_value="fixture permission denied"):
+                response = app.test_client().get("/api/backup/job/active", headers={"X-Token": TOKEN})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json["status"], "结果未知")
+            self.assertTrue(response.json["staged_cleanup_pending"])
+
+            with patch.object(backup, "_remove_orphaned_backup_staging", return_value="fixture permission denied"):
+                cleanup = app.test_client().get("/api/backup/job/cleanup", headers={"X-Token": TOKEN})
+            self.assertEqual(cleanup.status_code, 200)
+            self.assertTrue(cleanup.json["staged_cleanup_pending"])
+            persisted = json.loads(backup.BACKUP_JOBS_FILE.read_text(encoding="utf-8"))
+            self.assertIn("cleanup", persisted)
+            self.assertEqual(len(persisted), backup.BACKUP_JOB_LIMIT + len(protected))
 
     def test_job_publication_failures_and_thread_failure_report_actual_state(self):
         for mode in ("before", "after", "thread"):

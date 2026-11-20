@@ -186,6 +186,34 @@ def main():
                     record = restore._read_restore_request(fault["unknown"])
                     record["state"] = "committing"
                     restore_receipt(record)
+                if fault.get("retention"):
+                    backup.BACKUP_JOBS.clear()
+                    backup.BACKUP_CANCEL_EVENTS.clear()
+                    backup.BACKUP_JOBS_FILE.unlink(missing_ok=True)
+
+                    def retained_job(job_id, running, status, updated_at):
+                        return {
+                            "id": job_id,
+                            "items": ["scripts"],
+                            "type_text": "仅脚本",
+                            "running": running,
+                            "status": status,
+                            "filename": "",
+                            "size": 0,
+                            "size_text": "-",
+                            "error": "",
+                            "created_at": "2020-01-01 00:00:00",
+                            "updated_at": updated_at,
+                        }
+
+                    backup.persist_backup_job(retained_job("a" * 32, True, "正在压缩", "2020-01-01 00:00:00"))
+                    for index in range(backup.BACKUP_JOB_LIMIT + 1):
+                        backup.persist_backup_job(retained_job(
+                            f"retention-terminal-{index:03d}", False, "已完成", f"2026-01-{index + 1:03d} 00:00:00"
+                        ))
+                    backup.BACKUP_JOBS.clear()
+                    backup.BACKUP_CANCEL_EVENTS.clear()
+                    backup.ACTIVE_BACKUP_WORKERS = 0
                 if fault.get("orphan_stage"):
                     orphan_id = "c" * 32
                     orphan = {
@@ -432,7 +460,16 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
     await page.waitForFunction(()=>!sessionStorage.getItem('fls-backup-request'));
     await page.getByRole('link',{name:'下载备份',exact:true}).first().waitFor();
    };
-   await page.goto(base+'/login');await login();await page.goto(base+'/backup');
+   await page.goto(base+'/login');await login();
+   const workersBeforeRetention=(await state()).workers.length;
+   await fixture({retention:true});await page.goto(base+'/backup?job_id='+'a'.repeat(32));
+   await page.waitForFunction(()=>document.getElementById('backupJobText')?.textContent.includes('结果未知'));
+   const retained=await state();assert.equal(retained.jobs.find(row=>row.id==='a'.repeat(32)).status,'结果未知');
+   assert.equal(retained.workers.length,workersBeforeRetention);
+   const pendingAfterRestart=await page.evaluate(()=>JSON.parse(sessionStorage.getItem('fls-backup-request')));
+   assert.equal(pendingAfterRestart.job_id,'a'.repeat(32));assert.equal(pendingAfterRestart.result_unknown,true);
+   await page.evaluate(()=>sessionStorage.removeItem('fls-backup-request'));
+   await page.goto(base+'/backup');
    const initial=(await state()).workers.length;
    const fields=await page.locator('#backupCreateForm').evaluate(f=>({request_id:f.elements.request_id.value,items:['scripts']}));
    assert.equal((await page.request.post(base+'/api/backup/create',{data:fields,headers:{'X-CSRF-Token':'bad'}})).status(),400);
