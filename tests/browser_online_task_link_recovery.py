@@ -142,13 +142,41 @@ def main():
         @app.route("/api/fixture/task-link-cache", methods=["POST"])
         def task_link_cache_fixture():
             cache = source.ONLINE_SCRIPT_CACHE_FILE
-            if (request.get_json() or {}).get("restore"):
+            data = request.get_json() or {}
+            if data.get("restore"):
                 cache.rmdir()
                 source.save_online_script_cache([item])
+            elif data.get("add_task"):
+                current = source.load_online_script_cache()
+                current[0]["task_cron"] = [{"name": "Manual task", "command": "echo manual", "cron": ""}]
+                source.save_online_script_cache(current)
             else:
                 cache.unlink()
                 cache.mkdir()
             return jsonify(fetches=fault["fetches"], cache_is_directory=cache.is_dir())
+
+        @app.route("/api/fixture/task-link-confirmation", methods=["POST"])
+        def task_link_confirmation_fixture():
+            current = source.normalize_online_scripts(source.load_online_script_cache())[0]
+            request_id = uuid.uuid4().hex
+            expected = dict(current)
+            expected["task_cron"] = []
+            source.persist_task_link_request({
+                "request_id": request_id,
+                "script_id": current["id"],
+                "proxy_id": "",
+                "expected_version": source.online_task_link_version(current),
+                "state": "unknown",
+                "added": 0,
+                "total": len(current.get("task_cron") or []),
+                "error": "fixture interrupted before merge",
+                "updated_at": "old",
+                "expected_tasks_fingerprint": source.online_script_task_fingerprint(expected),
+                "published_tasks_fingerprint": "",
+                "confirmation": "",
+                "confirmation_fingerprint": "",
+            })
+            return jsonify(request_id=request_id, script_id=current["id"])
 
         @app.route("/api/fixture/refresh-retry", methods=["POST"])
         def refresh_retry_fixture():
@@ -318,6 +346,32 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    const restoredTaskLinkCache=await page.request.post(base+'/api/fixture/task-link-cache',{headers,data:{restore:true}});
    assert.equal(restoredTaskLinkCache.status(),200);
    assert.equal((await restoredTaskLinkCache.json()).fetches,1);
+
+   await fixture({reset:true,fail:false});
+   const seededConfirmation=await page.request.post(base+'/api/fixture/task-link-confirmation',{headers,data:{}});
+   assert.equal(seededConfirmation.status(),200);
+   const confirmationInfo=await seededConfirmation.json();
+   await page.evaluate(info=>sessionStorage.setItem('fls-online-task-link-request',JSON.stringify({request_id:info.request_id,script_id:info.script_id,proxy_id:''})),confirmationInfo);
+   await page.goto(base+'/online-scripts');
+   await page.getByRole('button',{name:'检查当前任务合并',exact:true}).waitFor();
+   await page.getByRole('button',{name:'检查当前任务合并',exact:true}).click();
+   await page.getByRole('button',{name:'继续原同步请求',exact:true}).waitFor();
+   const changedCache=await page.request.post(base+'/api/fixture/task-link-cache',{headers,data:{add_task:true}});
+   assert.equal(changedCache.status(),200);
+   await page.getByRole('button',{name:'继续原同步请求',exact:true}).click();
+   await page.waitForFunction(()=>document.querySelector('#onlineTaskLinkRecovery').textContent.includes('确认已因任务缓存变化失效'));
+   assert.equal(await page.getByRole('button',{name:'继续原同步请求',exact:true}).count(),0);
+   assert.equal(await page.getByRole('button',{name:'检查当前任务合并',exact:true}).count(),0);
+   await page.getByRole('button',{name:'重新读取同步状态',exact:true}).click();
+   await page.waitForFunction(()=>document.querySelector('#onlineTaskLinkRecovery').textContent.includes('确认已因任务缓存变化失效'));
+   await page.getByRole('link',{name:'查询原同步请求',exact:true}).click();
+   await page.waitForURL(base+'/online-scripts/task-link-status/'+confirmationInfo.request_id);
+   const staleConfirmationStatus=page.locator('.content');
+   assert.match(await staleConfirmationStatus.textContent(),/原未合并确认已失效，任务缓存已变化/);
+   assert.equal(await staleConfirmationStatus.locator('form[action="/online-scripts/task-link/browser-link"]').count(),0);
+   assert.equal(await page.getByRole('link',{name:'核对当前任务',exact:true}).count(),1);
+   await page.screenshot({path:'/tmp/fls-task-link-stale-confirmation-'+viewport.width+'.png'});
+   await page.evaluate(()=>sessionStorage.removeItem('fls-online-task-link-request'));
 
    await fixture({reset:true,fail:true});
    await page.goto(base+'/online-scripts');

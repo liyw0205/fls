@@ -825,6 +825,8 @@ function writeMessage(text, denied, pending, allowContinue, allowConfirm){{
 }}
 
 async function confirmPending(pending, button){{
+    if(pending.confirming) return;
+    pending.confirming = true;
     if(button) button.disabled = true;
     try{{
         const headers = {{"X-Requested-With":"XMLHttpRequest"}};
@@ -832,7 +834,9 @@ async function confirmPending(pending, button){{
         if(csrf) headers["X-CSRF-Token"] = csrf;
         const response = await fetch("/api/online-scripts/task-link-confirm/" + encodeURIComponent(pending.request_id), {{method:"POST", headers, credentials:"same-origin"}});
         const json = await flsReadJsonResponse(response);
-        if(!json || json.ok !== true) throw Object.assign(new Error(json && json.msg || "确认未完成"), {{status: response.status}});
+        if(!json || json.ok !== true || json.request_id !== pending.request_id || !["merged", "not_merged"].includes(json.confirmation)){{
+            throw Object.assign(new Error(json && json.msg || "确认响应无效，请查询原请求"), {{status: response.status}});
+        }}
         if(json.confirmation === "merged"){{
             sessionStorage.removeItem(storageKey);
             window.location.href = "/online-scripts?msg=" + encodeURIComponent(json.msg || "已确认任务已合并");
@@ -841,8 +845,10 @@ async function confirmPending(pending, button){{
         writeMessage(json.msg || "任务尚未合并，请继续原同步请求", false, pending, true, false);
     }}catch(error){{
         const denied = error && (error.status === 401 || error.status === 403);
-        writeMessage("任务合并确认失败：" + (error && error.message || String(error || "请求失败")), denied, pending, false, true);
-    }}
+        const payload = error && error.payload;
+        const stale = payload && payload.request_id === pending.request_id && payload.confirmation_stale === true;
+        writeMessage("任务合并确认失败：" + (error && error.message || String(error || "请求失败")), denied, pending, false, !stale);
+    }}finally{{ pending.confirming = false; }}
 }}
 
 async function queryPending(pending){{
@@ -850,6 +856,10 @@ async function queryPending(pending){{
         const response = await fetch("/api/online-scripts/task-link-status/" + encodeURIComponent(pending.request_id), {{cache:"no-store", credentials:"same-origin"}});
         const json = await flsReadJsonResponse(response);
         if(!json || json.request_id !== pending.request_id) throw new Error("同步状态响应无效");
+        if(json.confirmation_stale === true || json.confirmation_check_error){{
+            writeMessage(json.confirmation_error || ("原同步请求确认状态无法复核：" + json.confirmation_check_error), false, pending, false, false);
+            return;
+        }}
         if(json.state === "completed"){{
             sessionStorage.removeItem(storageKey);
             window.location.href = "/online-scripts/task-link-status/" + encodeURIComponent(pending.request_id);
