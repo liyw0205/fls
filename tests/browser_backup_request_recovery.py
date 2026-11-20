@@ -160,6 +160,10 @@ def main():
             if request.method == "POST":
                 fault.clear()
                 fault.update(request.get_json())
+                if fault.get("reset_restore_history"):
+                    with backup.BACKUP_RESTORE_REQUEST_LOCK:
+                        for path in restore.BACKUP_RESTORE_REQUESTS_DIR.glob("*.json"):
+                            path.unlink(missing_ok=True)
                 if fault.get("atomic_block"):
                     archive_paused.clear()
                     archive_release.clear()
@@ -184,7 +188,7 @@ def main():
                     (SCRIPT_DIR / "demo.py").write_text("print('later edit')")
                 if fault.get("unknown"):
                     record = restore._read_restore_request(fault["unknown"])
-                    record["state"] = "committing"
+                    record.update(state="committing", scheduler_reloaded=False, scheduler_reload_required=True)
                     restore_receipt(record)
                 if fault.get("retention"):
                     backup.BACKUP_JOBS.clear()
@@ -247,7 +251,7 @@ def main():
         env = dict(os.environ, FLS_UI_BASE=f"http://127.0.0.1:{server.server_port}", FLS_UI_TOKEN=TOKEN,
                    FLS_PLAYWRIGHT_CORE=str(playwright), FLS_CHROMIUM=str(chromium), FLS_RESTORE_ARCHIVE=base64.b64encode(archive.getvalue()).decode())
         try:
-            script = ATOMIC_SCRIPT if os.environ.get("FLS_BACKUP_ATOMIC") else ROLLBACK_SCRIPT if os.environ.get("FLS_BACKUP_ROLLBACK_RECOVERY") else LIMIT_SCRIPT if os.environ.get("FLS_BACKUP_LIMIT_RECOVERY") else CANCEL_SCRIPT if os.environ.get("FLS_BACKUP_CANCEL") else IDENTITY_SCRIPT if os.environ.get("FLS_RESTORE_IDENTITY") else RESTORE_SCRIPT if os.environ.get("FLS_BACKUP_RESTORE") else SCRIPT
+            script = ATOMIC_SCRIPT if os.environ.get("FLS_BACKUP_ATOMIC") else ROLLBACK_SCRIPT if os.environ.get("FLS_BACKUP_ROLLBACK_RECOVERY") else LIMIT_SCRIPT if os.environ.get("FLS_BACKUP_LIMIT_RECOVERY") else CANCEL_SCRIPT if os.environ.get("FLS_BACKUP_CANCEL") else IDENTITY_SCRIPT if os.environ.get("FLS_RESTORE_IDENTITY") else LOCAL_RESTORE_STATE_SCRIPT if os.environ.get("FLS_BACKUP_RESTORE_LOCAL_STATE") else RESTORE_SCRIPT if os.environ.get("FLS_BACKUP_RESTORE") else SCRIPT
             result = subprocess.run(["node", "-e", script], env=env, timeout=180)
             if result.returncode:
                 raise SystemExit(result.returncode)
@@ -557,6 +561,72 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    if(process.env.FLS_BULK_SCREENSHOTS) await page.screenshot({path:process.env.FLS_BULK_SCREENSHOTS+'/backup-request-'+viewport.width+'.png',fullPage:true});
    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
    assert.deepEqual(errors,[]);console.log('backup request recovery passed '+viewport.width);
+   await context.close();
+  }
+ }finally{await browser.close();}
+})().catch(e=>{console.error(e);process.exit(1)});
+'''
+
+
+LOCAL_RESTORE_STATE_SCRIPT = r'''
+const assert=require('node:assert/strict');
+const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
+(async()=>{
+ const browser=await chromium.launch({executablePath:process.env.FLS_CHROMIUM,args:['--no-sandbox']});
+ try{
+  for(const viewport of [{width:390,height:844},{width:1280,height:800}]){
+   const context=await browser.newContext({viewport}),page=await context.newPage();
+   page.on('dialog',d=>d.accept());const errors=[];page.on('pageerror',e=>errors.push(e.message));
+   const base=process.env.FLS_UI_BASE,headers={'X-Token':process.env.FLS_UI_TOKEN};
+   const fixture=async data=>assert.equal((await page.request.post(base+'/api/fixture/backup',{headers,data})).status(),200);
+   const state=async()=>(await page.request.get(base+'/api/fixture/backup',{headers})).json();
+   const form=()=>page.locator('form[action="/backup/import"]');
+   const recovery=()=>page.locator('#backupRestoreRecovery');
+   const archive={name:'restore.tar.gz',mimeType:'application/gzip',buffer:Buffer.from(process.env.FLS_RESTORE_ARCHIVE,'base64')};
+   await page.goto(base+'/login');await page.locator('[name="token"]').fill(process.env.FLS_UI_TOKEN);
+   await page.locator('button[type="submit"]').click();await page.waitForURL(u=>u.pathname!='/login');
+   await fixture({reset_restore_history:true});await page.goto(base+'/backup');const initial=(await state()).restores;
+   await form().locator('[name="file"]').setInputFiles(archive);
+   const requestId=await form().locator('[name="restore_request_id"]').inputValue();
+   let response=page.waitForResponse(r=>new URL(r.url()).pathname==='/backup/import'&&r.request().method()==='POST');
+   await form().locator('button[type="submit"]').click();assert.equal((await response).status(),200);
+   assert.equal((await state()).restores,initial+1);
+   await page.goto(base+'/backup');
+
+   await page.evaluate(()=>sessionStorage.setItem('fls-backup-restore','{broken'));
+   await page.reload();await recovery().getByRole('button',{name:'核对恢复历史',exact:true}).waitFor();
+   let restorePosts=0;page.on('request',request=>{if(request.method()==='POST'&&new URL(request.url()).pathname==='/backup/import')restorePosts++;});
+   await form().locator('[name="file"]').setInputFiles(archive);
+   await form().locator('button[type="submit"]').click();await recovery().getByText(/不会提交新的目录覆盖/).waitFor();
+   assert.equal(restorePosts,0);assert.equal((await state()).restores,initial+1);
+   await recovery().getByRole('button',{name:'核对恢复历史',exact:true}).click();
+   await recovery().getByText(new RegExp(requestId)).waitFor();
+   await recovery().locator('#backupRestoreHistoryItems > div').filter({hasText:requestId})
+    .getByRole('button',{name:'核对此请求',exact:true}).click();
+   await recovery().getByText(/损坏状态仍保留/).waitFor();
+   await recovery().getByRole('button',{name:'核对恢复历史',exact:true}).click();
+   await recovery().getByRole('button',{name:'确认清理已核对状态',exact:true}).waitFor();
+   await recovery().getByRole('button',{name:'确认清理已核对状态',exact:true}).click();
+   assert.equal(await page.evaluate(()=>sessionStorage.getItem('fls-backup-restore')),null);
+   assert.equal(await page.evaluate(()=>sessionStorage.getItem('fls-backup-restore-corrupt')),null);
+   assert.notEqual(await form().locator('[name="restore_request_id"]').inputValue(),requestId);
+
+   await fixture({unknown:requestId});
+   await page.evaluate(()=>sessionStorage.setItem('fls-backup-restore',JSON.stringify({restore_request_id:'invalid',restore_items:['data'],restore_deps:false})));
+   await page.reload();await recovery().getByRole('button',{name:'核对恢复历史',exact:true}).waitFor();
+   await recovery().getByRole('button',{name:'核对恢复历史',exact:true}).click();
+   await recovery().getByText(/restore\.tar\.gz \| unknown/).waitFor();
+   assert.equal(await recovery().getByRole('button',{name:'确认清理已核对状态',exact:true}).count(),0);
+   await recovery().locator('#backupRestoreHistoryItems > div').filter({hasText:requestId})
+    .getByRole('button',{name:'核对此请求',exact:true}).click();
+   await recovery().getByRole('button',{name:'仅重新加载调度器',exact:true}).waitFor();
+   await recovery().getByRole('button',{name:'核对恢复历史',exact:true}).click();
+   await recovery().getByText(/含有尚未完成或结果未知/).waitFor();
+   await form().locator('[name="file"]').setInputFiles(archive);
+   await form().locator('button[type="submit"]').click();await recovery().getByText(/不会提交新的目录覆盖/).waitFor();
+   assert.equal(restorePosts,0);assert.equal((await state()).restores,initial+1);
+   assert.equal(await page.evaluate(()=>sessionStorage.getItem('fls-backup-restore-corrupt')),'{\"restore_request_id\":\"invalid\",\"restore_items\":[\"data\"],\"restore_deps\":false}');
+   assert.deepEqual(errors,[]);console.log('backup restore local state recovery passed '+viewport.width);
    await context.close();
   }
  }finally{await browser.close();}

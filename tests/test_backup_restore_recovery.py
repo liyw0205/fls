@@ -21,6 +21,81 @@ class BackupRestoreRecoveryTests(unittest.TestCase):
         return client.post("/api/backup/import" if api else "/backup/import", data=data,
                            headers={"X-Token": TOKEN} if headers is None else headers)
 
+    def test_restore_history_is_authenticated_paginated_and_reconciles_interrupted_commit(self):
+        with isolated_app() as (app, base):
+            from fls_manager.routes.backup import restore
+
+            records = []
+            for number, state in enumerate(("restored", "failed", "committing"), 1):
+                request_id = f"{number:032x}"
+                record = {
+                    "request_id": request_id,
+                    "archive_sha256": f"{number:064x}",
+                    "filename": f"restore-{number}.tar.gz",
+                    "restore_items": ["data", "scripts"],
+                    "restore_deps": number == 1,
+                    "state": state,
+                    "scheduler_reload_required": False,
+                    "dependencies_failed": False,
+                    "created_at": f"2026-11-2{number} 00:00:00",
+                }
+                restore._save_restore_request(record)
+                records.append((request_id, record))
+
+            client = app.test_client()
+            self.assertEqual(client.get("/api/backup/restore-history").status_code, 401)
+            first = client.get(
+                "/api/backup/restore-history?limit=2&offset=0",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(first.status_code, 200)
+            self.assertEqual(first.get_json()["total"], 3)
+            self.assertEqual(first.get_json()["limit"], 2)
+            self.assertEqual(first.get_json()["offset"], 0)
+            self.assertTrue(first.get_json()["has_more"])
+            self.assertRegex(first.get_json()["snapshot"], r"^[a-f0-9]{64}$")
+            self.assertEqual(
+                [item["request_id"] for item in first.get_json()["items"]],
+                [records[2][0], records[1][0]],
+            )
+            self.assertEqual(first.get_json()["items"][0]["state"], "unknown")
+
+            second = client.get(
+                "/api/backup/restore-history?limit=2&offset=2",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(second.status_code, 200)
+            self.assertEqual(second.get_json()["snapshot"], first.get_json()["snapshot"])
+            self.assertFalse(second.get_json()["has_more"])
+            self.assertEqual(second.get_json()["items"][0]["filename"], "restore-1.tar.gz")
+            self.assertTrue(second.get_json()["items"][0]["restore_deps"])
+            self.assertEqual(
+                restore._read_restore_request(records[2][0])["state"], "unknown",
+            )
+
+            for query in ("limit=0", "limit=101", "offset=-1", "offset=abc"):
+                with self.subTest(query=query):
+                    response = client.get(
+                        "/api/backup/restore-history?" + query,
+                        headers={"X-Token": TOKEN},
+                    )
+                    self.assertEqual(response.status_code, 400)
+
+    def test_restore_history_fails_closed_on_corrupt_receipt(self):
+        with isolated_app() as (app, base):
+            from fls_manager.routes.backup import restore
+
+            request_id = "a" * 32
+            path = restore._restore_request_path(request_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{broken", encoding="utf-8")
+            response = app.test_client().get(
+                "/api/backup/restore-history", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(response.status_code, 500)
+            self.assertEqual(path.read_text(encoding="utf-8"), "{broken")
+            self.assertFalse(response.get_json()["ok"])
+
     def test_partial_restore_api_only_reloads_current_tasks_and_preserves_later_edits(self):
         with isolated_app() as (app, base):
             from fls_manager import scheduler, models

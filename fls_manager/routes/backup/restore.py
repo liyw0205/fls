@@ -61,6 +61,12 @@ def _bounded_restore_diagnostic(value):
 def _restore_request_response(record):
     restored = record.get("state") == "restored"
     unknown = record.get("state") == "unknown"
+    filename = record.get("filename", "")
+    updated_at = record.get("updated_at", record.get("created_at", ""))
+    if not isinstance(filename, str):
+        filename = ""
+    if not isinstance(updated_at, str):
+        updated_at = ""
     reload_required = bool(record.get("scheduler_reload_required")) or unknown and not record.get("scheduler_reloaded", False)
     dependencies_failed = bool(record.get("dependencies_failed"))
     resolved = restored and not reload_required and not dependencies_failed
@@ -82,6 +88,9 @@ def _restore_request_response(record):
     return {
         "ok": resolved, "resolved": resolved, "msg": message,
         "request_id": record["request_id"], "state": record["state"],
+        "filename": _bounded_restore_diagnostic(filename)[:240],
+        "updated_at": updated_at,
+        "restore_deps": bool(record.get("restore_deps", False)),
         "restored": restored, "restore_outcome_unknown": unknown,
         "restored_items": record.get("restore_items", []),
         "scheduler_reload_required": reload_required,
@@ -94,6 +103,73 @@ def _restore_request_response(record):
         "scheduler_error": _bounded_restore_diagnostic(record.get("scheduler_error"))
         if reload_required else "",
     }, status
+
+
+@bp.route("/api/backup/restore-history")
+def api_backup_restore_history():
+    try:
+        raw_limit = request.args.get("limit", "100")
+        raw_offset = request.args.get("offset", "0")
+        if not re.fullmatch(r"[0-9]{1,6}", raw_limit) or not re.fullmatch(r"[0-9]{1,9}", raw_offset):
+            raise ValueError
+        limit, offset = int(raw_limit), int(raw_offset)
+        if not 1 <= limit <= 100 or offset > 100000000:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify(ok=False, msg="恢复历史分页参数无效"), 400
+
+    try:
+        with storage_transaction(), BACKUP_RESTORE_REQUEST_LOCK:
+            directory = BACKUP_RESTORE_REQUESTS_DIR
+            if directory.is_symlink():
+                raise RuntimeError("备份恢复回执目录不能是符号链接")
+            paths = []
+            if directory.exists():
+                if not directory.is_dir():
+                    raise RuntimeError("备份恢复回执目录无效")
+                for path in directory.iterdir():
+                    if not path.name.endswith(".json"):
+                        continue
+                    request_id = path.name[:-5]
+                    if not re.fullmatch(r"[a-f0-9]{32}", request_id):
+                        raise RuntimeError("备份恢复历史中存在无效回执文件")
+                    paths.append((request_id, path))
+
+            records = []
+            for request_id, path in paths:
+                if path.is_symlink() or not path.is_file():
+                    raise RuntimeError("备份恢复回执必须是普通文件")
+                record = _read_restore_request(request_id)
+                if record is None:
+                    raise RuntimeError("备份恢复历史在读取期间发生变化，请重试")
+                if record["state"] == "committing" and not backup_state.RESTORE_ACTIVE:
+                    record["state"] = "unknown"
+                    record["restore_outcome_unknown"] = True
+                    _save_restore_request(record)
+                payload, _ = _restore_request_response(record)
+                records.append(payload)
+
+            records.sort(
+                key=lambda item: (item.get("updated_at", ""), item.get("request_id", "")),
+                reverse=True,
+            )
+            snapshot = hashlib.sha256(json.dumps(
+                records, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()
+            total = len(records)
+            items = records[offset:offset + limit]
+            return jsonify(
+                ok=True,
+                items=items,
+                snapshot=snapshot,
+                total=total,
+                limit=limit,
+                offset=offset,
+                has_more=offset + len(items) < total,
+                active=bool(backup_state.RESTORE_ACTIVE),
+            )
+    except Exception:
+        return jsonify(ok=False, msg="备份恢复历史无法完整读取，请修复回执后重试"), 500
 
 
 @bp.route("/api/backup/restore/<request_id>")
