@@ -215,6 +215,16 @@ def main():
                 cache.mkdir()
             return jsonify(fetches=fault["fetches"], cache_is_directory=cache.is_dir())
 
+        @app.route("/api/fixture/refresh-recovery-damage", methods=["POST"])
+        def refresh_recovery_damage_fixture():
+            data = request.get_json() or {}
+            request_id = str(data.get("request_id") or "")
+            path = constants._online_refresh_task_recoveries_path(request_id)
+            if data.get("copy") == "backup":
+                path = constants._online_refresh_task_recoveries_backup_path(request_id)
+            path.write_text("fixture recovery copy corruption", encoding="utf-8")
+            return jsonify(ok=True, path=path.name)
+
         @app.route("/api/fixture/task-link-confirmation", methods=["POST"])
         def task_link_confirmation_fixture():
             prepared = (request.get_json() or {}).get("prepared") is True
@@ -447,12 +457,21 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    assert.equal(recoveredResponse.status(),200);
    await page.waitForURL(url=>url.searchParams.get('msg')?.includes('外部任务源同步完成'));
    assert.equal((await fixture({})).fetches,1);
+   const damagePrimary=await page.request.post(base+'/api/fixture/refresh-recovery-damage',{headers,data:{request_id:refreshRecoveryRequest}});
+   assert.equal(damagePrimary.status(),200);
+   const repairedStatus=await page.request.get(base+'/api/online-scripts/refresh-status/'+refreshRecoveryRequest,{headers});
+   assert.equal(repairedStatus.status(),200);
+   assert.equal((await repairedStatus.json()).task_link_recovery_maintenance.repaired,true);
+   const damageBackup=await page.request.post(base+'/api/fixture/refresh-recovery-damage',{headers,data:{request_id:refreshRecoveryRequest,copy:'backup'}});
+   assert.equal(damageBackup.status(),200);
    await page.goto(refreshFailureUrl);
+   await page.locator('#onlineRefreshTaskLinkFailures').getByText(/恢复回执副本已自动修复/).waitFor();
    await page.locator('#onlineRefreshTaskLinkFailures').getByText(/浏览器任务源 104：已恢复/).waitFor();
    assert.equal(await page.locator('#onlineRefreshTaskLinkFailures form[data-script-id="browser-link-104"]').count(),0);
    const recoveredStatus=await page.request.get(base+'/api/online-scripts/refresh-task-link-failures/'+refreshRecoveryRequest+'?offset=100&limit=100',{headers});
    assert.equal(recoveredStatus.status(),200);
    assert.equal((await recoveredStatus.json()).items[4].recovery.state,'completed');
+   assert.equal((await fixture({})).fetches,1);
    await page.screenshot({path:'/tmp/fls-refresh-failure-page-'+viewport.width+'.png'});
    if(process.env.FLS_REFRESH_RECOVERY_ONLY==='1'){
      assert.deepEqual(errors,[]);

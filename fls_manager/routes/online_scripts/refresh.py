@@ -47,6 +47,7 @@ def _refresh_status_with_failure_recovery(state):
     state["task_link_failures"] = page["items"]
     state["task_link_failure_count"] = page["total"]
     state["task_link_failure_digest"] = page["digest"]
+    state["task_link_recovery_maintenance"] = page["maintenance"]
     return state
 
 
