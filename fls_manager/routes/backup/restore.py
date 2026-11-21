@@ -115,8 +115,10 @@ def _read_restore_archive_maintenance_state():
         or not re.fullmatch(r"[a-f0-9]{64}", state["fingerprint"])
         or not isinstance(state.get("target_digest"), str)
         or not re.fullmatch(r"[a-f0-9]{64}", state["target_digest"])
-        or state.get("kind") not in ("repair", "publication", "unavailable")):
+        or state.get("kind") not in ("repair", "publication", "unavailable")
+        or "acknowledged" in state and type(state["acknowledged"]) is not bool):
         raise RuntimeError("备份恢复维护状态结构无效")
+    state.setdefault("acknowledged", False)
     return state
 
 
@@ -192,6 +194,7 @@ def _persist_restore_archive_maintenance(required, fingerprint, target_digest, k
     state = {
         "version": 1, "event_id": event_id, "required": bool(required),
         "fingerprint": fingerprint, "target_digest": target_digest, "kind": kind,
+        "acknowledged": False,
     }
     if previous == state:
         return previous
@@ -210,9 +213,21 @@ def _restore_archive_maintenance_payload(state=None, *, unreadable=False):
         state = _read_restore_archive_maintenance_state()
     if state is None:
         return None
+    if state.get("acknowledged"):
+        try:
+            _sync_restore_archive_directory()
+            return None
+        except Exception:
+            return {
+                "event_id": state["event_id"],
+                "required": False,
+                "acknowledged": True,
+                "notice": "维护提示已确认，但目录同步尚未确认；请重试确认以完成恢复。",
+            }
     return {
         "event_id": state["event_id"],
         "required": state["required"],
+        "acknowledged": False,
         "notice": _restore_archive_maintenance_notice(state),
     }
 
@@ -710,6 +725,9 @@ def _ack_restore_archive_maintenance(event_id):
                     {"ok": False, "msg": "恢复维护状态已变化，请重新核对历史"}, state,
                 )
                 return payload, 409
+            if state.get("acknowledged"):
+                _sync_restore_archive_directory()
+                return {"ok": True, "cleared": True, "maintenance": None}, 200
 
             _read_restore_archive_index(require_redundancy=True)
             state = _read_restore_archive_maintenance_state()
@@ -724,14 +742,15 @@ def _ack_restore_archive_maintenance(event_id):
                 payload = {"ok": False, "msg": "恢复归档仍待维护，不能清除提示"}
                 return _attach_restore_archive_maintenance(payload, state), 409
 
-            path = _restore_archive_maintenance_path()
-            path.unlink()
-            _sync_restore_archive_directory()
+            acknowledged = dict(state, acknowledged=True)
+            _write_restore_archive_maintenance_state(acknowledged)
             return {"ok": True, "cleared": True, "maintenance": None}, 200
     except Exception:
         payload = _attach_current_restore_archive_maintenance(
-            {"ok": False, "msg": "恢复维护状态未能清除；原恢复请求与目录保持不变"},
+            {"ok": False, "msg": "恢复维护确认尚未持久核实；原恢复请求与目录未更改，可重试确认"},
         )
+        if payload.get("maintenance") is None and not payload.get("maintenance_error"):
+            return {"ok": True, "cleared": True, "maintenance": None}, 200
         return payload, 503
 
 

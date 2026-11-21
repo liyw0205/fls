@@ -879,7 +879,8 @@ function flsRestoreHistoryFingerprint(local){{
 function flsRestoreMaintenanceValid(value){{
     return value===null||!!value&&typeof value==="object"&&!Array.isArray(value)
         &&typeof value.event_id==="string"&&(value.event_id===""||/^[a-f0-9]{{32}}$/.test(value.event_id))
-        &&typeof value.required==="boolean"&&typeof value.notice==="string";
+        &&typeof value.required==="boolean"&&typeof value.notice==="string"
+        &&(value.acknowledged===undefined||typeof value.acknowledged==="boolean");
 }}
 
 function flsRenderRestoreHistory(){{

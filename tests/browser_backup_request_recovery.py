@@ -39,6 +39,8 @@ def main():
         release.set()
         persist, receipt, worker = backup.persist_backup_job, actions.write_json, backup._create_backup_worker
         write_archive_index = restore._write_restore_archive_index_file
+        sync_restore_archive_directory = restore._sync_restore_archive_directory
+        ack_sync_failure = {"enabled": False, "count": 0}
         extracted_limit = backup.MAX_BACKUP_EXTRACTED_BYTES
         reload, commit = scheduler._reload_scheduler_locked, restore._commit_restore_directories
         restore_receipt = restore._save_restore_request
@@ -122,6 +124,22 @@ def main():
             return restore_receipt(record)
 
         restore._save_restore_request = persist_restore
+
+        def sync_archive_directory():
+            if ack_sync_failure["enabled"]:
+                state_path = restore._restore_archive_maintenance_path()
+                try:
+                    state = json.loads(state_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    state = {}
+                if state.get("acknowledged"):
+                    ack_sync_failure["count"] += 1
+                    if ack_sync_failure["count"] <= 2:
+                        raise OSError("fixture acknowledgement directory fsync failure")
+                    ack_sync_failure["enabled"] = False
+            return sync_restore_archive_directory()
+
+        restore._sync_restore_archive_directory = sync_archive_directory
         archive = io.BytesIO()
         with tarfile.open(fileobj=archive, mode="w:gz") as tar:
             for name, data in {
@@ -162,6 +180,8 @@ def main():
             if request.method == "POST":
                 fault.clear()
                 fault.update(request.get_json())
+                if fault.get("ack_directory_fsync_failure"):
+                    ack_sync_failure.update(enabled=True, count=0)
                 if fault.get("reset_restore_history"):
                     with backup.BACKUP_RESTORE_REQUEST_LOCK:
                         for path in restore.BACKUP_RESTORE_REQUESTS_DIR.glob("*.json"):
@@ -336,13 +356,17 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    await archivedRow.getByRole('button',{name:'核对此请求',exact:true}).click();
    await recovery().getByText(/已归档，不会再次覆盖目录/).waitFor();
    const maintenanceEventId=await page.evaluate(()=>window.flsRestoreHistoryVerification.maintenance.event_id);
+   await fixture({ack_directory_fsync_failure:true});
+   const acknowledge=recovery().getByRole('button',{name:'确认已读并清除维护提示',exact:true});
+   await acknowledge.waitFor();await acknowledge.click();
+   await recovery().getByText(/维护提示未能清除.*HTTP 503/).waitFor();
+   await recovery().getByText(/维护提示已确认，但目录同步尚未确认/).waitFor();
    let fakeAck=true;
    await page.route('**/api/backup/restore-maintenance/*/ack',async route=>{
     if(!fakeAck)return route.continue();fakeAck=false;
     await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({ok:true,cleared:false,maintenance:{event_id:maintenanceEventId,required:false,notice:'尚未清除'}})});
    });
-   const acknowledge=recovery().getByRole('button',{name:'确认已读并清除维护提示',exact:true});
-   await acknowledge.waitFor();await acknowledge.click();
+   await recovery().getByRole('button',{name:'确认已读并清除维护提示',exact:true}).click();
    await recovery().getByText(/维护提示未能清除.*维护清除确认响应无效/).waitFor();
    assert.equal((await (await page.request.get(base+'/api/backup/restore-history?limit=100&offset=0',{headers})).json()).maintenance.event_id,maintenanceEventId);
    await recovery().getByRole('button',{name:'确认已读并清除维护提示',exact:true}).click();
