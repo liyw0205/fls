@@ -797,6 +797,43 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    await page.waitForURL(url=>url.pathname==='/online-scripts'&&(url.searchParams.get('msg')||'').includes('外部任务源同步完成'));
    const dynamicState=await fixture({});
    assert.equal(dynamicState.fetches,2);
+
+   const autoRetryRequest=('a'+viewport.width.toString(16)).padEnd(32,'a');
+   const autoRetryRefresh=('b'+viewport.width.toString(16)).padEnd(32,'b');
+   const runningFixture=await page.request.post(base+'/api/fixture/online-refresh',{headers,data:{
+     running:true,request_id:autoRetryRequest,refresh_id:autoRetryRefresh,
+   }});
+   assert.equal(runningFixture.status(),200);
+   await page.evaluate(({requestId})=>sessionStorage.setItem('fls-online-refresh-request',JSON.stringify({
+     request_id:requestId,proxy_id:'',server_id:'',
+   })),{requestId:autoRetryRequest});
+   const autoStatusUrl=base+'/api/online-scripts/refresh-status/'+autoRetryRequest;
+   let autoStatusReads=0,refreshPosts=0;
+   const countRefreshPosts=request=>{
+     if(request.method()==='POST'&&request.url().includes('/api/online-scripts/refresh')) refreshPosts++;
+   };
+   page.on('request',countRefreshPosts);
+   await page.route(autoStatusUrl,route=>{
+     autoStatusReads++;
+     if(autoStatusReads===1) return route.fulfill({status:503,contentType:'text/html',body:'temporary status unavailable'});
+     return route.continue();
+   });
+   await page.goto(base+'/online-scripts');
+   await page.waitForFunction(()=>document.querySelector('#onlineRefreshStatusText').textContent.includes('1/5'));
+   assert.equal(await page.locator('#onlineRefreshQuery').isVisible(),true);
+   await page.screenshot({path:'/tmp/fls-refresh-status-auto-retry-'+viewport.width+'.png'});
+   const recoveredStatusResponse=page.waitForResponse(response=>response.url()===autoStatusUrl&&response.status()===200,{timeout:7000});
+   await recoveredStatusResponse;
+   await page.waitForFunction(()=>!document.querySelector('#onlineRefreshStatusText').textContent.includes('HTTP 503'));
+   assert.equal(autoStatusReads,2);
+   assert.equal(refreshPosts,0,'automatic status recovery must not repeat the synchronization POST');
+   await page.evaluate(()=>window.dispatchEvent(new Event('pagehide')));
+   await page.waitForTimeout(2200);
+   assert.equal(autoStatusReads,2,'pagehide clears the next poll timer');
+   assert.deepEqual(errors,[]);
+   page.off('request',countRefreshPosts);
+   await page.unroute(autoStatusUrl);
+
    const manyFailureRequestId='9'.repeat(32);
    await fixture({reset:true,fail:true});
    const manyFailures=await page.request.post(base+'/api/fixture/online-refresh',{headers,data:{failure_count:105,request_id:manyFailureRequestId,refresh_id:'8'.repeat(32)}});
