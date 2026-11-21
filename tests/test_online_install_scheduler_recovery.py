@@ -5,6 +5,7 @@ import subprocess
 import threading
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from tests.test_ui_route_components import ROOT, TOKEN, isolated_app
@@ -122,6 +123,329 @@ class OnlineInstallSchedulerRecoveryTests(unittest.TestCase):
                 repeated = client.post(action, headers=headers)
             self.assertEqual(repeated.status_code, 409)
             reload_scheduler.assert_not_called()
+
+    def test_log_errors_preserve_bound_state_recovery_and_saved_tasks(self):
+        for failure in ("missing", "boundary", "read"):
+            with self.subTest(failure=failure), isolated_app() as (app, base_dir):
+                from fls_manager.models import load_tasks
+                from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE, get_online_install_job
+
+                install_id = self.partial_install(app, base_dir)
+                info = get_online_install_job(install_id)
+                log_file = Path(info["log_file"])
+                protected = base_dir / "protected.txt"
+                protected.write_text("do not read or modify", encoding="utf-8")
+                if failure != "read":
+                    log_file.unlink()
+                if failure == "boundary":
+                    log_file.symlink_to(protected)
+                original = ONLINE_INSTALL_JOBS_FILE.read_bytes()
+                tasks = load_tasks()
+                headers = {"X-Token": TOKEN}
+                client = app.test_client()
+                with patch("fls_manager.routes.online_scripts.logs.tail_file", return_value="读取日志失败: temporary IO error"):
+                    response = client.get(f"/api/online-scripts/log/{install_id}", headers=headers)
+                self.assertEqual(response.status_code, 200 if failure == "missing" else 500)
+                payload = response.json
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["install_id"], install_id)
+                self.assertEqual(payload["log_status"], 404 if failure == "missing" else 500)
+                self.assertEqual(payload["status"], "部分完成")
+                self.assertEqual(payload["phase"], "scheduler_reload_pending")
+                self.assertTrue(payload["scheduler_reload_pending"])
+                self.assertIn("scheduler unavailable", payload["install_error"])
+                self.assertTrue(payload["log_error"])
+                self.assertEqual(payload["recovery"]["label"], "重新加载调度器")
+                state = client.get(payload["state_url"], headers=headers)
+                self.assertEqual(state.status_code, 200)
+                self.assertEqual(state.json["status"], "部分完成")
+                self.assertEqual(state.json["recovery"], payload["recovery"])
+                self.assertEqual(ONLINE_INSTALL_JOBS_FILE.read_bytes(), original)
+                self.assertEqual(load_tasks(), tasks)
+                with patch("fls_manager.routes.online_scripts.install.reload_scheduler") as reload, patch(
+                    "fls_manager.online_scripts.install.download_online_script_logged",
+                ) as download, patch("fls_manager.online_scripts.install.import_task_if_needed") as importer:
+                    restored = client.post(payload["recovery"]["api_action"], headers=headers)
+                    repeated = client.post(payload["recovery"]["api_action"], headers=headers)
+                self.assertEqual(restored.status_code, 200)
+                self.assertEqual(repeated.status_code, 409)
+                reload.assert_called_once()
+                download.assert_not_called()
+                importer.assert_not_called()
+                self.assertEqual(load_tasks(), tasks)
+                self.assertEqual(protected.read_text(encoding="utf-8"), "do not read or modify")
+
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise missing log recovery")
+    def test_missing_log_page_keeps_recovery_and_refreshes_state_without_losing_diagnostics(self):
+        with isolated_app() as (app, base_dir):
+            install_id = self.partial_install(app, base_dir)
+            from fls_manager.online_scripts.constants import get_online_install_job
+
+            info = get_online_install_job(install_id)
+            Path(info["log_file"]).unlink()
+            client = app.test_client()
+            headers = {"X-Token": TOKEN}
+            html = client.get(f"/online-scripts/log/{install_id}", headers=headers).get_data(as_text=True)
+            initial = client.get(f"/api/online-scripts/log/{install_id}", headers=headers).json
+            state = client.get(f"/api/online-scripts/log/{install_id}?state_only=1", headers=headers).json
+            with patch("fls_manager.routes.online_scripts.install.reload_scheduler"):
+                client.post(initial["recovery"]["api_action"], headers=headers)
+            complete = client.get(f"/api/online-scripts/log/{install_id}", headers=headers).json
+            script = next(value for value in re.findall(r"<script>(.*?)</script>", html, re.S)
+                          if "async function loadLog(" in value)
+            source = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+            reader = source[source.index("function flsResponseErrorDiagnostic("):
+                            source.index("async function flsReadTextResponse(")]
+            result = subprocess.run(["node", "-e", r"""
+const vm=require('node:vm'),assert=require('node:assert/strict');
+const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const names=['installStatus','installPhase','installError','installReturncode','installStopAction',
+  'installPollError','installPollLogin','installPollLogs','installPollRetry','installStopQuery',
+  'installStateQuery','log','flsLogNewTip'];
+const elements=Object.fromEntries(names.map(id=>[id,{hidden:true,textContent:'',style:{},dataset:{},
+  addEventListener(name,fn){this[name]=fn;}}]));
+elements.log.textContent='last known output';elements.installStatus.textContent='运行中';
+const recovery={hidden:true,dataset:{},form:null,html:'',
+  set innerHTML(value){this.html=value;this.form=value.includes('<form')?{button:{disabled:false},
+    querySelector(){return this.button;},addEventListener(name,fn){this[name]=fn;}}:null;},
+  get innerHTML(){return this.html;},querySelector(){return this.form;}};
+elements.installRecoveryAction=recovery;
+const calls=[],responses=[input.initial,input.state,{ok:true},input.complete];
+const context={window:{innerHeight:800,scrollY:0,scrollTo(){},addEventListener(){}},
+  document:{documentElement:{scrollHeight:800},getElementById:id=>elements[id],querySelector:()=>null},
+  location:{pathname:'/online-scripts/log/'+input.initial.install_id,search:''},
+  flsGetCsrfToken:()=> 'recovery-csrf',setInterval:()=>1,clearInterval(){},
+  setTimeout(){throw new Error('terminal log errors must not auto poll');},clearTimeout(){},
+  fetch:async(url,options={})=>{calls.push({url,options});return {ok:true,status:200,text:async()=>JSON.stringify(responses.shift())};}};
+const flush=()=>new Promise(resolve=>setImmediate(resolve));
+vm.createContext(context);vm.runInContext(input.reader+input.script,context);
+(async()=>{
+  await flush();
+  assert.equal(elements.installStatus.textContent,'部分完成');
+  assert.equal(elements.installPhase.textContent,'scheduler_reload_pending');
+  assert.equal(elements.installReturncode.textContent,'0');
+  assert.equal(elements.log.textContent,'last known output');
+  assert.equal(elements.installPollError.hidden,false);
+  assert.equal(recovery.hidden,false);assert.match(recovery.html,/重新加载调度器/);
+  assert.match(recovery.html,/csrf_token.*recovery-csrf/);
+  assert.equal(elements.installStateQuery.hidden,false);assert.equal(elements.installPollRetry.hidden,false);
+  await elements.installStateQuery.click();
+  assert.equal(calls[1].url,'/api/online-scripts/log/'+input.initial.install_id+'?state_only=1');
+  assert.equal(elements.installPollError.hidden,false);assert.match(elements.installPollError.textContent,/日志/);
+  assert.equal(elements.log.textContent,'last known output');
+  const form=recovery.form;
+  await form.submit({preventDefault(){}});
+  assert.equal(calls[2].url,input.initial.recovery.api_action);
+  assert.equal(calls[2].options.headers['X-CSRF-Token'],'recovery-csrf');
+  assert.equal(calls.length,4);
+  assert.equal(elements.installStatus.textContent,'已完成');assert.equal(elements.log.textContent,'last known output');
+  assert.equal(elements.installPollError.hidden,false);assert.equal(recovery.form,null);
+  assert.equal(context.window.__FLS_ACTIVE_LOG_INTERVAL__,null);
+  await form.submit({preventDefault(){}});assert.equal(calls.length,4,'stale recovery form must not resubmit');
+})().catch(error=>{console.error(error);process.exitCode=1;});
+"""], input=json.dumps({"script": script, "reader": reader, "initial": initial, "state": state, "complete": complete}),
+                capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_task_import_recovery_allows_missing_log_and_refuses_uncontrolled_log_writes(self):
+        for failure in ("missing", "symlink", "uncontrolled", "empty_identity", "invalid_identity"):
+            with self.subTest(failure=failure), isolated_app() as (app, base_dir):
+                from fls_manager.models import load_tasks
+                from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE, get_online_install_job, persist_online_install
+
+                install_id = self.pending_task_import(base_dir)
+                info = get_online_install_job(install_id)
+                log_file = Path(info["log_file"])
+                protected = base_dir / "protected.txt"
+                protected.write_text("protected content", encoding="utf-8")
+                log_file.unlink()
+                if failure == "symlink":
+                    log_file.symlink_to(protected)
+                if failure == "uncontrolled":
+                    info["log_file"] = str(protected)
+                if failure == "empty_identity":
+                    info["log_file"] = " "
+                if failure == "invalid_identity":
+                    info["log_file"] = 123
+                if failure in ("uncontrolled", "empty_identity", "invalid_identity"):
+                    persist_online_install(info)
+                original = ONLINE_INSTALL_JOBS_FILE.read_bytes()
+                action = f"/api/online-scripts/install-task-retry/{install_id}"
+                with patch("fls_manager.online_scripts.tasks.reload_scheduler") as reload, patch(
+                    "fls_manager.online_scripts.install.download_online_script_logged",
+                ) as download:
+                    response = app.test_client().post(action, headers={"X-Token": TOKEN})
+                self.assertEqual(response.status_code, 200 if failure == "missing" else 409)
+                download.assert_not_called()
+                self.assertEqual(protected.read_text(encoding="utf-8"), "protected content")
+                if failure == "missing":
+                    reload.assert_called_once()
+                    self.assertEqual(len(load_tasks()), 1)
+                    self.assertTrue(log_file.is_file())
+                    self.assertEqual(get_online_install_job(install_id)["status"], "已完成")
+                else:
+                    reload.assert_not_called()
+                    self.assertFalse(load_tasks())
+                    self.assertEqual(ONLINE_INSTALL_JOBS_FILE.read_bytes(), original)
+                    self.assertEqual(response.json["request_id"], install_id)
+                    self.assertIn("日志", response.json["msg"])
+
+    def test_missing_log_native_recovery_forms_keep_csrf_session_and_single_completion(self):
+        for mode in ("task_import", "scheduler"):
+            with self.subTest(mode=mode), isolated_app() as (app, base_dir):
+                from fls_manager.models import load_tasks
+                from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE, get_online_install_job
+
+                install_id = self.pending_task_import(base_dir) if mode == "task_import" else self.partial_install(app, base_dir)
+                Path(get_online_install_job(install_id)["log_file"]).unlink()
+                client = app.test_client()
+                initial = client.get(f"/api/online-scripts/log/{install_id}", headers={"X-Token": TOKEN}).json
+                action = initial["recovery"]["action"]
+                csrf = "missing-log-recovery-csrf"
+
+                def login():
+                    with client.session_transaction() as session:
+                        session.update(token=TOKEN, token_expire_at=int(time.time()) + 3600,
+                                       security_verified=True, csrf_token=csrf)
+
+                login()
+                page = client.get(f"/online-scripts/log/{install_id}")
+                self.assertEqual(page.status_code, 200)
+                self.assertIn(f'action="{action}"', page.get_data(as_text=True))
+                self.assertIn(f'name="csrf_token" value="{csrf}"', page.get_data(as_text=True))
+                original = ONLINE_INSTALL_JOBS_FILE.read_bytes()
+                tasks = load_tasks()
+                with patch("fls_manager.routes.online_scripts.install.reload_scheduler") as reload, patch(
+                    "fls_manager.online_scripts.tasks.reload_scheduler",
+                ) as import_reload, patch("fls_manager.online_scripts.install.download_online_script_logged") as download:
+                    self.assertEqual(client.post(action, data={"csrf_token": "wrong"}).status_code, 400)
+                    with client.session_transaction() as session:
+                        session["token_expire_at"] = 1
+                    expired = client.post(action, data={"csrf_token": csrf})
+                    self.assertEqual(expired.status_code, 302)
+                    self.assertIn("/login?next=", expired.location)
+                    self.assertEqual(client.get(initial["state_url"]).status_code, 401)
+                    login()
+                    with patch("fls_manager.auth.query_token_enabled", return_value=False):
+                        denied = client.post(initial["recovery"]["api_action"], data={"csrf_token": csrf}, query_string={"token": TOKEN})
+                    self.assertEqual(denied.status_code, 403)
+                    self.assertEqual(ONLINE_INSTALL_JOBS_FILE.read_bytes(), original)
+                    self.assertEqual(load_tasks(), tasks)
+                    reload.assert_not_called()
+                    import_reload.assert_not_called()
+                    restored = client.post(action, data={"csrf_token": csrf})
+                    self.assertEqual(restored.status_code, 302)
+                    self.assertIn(f"/online-scripts/log/{install_id}", restored.location)
+                    self.assertEqual(client.post(action, data={"csrf_token": csrf}).status_code, 409)
+                    self.assertEqual(get_online_install_job(install_id)["status"], "已完成")
+                    self.assertEqual(len(load_tasks()), 1)
+                    (import_reload if mode == "task_import" else reload).assert_called_once()
+                    download.assert_not_called()
+
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise recovery concurrency")
+    def test_missing_log_recovery_lost_response_uses_single_readonly_query_and_ignores_old_log(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import get_online_install_job
+
+            install_id = self.partial_install(app, base_dir)
+            Path(get_online_install_job(install_id)["log_file"]).unlink()
+            client = app.test_client()
+            headers = {"X-Token": TOKEN}
+            html = client.get(f"/online-scripts/log/{install_id}", headers=headers).get_data(as_text=True)
+            initial = client.get(f"/api/online-scripts/log/{install_id}", headers=headers).json
+            with patch("fls_manager.routes.online_scripts.install.reload_scheduler"):
+                client.post(initial["recovery"]["api_action"], headers=headers)
+            complete = client.get(f"/api/online-scripts/log/{install_id}?state_only=1", headers=headers).json
+            script = next(value for value in re.findall(r"<script>(.*?)</script>", html, re.S)
+                          if "async function loadLog(" in value)
+            source = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+            reader = source[source.index("function flsResponseErrorDiagnostic("):
+                            source.index("async function flsReadTextResponse(")]
+            result = subprocess.run(["node", "-e", r"""
+const vm=require('node:vm'),assert=require('node:assert/strict');
+const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const response=(status,payload)=>({ok:status>=200&&status<300,status,text:async()=>JSON.stringify(payload)});
+function setup(first){
+  const elements=Object.fromEntries(['installStatus','installPhase','installError','installReturncode','installStopAction',
+    'installPollError','installPollLogin','installPollLogs','installPollRetry','installStopQuery','installStateQuery','log','flsLogNewTip']
+    .map(id=>[id,{hidden:true,textContent:'preserved',dataset:{},style:{},addEventListener(name,fn){this[name]=fn;}}]));
+  const recovery={hidden:true,dataset:{},form:null,html:'',set innerHTML(value){this.html=value;
+    this.form=value.includes('<form')?{button:{disabled:false},querySelector(){return this.button;},
+      addEventListener(name,fn){this[name]=fn;}}:null;},get innerHTML(){return this.html;},querySelector(){return this.form;}};
+  elements.installRecoveryAction=recovery;
+  const calls=[],replies=[response(200,first)],listeners={};
+  const context={window:{innerHeight:800,scrollY:0,scrollTo(){},addEventListener(name,fn){listeners[name]=fn;}},
+    document:{documentElement:{scrollHeight:800},getElementById:id=>elements[id],querySelector:()=>null},
+    location:{pathname:'/online-scripts/log/'+input.initial.install_id,search:'?back=%2Fonline-scripts%2Finstall-history'},
+    URLSearchParams,flsGetCsrfToken:()=> 'csrf',
+    setInterval:()=>1,clearInterval(){},setTimeout(){throw new Error('no automatic mutation or terminal polling');},clearTimeout(){},
+    fetch:async(url,options={})=>{calls.push({url,options});assert.ok(replies.length,'unexpected request');return replies.shift();}};
+  vm.createContext(context);vm.runInContext(input.reader+input.script,context);
+  return {elements,recovery,context,calls,replies,listeners};
+}
+const flush=()=>new Promise(resolve=>setImmediate(resolve));
+(async()=>{
+  const c=setup(input.initial);await flush();
+  assert.match(c.recovery.html,/back=.*online-scripts/);
+  const form=c.recovery.form;let resolveLog,resolvePost;
+  c.replies.push(new Promise(resolve=>{resolveLog=resolve;}));
+  const oldRead=c.elements.installPollRetry.onclick();assert.equal(c.calls.length,2);
+  c.replies.push(new Promise(resolve=>{resolvePost=resolve;}));
+  const submitted=form.submit({preventDefault(){}});
+  await form.submit({preventDefault(){}});await c.elements.installStateQuery.click();
+  assert.equal(c.calls.length,3,'recovery POST must block duplicate submits and status reads');
+  resolvePost(response(502,{msg:'response lost after commit'}));await submitted;
+  assert.equal(form.button.disabled,true);assert.equal(c.elements.installStateQuery.hidden,false);
+  assert.match(c.elements.installPollError.textContent,/先查询原安装结果/);
+  await form.submit({preventDefault(){}});assert.equal(c.calls.length,3);
+  resolveLog(response(200,{ok:true,install_id:input.initial.install_id,running:true,status:'outdated',log:'old output'}));await oldRead;
+  assert.equal(c.elements.log.textContent,'preserved');assert.equal(c.elements.installStatus.textContent,'部分完成');
+  let resolveState;c.replies.push(new Promise(resolve=>{resolveState=resolve;}));
+  const stateRead=c.elements.installStateQuery.click();await c.elements.installStateQuery.click();
+  assert.equal(c.calls.length,4,'manual state reads must be single flight');
+  resolveState(response(503,{msg:'state temporarily unavailable'}));await stateRead;
+  assert.equal(c.elements.log.textContent,'preserved');assert.equal(form.button.disabled,true);
+  c.replies.push(response(200,input.complete));await c.elements.installStateQuery.click();
+  assert.equal(c.elements.installStatus.textContent,'已完成');assert.equal(c.recovery.form,null);
+  assert.equal(c.elements.log.textContent,'preserved');assert.equal(c.elements.installPollError.hidden,false);
+  assert.equal(c.calls.filter(call=>call.options.method==='POST').length,1);
+  assert.ok(c.calls.slice(3).every(call=>call.url.endsWith('?state_only=1')));
+
+  for(const showBeforeResponse of [true,false]){
+    const restored=setup(input.initial);await flush();let resolveRecovery;
+    restored.replies.push(new Promise(resolve=>{resolveRecovery=resolve;}));
+    const request=restored.recovery.form.submit({preventDefault(){}});
+    restored.listeners.pagehide();
+    if(showBeforeResponse)restored.listeners.pageshow({persisted:true});
+    restored.replies.push(response(200,input.complete));
+    resolveRecovery(response(200,{ok:true,request_id:input.initial.install_id}));await request;
+    if(!showBeforeResponse){
+      assert.equal(restored.calls.length,2,'hidden pages must not issue recovery queries');
+      restored.listeners.pageshow({persisted:true});
+    }
+    await flush();
+    assert.equal(restored.calls.length,3);assert.ok(restored.calls[2].url.endsWith('?state_only=1'));
+    assert.equal(restored.elements.installStatus.textContent,'已完成');
+    assert.equal(restored.elements.log.textContent,'preserved');
+    assert.equal(restored.calls.filter(call=>call.options.method==='POST').length,1);
+  }
+
+  for(const code of [401,403]){
+    const auth=setup(input.initial);await flush();const oldForm=auth.recovery.form;
+    auth.replies.push(response(code,{msg:'permission denied'}));await auth.elements.installStateQuery.click();
+    assert.equal(auth.recovery.hidden,true);assert.equal(auth.elements.installPollLogin.hidden,false);
+    assert.match(auth.elements.installPollLogin.href,/login\?next=/);
+    await oldForm.submit({preventDefault(){}});assert.equal(auth.calls.length,2,'permission failure must block old form submission');
+    auth.replies.push(response(200,input.complete));await auth.elements.installStateQuery.click();
+    assert.equal(auth.elements.installStatus.textContent,'已完成');assert.equal(auth.elements.installPollLogin.hidden,true);
+  }
+  const wrong=setup({...input.initial,install_id:'e'.repeat(32)});await flush();
+  assert.equal(wrong.elements.installStatus.textContent,'preserved');assert.equal(wrong.recovery.form,null);
+  assert.match(wrong.elements.installPollError.textContent,/状态响应无效/);
+})().catch(error=>{console.error(error);process.exitCode=1;});
+"""], input=json.dumps({"script": script, "reader": reader, "initial": initial, "complete": complete}),
+                capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_reload_and_persistence_failures_keep_recovery_available(self):
         for failure in ("reload", "persist"):

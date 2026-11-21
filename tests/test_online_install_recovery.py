@@ -536,6 +536,7 @@ class OnlineInstallRecoveryTests(unittest.TestCase):
         with isolated_app() as (app, base_dir):
             from fls_manager.online_scripts.constants import get_online_install_job, persist_online_install
             from fls_manager.online_scripts.install import _fingerprint_path
+            from fls_manager.online_scripts.logs import online_install_log_file
 
             item, info = self.prepare(base_dir)
             info["id"] = "a" * 32
@@ -548,6 +549,7 @@ class OnlineInstallRecoveryTests(unittest.TestCase):
                 phase="importing_tasks",
                 target_path=str(target),
                 target_fingerprint=_fingerprint_path(target),
+                log_file=str(online_install_log_file(info["id"], item["name"])),
                 error="任务导入失败",
             )
             persist_online_install(info)
@@ -639,6 +641,7 @@ class OnlineInstallRecoveryTests(unittest.TestCase):
         with isolated_app() as (app, base_dir):
             from fls_manager.online_scripts.constants import persist_online_install
             from fls_manager.online_scripts.install import _fingerprint_path
+            from fls_manager.online_scripts.logs import online_install_log_file
 
             _item, info = self.prepare(base_dir)
             info["id"] = "b" * 32
@@ -646,6 +649,7 @@ class OnlineInstallRecoveryTests(unittest.TestCase):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text("downloaded", encoding="utf-8")
             info.update(running=False, status="失败", phase="importing_tasks", target_path=str(target), target_fingerprint=_fingerprint_path(target))
+            info["log_file"] = str(online_install_log_file(info["id"], _item["name"]))
             persist_online_install(info)
             client = app.test_client()
             denied = client.post("/api/online-scripts/install-task-retry/" + info["id"])

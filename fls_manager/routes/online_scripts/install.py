@@ -672,6 +672,16 @@ def _retry_install_tasks(install_id):
             return {"ok": False, "request_id": install_id, "msg": "安装或恢复仍在进行，请稍后重试。"}, 409
         if not info.get("import_task") or info.get("phase") != "importing_tasks":
             return {"ok": False, "request_id": install_id, "msg": "当前安装没有可单独恢复的任务导入阶段。"}, 409
+        from .logs import _install_log_file
+        _, log_failure = _install_log_file(info)
+        if (
+            not isinstance(info.get("log_file"), str) or not info["log_file"].strip()
+            or (log_failure and log_failure[2] != 404)
+        ):
+            return {
+                "ok": False, "request_id": install_id,
+                "msg": "安装日志路径不可用，未导入任何任务。请修复原日志路径或权限后查询原安装结果。",
+            }, 409
         consistency = verify_install_outputs(info)
         if consistency.get("target") != "unchanged":
             return {
