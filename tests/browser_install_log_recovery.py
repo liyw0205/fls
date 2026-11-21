@@ -65,6 +65,7 @@ def main():
         downloads = []
         task_reload_state = {"failures": 0, "calls": 0}
         receipt_fault = {"install_id": "", "remaining": 0}
+        scheduler_receipt_fault = {"install_id": "", "remaining": 0, "mode": "after"}
         write = storage._write_json_unlocked
 
         def write_with_receipt_failure(path, data):
@@ -73,6 +74,13 @@ def main():
                     and data.get(install_id, {}).get("phase") == "completed"):
                 receipt_fault["remaining"] -= 1
                 raise PermissionError("browser completion receipt unavailable")
+            install_id = scheduler_receipt_fault["install_id"]
+            if (path == ONLINE_INSTALL_JOBS_FILE and scheduler_receipt_fault["remaining"]
+                    and data.get(install_id, {}).get("scheduler_reload_pending") is False):
+                scheduler_receipt_fault["remaining"] -= 1
+                if scheduler_receipt_fault["mode"] == "after":
+                    write(path, data)
+                raise PermissionError("browser scheduler receipt unavailable")
             return write(path, data)
 
         storage._write_json_unlocked = write_with_receipt_failure
@@ -247,6 +255,8 @@ def main():
                     if data.get("fail_task_receipt"):
                         task_reload_state["failures"] = 0
                         receipt_fault.update(install_id=install_id, remaining=1)
+                    if data.get("fail_scheduler_receipt_after_commit"):
+                        scheduler_receipt_fault.update(install_id=install_id, remaining=1, mode="after")
                 if data.get("restart_task_install"):
                     ONLINE_INSTALL_RUNNING.clear()
                     ONLINE_INSTALL_RETRYING.clear()
@@ -431,6 +441,43 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true);
     await page.screenshot({path:'/tmp/fls-install-task-confirm-completed-'+viewport.width+'.png',fullPage:true});
     assert.deepEqual(errors,[]);await context.close();console.log('task receipt recovery passed '+viewport.width);
+    continue;
+   }
+   if(process.env.FLS_INSTALL_LOG_ONLY==='scheduler-receipt'){
+    await page.goto(base+'/login');await login();
+    await fixture({seed_task_retry_recovery:true,width:viewport.width});
+    const installId=(viewport.width===390?'a':'b').repeat(32);
+    const scriptId='browser-task-recovery-'+viewport.width;
+    const before=await state();
+    await page.goto(base+'/online-scripts/log/'+installId);
+    await page.locator('#installRecoveryAction').getByRole('button',{name:'仅恢复任务导入',exact:true}).click();
+    await page.locator('#installRecoveryAction').getByRole('button',{name:'重新加载调度器',exact:true}).waitFor();
+    const pending=await state();
+    assert.equal(pending.task_imports[scriptId],1);
+    assert.equal(pending.task_reload_count,1);
+    await fixture({fail_scheduler_receipt_after_commit:true,width:viewport.width});
+    let reloadPosts=0;
+    await page.route('**/api/online-scripts/install-reload/'+installId,async route=>{
+     reloadPosts++;
+     const committed=await route.fetch();
+     assert.equal(committed.status(),200);
+     assert.equal((await committed.json()).receipt_confirmed,true);
+     await route.fulfill({status:502,contentType:'text/plain',body:'scheduler response lost'});
+    });
+    await page.locator('#installRecoveryAction').getByRole('button',{name:'重新加载调度器',exact:true}).click();
+    await page.waitForFunction(()=>document.querySelector('#installPollError').textContent.includes('scheduler response lost'));
+    assert.equal(await page.locator('#installRecoveryAction button').isDisabled(),true);
+    await page.locator('#installStateQuery').click();
+    await page.waitForFunction(()=>document.querySelector('#installStatus').textContent==='已完成'
+      &&document.querySelector('#installPollError').textContent.includes('原安装状态已确认'));
+    const completed=await state();
+    assert.equal(reloadPosts,1);
+    assert.equal(completed.task_reload_count,2);
+    assert.equal(completed.task_imports[scriptId],1);
+    assert.equal(completed.downloads,before.downloads);
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true);
+    await page.screenshot({path:'/tmp/fls-install-scheduler-confirm-'+viewport.width+'.png',fullPage:true});
+    assert.deepEqual(errors,[]);await context.close();console.log('scheduler receipt recovery passed '+viewport.width);
     continue;
    }
    if(process.env.FLS_INSTALL_LOG_ONLY!=='online-stop'){
