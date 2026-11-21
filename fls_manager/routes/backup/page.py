@@ -827,7 +827,17 @@ function flsRestoreRecovery(message, payload){{
     const locked=!!(local&&local.invalid);
     let html="<p>"+flsEscapeHtml(message)+"</p>";
     if(locked) html+="<button class='btn btn-primary' type='button' onclick='flsCheckRestoreHistory(this,0)'>核对恢复历史</button> ";
-    if(!locked) html+="<button class='btn btn-primary' type='button' onclick='flsQueryRestoreRequest(this)'>查询原恢复请求</button> ";
+    if(!locked&&payload&&/^[a-f0-9]{{32}}$/.test(String(payload.request_id||""))){{
+        html+="<button class='btn btn-primary' type='button' onclick='flsQueryRestoreHistoryRequest("+JSON.stringify(payload.request_id)+",this)'>查询原恢复请求</button> ";
+        html+="<p>原恢复请求标识：<code style='overflow-wrap:anywhere;'>"+flsEscapeHtml(payload.request_id)+"</code></p>";
+    }}else if(!locked) html+="<button class='btn btn-primary' type='button' onclick='flsQueryRestoreRequest(this)'>查询原恢复请求</button> ";
+    const maintenance=payload&&payload.maintenance;
+    if(maintenance&&typeof maintenance.notice==="string"){{
+        html+="<section class='section' role='status'>"+flsEscapeHtml(maintenance.notice);
+        if(!maintenance.required&&/^[a-f0-9]{{32}}$/.test(String(maintenance.event_id||"")))
+            html+=" <button class='btn btn-gray' type='button' onclick='flsAcknowledgeRestoreMaintenance("+JSON.stringify(maintenance.event_id)+",this)'>确认已读并清除维护提示</button>";
+        html+="</section>";
+    }}
     if(payload && payload.error) html+="<pre class='section backup-restore-diagnostic' style='white-space:pre-wrap;overflow-wrap:anywhere;'>"+flsEscapeHtml(payload.error)+"</pre> ";
     if(payload && payload.scheduler_error) html+="<pre class='section backup-restore-diagnostic' style='white-space:pre-wrap;overflow-wrap:anywhere;'>"+flsEscapeHtml(payload.scheduler_error)+"</pre> ";
     if(payload && payload.scheduler_reload_required){{
@@ -866,6 +876,12 @@ function flsRestoreHistoryFingerprint(local){{
     return local&&local.invalid ? local.fingerprint||"restore-storage-error" : "restore-history";
 }}
 
+function flsRestoreMaintenanceValid(value){{
+    return value===null||!!value&&typeof value==="object"&&!Array.isArray(value)
+        &&typeof value.event_id==="string"&&(value.event_id===""||/^[a-f0-9]{{32}}$/.test(value.event_id))
+        &&typeof value.required==="boolean"&&typeof value.notice==="string";
+}}
+
 function flsRenderRestoreHistory(){{
     const target=document.getElementById("backupRestoreHistoryItems");
     const verification=window.flsRestoreHistoryVerification;
@@ -873,12 +889,18 @@ function flsRenderRestoreHistory(){{
     if(!target||!verification||verification.fingerprint!==flsRestoreHistoryFingerprint(local)) return;
     target.replaceChildren();
     const summary=document.createElement("p");
-    summary.textContent=verification.error||verification.maintenance_error||(
+    summary.textContent=verification.error||(
         verification.complete
             ? "已核对全部 "+verification.items.length+" 条恢复回执。"
             : "已读取 "+verification.items.length+" / "+verification.total+" 条恢复回执。"
     );
     target.appendChild(summary);
+    if(verification.maintenance_error){{
+        const maintenanceNotice=document.createElement("p");
+        maintenanceNotice.setAttribute("role","status");
+        maintenanceNotice.textContent=verification.maintenance_error;
+        target.appendChild(maintenanceNotice);
+    }}
     verification.items.forEach(item=>{{
         const row=document.createElement("div");
         const text=document.createElement("span");
@@ -889,6 +911,13 @@ function flsRenderRestoreHistory(){{
         inspect.addEventListener("click",()=>flsQueryRestoreHistoryRequest(item.request_id,inspect));
         row.appendChild(inspect);target.appendChild(row);
     }});
+    if(verification.maintenance&&!verification.maintenance.required&&/^[a-f0-9]{{32}}$/.test(verification.maintenance.event_id)){{
+        const acknowledge=document.createElement("button");
+        acknowledge.type="button";acknowledge.className="btn btn-gray";
+        acknowledge.textContent="确认已读并清除维护提示";
+        acknowledge.addEventListener("click",()=>flsAcknowledgeRestoreMaintenance(verification.maintenance.event_id,acknowledge));
+        target.appendChild(acknowledge);
+    }}
     if(verification.has_more){{
         const next=document.createElement("button");
         next.type="button";next.className="btn btn-gray";next.textContent="继续核对历史";
@@ -913,6 +942,7 @@ async function flsCheckRestoreHistory(source, offset){{
             ||json.offset!==offset||json.limit!==100||typeof json.has_more!=="boolean"||typeof json.active!=="boolean"
             ||json.maintenance_error!==undefined&&typeof json.maintenance_error!=="string"
             ||json.maintenance_required!==undefined&&typeof json.maintenance_required!=="boolean"
+            ||json.maintenance!==undefined&&!flsRestoreMaintenanceValid(json.maintenance)
             ||typeof json.snapshot!=="string"||!/^[a-f0-9]{{64}}$/.test(json.snapshot)
             ||json.items.some(item=>!flsRestoreHistoryItemValid(item))
             ||offset+json.items.length>json.total||json.has_more!==(offset+json.items.length<json.total))
@@ -922,7 +952,8 @@ async function flsCheckRestoreHistory(source, offset){{
         verification.items.push(...json.items);verification.total=json.total;verification.has_more=json.has_more;
         verification.snapshot=json.snapshot;
         verification.active=json.active;verification.complete=!json.has_more&&verification.items.length===json.total;
-        verification.maintenance_error=json.maintenance_error||"";
+        verification.maintenance=json.maintenance||null;
+        verification.maintenance_error=json.maintenance_error||verification.maintenance&&verification.maintenance.notice||"";
         verification.safe=verification.complete&&!json.active&&json.maintenance_required!==true&&verification.items.every(item=>
             item.state!=="committing"&&item.state!=="unknown"&&!item.restore_outcome_unknown
             &&!item.scheduler_reload_required&&!item.dependencies_failed);
@@ -935,10 +966,36 @@ async function flsCheckRestoreHistory(source, offset){{
                 ?"恢复历史含有尚未完成或结果未知的操作；先核对对应请求，不允许新覆盖。"
                 :"恢复历史尚未完整读取；继续核对后才能清理本地状态。",{{}});
     }}catch(error){{
+        const payload=error&&error.payload;
+        const maintenance=payload&&flsRestoreMaintenanceValid(payload.maintenance)?payload.maintenance:null;
         window.flsRestoreHistoryVerification={{fingerprint,items:[],total:null,has_more:false,complete:false,safe:false,
-            error:"恢复历史读取失败："+String(error&&error.message||error),maintenance_error:""}};
-        if(local&&local.invalid) flsRestoreRecovery("恢复历史未能完整核实；原始本地状态保留，不能开始新恢复。",{{}});
+            error:"恢复历史读取失败："+String(error&&error.message||error),maintenance_error:payload&&payload.maintenance_error||maintenance&&maintenance.notice||"",
+            maintenance}};
+        if(local&&local.invalid) flsRestoreRecovery("恢复历史未能完整核实；原始本地状态保留，不能开始新恢复。",payload||{{}});
         else document.getElementById("backupRestoreHistoryItems").textContent=window.flsRestoreHistoryVerification.error;
+    }}finally{{if(source)flsRestoreButton(source);flsRenderRestoreHistory();}}
+}}
+
+async function flsAcknowledgeRestoreMaintenance(eventId, source){{
+    if(!/^[a-f0-9]{{32}}$/.test(String(eventId||""))) return;
+    if(source&&!flsMarkButtonBusy(source,"确认中...")) return;
+    try{{
+        const token=document.querySelector('meta[name="csrf-token"]');
+        const response=await fetch("/api/backup/restore-maintenance/"+encodeURIComponent(eventId)+"/ack",{{
+            method:"POST",credentials:"same-origin",headers:{{"X-CSRF-Token":token&&token.content||""}}
+        }});
+        const payload=await flsReadJsonResponse(response);
+        if(!payload||payload.ok!==true||payload.cleared!==true||payload.maintenance!==null){{
+            const error=new Error("维护清除确认响应无效");error.payload=payload;throw error;
+        }}
+        const verification=window.flsRestoreHistoryVerification;
+        if(verification&&verification.maintenance&&verification.maintenance.event_id===eventId){{
+            verification.maintenance=null;verification.maintenance_error="";
+        }}
+        flsRestoreRecovery("恢复维护提示已确认清除；原恢复请求与目录未更改。",{{}});
+    }}catch(error){{
+        const payload=error&&error.payload;
+        flsRestoreRecovery("维护提示未能清除，请重新核对原恢复请求："+String(error&&error.message||error),payload||{{}});
     }}finally{{if(source)flsRestoreButton(source);flsRenderRestoreHistory();}}
 }}
 
@@ -950,9 +1007,16 @@ async function flsQueryRestoreHistoryRequest(requestId, source){{
         const response=await fetch("/api/backup/restore/"+encodeURIComponent(requestId),{{cache:"no-store",credentials:"same-origin"}});
         let payload;
         try{{payload=await flsReadJsonResponse(response);}}
-        catch(error){{payload=error&&error.payload;if(!payload||payload.request_id!==requestId) throw error;}}
+        catch(error){{
+            payload=error&&error.payload;
+            if(payload&&payload.maintenance&&flsRestoreMaintenanceValid(payload.maintenance)){{
+                flsRestoreRecovery(payload.msg||"原恢复请求无法读取，请保留请求标识后重试。",payload);return;
+            }}
+            if(!payload||payload.request_id!==requestId) throw error;
+        }}
         if(!payload||payload.request_id!==requestId||!Array.isArray(payload.restored_items)
-            ||typeof payload.restore_deps!=="boolean") throw new Error("原恢复回执无效");
+            ||typeof payload.restore_deps!=="boolean"
+            ||payload.maintenance!==undefined&&!flsRestoreMaintenanceValid(payload.maintenance)) throw new Error("原恢复回执无效");
         const current=flsRestoreLocalRecoveryState();
         if((local&&local.invalid)&&(!current||!current.invalid||current.fingerprint!==local.fingerprint)) throw new Error("本地恢复状态已变化");
         if(!local||!local.invalid){{
@@ -1026,18 +1090,21 @@ async function flsQueryRestoreRequest(source){{
             if(!payload || !payload.state && e.status!==404) throw e;
             if(e.status===404) payload.state="received";
         }}
+        if(payload.maintenance!==undefined&&!flsRestoreMaintenanceValid(payload.maintenance)) throw new Error("恢复维护状态无效");
         if(payload.resolved){{
             sessionStorage.removeItem("fls-backup-restore");
             if(sessionStorage.getItem("fls-backup-restore")!==null) throw new Error("已完成请求状态未能清理");
             document.querySelector('form[action="/backup/import"] [name="restore_request_id"]').value=flsNewBackupRequest();
             if(flsRestoreLocalRecoveryState()&&flsRestoreLocalRecoveryState().invalid)
                 flsRestoreRecovery(payload.msg+"；损坏状态仍保留，需完成全部历史核对后才能开始新恢复。",payload);
+            else if(payload.maintenance) flsRestoreRecovery(payload.msg,payload);
             else document.getElementById("backupRestoreRecovery").textContent=payload.msg;
         }}else{{
             flsRestoreRecovery(payload.msg,payload);
         }}
     }}catch(e){{
-        flsRestoreRecovery("原恢复状态读取失败："+String(e));
+        const payload=e&&e.payload;
+        flsRestoreRecovery("原恢复状态读取失败："+String(e),payload||{{}});
     }}finally{{flsRestoreButton(source);}}
 }}
 
@@ -1087,6 +1154,8 @@ setTimeout(function(){{
     if(pending) flsRestoreRecovery(pending.invalid
         ?"本地恢复状态损坏或无法读取；请核对完整恢复历史后再处理，期间不会提交新的目录覆盖。"
         :"原恢复请求结果未确认，请先查询，避免再次覆盖目录。",{{}});
+    const requestId=new URLSearchParams(location.search).get("restore_request_id");
+    if(/^[a-f0-9]{{32}}$/.test(String(requestId||""))) flsQueryRestoreHistoryRequest(requestId,null);
 }},0);
 </script>
 """

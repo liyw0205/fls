@@ -247,7 +247,7 @@ class BackupRestoreIdempotencyTests(unittest.TestCase):
                     self.assertEqual(response.status_code, 200)
                     self.assertTrue(response.json["maintenance_error"])
                     self.assertEqual(response.json["maintenance_required"], failure_point in (
-                        "primary_index", "backup_dir_sync", "primary_dir_sync",
+                        "backup_index", "primary_index", "backup_dir_sync",
                     ))
                     archived = [item for item in response.json["items"] if item["archived"]]
                     self.assertEqual(len(archived), int(failure_point != "backup_index"))
@@ -268,7 +268,7 @@ class BackupRestoreIdempotencyTests(unittest.TestCase):
                     )
                     self.assertEqual(recovered.status_code, 200)
                     self.assertFalse(recovered.json["maintenance_required"])
-                    if failure_point in ("primary_index", "backup_dir_sync"):
+                    if failure_point in ("primary_index", "backup_dir_sync", "primary_dir_sync"):
                         self.assertIn("自动合并并修复", recovered.json["maintenance_error"])
                     else:
                         self.assertEqual(recovered.json["maintenance_error"], "")
@@ -277,6 +277,17 @@ class BackupRestoreIdempotencyTests(unittest.TestCase):
                     primary = restore._read_restore_archive_index()
                     backup = restore._read_restore_archive_index_file(restore._restore_archive_backup_path())
                     self.assertEqual(primary, backup)
+                    settled = app.test_client().get(
+                        "/api/backup/restore-history?limit=20", headers={"X-Token": TOKEN},
+                    )
+                    if recovered.json.get("maintenance"):
+                        self.assertEqual(settled.json["maintenance"]["event_id"],
+                                         recovered.json["maintenance"]["event_id"])
+                        event_id = recovered.json["maintenance"]["event_id"]
+                        cleared = app.test_client().post(
+                            f"/api/backup/restore-maintenance/{event_id}/ack", headers={"X-Token": TOKEN},
+                        )
+                        self.assertEqual(cleared.status_code, 200)
                     settled = app.test_client().get(
                         "/api/backup/restore-history?limit=20", headers={"X-Token": TOKEN},
                     )
@@ -320,12 +331,16 @@ class BackupRestoreIdempotencyTests(unittest.TestCase):
                 )
                 self.assertEqual(query.status_code, 410)
                 self.assertTrue(query.json["archived"])
+                self.assertFalse(query.json["maintenance_required"])
+                self.assertIn("自动合并并修复", query.json["maintenance_error"])
+                event_id = query.json["maintenance"]["event_id"]
 
                 history = app.test_client().get(
                     "/api/backup/restore-history?limit=20", headers={"X-Token": TOKEN},
                 )
                 self.assertEqual(history.status_code, 200)
                 self.assertIn("自动合并并修复", history.json["maintenance_error"])
+                self.assertEqual(history.json["maintenance"]["event_id"], event_id)
                 archived_ids = {item["request_id"] for item in history.json["items"] if item["archived"]}
                 self.assertEqual(archived_ids, {request_ids[0]})
                 self.assertEqual(restore._read_restore_archive_index(),
@@ -334,7 +349,274 @@ class BackupRestoreIdempotencyTests(unittest.TestCase):
                 with patch.object(restore, "_commit_restore_directories") as commit:
                     replay = self.post(app.test_client(), raw, restore_request_id=request_ids[0])
                 self.assertEqual(replay.status_code, 410)
+                self.assertEqual(replay.json["maintenance"]["event_id"], event_id)
                 commit.assert_not_called()
+
+                html = app.test_client().post(
+                    "/backup/import",
+                    data={
+                        "file": (io.BytesIO(raw), "restore.tar.gz"),
+                        "restore_request_id": request_ids[0],
+                        "restore_items": ["data", "scripts"],
+                        "restore_deps": "0",
+                    },
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(html.status_code, 410)
+                html_text = html.get_data(as_text=True)
+                self.assertIn(event_id, html_text)
+                self.assertIn(request_ids[0], html_text)
+                self.assertIn("确认已读并清除维护提示", html_text)
+                self.assertTrue(restore._restore_request_path(request_ids[0]).exists() is False)
+
+    def test_archive_maintenance_event_survives_restart_concurrency_and_ack_retries(self):
+        with isolated_app() as (app, base):
+            from fls_manager.routes.backup import restore
+
+            raw = restore_test_archive().getvalue()
+            request_id = "e" * 32
+            record = {
+                "request_id": request_id,
+                "archive_sha256": hashlib.sha256(raw).hexdigest(),
+                "filename": "restore.tar.gz",
+                "restore_items": ["data", "scripts"],
+                "restore_deps": False,
+                "state": "restored",
+                "scheduler_reload_required": False,
+                "scheduler_reloaded": True,
+                "dependencies_failed": False,
+                "archived": True,
+                "archived_at": "2026-11-21 00:00:00",
+            }
+            index = {"version": 1, "records": {request_id: record}}
+            directory = base / ".backup_restore_requests"
+            directory.mkdir()
+            restore._write_restore_archive_index_pair(index)
+            restore._restore_archive_index_path().write_text("{damaged", encoding="utf-8")
+
+            process_code = (
+                "import json; from fls_manager.routes.backup import restore; "
+                "from fls_manager.storage import storage_transaction; "
+                "ctx=storage_transaction(); ctx.__enter__(); "
+                "lock=restore._restore_archive_process_lock(); lock.__enter__(); "
+                "index=restore._read_restore_archive_index(); "
+                "state=restore._read_restore_archive_maintenance_state(); "
+                "print(json.dumps({'records':len(index['records']),'event_id':state['event_id']})); "
+                "lock.__exit__(None,None,None); ctx.__exit__(None,None,None)"
+            )
+
+            def recover_in_process(_):
+                result = subprocess.run(
+                    [sys.executable, "-c", process_code],
+                    cwd=Path(__file__).resolve().parents[1],
+                    env=os.environ.copy(), capture_output=True, text=True, timeout=30,
+                )
+                if result.returncode:
+                    raise AssertionError(result.stderr)
+                return json.loads(result.stdout)
+
+            with ThreadPoolExecutor(4) as pool:
+                process_results = list(pool.map(recover_in_process, range(4)))
+            self.assertEqual({item["event_id"] for item in process_results},
+                             {restore._read_restore_archive_maintenance_state()["event_id"]})
+
+            clients = [app.test_client() for _ in range(4)]
+            with ThreadPoolExecutor(4) as pool:
+                responses = list(pool.map(
+                    lambda client: client.get(
+                        "/api/backup/restore/" + request_id, headers={"X-Token": TOKEN},
+                    ),
+                    clients,
+                ))
+            self.assertEqual([response.status_code for response in responses], [410] * 4)
+            maintenance = [response.json["maintenance"] for response in responses]
+            self.assertTrue(all(item == maintenance[0] for item in maintenance))
+            first_event = maintenance[0]["event_id"]
+            self.assertFalse(maintenance[0]["required"])
+
+            state_path = restore._restore_archive_maintenance_path()
+            state_bytes = state_path.read_bytes()
+            self.assertNotIn(request_id.encode(), state_bytes)
+            self.assertNotIn(b"restore.tar.gz", state_bytes)
+            restarted = subprocess.run(
+                [sys.executable, "-c", (
+                    "import json; from fls_manager.routes.backup import restore; "
+                    "print(json.dumps(restore._read_restore_archive_maintenance_state()))"
+                )],
+                cwd=Path(__file__).resolve().parents[1],
+                env=os.environ.copy(), capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(restarted.returncode, 0, restarted.stderr)
+            self.assertEqual(json.loads(restarted.stdout)["event_id"], first_event)
+
+            missing_csrf = app.test_client().post(
+                f"/api/backup/restore-maintenance/{first_event}/ack",
+            )
+            self.assertEqual(missing_csrf.status_code, 400)
+            with patch.object(restore, "_commit_restore_directories") as commit:
+                replay = self.post(app.test_client(), raw, restore_request_id=request_id)
+            self.assertEqual(replay.status_code, 410)
+            self.assertEqual(replay.json["maintenance"]["event_id"], first_event)
+            commit.assert_not_called()
+
+            cleared = app.test_client().post(
+                f"/api/backup/restore-maintenance/{first_event}/ack", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(cleared.status_code, 200)
+            self.assertFalse(state_path.exists())
+
+            restore._restore_archive_index_path().write_text("{damaged again", encoding="utf-8")
+            second = app.test_client().get(
+                "/api/backup/restore/" + request_id, headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(second.status_code, 410)
+            second_event = second.json["maintenance"]["event_id"]
+            self.assertNotEqual(second_event, first_event)
+            stale = app.test_client().post(
+                f"/api/backup/restore-maintenance/{first_event}/ack", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(stale.status_code, 409)
+            self.assertEqual(stale.json["maintenance"]["event_id"], second_event)
+            self.assertEqual(restore._read_restore_archive_maintenance_state()["event_id"], second_event)
+
+            unlink = Path.unlink
+
+            def fail_maintenance_clear(path, *args, **kwargs):
+                if path == state_path:
+                    raise OSError("fixture maintenance clear failure")
+                return unlink(path, *args, **kwargs)
+
+            with patch.object(Path, "unlink", fail_maintenance_clear):
+                failed_clear = app.test_client().post(
+                    f"/api/backup/restore-maintenance/{second_event}/ack", headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(failed_clear.status_code, 503)
+            self.assertTrue(state_path.exists())
+            self.assertEqual(failed_clear.json["maintenance"]["event_id"], second_event)
+            retried_clear = app.test_client().post(
+                f"/api/backup/restore-maintenance/{second_event}/ack", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(retried_clear.status_code, 200)
+            self.assertFalse(state_path.exists())
+
+    def test_archive_maintenance_publication_failure_and_corrupt_receipt_fail_closed(self):
+        with isolated_app() as (app, base):
+            from fls_manager.routes.backup import restore
+
+            raw = restore_test_archive().getvalue()
+            request_id = "f" * 32
+            record = {
+                "request_id": request_id,
+                "archive_sha256": hashlib.sha256(raw).hexdigest(),
+                "filename": "restore.tar.gz",
+                "restore_items": ["scripts"],
+                "restore_deps": False,
+                "state": "restored",
+                "scheduler_reload_required": False,
+                "scheduler_reloaded": True,
+                "dependencies_failed": False,
+                "archived": True,
+            }
+            directory = base / ".backup_restore_requests"
+            directory.mkdir()
+            restore._write_restore_archive_index_pair({"version": 1, "records": {request_id: record}})
+            primary = restore._restore_archive_index_path()
+            backup_before = restore._restore_archive_backup_path().read_bytes()
+            primary.write_text("{damaged", encoding="utf-8")
+
+            with patch.object(restore, "_write_restore_archive_maintenance_state",
+                              side_effect=OSError("fixture maintenance publication failure")):
+                failed = app.test_client().get(
+                    "/api/backup/restore/" + request_id, headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(failed.status_code, 500)
+            self.assertTrue(failed.json["maintenance_required"])
+            self.assertTrue(failed.json["maintenance"]["notice"])
+            self.assertEqual(primary.read_text(encoding="utf-8"), "{damaged")
+            self.assertEqual(restore._restore_archive_backup_path().read_bytes(), backup_before)
+
+            recovered = app.test_client().get(
+                "/api/backup/restore/" + request_id, headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(recovered.status_code, 410)
+            self.assertFalse(recovered.json["maintenance_required"])
+            event_id = recovered.json["maintenance"]["event_id"]
+
+            state_path = restore._restore_archive_maintenance_path()
+            state_path.write_text("{damaged maintenance", encoding="utf-8")
+            primary_before = primary.read_bytes()
+            backup_before = restore._restore_archive_backup_path().read_bytes()
+            blocked = app.test_client().post(
+                "/api/backup/import",
+                data={"file": (io.BytesIO(raw), "restore.tar.gz"), "restore_request_id": request_id,
+                      "restore_items": ["scripts"]},
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(blocked.status_code, 500)
+            self.assertTrue(blocked.json["maintenance_required"])
+            self.assertEqual(primary.read_bytes(), primary_before)
+            self.assertEqual(restore._restore_archive_backup_path().read_bytes(), backup_before)
+            self.assertTrue(state_path.exists())
+
+    def test_html_archive_replay_maintenance_ack_requires_session_csrf(self):
+        with isolated_app() as (app, base):
+            from fls_manager.routes.backup import restore
+            from tests.test_auth_backup import csrf_token_from_html
+
+            raw = restore_test_archive().getvalue()
+            request_id = "d" * 32
+            record = {
+                "request_id": request_id,
+                "archive_sha256": hashlib.sha256(raw).hexdigest(),
+                "filename": "restore.tar.gz",
+                "restore_items": ["scripts"],
+                "restore_deps": False,
+                "state": "restored",
+                "scheduler_reload_required": False,
+                "scheduler_reloaded": True,
+                "dependencies_failed": False,
+                "archived": True,
+            }
+            directory = base / ".backup_restore_requests"
+            directory.mkdir()
+            restore._write_restore_archive_index_pair({"version": 1, "records": {request_id: record}})
+            restore._restore_archive_index_path().write_text("{damaged", encoding="utf-8")
+
+            client = app.test_client()
+            login_page = client.get("/login")
+            login_csrf = csrf_token_from_html(login_page.get_data(as_text=True))
+            login = client.post("/login", data={"token": TOKEN, "csrf_token": login_csrf})
+            self.assertEqual(login.status_code, 302)
+            client.get(login.headers["Location"])
+            backup_page = client.get("/backup")
+            form_csrf = csrf_token_from_html(backup_page.get_data(as_text=True))
+
+            replay = client.post(
+                "/backup/import",
+                data={"file": (io.BytesIO(raw), "restore.tar.gz"), "restore_request_id": request_id,
+                      "restore_items": ["scripts"], "restore_deps": "0", "csrf_token": form_csrf},
+            )
+            self.assertEqual(replay.status_code, 410)
+            body = replay.get_data(as_text=True)
+            self.assertIn(request_id, body)
+            self.assertIn("确认已读并清除维护提示", body)
+            event_id = restore._read_restore_archive_maintenance_state()["event_id"]
+            html_csrf = csrf_token_from_html(body)
+
+            rejected = client.post(
+                "/backup/restore-maintenance/ack",
+                data={"event_id": event_id, "request_id": request_id, "csrf_token": "bad"},
+            )
+            self.assertEqual(rejected.status_code, 400)
+            self.assertEqual(restore._read_restore_archive_maintenance_state()["event_id"], event_id)
+
+            acknowledged = client.post(
+                "/backup/restore-maintenance/ack",
+                data={"event_id": event_id, "request_id": request_id, "csrf_token": html_csrf},
+            )
+            self.assertEqual(acknowledged.status_code, 302)
+            self.assertEqual(acknowledged.headers["Location"], "/backup?restore_request_id=" + request_id)
+            self.assertFalse(restore._restore_archive_maintenance_path().exists())
 
     def test_unrepairable_index_symlink_keeps_details_and_reports_maintenance(self):
         for linked_copy in ("primary", "backup"):
