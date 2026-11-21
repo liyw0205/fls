@@ -14,6 +14,7 @@ from ...online_scripts.source import (
     load_online_script_cache,
     list_task_link_requests,
     persist_task_link_request,
+    _task_link_request_snapshot,
 )
 from ...online_scripts.constants import (
     ONLINE_TASK_LINK_ACTIVE,
@@ -109,6 +110,15 @@ def _persist_failure(record, message, status_code, *, retry=True, state="failed"
         "retry_allowed": retry,
         "resolved": True,
     }, status_code
+
+
+def _task_link_receipt_matches(expected, actual):
+    if not isinstance(actual, dict):
+        return False
+    try:
+        return _task_link_request_snapshot(expected) == _task_link_request_snapshot(actual)
+    except Exception:
+        return False
 
 
 def _refresh_task_link_recovery_result(request_id, script_id, origin_refresh_request_id, recovery):
@@ -582,13 +592,30 @@ def _confirm_task_link_locked(request_id):
             "msg": "当前任务指纹与预期结果不一致，无法安全确认；未修改任务。",
         }, 409
 
+    expected_receipt = _task_link_request_snapshot(record)
+    receipt_recovered = False
     try:
         persist_task_link_request(record)
     except Exception as exc:
-        return {
-            "ok": False, "request_id": request_id,
-            "msg": f"确认结果无法保存：{exc}；未改变任务内容。",
-        }, 503
+        try:
+            actual = get_task_link_request(request_id)
+        except Exception as read_exc:
+            return {
+                "ok": False, "request_id": request_id,
+                "msg": f"确认回执无法确认：{exc}；回执复核失败：{read_exc}。请查询原同步请求。",
+                "receipt_confirmation_required": True,
+                "state_url": f"/api/online-scripts/task-link-status/{request_id}",
+                "status_url": f"/online-scripts/task-link-status/{request_id}",
+            }, 503
+        receipt_recovered = _task_link_receipt_matches(expected_receipt, actual)
+        if not receipt_recovered:
+            return {
+                "ok": False, "request_id": request_id,
+                "msg": f"确认回执无法确认：{exc}；磁盘状态与本次确认结果不一致，请查询原同步请求。",
+                "receipt_confirmation_required": True,
+                "state_url": f"/api/online-scripts/task-link-status/{request_id}",
+                "status_url": f"/online-scripts/task-link-status/{request_id}",
+            }, 503
     return {
         "ok": True,
         "request_id": request_id,
@@ -596,6 +623,8 @@ def _confirm_task_link_locked(request_id):
         "confirmation": record["confirmation"],
         "confirmation_fingerprint": record["confirmation_fingerprint"],
         "retry_allowed": retry_allowed,
+        "receipt_confirmed": True,
+        "receipt_recovered": receipt_recovered,
         "msg": msg,
     }, 200
 

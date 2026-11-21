@@ -35,7 +35,9 @@ def main():
         }
         source.save_online_script_cache([item])
         fault = {"fail": True, "fetches": 0, "refreshes": 0, "fail_history_publication": False,
-                 "fail_retry_start": False, "fail_retry_receipt": False}
+                 "fail_retry_start": False, "fail_retry_receipt": False,
+                 "confirmation_failure_request": "", "confirmation_failure_mode": "",
+                 "confirmation_failure_remaining": 0}
         real_fetch = task_link.fetch_task_link_tasks
         real_persist = task_link.persist_task_link_request
         real_refresh_start = refresh.start_refresh_thread
@@ -81,6 +83,13 @@ def main():
                 if mode == "after":
                     real_persist(record)
                 raise OSError("browser startup receipt unavailable")
+            confirmation_id = fault["confirmation_failure_request"]
+            if (confirmation_id and record.get("request_id") == confirmation_id
+                    and fault["confirmation_failure_remaining"] and record.get("confirmation")):
+                fault["confirmation_failure_remaining"] = 0
+                if fault["confirmation_failure_mode"] == "after":
+                    real_persist(record)
+                raise OSError("browser task confirmation receipt lost after replace")
             return real_persist(record)
 
         task_link.persist_task_link_request = persist
@@ -116,10 +125,18 @@ def main():
             if request.method == "POST":
                 data = request.get_json() or {}
                 fault["fail"] = bool(data.get("fail"))
+                if "confirmation_failure_request" in data:
+                    fault.update(
+                        confirmation_failure_request=data["confirmation_failure_request"],
+                        confirmation_failure_mode=data.get("confirmation_failure_mode", "after"),
+                        confirmation_failure_remaining=1,
+                    )
                 if "startup_failure" in data:
                     fault["startup_failure"] = data["startup_failure"]
                 if data.get("reset"):
                     fault["fetches"] = 0
+                    fault.update(confirmation_failure_request="", confirmation_failure_mode="",
+                                 confirmation_failure_remaining=0)
                     source.save_online_script_cache([item])
             cached = source.load_online_script_cache()
             return jsonify(fail=fault["fail"], fetches=fault["fetches"], refreshes=fault["refreshes"], cached=cached)
@@ -227,8 +244,14 @@ def main():
 
         @app.route("/api/fixture/task-link-confirmation", methods=["POST"])
         def task_link_confirmation_fixture():
-            prepared = (request.get_json() or {}).get("prepared") is True
+            data = request.get_json() or {}
+            prepared = data.get("prepared") is True
+            published = data.get("published") is True
             current = source.normalize_online_scripts(source.load_online_script_cache())[0]
+            if published:
+                current["task_cron"] = [{"name": "Fixture published task", "command": "echo published", "cron": ""}]
+                source.save_online_script_cache([current])
+                current = source.normalize_online_scripts(source.load_online_script_cache())[0]
             request_id = uuid.uuid4().hex
             expected = dict(current)
             expected["task_cron"] = []
@@ -238,12 +261,12 @@ def main():
                 "proxy_id": "",
                 "expected_version": source.online_task_link_version(current),
                 "state": "prepared" if prepared else "unknown",
-                "added": 0,
+                "added": 1 if published else 0,
                 "total": len(current.get("task_cron") or []),
                 "error": "fixture interrupted before merge",
                 "updated_at": "old",
                 "expected_tasks_fingerprint": source.online_script_task_fingerprint(expected),
-                "published_tasks_fingerprint": "",
+                "published_tasks_fingerprint": source.online_script_task_fingerprint(current) if published else "",
                 "confirmation": "",
                 "confirmation_fingerprint": "",
             })
@@ -742,6 +765,38 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    assert.equal(await page.getByRole('link',{name:'核对当前任务',exact:true}).count(),1);
    await page.screenshot({path:'/tmp/fls-task-link-stale-confirmation-'+viewport.width+'.png'});
    await page.evaluate(()=>sessionStorage.removeItem('fls-online-task-link-request'));
+
+   await fixture({reset:true,fail:false});
+   const publishedConfirmation=await page.request.post(base+'/api/fixture/task-link-confirmation',{headers,data:{published:true}});
+   assert.equal(publishedConfirmation.status(),200);
+   const publishedInfo=await publishedConfirmation.json();
+   await page.evaluate(info=>sessionStorage.setItem('fls-online-task-link-request',JSON.stringify({request_id:info.request_id,script_id:info.script_id,proxy_id:''})),publishedInfo);
+   await page.goto(base+'/online-scripts');
+   const confirmButton=page.getByRole('button',{name:'检查当前任务合并',exact:true});
+   await confirmButton.waitFor();
+   await fixture({confirmation_failure_request:publishedInfo.request_id,confirmation_failure_mode:'after'});
+   const confirmationUrl=base+'/api/online-scripts/task-link-confirm/'+publishedInfo.request_id;
+   let confirmationPosts=0;
+   await page.route(confirmationUrl,async route=>{
+     confirmationPosts++;
+     const response=await route.fetch();assert.equal(response.status(),200);
+     const receipt=await response.json();assert.equal(receipt.receipt_recovered,true);
+     await route.fulfill({status:502,contentType:'text/plain',body:'confirmation response lost after replace'});
+   },{times:1});
+   await confirmButton.click();
+   await page.waitForFunction(()=>document.querySelector('#onlineTaskLinkRecovery').textContent.includes('confirmation response lost after replace'));
+   assert.equal(await page.evaluate(()=>JSON.parse(sessionStorage.getItem('fls-online-task-link-request')).request_id),publishedInfo.request_id);
+   const confirmedApi=await page.request.get(base+'/api/online-scripts/task-link-status/'+publishedInfo.request_id,{headers});
+   assert.equal(confirmedApi.status(),200);
+   assert.equal((await confirmedApi.json()).confirmation,'merged');
+   await page.unroute(confirmationUrl);
+   await page.getByRole('button',{name:'检查当前任务合并',exact:true}).click();
+   await page.waitForURL(url=>url.pathname==='/online-scripts'&&url.searchParams.has('msg'));
+   assert.equal(confirmationPosts,1);
+   assert.equal(await page.evaluate(()=>sessionStorage.getItem('fls-online-task-link-request')),null);
+   const afterConfirmation=await fixture({});
+   assert.equal(afterConfirmation.fetches,0);
+   assert.equal(afterConfirmation.cached[0].task_cron.length,1);
 
    await fixture({reset:true,fail:true});
    await page.goto(base+'/online-scripts');
