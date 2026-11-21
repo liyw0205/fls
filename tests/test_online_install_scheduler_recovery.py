@@ -966,21 +966,27 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
     def test_reload_and_persistence_failures_keep_recovery_available(self):
         for failure in ("reload", "persist"):
             with self.subTest(failure=failure), isolated_app() as (app, base_dir):
-                from fls_manager.online_scripts.constants import get_online_install_job
+                from fls_manager import storage
+                from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE, get_online_install_job
 
                 install_id = self.partial_install(app, base_dir)
                 action = f"/online-scripts/install-reload/{install_id}"
                 client = app.test_client()
                 headers = {"X-Token": TOKEN, "X-Requested-With": "FLS-Ajax"}
+                write = storage._write_json_unlocked
+
+                def fail_receipt(path, data):
+                    if (failure == "persist" and path == ONLINE_INSTALL_JOBS_FILE
+                            and data.get(install_id, {}).get("scheduler_reload_pending") is False):
+                        raise PermissionError("job read-only")
+                    return write(path, data)
+
                 with patch(
                     "fls_manager.routes.online_scripts.install.reload_scheduler",
                     side_effect=RuntimeError("still unavailable") if failure == "reload" else None,
-                ), patch(
-                    "fls_manager.routes.online_scripts.install.persist_online_install",
-                    side_effect=PermissionError("job read-only") if failure == "persist" else None,
-                ):
+                ), patch("fls_manager.storage._write_json_unlocked", side_effect=fail_receipt):
                     failed = client.post(action, headers=headers)
-                self.assertEqual(failed.status_code, 503 if failure == "reload" else 500)
+                self.assertEqual(failed.status_code, 503)
                 html = failed.get_data(as_text=True)
                 self.assertIn("still unavailable" if failure == "reload" else "job read-only", html)
                 self.assertIn(f'action="{action}"', html)
@@ -990,6 +996,150 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
                     recovered = client.post(action, headers=headers)
                 self.assertEqual(recovered.status_code, 302)
                 self.assertEqual(get_online_install_job(install_id)["status"], "已完成")
+
+    def test_scheduler_reload_receipt_replace_failure_uses_persisted_state(self):
+        for failure in ("before", "after"):
+            with self.subTest(failure=failure), isolated_app() as (app, base_dir):
+                from fls_manager import storage
+                from fls_manager.models import TASK_FILE, load_tasks
+                from fls_manager.online_scripts.constants import (
+                    ONLINE_INSTALL_JOBS_FILE, ONLINE_INSTALL_RUNNING, get_online_install_job,
+                )
+
+                install_id = self.partial_install(app, base_dir)
+                tasks_before = load_tasks()
+                tasks_file_before = TASK_FILE.read_bytes()
+                write = storage._write_json_unlocked
+                fail_once = {"value": True}
+
+                def fail_final_receipt(path, data):
+                    job = data.get(install_id, {}) if path == ONLINE_INSTALL_JOBS_FILE else {}
+                    if fail_once["value"] and job.get("scheduler_reload_pending") is False:
+                        fail_once["value"] = False
+                        if failure == "after":
+                            write(path, data)
+                        raise PermissionError("reload receipt publication failed")
+                    return write(path, data)
+
+                client = app.test_client()
+                action = f"/api/online-scripts/install-reload/{install_id}"
+                reload_calls = []
+                with patch("fls_manager.storage._write_json_unlocked", side_effect=fail_final_receipt), patch(
+                    "fls_manager.routes.online_scripts.install.reload_scheduler",
+                    side_effect=lambda: reload_calls.append(install_id),
+                ), patch("fls_manager.online_scripts.install.download_online_script_logged") as download, patch(
+                    "fls_manager.online_scripts.install.import_task_if_needed"
+                ) as importer:
+                    failed_or_confirmed = client.post(action, headers={"X-Token": TOKEN})
+
+                if failure == "after":
+                    self.assertEqual(failed_or_confirmed.status_code, 200)
+                    self.assertTrue(failed_or_confirmed.json["ok"])
+                    self.assertTrue(failed_or_confirmed.json["receipt_confirmed"])
+                    expected_status = "已完成"
+                else:
+                    self.assertEqual(failed_or_confirmed.status_code, 503)
+                    self.assertFalse(failed_or_confirmed.json["ok"])
+                    self.assertTrue(failed_or_confirmed.json["scheduler_reload_required"])
+                    self.assertIn("reload receipt publication failed", failed_or_confirmed.json["msg"])
+                    self.assertEqual(failed_or_confirmed.json["state_url"],
+                                     f"/api/online-scripts/log/{install_id}?state_only=1")
+                    expected_status = "部分完成"
+
+                ONLINE_INSTALL_RUNNING.clear()
+                state = client.get(f"/api/online-scripts/log/{install_id}?state_only=1", headers={"X-Token": TOKEN})
+                self.assertEqual(state.status_code, 200)
+                self.assertEqual(state.json["status"], expected_status)
+                self.assertEqual(load_tasks(), tasks_before)
+                self.assertEqual(TASK_FILE.read_bytes(), tasks_file_before)
+                download.assert_not_called()
+                importer.assert_not_called()
+                self.assertEqual(len(reload_calls), 1)
+
+                if failure == "before":
+                    with patch("fls_manager.routes.online_scripts.install.reload_scheduler",
+                               side_effect=lambda: reload_calls.append(install_id)):
+                        recovered = client.post(action, headers={"X-Token": TOKEN})
+                    self.assertEqual(recovered.status_code, 200)
+                    self.assertEqual(recovered.json["status"], "已完成")
+                    self.assertEqual(len(reload_calls), 2)
+                else:
+                    with patch("fls_manager.routes.online_scripts.install.reload_scheduler") as reload:
+                        repeated = client.post(action, headers={"X-Token": TOKEN})
+                    self.assertEqual(repeated.status_code, 409)
+                    reload.assert_not_called()
+                self.assertEqual(TASK_FILE.read_bytes(), tasks_file_before)
+
+    def test_scheduler_reload_rejects_stale_task_recovery_claim_before_side_effect(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager import storage
+            from fls_manager.models import TASK_FILE
+            from fls_manager.online_scripts.constants import (
+                ONLINE_INSTALL_JOBS_FILE, ONLINE_INSTALL_RUNNING, get_online_install_job, persist_online_install,
+            )
+
+            install_id = self.partial_install(app, base_dir)
+            live = get_online_install_job(install_id)
+            live["task_recovery"] = {"id": "live-claim", "pending": False}
+            persist_online_install(live)
+            ONLINE_INSTALL_RUNNING[install_id] = dict(live)
+            persisted_claim = {"id": "persisted-claim", "pending": False}
+            storage.mutate_json(
+                ONLINE_INSTALL_JOBS_FILE, {},
+                lambda jobs: {**jobs, install_id: {**jobs[install_id], "task_recovery": persisted_claim}},
+                strict=True,
+            )
+            tasks_file_before = TASK_FILE.read_bytes()
+            client = app.test_client()
+            action = f"/api/online-scripts/install-reload/{install_id}"
+
+            with patch("fls_manager.routes.online_scripts.install.reload_scheduler") as reload:
+                conflict = client.post(action, headers={"X-Token": TOKEN})
+            self.assertEqual(conflict.status_code, 409)
+            self.assertTrue(conflict.json["scheduler_reload_required"])
+            self.assertIn("回执已变化", conflict.json["msg"])
+            reload.assert_not_called()
+            self.assertEqual(get_online_install_job(install_id)["task_recovery"], persisted_claim)
+
+            with patch("fls_manager.routes.online_scripts.install.reload_scheduler") as reload:
+                recovered = client.post(action, headers={"X-Token": TOKEN})
+            self.assertEqual(recovered.status_code, 200)
+            self.assertTrue(recovered.json["ok"])
+            reload.assert_called_once()
+            self.assertEqual(get_online_install_job(install_id)["task_recovery"], persisted_claim)
+            self.assertEqual(TASK_FILE.read_bytes(), tasks_file_before)
+
+    def test_scheduler_reload_refuses_corrupt_or_symlink_receipts(self):
+        for failure in ("corrupt", "symlink"):
+            with self.subTest(failure=failure), isolated_app() as (app, base_dir):
+                from fls_manager.models import TASK_FILE
+                from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE
+
+                install_id = self.partial_install(app, base_dir)
+                tasks_before = TASK_FILE.read_bytes()
+                original_jobs = ONLINE_INSTALL_JOBS_FILE.read_bytes()
+                protected = base_dir / "protected-install-jobs.json"
+                if failure == "corrupt":
+                    ONLINE_INSTALL_JOBS_FILE.write_text("{broken", encoding="utf-8")
+                else:
+                    ONLINE_INSTALL_JOBS_FILE.replace(protected)
+                    ONLINE_INSTALL_JOBS_FILE.symlink_to(protected)
+
+                with patch("fls_manager.routes.online_scripts.install.reload_scheduler") as reload:
+                    response = app.test_client().post(
+                        f"/api/online-scripts/install-reload/{install_id}", headers={"X-Token": TOKEN},
+                    )
+                self.assertEqual(response.status_code, 503)
+                self.assertTrue(response.json["receipt_confirmation_required"])
+                self.assertIn("回执无法核实", response.json["msg"])
+                self.assertTrue(response.json["state_url"].endswith("?state_only=1"))
+                reload.assert_not_called()
+                self.assertEqual(TASK_FILE.read_bytes(), tasks_before)
+                if failure == "corrupt":
+                    self.assertEqual(ONLINE_INSTALL_JOBS_FILE.read_text(encoding="utf-8"), "{broken")
+                else:
+                    self.assertTrue(ONLINE_INSTALL_JOBS_FILE.is_symlink())
+                    self.assertEqual(protected.read_bytes(), original_jobs)
 
     def test_api_reload_reports_failure_then_recovers_without_reinstalling(self):
         with isolated_app() as (app, base_dir):

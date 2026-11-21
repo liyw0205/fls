@@ -1691,6 +1691,30 @@ def persist_online_install_task_recovery(install_id, recovery, **changes):
         return updated
 
 
+def persist_online_install_scheduler_reload(install_id, expected_recovery, info):
+    snapshot = _install_snapshot(info)
+    if snapshot.get("id") != install_id or snapshot.get("task_recovery") != expected_recovery:
+        raise RuntimeError("调度器重载回执身份无效，未覆盖原记录")
+
+    with storage_transaction():
+        jobs = _read_install_jobs()
+        current = jobs.get(install_id)
+        if (
+            not current
+            or current.get("id") != install_id
+            or current.get("script_id") != snapshot.get("script_id")
+            or current.get("retry_of") != snapshot.get("retry_of")
+            or current.get("task_recovery") != expected_recovery
+            or not current.get("scheduler_reload_pending")
+            or current.get("running")
+        ):
+            raise RuntimeError("原安装调度器恢复回执已变化，未覆盖原记录")
+        jobs[install_id] = snapshot
+        write_json(ONLINE_INSTALL_JOBS_FILE, jobs)
+
+    return snapshot
+
+
 def _load_persisted_online_install(install_id):
     jobs = _read_install_jobs()
     info = jobs.get(str(install_id or ""))

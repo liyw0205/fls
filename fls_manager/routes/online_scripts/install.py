@@ -14,7 +14,9 @@ from ...online_scripts.constants import (
     InstallHistoryLimitError,
     online_install_retry_relation,
     persist_online_install,
+    persist_online_install_scheduler_reload,
     persist_online_install_task_recovery,
+    _install_snapshot,
     _load_persisted_online_install,
 )
 from ...online_scripts.install import capture_install_outputs, _persist_install_state
@@ -671,6 +673,36 @@ def _install_task_confirmation_form(install_id):
     )
 
 
+def _install_reload_receipt_matches(expected, actual):
+    return isinstance(actual, dict) and _install_snapshot(expected) == _install_snapshot(actual)
+
+
+def _install_reload_state_url(install_id):
+    return url_for("online_scripts.api_online_install_log", install_id=install_id, state_only="1")
+
+
+def _install_reload_claim_conflict(install_id, actual):
+    payload = {
+        "ok": False,
+        "request_id": install_id,
+        "receipt_confirmation_required": True,
+        "state_url": _install_reload_state_url(install_id),
+        "msg": "原安装调度器恢复回执已变化，请查询原安装状态后重试。",
+    }
+    if (
+        isinstance(actual, dict)
+        and actual.get("id") == install_id
+        and actual.get("scheduler_reload_pending")
+        and not actual.get("running")
+    ):
+        payload.update(
+            phase="scheduler_reload_pending",
+            scheduler_reload_required=True,
+            reload_url=url_for("online_scripts.api_online_scripts_install_reload", install_id=install_id),
+        )
+    return payload, 409
+
+
 def _unconfirmed_install_tasks(info, message):
     info["task_recovery"] = dict(info["task_recovery"], pending=True)
     info.update(running=False, status="结果未知", phase="task_import_confirmation_pending", returncode=None,
@@ -939,18 +971,90 @@ def _reload_install_scheduler(install_id):
                     "msg": "原任务导入回执尚未确认，请先核实原结果。"}, 409
         if not info.get("scheduler_reload_pending"):
             return {"ok": False, "request_id": install_id, "msg": "该安装没有待恢复的调度器重载。"}, 409
+        try:
+            persisted = _load_persisted_online_install(install_id)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "request_id": install_id,
+                "receipt_confirmation_required": True,
+                "state_url": _install_reload_state_url(install_id),
+                "msg": f"原安装回执无法核实，未重载调度器：{exc}",
+            }, 503
+        if (
+            not _install_reload_receipt_matches(info, persisted)
+            or not isinstance(persisted, dict)
+            or not persisted.get("scheduler_reload_pending")
+        ):
+            if persisted and persisted.get("id") == install_id:
+                live = ONLINE_INSTALL_RUNNING.get(install_id)
+                if isinstance(live, dict):
+                    live.update(persisted)
+            return _install_reload_claim_conflict(install_id, persisted)
         ONLINE_INSTALL_RETRYING.add(install_id)
 
     try:
+        receipt_conflict_detected = False
+        receipt_conflict_actual = None
+        receipt_error = ""
+        retryable_receipt = None
+        updated = None
         try:
             with TASKS_MUTATION_LOCK:
-                recovery = info.get("task_recovery") or {}
-                if recovery.get("publication"):
-                    with storage_transaction():
-                        confirmation, _signature = task_import_publication_state({"script_id": info["script_id"], **recovery})
-                    if confirmation != "published":
-                        raise RuntimeError("原任务导入尚未写入，请先核实原结果")
-                reload_scheduler()
+                with storage_transaction():
+                    actual = _load_persisted_online_install(install_id)
+                if (
+                    not _install_reload_receipt_matches(info, actual)
+                    or not isinstance(actual, dict)
+                    or not actual.get("scheduler_reload_pending")
+                ):
+                    receipt_conflict_detected = True
+                    receipt_conflict_actual = actual
+                else:
+                    recovery = actual.get("task_recovery") or {}
+                    if recovery.get("publication"):
+                        confirmation, _signature = task_import_publication_state(
+                            {"script_id": actual["script_id"], **recovery}
+                        )
+                        if confirmation != "published":
+                            raise RuntimeError("原任务导入尚未写入，请先核实原结果")
+                    reload_scheduler()
+
+                    updated = dict(actual)
+                    updated.update(
+                        phase="completed" if updated.get("status") == "部分完成" else updated.get("phase") or "unknown",
+                        scheduler_reload_pending=False,
+                        scheduler_reload_error="",
+                        updated_at=now_str(),
+                    )
+                    if updated.get("status") == "部分完成":
+                        updated.update(status="已完成", error="", persistence_error="")
+                    try:
+                        updated = persist_online_install_scheduler_reload(install_id, actual.get("task_recovery"), updated)
+                    except Exception as exc:
+                        receipt_error = str(exc)
+                        try:
+                            persisted_after = _load_persisted_online_install(install_id)
+                        except Exception as read_exc:
+                            persisted_after = None
+                            receipt_error += f"；重读原安装回执失败：{read_exc}"
+                        if _install_reload_receipt_matches(updated, persisted_after):
+                            updated = persisted_after
+                            receipt_error = ""
+                        else:
+                            retryable_receipt = (
+                                persisted_after
+                                if isinstance(persisted_after, dict)
+                                and persisted_after.get("id") == install_id
+                                and persisted_after.get("task_recovery") == actual.get("task_recovery")
+                                and persisted_after.get("scheduler_reload_pending")
+                                and not persisted_after.get("running")
+                                else None
+                            )
+                            if not retryable_receipt and isinstance(persisted_after, dict):
+                                receipt_conflict_detected = True
+                                receipt_conflict_actual = persisted_after
+                                receipt_error = ""
         except Exception as exc:
             return {
                 "ok": False,
@@ -959,29 +1063,37 @@ def _reload_install_scheduler(install_id):
                 "msg": f"任务保持已保存，调度器重载失败：{exc}",
                 "scheduler_reload_required": True,
                 "reload_url": url_for("online_scripts.api_online_scripts_install_reload", install_id=install_id),
+                "state_url": _install_reload_state_url(install_id),
             }, 503
 
+        if receipt_conflict_detected:
+            with ONLINE_INSTALL_LOCK:
+                live = ONLINE_INSTALL_RUNNING.get(install_id)
+                if isinstance(live, dict) and receipt_conflict_actual and receipt_conflict_actual.get("id") == install_id:
+                    live.update(receipt_conflict_actual)
+            return _install_reload_claim_conflict(install_id, receipt_conflict_actual)
+
+        if receipt_error:
+            with ONLINE_INSTALL_LOCK:
+                live = ONLINE_INSTALL_RUNNING.get(install_id)
+                if isinstance(live, dict) and retryable_receipt:
+                    live.update(retryable_receipt)
+            payload = {
+                "ok": False,
+                "request_id": install_id,
+                "phase": "scheduler_reload_pending",
+                "receipt_confirmation_required": True,
+                "state_url": _install_reload_state_url(install_id),
+                "msg": f"调度器已重新加载，但恢复回执无法确认：{receipt_error}。请查询原安装状态。",
+            }
+            if retryable_receipt:
+                payload.update(
+                    scheduler_reload_required=True,
+                    reload_url=url_for("online_scripts.api_online_scripts_install_reload", install_id=install_id),
+                )
+            return payload, 503
+
         with ONLINE_INSTALL_LOCK:
-            updated = dict(info)
-            updated.update(
-                phase="completed" if updated.get("status") == "部分完成" else updated.get("phase") or "unknown",
-                scheduler_reload_pending=False,
-                scheduler_reload_error="",
-                updated_at=now_str(),
-            )
-            if updated.get("status") == "部分完成":
-                updated.update(status="已完成", error="", persistence_error="")
-            try:
-                persist_online_install(updated)
-            except Exception as exc:
-                return {
-                    "ok": False,
-                    "request_id": install_id,
-                    "phase": "scheduler_reload_pending",
-                    "msg": f"调度器已重新加载，但保存恢复结果失败：{exc}。请修复文件权限或磁盘空间后重新加载以保存状态。",
-                    "scheduler_reload_required": True,
-                    "reload_url": url_for("online_scripts.api_online_scripts_install_reload", install_id=install_id),
-                }, 500
             live = ONLINE_INSTALL_RUNNING.get(install_id)
             if isinstance(live, dict):
                 live.update(updated)
@@ -990,7 +1102,8 @@ def _reload_install_scheduler(install_id):
             "request_id": install_id,
             "phase": updated.get("phase") or "completed",
             "status": updated.get("status") or "已完成",
-            "msg": "调度器已恢复，未重复安装或导入任务",
+            "receipt_confirmed": True,
+            "msg": "调度器已恢复并确认保存，未重复安装或导入任务",
         }, 200
     finally:
         with ONLINE_INSTALL_LOCK:
