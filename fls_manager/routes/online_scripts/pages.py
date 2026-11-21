@@ -363,6 +363,8 @@ def online_scripts_page():
     <div id="onlineRefreshPersistence">{refresh_persistence_html}</div>
     <div id="onlineRefreshHistory" class="action-row" style="margin-top:8px;">{refresh_history_html(refresh_history)}</div>
     <div id="onlineRefreshHistoryError" class="notice red" role="status"{' hidden' if not refresh_history_error else ''}>{h(refresh_history_error)}</div>
+    <button id="onlineRefreshHistoryRetry" class="btn btn-gray" type="button" hidden>重新读取刷新历史</button>
+    <a id="onlineRefreshHistoryLogin" class="btn btn-gray" href="/login?next=%2Fonline-scripts" hidden>重新登录</a>
 </div>
 </section>
 
@@ -403,13 +405,62 @@ function clearOnlineRefreshPending(){{
 
 var onlineRefreshPending = readOnlineRefreshPending();
 if(onlineRefreshPending) window.__FLS_ONLINE_REFRESH_WAS_RUNNING__ = true;
-var onlineRefreshStatusPending = false;
-var onlineRefreshStatusGeneration = typeof onlineRefreshStatusGeneration === "number" ? onlineRefreshStatusGeneration + 1 : 0;
+var onlineRefreshStatusControl = window.__FLS_ONLINE_REFRESH_STATUS_CONTROL__ || {{
+    pending: false, generation: 0, timer: null, failures: 0,
+    outcome: "idle", requestId: "", pageHidden: false
+}};
+window.__FLS_ONLINE_REFRESH_STATUS_CONTROL__ = onlineRefreshStatusControl;
+if(onlineRefreshStatusControl.timer !== null && typeof clearTimeout === "function")
+    clearTimeout(onlineRefreshStatusControl.timer);
+onlineRefreshStatusControl.pending = false;
+onlineRefreshStatusControl.generation++;
+onlineRefreshStatusControl.timer = null;
+onlineRefreshStatusControl.failures = 0;
+onlineRefreshStatusControl.outcome = {str(bool(refresh_running)).lower()} ? "running" : (onlineRefreshPending ? "unqueried" : "idle");
+onlineRefreshStatusControl.requestId = onlineRefreshPending ? onlineRefreshPending.request_id : "";
+onlineRefreshStatusControl.pageHidden = false;
 var onlineRefreshMissingRequest = false;
+var onlineRefreshHistoryControl = window.__FLS_ONLINE_REFRESH_HISTORY_CONTROL__ || {{pending:false, generation:0}};
+window.__FLS_ONLINE_REFRESH_HISTORY_CONTROL__ = onlineRefreshHistoryControl;
+onlineRefreshHistoryControl.generation++;
+onlineRefreshHistoryControl.pending = false;
+
+function clearOnlineRefreshStatusTimer(){{
+    if(onlineRefreshStatusControl.timer !== null){{
+        if(typeof clearTimeout === "function") clearTimeout(onlineRefreshStatusControl.timer);
+        onlineRefreshStatusControl.timer = null;
+    }}
+}}
+
+function scheduleOnlineRefreshStatus(delay, generation){{
+    if(onlineRefreshStatusControl.pageHidden || onlineRefreshStatusControl.timer !== null) return;
+    onlineRefreshStatusControl.timer = setTimeout(function(){{
+        onlineRefreshStatusControl.timer = null;
+        if(onlineRefreshStatusControl.pageHidden || generation !== onlineRefreshStatusControl.generation) return;
+        return updateOnlineRefreshStatus({{automatic:true}});
+    }}, delay);
+}}
 
 function invalidateOnlineRefreshStatus(){{
-    onlineRefreshStatusGeneration++;
-    onlineRefreshStatusPending = false;
+    onlineRefreshStatusControl.generation++;
+    onlineRefreshStatusControl.pending = false;
+    clearOnlineRefreshStatusTimer();
+}}
+
+if(!window.__FLS_ONLINE_REFRESH_STATUS_LIFECYCLE_BOUND__ && typeof window.addEventListener === "function"){{
+    window.__FLS_ONLINE_REFRESH_STATUS_LIFECYCLE_BOUND__ = true;
+    window.addEventListener("pagehide", function(){{
+        onlineRefreshStatusControl.pageHidden = true;
+        onlineRefreshStatusControl.generation++;
+        onlineRefreshStatusControl.pending = false;
+        clearOnlineRefreshStatusTimer();
+    }});
+    window.addEventListener("pageshow", function(event){{
+        if(!event || !event.persisted) return;
+        onlineRefreshStatusControl.pageHidden = false;
+        if(onlineRefreshStatusControl.outcome === "running" || onlineRefreshStatusControl.outcome === "unqueried")
+            updateOnlineRefreshStatus();
+    }});
 }}
 
 function escapeHtml(s){{
@@ -440,6 +491,8 @@ async function submitOnlineRefreshRecoverForm(form, event){{
     if(button) button.disabled = true;
     const pending = readOnlineRefreshPending();
     saveOnlineRefreshPending(pending && pending.request_id === requestId ? pending : {{request_id:requestId}});
+    onlineRefreshStatusControl.outcome = "unqueried";
+    onlineRefreshStatusControl.requestId = requestId;
     invalidateOnlineRefreshStatus();
     try{{
         const headers = {{"X-Requested-With":"XMLHttpRequest"}};
@@ -467,14 +520,31 @@ async function submitOnlineRefreshRecoverForm(form, event){{
     }}
 }}
 
+function hideOnlineRefreshHistoryReadActions(){{
+    const retry = document.getElementById("onlineRefreshHistoryRetry");
+    const login = document.getElementById("onlineRefreshHistoryLogin");
+    if(retry){{ retry.hidden = true; retry.disabled = false; }}
+    if(login) login.hidden = true;
+}}
+
 async function updateOnlineRefreshHistory(){{
     const history = document.getElementById("onlineRefreshHistory");
     const error = document.getElementById("onlineRefreshHistoryError");
-    if(!history) return;
+    const retry = document.getElementById("onlineRefreshHistoryRetry");
+    const login = document.getElementById("onlineRefreshHistoryLogin");
+    if(!history || onlineRefreshHistoryControl.pending) return;
+    const generation = ++onlineRefreshHistoryControl.generation;
+    onlineRefreshHistoryControl.pending = true;
+    if(retry) retry.disabled = true;
     try{{
         const response = await fetch({json.dumps(refresh_history_url)}, {{cache:"no-store", credentials:"same-origin"}});
         const json = await flsReadJsonResponse(response);
-        if(!json || !Array.isArray(json.items)) throw new Error("刷新历史响应无效");
+        if(generation !== onlineRefreshHistoryControl.generation || document.getElementById("onlineRefreshHistory") !== history) return;
+        if(!json || json.ok !== true || !Array.isArray(json.items) || json.items.some(function(item){{
+            return !item || typeof item !== "object" || Array.isArray(item) ||
+                !/^[a-f0-9]{{32}}$/.test(String(item.request_id || "")) || typeof item.status !== "string";
+        }}))
+            throw new Error(json && (json.error || json.msg) || "刷新历史响应无效");
         const rows = json.items.map(function(item){{
             const requestId = String(item && item.request_id || "");
             if(!/^[a-f0-9]{{32}}$/.test(requestId)) return "";
@@ -504,11 +574,24 @@ async function updateOnlineRefreshHistory(){{
         bindOnlineRefreshRetryForms(history);
         bindOnlineRefreshConfirmForms(history);
         if(error){{ error.hidden = true; error.textContent = ""; }}
+        hideOnlineRefreshHistoryReadActions();
     }}catch(e){{
+        if(generation !== onlineRefreshHistoryControl.generation || document.getElementById("onlineRefreshHistory") !== history) return;
+        const denied = e && (e.status === 401 || e.status === 403);
         if(error){{
             const status = e && e.status ? "HTTP " + e.status : "请求失败";
             error.hidden = false;
             error.textContent = "刷新历史读取失败（" + status + "）：" + (e && e.message || String(e || "未知错误")) + "。当前已显示的历史未清除。";
+        }}
+        if(retry){{ retry.hidden = false; retry.disabled = false; }}
+        if(login){{
+            login.hidden = !denied;
+            if(denied) login.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
+        }}
+    }}finally{{
+        if(generation === onlineRefreshHistoryControl.generation){{
+            onlineRefreshHistoryControl.pending = false;
+            if(retry) retry.disabled = false;
         }}
     }}
 }}
@@ -632,30 +715,50 @@ function bindOnlineRefreshConfirmForms(root){{
     }});
 }}
 
-async function updateOnlineRefreshStatus(){{
-    if(onlineRefreshStatusPending) return;
-    const generation = ++onlineRefreshStatusGeneration;
+function isRetryableOnlineRefreshStatusError(error){{
+    const status = Number(error && error.status);
+    if(Number.isInteger(status) && status > 0)
+        return status === 408 || status === 429 || (status >= 500 && status <= 599);
+    return !!error && (error.name === "TypeError" || error.name === "NetworkError");
+}}
+
+async function updateOnlineRefreshStatus(options){{
+    const automatic = !!(options && options.automatic === true);
+    if(onlineRefreshStatusControl.pending) return;
+    if(!automatic){{
+        clearOnlineRefreshStatusTimer();
+        onlineRefreshStatusControl.failures = 0;
+    }}
+    const generation = ++onlineRefreshStatusControl.generation;
     const statusText = document.getElementById("onlineRefreshStatusText");
     const queryButton = document.getElementById("onlineRefreshQuery");
-    onlineRefreshStatusPending = true;
+    const currentPending = readOnlineRefreshPending();
+    const requestId = automatic && onlineRefreshStatusControl.requestId
+        ? onlineRefreshStatusControl.requestId
+        : (currentPending && currentPending.request_id || "");
+    if(!automatic) onlineRefreshStatusControl.requestId = requestId;
+    onlineRefreshStatusControl.pending = true;
     if(queryButton) queryButton.disabled = true;
     try {{
-        const currentPending = readOnlineRefreshPending();
-        const statusUrl = currentPending && currentPending.request_id
-            ? "/api/online-scripts/refresh-status/" + encodeURIComponent(currentPending.request_id)
+        const statusUrl = requestId
+            ? "/api/online-scripts/refresh-status/" + encodeURIComponent(requestId)
             : "/api/online-scripts/refresh-status";
         const res = await fetch(statusUrl, {{cache:"no-store", credentials:"same-origin"}});
         const json = await flsReadJsonResponse(res);
-        if(generation !== onlineRefreshStatusGeneration || document.getElementById("onlineRefreshStatusText") !== statusText) return;
+        if(generation !== onlineRefreshStatusControl.generation || document.getElementById("onlineRefreshStatusText") !== statusText) return;
         if(!json || typeof json.running !== "boolean" || json.ok === false){{
             throw new Error("同步状态响应无效，请重新查询原请求");
         }}
-        if(currentPending && json.request_id !== currentPending.request_id){{
+        if(requestId && json.request_id !== requestId){{
             throw new Error("同步状态与原请求不一致，请重新查询原请求");
         }}
+        onlineRefreshStatusControl.outcome = json.running ? "running" : "terminal";
+        onlineRefreshStatusControl.requestId = requestId;
+        onlineRefreshStatusControl.failures = 0;
+        clearOnlineRefreshStatusTimer();
         onlineRefreshMissingRequest = false;
 
-        if(currentPending && json.id && !currentPending.server_id){{
+        if(currentPending && currentPending.request_id === requestId && json.id && !currentPending.server_id){{
             currentPending.server_id = String(json.id);
             saveOnlineRefreshPending(currentPending);
         }}
@@ -733,10 +836,11 @@ async function updateOnlineRefreshStatus(){{
             window.__FLS_ONLINE_REFRESH_WAS_RUNNING__ = true;
         }}
 
-        if(currentPending && !json.running && json.id &&
+        if(currentPending && currentPending.request_id === requestId && !json.running && json.id &&
             currentPending.server_id === String(json.id) &&
             (json.status === "已完成" || json.status === "部分完成")){{
             clearOnlineRefreshPending();
+            onlineRefreshStatusControl.requestId = "";
         }}
 
         if(json.running || json.message || json.error || taskFailures.length){{
@@ -784,12 +888,22 @@ async function updateOnlineRefreshStatus(){{
         }}
 
         if(json.running){{
-            setTimeout(updateOnlineRefreshStatus, 2000);
+            scheduleOnlineRefreshStatus(2000, generation);
+        }}else{{
+            clearOnlineRefreshStatusTimer();
         }}
 
     }} catch(e) {{
-        if(generation !== onlineRefreshStatusGeneration || document.getElementById("onlineRefreshStatusText") !== statusText) return;
-        if(e && e.status === 404 && readOnlineRefreshPending()) onlineRefreshMissingRequest = true;
+        if(generation !== onlineRefreshStatusControl.generation || document.getElementById("onlineRefreshStatusText") !== statusText) return;
+        const latestPending = readOnlineRefreshPending();
+        if(e && e.status === 404 && latestPending && latestPending.request_id === requestId){{
+            onlineRefreshMissingRequest = true;
+            onlineRefreshStatusControl.outcome = "missing";
+        }}
+        const responseState = e && e.payload && (e.payload.refresh_state || e.payload);
+        if(responseState && typeof responseState.running === "boolean"){{
+            onlineRefreshStatusControl.outcome = responseState.running ? "running" : "terminal";
+        }}
         const card = document.getElementById("onlineRefreshStatusCard");
         const text = document.getElementById("onlineRefreshStatusText");
         const btn = document.getElementById("onlineRefreshBtn");
@@ -797,11 +911,25 @@ async function updateOnlineRefreshStatus(){{
         const status = e && e.status ? "HTTP " + e.status : "请求失败";
         const detail = e && e.message ? e.message : String(e || "未知错误");
         const denied = e && (e.status === 401 || e.status === 403);
+        const retryable = !denied && isRetryableOnlineRefreshStatusError(e) &&
+            (onlineRefreshStatusControl.outcome === "running" || onlineRefreshStatusControl.outcome === "unqueried");
+        const retryScheduled = retryable && !onlineRefreshStatusControl.pageHidden &&
+            onlineRefreshStatusControl.failures < 5;
+        if(retryScheduled) onlineRefreshStatusControl.failures++;
+        else clearOnlineRefreshStatusTimer();
+        const retryDelay = retryScheduled
+            ? Math.min(2000 * Math.pow(2, onlineRefreshStatusControl.failures - 1), 30000)
+            : 0;
         const next = denied
             ? "登录状态已失效，请重新登录后重试"
             : (e && e.status === 404
                 ? "原刷新记录不存在或已被替换；确认后可重新发起同步"
-                : "点击重新查询同步状态；已有日志和恢复操作已保留");
+                : (retryScheduled
+                    ? "系统将在 " + Math.ceil(retryDelay / 1000) + " 秒后自动重新查询原请求状态（" +
+                        onlineRefreshStatusControl.failures + "/5）；也可手动重新查询，已有日志和恢复操作已保留"
+                    : (retryable && onlineRefreshStatusControl.failures >= 5
+                        ? "自动重试次数已达上限，请手动重新查询；已有日志和恢复操作已保留"
+                        : "点击重新查询同步状态；已有日志和恢复操作已保留")));
         if(card) card.style.display = "block";
         if(queryButton) queryButton.hidden = false;
         if(text) text.innerHTML =
@@ -816,16 +944,19 @@ async function updateOnlineRefreshStatus(){{
             login.hidden = !denied;
             if(denied) login.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
         }}
+        if(retryScheduled) scheduleOnlineRefreshStatus(retryDelay, generation);
     }} finally {{
-        if(generation === onlineRefreshStatusGeneration){{
-            onlineRefreshStatusPending = false;
+        if(generation === onlineRefreshStatusControl.generation){{
+            onlineRefreshStatusControl.pending = false;
             if(queryButton) queryButton.disabled = false;
         }}
     }}
 }}
 
 var onlineRefreshQuery = document.getElementById("onlineRefreshQuery");
-if(onlineRefreshQuery) onlineRefreshQuery.onclick = updateOnlineRefreshStatus;
+if(onlineRefreshQuery) onlineRefreshQuery.onclick = function(){{ return updateOnlineRefreshStatus(); }};
+var onlineRefreshHistoryRetry = document.getElementById("onlineRefreshHistoryRetry");
+if(onlineRefreshHistoryRetry) onlineRefreshHistoryRetry.onclick = function(){{ return updateOnlineRefreshHistory(); }};
 updateOnlineRefreshStatus();
 updateOnlineRefreshHistory();
 bindOnlineRefreshRetryForms(document);
@@ -855,6 +986,8 @@ async function submitOnlineRefreshForm(form, event){{
     if(requestInput) requestInput.value = requestId;
     const pending = {{request_id: requestId, proxy_id: proxyId, server_id: savedPending && savedPending.proxy_id === proxyId ? (savedPending.server_id || "") : ""}};
     saveOnlineRefreshPending(pending);
+    onlineRefreshStatusControl.outcome = "unqueried";
+    onlineRefreshStatusControl.requestId = requestId;
     invalidateOnlineRefreshStatus();
     window.__FLS_ONLINE_REFRESH_WAS_RUNNING__ = true;
     if(button) button.disabled = true;
