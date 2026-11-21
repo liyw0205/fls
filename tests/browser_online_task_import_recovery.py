@@ -33,7 +33,11 @@ def main():
                           {"name": "Excluded task", "command": "echo excluded", "cron": ""}],
         }
         source.save_online_script_cache([item])
-        fault = {"fail": True, "reloads": 0, "recovery_reloads": 0, "startup_failure": "", "publication_failure": False}
+        fault = {
+            "fail": True, "reloads": 0, "recovery_reloads": 0, "startup_failure": "",
+            "publication_failure": False, "receipt_failure_request": "",
+            "receipt_failure_mode": "", "receipt_failure_remaining": 0,
+        }
 
         def task_reload():
             fault["reloads"] += 1
@@ -50,6 +54,13 @@ def main():
         real_write = storage._write_json_unlocked
 
         def write(path, data):
+            request_id = fault["receipt_failure_request"]
+            receipt = data.get(request_id, {}) if path == constants.ONLINE_TASK_IMPORT_REQUESTS_FILE else {}
+            if (request_id and fault["receipt_failure_remaining"] and receipt.get("state") == "completed"):
+                fault["receipt_failure_remaining"] = 0
+                if fault["receipt_failure_mode"] == "after":
+                    real_write(path, data)
+                raise OSError("browser scheduler completion receipt unavailable")
             if path == models.TASK_FILE and fault["publication_failure"]:
                 fault["publication_failure"] = False
                 real_write(path, data)
@@ -84,11 +95,19 @@ def main():
             if data.get("damage_cache"):
                 constants.ONLINE_SCRIPT_CACHE_FILE.write_text("broken browser cache", encoding="utf-8")
                 return jsonify(ok=True)
+            if data.get("receipt_failure_request"):
+                fault.update(receipt_failure_request=data["receipt_failure_request"],
+                             receipt_failure_mode=data.get("receipt_failure_mode", "after"),
+                             receipt_failure_remaining=1)
+                return jsonify(ok=True)
             source.save_online_script_cache([item])
             save_tasks([])
             constants.ONLINE_TASK_IMPORT_ACTIVE.clear()
             constants.mutate_json(constants.ONLINE_TASK_IMPORT_REQUESTS_FILE, {}, lambda _: {}, strict=True)
-            fault.update(fail=data.get("fail", True), startup_failure=data.get("startup_failure", ""), publication_failure=data.get("publication_failure", False), reloads=0, recovery_reloads=0)
+            fault.update(fail=data.get("fail", True), startup_failure=data.get("startup_failure", ""),
+                         publication_failure=data.get("publication_failure", False), reloads=0,
+                         recovery_reloads=0, receipt_failure_request="", receipt_failure_mode="",
+                         receipt_failure_remaining=0)
             request_id = uuid.uuid4().hex
             if data.get("capacity"):
                 normalized = source.load_online_script_cache()[0]
@@ -238,6 +257,35 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    await page.goto(selectUrl);
    await page.waitForURL(url=>url.pathname==='/online-scripts'&&url.searchParams.has('msg'));
    assert.equal(await page.evaluate(()=>sessionStorage.getItem('fls-online-install-request')),null);
+
+   await fixture({fail:true});
+   await page.goto(selectUrl);
+   await page.locator('.fls-install-task-checkbox[data-index="2"]').uncheck();
+   const reloadReceiptId=await page.locator('#onlineInstallSelectForm [name="request_id"]').inputValue();
+   await page.locator('button[formaction="/online-scripts/import-tasks/browser-import"]').click();
+   await page.locator('#onlineInstallApiError').waitFor({state:'visible'});
+   assert.equal((await fixture({inspect:true})).recovery_reloads,0);
+   await fixture({receipt_failure_request:reloadReceiptId,receipt_failure_mode:'after'});
+   await page.locator('#onlineInstallRecoveryRetry').click();
+   await page.locator('#onlineInstallRecoveryReload').waitFor({state:'visible'});
+   const reloadReceiptUrl=base+'/api/online-scripts/import-tasks-reload/'+reloadReceiptId;
+   let reloadReceiptPosts=0;
+   await page.route(reloadReceiptUrl,async route=>{
+     reloadReceiptPosts++;
+     const response=await route.fetch();assert.equal(response.status(),200);
+     assert.equal((await response.json()).receipt_confirmed,true);
+     await route.fulfill({status:502,contentType:'text/plain',body:'scheduler receipt response lost'});
+   });
+   await page.locator('#onlineInstallRecoveryReload').click();
+   await page.waitForFunction(()=>document.querySelector('#onlineInstallRecoveryStatus').textContent.includes('scheduler receipt response lost'));
+   assert.equal(reloadReceiptPosts,1);
+   await page.unroute(reloadReceiptUrl);
+   await page.locator('#onlineInstallRecoveryRetry').click();
+   await page.waitForURL(url=>url.pathname==='/online-scripts'&&url.searchParams.has('msg'));
+   const recoveredReload=await fixture({inspect:true});
+   assert.equal(recoveredReload.tasks.length,1);assert.equal(recoveredReload.reloads,1);
+   assert.equal(recoveredReload.recovery_reloads,1);
+
    await fixture({fail:false,publication_failure:true});
    await page.goto(selectUrl);
    await page.locator('.fls-install-task-checkbox[data-index="2"]').uncheck();

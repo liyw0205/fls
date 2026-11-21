@@ -192,6 +192,105 @@ class OnlineTaskImportConfirmationTests(unittest.TestCase):
             self.assertEqual(checked.json["confirmation"], "published")
             self.assertEqual(checked.json["state"], "scheduler_pending")
 
+    def test_scheduler_reload_receipt_publication_failure_confirms_disk_state(self):
+        for after in (False, True):
+            with self.subTest(after=after), self.app() as (app, _base_dir):
+                from fls_manager import models, storage
+                from fls_manager.online_scripts import constants, tasks
+                from fls_manager.routes.online_scripts import install_select
+
+                with patch.object(tasks, "reload_scheduler", side_effect=RuntimeError("scheduler unavailable")):
+                    pending = self.submit(app)
+                self.assertEqual(pending.status_code, 503)
+                self.assertEqual(constants.get_online_task_import_request(self.request_id)["state"], "scheduler_pending")
+                task_file_before = models.TASK_FILE.read_bytes()
+
+                receipt_file = constants.ONLINE_TASK_IMPORT_REQUESTS_FILE
+                write = storage._write_json_unlocked
+                fail_once = {"value": True}
+
+                def fail_receipt(path, data):
+                    record = data.get(self.request_id, {}) if path == receipt_file else {}
+                    if fail_once["value"] and record.get("state") == "completed":
+                        fail_once["value"] = False
+                        if after:
+                            write(path, data)
+                        raise OSError("scheduler completion receipt unavailable")
+                    return write(path, data)
+
+                reload_calls = []
+                client = app.test_client()
+                action = "/api/online-scripts/import-tasks-reload/" + self.request_id
+                with patch.object(storage, "_write_json_unlocked", side_effect=fail_receipt), patch.object(
+                    install_select, "reload_scheduler", side_effect=lambda: reload_calls.append(self.request_id),
+                ):
+                    response = client.post(action, headers=self.headers)
+                    if after:
+                        self.assertEqual(response.status_code, 200)
+                        self.assertTrue(response.json["receipt_confirmed"])
+                        self.assertEqual(response.json["state"], "completed")
+                        repeated = client.post(action, headers=self.headers)
+                        self.assertEqual(repeated.status_code, 200)
+                        self.assertTrue(repeated.json["replayed"])
+                    else:
+                        self.assertEqual(response.status_code, 503)
+                        self.assertTrue(response.json["receipt_confirmation_required"])
+                        self.assertEqual(response.json["state_url"], "/api/online-scripts/import-tasks-status/" + self.request_id)
+                        self.assertTrue(response.json["scheduler_reload_required"])
+                        status = client.get(response.json["state_url"], headers=self.headers)
+                        self.assertEqual(status.json["state"], "scheduler_pending")
+                        status_page = client.get(response.json["status_url"], headers=self.headers)
+                        self.assertIn("仅重新加载调度器", status_page.get_data(as_text=True))
+                        with client.session_transaction() as session:
+                            session.update(token=TOKEN, token_expire_at=int(time.time()) + 3600,
+                                           security_verified=True, csrf_token="reload-csrf")
+                        form_action = "/online-scripts/import-tasks-reload/" + self.request_id
+                        denied = client.post(form_action, data={"csrf_token": "wrong"})
+                        self.assertEqual(denied.status_code, 400)
+                        self.assertEqual(len(reload_calls), 1)
+                        recovered = client.post(form_action, data={"csrf_token": "reload-csrf"})
+                        self.assertEqual(recovered.status_code, 302)
+                self.assertEqual(len(reload_calls), 1 if after else 2)
+                self.assertEqual(models.TASK_FILE.read_bytes(), task_file_before)
+                self.assertEqual(constants.get_online_task_import_request(self.request_id)["state"], "completed")
+
+    def test_scheduler_reload_error_keeps_actionable_html_form_and_csrf_boundary(self):
+        with self.app() as (app, _base_dir):
+            from fls_manager.online_scripts import constants, tasks
+            from fls_manager.routes.online_scripts import install_select
+
+            with patch.object(tasks, "reload_scheduler", side_effect=RuntimeError("initial scheduler unavailable")):
+                self.assertEqual(self.submit(app).status_code, 503)
+            client = app.test_client()
+            action = "/online-scripts/import-tasks-reload/" + self.request_id
+            api_action = "/api/online-scripts/import-tasks-reload/" + self.request_id
+            with patch.object(install_select, "reload_scheduler", side_effect=RuntimeError("scheduler still unavailable")) as reload:
+                failed = client.post(api_action, headers=self.headers)
+                self.assertEqual(failed.status_code, 503)
+                self.assertTrue(failed.json["scheduler_reload_required"])
+                self.assertEqual(failed.json["state"], "scheduler_pending")
+                self.assertEqual(failed.json["status_url"], "/online-scripts/import-tasks-status/" + self.request_id)
+                self.assertEqual(failed.json["state_url"], "/api/online-scripts/import-tasks-status/" + self.request_id)
+                reload.assert_called_once()
+            with client.session_transaction() as session:
+                session.update(token=TOKEN, token_expire_at=int(time.time()) + 3600,
+                               security_verified=True, csrf_token="reload-csrf")
+            with patch.object(install_select, "reload_scheduler", side_effect=RuntimeError("scheduler still unavailable")) as reload:
+                denied = client.post(action, data={"csrf_token": "wrong"})
+                self.assertEqual(denied.status_code, 400)
+                reload.assert_not_called()
+                failed_form = client.post(action, data={"csrf_token": "reload-csrf"})
+                self.assertEqual(failed_form.status_code, 503)
+                html = failed_form.get_data(as_text=True)
+                self.assertIn(f'action="{action}"', html)
+                self.assertIn("查询原导入请求", html)
+                reload.assert_called_once()
+            with patch.object(install_select, "reload_scheduler") as recovered:
+                completed = client.post(action, data={"csrf_token": "reload-csrf"})
+            self.assertEqual(completed.status_code, 302)
+            recovered.assert_called_once()
+            self.assertEqual(constants.get_online_task_import_request(self.request_id)["state"], "completed")
+
     def test_content_change_or_corrupt_task_file_keeps_unknown_and_never_reloads(self):
         for damage in ("edit", "corrupt"):
             with self.subTest(damage=damage), self.app() as (app, _base_dir):

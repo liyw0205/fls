@@ -9,6 +9,7 @@ from ...online_scripts.constants import (
     get_online_task_import_request,
     list_online_task_import_requests,
     persist_online_task_import_request,
+    _task_import_snapshot,
     ONLINE_TASK_IMPORT_LOCK,
     ONLINE_TASK_IMPORT_ACTIVE,
     TaskImportHistoryFull,
@@ -515,6 +516,15 @@ def api_online_scripts_import_tasks_reload(request_id):
     return jsonify(payload), status_code
 
 
+def _task_import_receipt_matches(expected, actual):
+    if not isinstance(actual, dict):
+        return False
+    try:
+        return _task_import_snapshot(expected) == _task_import_snapshot(actual)
+    except Exception:
+        return False
+
+
 def _reload_import_scheduler(request_id):
     if not re.fullmatch(r"[a-f0-9]{32}", request_id or ""):
         return {"ok": False, "msg": "在线任务导入请求标识无效"}, 400
@@ -531,7 +541,9 @@ def _reload_import_scheduler(request_id):
             return {"ok": False, "request_id": request_id, "script_id": record.get("script_id", ""),
                     "msg": "原导入仍在处理中或已归档，不能执行调度器恢复。", "retry_allowed": False}, 409
         if record.get("state") == "completed":
-            return {"ok": True, "request_id": request_id, "script_id": record.get("script_id", ""), "msg": "调度器已恢复，未重复导入", "replayed": True}, 200
+            return {"ok": True, "request_id": request_id, "script_id": record.get("script_id", ""),
+                    "state": "completed", "receipt_confirmed": True,
+                    "msg": "调度器已恢复，未重复导入", "replayed": True}, 200
         if record.get("state") != "scheduler_pending":
             return {"ok": False, "request_id": request_id, "script_id": record.get("script_id", ""), "msg": "当前导入没有待恢复的调度器状态"}, 409
         if record.get("publication"):
@@ -543,16 +555,58 @@ def _reload_import_scheduler(request_id):
             except Exception as exc:
                 return {"ok": False, "request_id": request_id, "script_id": record.get("script_id", ""),
                         "msg": f"原任务状态无法复核，未重载调度器：{exc}", "retry_allowed": False}, 409
+        original_receipt = _task_import_snapshot(record)
         try:
             reload_scheduler()
         except Exception as exc:
-            return {"ok": False, "request_id": request_id, "script_id": record.get("script_id", ""), "msg": f"调度器重载失败：{exc}，任务文件保持已保存状态"}, 503
+            return {
+                "ok": False,
+                "request_id": request_id,
+                "script_id": record.get("script_id", ""),
+                "state": "scheduler_pending",
+                "scheduler_reload_required": True,
+                "reload_url": f"/api/online-scripts/import-tasks-reload/{request_id}",
+                "status_url": f"/online-scripts/import-tasks-status/{request_id}",
+                "state_url": f"/api/online-scripts/import-tasks-status/{request_id}",
+                "msg": f"调度器重载失败：{exc}，任务文件保持已保存状态",
+            }, 503
         _import_record_update(record, "completed", "任务已保存，调度器已恢复")
         try:
             persist_online_task_import_request(record)
         except Exception as exc:
-            return {"ok": False, "request_id": request_id, "script_id": record.get("script_id", ""), "msg": f"调度器已恢复，但导入回执无法保存：{exc}"}, 503
-    return {"ok": True, "request_id": request_id, "script_id": record.get("script_id", ""), "msg": "任务已保存，调度器已恢复"}, 200
+            try:
+                persisted = get_online_task_import_request(request_id, recover=False)
+            except Exception as read_exc:
+                persisted = None
+                exc = f"{exc}；重读原回执失败：{read_exc}"
+            if not _task_import_receipt_matches(record, persisted):
+                retryable = (
+                    _task_import_receipt_matches(original_receipt, persisted)
+                    and persisted.get("state") == "scheduler_pending"
+                    and not persisted.get("active")
+                    and not persisted.get("archived")
+                ) if isinstance(persisted, dict) else False
+                payload = {
+                    "ok": False,
+                    "request_id": request_id,
+                    "script_id": record.get("script_id", ""),
+                    "state": persisted.get("state") if isinstance(persisted, dict) else "unknown",
+                    "receipt_confirmation_required": True,
+                    "status_url": f"/online-scripts/import-tasks-status/{request_id}",
+                    "state_url": f"/api/online-scripts/import-tasks-status/{request_id}",
+                    "retry_allowed": False,
+                    "msg": f"调度器已重载，但原导入完成回执无法确认：{exc}。请查询原请求。",
+                }
+                if retryable:
+                    payload.update(
+                        scheduler_reload_required=True,
+                        reload_url=f"/api/online-scripts/import-tasks-reload/{request_id}",
+                    )
+                return payload, 503
+            record = persisted
+    return {"ok": True, "request_id": request_id, "script_id": record.get("script_id", ""),
+            "state": "completed", "receipt_confirmed": True,
+            "msg": "任务已保存，调度器已恢复"}, 200
 
 
 def _archive_task_import(request_id, choice):
@@ -605,7 +659,7 @@ def online_scripts_import_tasks_reload(request_id):
     if payload.get("ok"):
         return redirect(url_for("online_scripts.online_scripts_page", msg=payload.get("msg")))
     return _task_import_error(payload.get("script_id", ""), payload.get("msg", "导入恢复失败"), status_code,
-                              persisted=status_code == 503, request_id=request_id)
+                              persisted=bool(payload.get("scheduler_reload_required")), request_id=request_id)
 
 
 @bp.route("/online-scripts/import-tasks-status/<request_id>")
