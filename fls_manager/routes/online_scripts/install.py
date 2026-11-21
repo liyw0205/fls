@@ -388,6 +388,27 @@ def _api_install_start_result(result, install_id):
     return result
 
 
+def _api_install_rejected(request_id, message, status_code, *, retry_allowed=False, **details):
+    payload = {
+        "ok": False,
+        "request_id": request_id,
+        "msg": str(message),
+        "retry_allowed": retry_allowed,
+        **details,
+    }
+    try:
+        previous = get_online_install_job(request_id) if request_id else None
+    except Exception as exc:
+        payload["msg"] += f"；原请求状态无法核实：{exc}"
+    else:
+        if previous:
+            payload["install_id"] = request_id
+            payload["log_url"] = url_for("online_scripts.api_online_install_log", install_id=request_id)
+        else:
+            payload["accepted"] = False
+    return jsonify(payload), status_code
+
+
 @bp.route("/api/online-scripts/install/<script_id>", methods=["POST"])
 def api_online_scripts_install(script_id):
     if request.is_json:
@@ -405,11 +426,13 @@ def api_online_scripts_install(script_id):
     try:
         item = get_online_script(script_id)
     except Exception as exc:
-        return jsonify(ok=False, request_id=request_id,
-                       msg=f"在线脚本源缓存无法读取，未覆盖原文件：{exc}"), 500
+        return _api_install_rejected(
+            request_id, f"在线脚本源缓存无法读取，未覆盖原文件：{exc}", 500,
+        )
     if not item:
-        return jsonify(ok=False, request_id=request_id,
-                       msg="脚本已不在本地缓存中，请同步在线脚本源后重试"), 404
+        return _api_install_rejected(
+            request_id, "脚本已不在本地缓存中，请同步在线脚本源后重试", 404,
+        )
 
     proxy_id = str(data.get("proxy_id", "") or "").strip()
     try:
@@ -418,9 +441,9 @@ def api_online_scripts_install(script_id):
         enable_task = _api_flag(data, "enable_task")
         force = _api_flag(data, "force")
     except ValueError as exc:
-        return jsonify(ok=False, request_id=request_id, msg=str(exc), retry_allowed=True), 400
+        return _api_install_rejected(request_id, str(exc), 400, retry_allowed=True)
     except Exception as exc:
-        return jsonify(ok=False, request_id=request_id, msg=f"读取代理配置失败：{exc}"), 500
+        return _api_install_rejected(request_id, f"读取代理配置失败：{exc}", 500)
 
     selected_task_indexes = []
     if import_task:
@@ -445,17 +468,16 @@ def api_online_scripts_install(script_id):
             selected_task_indexes = validated_install_task_indexes(item, selected_task_indexes)
             validate_online_task_import(item, selected_task_indexes)
         except ValueError as exc:
-            return jsonify(ok=False, request_id=request_id,
-                           msg=f"{exc}。请重新选择任务后重试", retry_allowed=False), 400
+            return _api_install_rejected(
+                request_id, f"{exc}。请重新选择任务后重试", 400,
+            )
         except Exception as exc:
-            return jsonify(ok=False, request_id=request_id, msg=f"任务校验失败：{exc}"), 500
+            return _api_install_rejected(request_id, f"任务校验失败：{exc}", 500)
     else:
         if enable_task or _api_values(data, "task_indexes") or _api_values(data, "excluded_task_indexes"):
-            return jsonify(ok=False, request_id=request_id,
-                           msg="未启用任务导入时不能提交任务选择", retry_allowed=False), 400
+            return _api_install_rejected(request_id, "未启用任务导入时不能提交任务选择", 400)
         if str(data.get("select_mode", "") or "").strip():
-            return jsonify(ok=False, request_id=request_id,
-                           msg="未启用任务导入时不能提交任务选择模式", retry_allowed=False), 400
+            return _api_install_rejected(request_id, "未启用任务导入时不能提交任务选择模式", 400)
         enable_task = False
 
     try:
@@ -477,10 +499,12 @@ def api_online_scripts_install(script_id):
     try:
         target = online_script_target(item)
     except Exception as exc:
-        return jsonify(ok=False, request_id=request_id, msg=f"脚本目标路径非法：{exc}"), 400
+        return _api_install_rejected(request_id, f"脚本目标路径非法：{exc}", 400)
     if target.exists() and not force:
-        return jsonify(ok=False, request_id=request_id, confirm_required=True,
-                       target=str(target), msg="目标已存在，请确认覆盖后重试"), 409
+        return _api_install_rejected(
+            request_id, "目标已存在，请确认覆盖后重试", 409,
+            retry_allowed=True, confirm_required=True, target=str(target),
+        )
 
     active_id, active_info = active_online_install_for_script(script_id)
     if active_id:

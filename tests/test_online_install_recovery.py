@@ -400,6 +400,15 @@ class OnlineInstallRecoveryTests(unittest.TestCase):
                     }, headers={"X-Token": TOKEN},
                 )
                 self.assertEqual(conflict.status_code, 409)
+                invalid_replay = client.post(
+                    "/api/online-scripts/install/demo", json={
+                        "request_id": request_id, "import_task": True, "task_indexes": ["9"],
+                    }, headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(invalid_replay.status_code, 400)
+                self.assertNotIn("accepted", invalid_replay.json)
+                self.assertEqual(invalid_replay.json["install_id"], request_id)
+                self.assertIn("/api/online-scripts/log/" + request_id, invalid_replay.json["log_url"])
                 invalid_id = "e" * 32
                 invalid = client.post(
                     "/api/online-scripts/install/demo", json={
@@ -407,6 +416,7 @@ class OnlineInstallRecoveryTests(unittest.TestCase):
                     }, headers={"X-Token": TOKEN},
                 )
                 self.assertEqual(invalid.status_code, 400)
+                self.assertIs(invalid.json["accepted"], False)
                 excluded = client.post(
                     "/api/online-scripts/install/demo", json={
                         "request_id": "f" * 32, "import_task": True,
@@ -414,12 +424,21 @@ class OnlineInstallRecoveryTests(unittest.TestCase):
                     }, headers={"X-Token": TOKEN},
                 )
                 self.assertEqual(excluded.status_code, 400)
+                self.assertIs(excluded.json["accepted"], False)
                 mixed = client.post(
                     "/api/online-scripts/install/demo", json={
                         "request_id": "a" * 32, "task_indexes": ["1"],
                     }, headers={"X-Token": TOKEN},
                 )
                 self.assertEqual(mixed.status_code, 400)
+                self.assertIs(mixed.json["accepted"], False)
+                invalid_proxy = client.post(
+                    "/api/online-scripts/install/demo", json={
+                        "request_id": "9" * 32, "proxy_id": "missing-proxy",
+                    }, headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(invalid_proxy.status_code, 400)
+                self.assertIs(invalid_proxy.json["accepted"], False)
                 start.assert_called_once()
             self.assertIsNone(get_online_install_job(invalid_id))
             self.assertIsNone(get_online_install_job("f" * 32))
@@ -676,6 +695,63 @@ class FormDataMock{constructor(){this.values={request_id:request.value};}delete(
  assert.equal(calls.length,2);assert.equal(calls[0].url,'/api/online-scripts/install/demo');assert.equal(calls[1].opts.body.values.force,'1');
  assert.equal(calls[0].opts.headers['X-CSRF-Token'],'install-csrf');assert.equal(context.window.location.href,'/online-scripts/log/'+ 'a'.repeat(32));})().catch(e=>{console.error(e);process.exitCode=1;});
 """], input=json.dumps({"script":script,"reader":reader}), capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise rejected install recovery")
+    def test_install_selection_ajax_unlocks_after_explicit_preacceptance_rejection(self):
+        with isolated_app() as (app, base_dir):
+            self.prepare(base_dir)
+            html = app.test_client().get(
+                "/online-scripts/install-select/demo", headers={"X-Token": TOKEN},
+            ).get_data(as_text=True)
+            script = next(
+                script for script in re.findall(r"<script>(.*?)</script>", html, re.S)
+                if "flsInstallSubmitApi" in script
+            )
+            source = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+            reader = source[
+                source.index("async function flsReadJsonResponse("):source.index(
+                    "async function flsReadTextResponse("
+                )
+            ]
+            result = subprocess.run(["node", "-e", r"""
+const vm=require('node:vm');const assert=require('node:assert/strict');
+const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const id='e'.repeat(32),request={value:id},proxy={value:'missing-proxy'};
+const button={disabled:false};
+const ids=['onlineInstallApiError','onlineInstallApiLogin','onlineInstallRecoveryHistory',
+  'onlineInstallRecoveryInstallHistory','onlineInstallRecoveryCheckHistory','onlineInstallRecoveryClear',
+  'onlineInstallRecoveryStatus','onlineInstallRecoveryLog','onlineInstallRecoveryStatusLink',
+  'onlineInstallRecoveryReload','onlineInstallRecoveryConfirm','onlineInstallRecoveryRetry',
+  'onlineInstallRecoveryResume','onlineInstallRecoveryHistoryItems'];
+const elements=Object.fromEntries(ids.map(name=>[name,{hidden:true,disabled:false,textContent:'',href:'',onclick:null,
+  replaceChildren(){},appendChild(){}}]));
+const form={__flsInstallRecoveryLocked:false,__flsInstallSubmitting:false,
+  querySelector(selector){return selector.includes('request_id')?request:selector.includes('proxy_id')?proxy:null;},
+  querySelectorAll(){return[button];},getAttribute(){return'/online-scripts/install/demo';},addEventListener(){}};
+const storage={value:null,getItem(){return this.value;},setItem(_key,value){this.value=value;},removeItem(){this.value=null;}};
+class FormDataMock{constructor(){this.values={request_id:id,proxy_id:proxy.value};}delete(key){delete this.values[key];}set(key,value){this.values[key]=value;}}
+const calls=[];
+const context={window:{FLS_INSTALL_SCRIPT_ID:'demo',location:{pathname:'/online-scripts/install-select/demo',search:''}},
+  location:{pathname:'/online-scripts/install-select/demo',search:''},document:{
+    getElementById(name){return name==='onlineInstallSelectForm'?form:name==='excludedTaskIndexes'?{value:''}:elements[name];},
+    querySelectorAll(){return[];},querySelector(){return null;},createElement(){return{textContent:'',href:'',appendChild(){}};}},
+  sessionStorage:storage,FormData:FormDataMock,flsGetCsrfToken:()=> 'csrf',flsApplyExcludedToVisible(){},
+  flsResponseErrorDiagnostic(_response,body){const payload=JSON.parse(body);return{payload,message:payload.msg};},
+  fetch:async(url,options)=>{calls.push({url,options});return{ok:false,status:400,
+    headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({ok:false,accepted:false,
+      request_id:id,retry_allowed:true,msg:'代理选择无效'})};},encodeURIComponent,setTimeout,confirm:()=>true};
+vm.createContext(context);vm.runInContext(input.reader+input.script,context);
+(async()=>{
+  await context.flsInstallSubmitApi('/online-scripts/install/demo',form,button);
+  assert.equal(calls.length,1);assert.equal(calls[0].url,'/api/online-scripts/install/demo');
+  assert.equal(calls[0].options.headers['X-CSRF-Token'],'csrf');
+  assert.equal(storage.value,null);assert.equal(form.__flsInstallRecoveryLocked,false);
+  assert.equal(form.__flsInstallSubmitting,false);assert.equal(button.disabled,false);
+  assert.equal(request.value,id);assert.equal(proxy.value,'missing-proxy');
+  assert.match(elements.onlineInstallApiError.textContent,/代理选择无效/);
+})().catch(error=>{console.error(error);process.exitCode=1;});
+"""], input=json.dumps({"script": script, "reader": reader}), capture_output=True, text=True, timeout=5)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise install recovery")
