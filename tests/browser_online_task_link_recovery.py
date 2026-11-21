@@ -40,7 +40,7 @@ def main():
                  "confirmation_failure_remaining": 0,
                  "refresh_recovery_failure_request": "", "refresh_recovery_failure_remaining": 0,
                  "failure_receipt_request": "", "failure_receipt_mode": "after",
-                 "failure_receipt_remaining": 0}
+                 "failure_receipt_remaining": 0, "task_link_status_failure_request": ""}
         real_fetch = task_link.fetch_task_link_tasks
         real_persist = task_link.persist_task_link_request
         real_persist_refresh_recovery = task_link.persist_online_refresh_task_link_recovery
@@ -131,6 +131,19 @@ def main():
 
             constants.os.replace = fail_history_once
 
+        @app.before_request
+        def inject_task_link_status_failure():
+            failure_request = fault["task_link_status_failure_request"]
+            if request.path != "/online-scripts/task-link-status/" + failure_request or not failure_request:
+                return None
+            fault["task_link_status_failure_request"] = ""
+            g.task_link_status_record = task_link._task_link_status_record
+
+            def fail_status_read(_request_id):
+                raise OSError("browser task-link status storage temporarily unavailable")
+
+            task_link._task_link_status_record = fail_status_read
+
         @app.teardown_request
         def restore_refresh_replace(_error):
             original_replace = getattr(g, "refresh_replace", None)
@@ -139,6 +152,9 @@ def main():
             original_persist = getattr(g, "refresh_persist", None)
             if original_persist is not None:
                 constants.persist_online_refresh = original_persist
+            original_status_record = getattr(g, "task_link_status_record", None)
+            if original_status_record is not None:
+                task_link._task_link_status_record = original_status_record
 
         @app.route("/api/fixture/task-link", methods=["GET", "POST"])
         def fixture():
@@ -163,6 +179,8 @@ def main():
                         failure_receipt_mode=data.get("failure_receipt_mode", "after"),
                         failure_receipt_remaining=1,
                     )
+                if "task_link_status_failure_request" in data:
+                    fault["task_link_status_failure_request"] = data["task_link_status_failure_request"]
                 if "startup_failure" in data:
                     fault["startup_failure"] = data["startup_failure"]
                 if data.get("reset"):
@@ -171,7 +189,7 @@ def main():
                                  confirmation_failure_remaining=0, refresh_recovery_failure_request="",
                                  refresh_recovery_failure_remaining=0, failure_receipt_request="",
                                  failure_receipt_mode="after",
-                                 failure_receipt_remaining=0)
+                                 failure_receipt_remaining=0, task_link_status_failure_request="")
                     source.save_online_script_cache([item])
             cached = source.load_online_script_cache()
             return jsonify(fail=fault["fail"], fetches=fault["fetches"], refreshes=fault["refreshes"], cached=cached)
@@ -798,7 +816,14 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    assert.equal(await page.getByRole('button',{name:'继续原同步请求',exact:true}).count(),0);
    const statusLink=page.getByRole('link',{name:'查询原同步请求',exact:true});
    assert.equal(new URL(await statusLink.getAttribute('href'),base).pathname,'/online-scripts/task-link-status/'+unpersistedId);
-   await statusLink.click();
+   await fixture({task_link_status_failure_request:unpersistedId});
+   const [statusReadFailure]=await Promise.all([
+     page.waitForResponse(response=>response.url()===base+'/online-scripts/task-link-status/'+unpersistedId&&response.request().method()==='GET'),
+     statusLink.click(),
+   ]);
+   assert.equal(statusReadFailure.status(),500);
+   assert.match(await page.locator('[data-fls-ajax-load-error]').textContent(),/页面加载失败（HTTP 500）/);
+   await page.getByRole('button',{name:'重新加载页面',exact:true}).click();
    await page.waitForURL(base+'/online-scripts/task-link-status/'+unpersistedId);
    await page.getByRole('heading',{name:'发布结果未知，请勿直接重发',exact:true}).waitFor();
    assert.equal(await page.locator('form[action="/online-scripts/task-link/browser-link"]').count(),0);
