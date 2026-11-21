@@ -402,6 +402,43 @@ def main():
                 path.unlink(missing_ok=True)
             return jsonify(refreshes=fault["refreshes"])
 
+        delayed_refresh = {}
+
+        @app.route("/api/fixture/delayed-refresh-log", methods=["POST"])
+        def delayed_refresh_log_fixture():
+            data = request.get_json() or {}
+            action = data.get("action")
+            if action == "seed":
+                refresh_id, request_id = uuid.uuid4().hex, uuid.uuid4().hex
+                log_file = online_refresh_log_file(refresh_id)
+                log_file.unlink(missing_ok=True)
+                delayed_refresh.update(id=refresh_id, request_id=request_id, log_file=log_file)
+                update_online_refresh_state(
+                    id=refresh_id, request_id=request_id, proxy_id="", running=True, status="运行中",
+                    message="正在后台同步在线脚本源", error="", cache_published=False,
+                    task_link_failures=[], task_link_failure_count=0,
+                    task_link_failure_digest=constants._refresh_task_failure_digest([]),
+                    updated_at="delayed-log-start", log_file=str(log_file),
+                )
+            elif action in ("publish", "complete", "remove") and delayed_refresh:
+                log_file = delayed_refresh["log_file"]
+                if action == "publish":
+                    log_file.write_text("delayed refresh log available\n", encoding="utf-8")
+                elif action == "complete":
+                    update_online_refresh_state(
+                        running=False, status="已完成", message="fixture refresh completed",
+                        error="", cache_published=True, updated_at="delayed-log-complete",
+                    )
+                else:
+                    log_file.unlink(missing_ok=True)
+            else:
+                return jsonify(ok=False, error="invalid delayed refresh action"), 400
+            return jsonify(
+                ok=True, id=delayed_refresh.get("id"), request_id=delayed_refresh.get("request_id"),
+                running=bool(constants.get_online_refresh_state().get("running")),
+                refreshes=fault["refreshes"],
+            )
+
         server = make_server("127.0.0.1", 0, app, threaded=True)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         try:
@@ -1092,6 +1129,41 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    await page.locator('#onlineRefreshLogLink').click();
    await page.locator('#refreshLogText').waitFor();
    assert.match(await page.locator('#refreshLogText').textContent(),/original retry completed/);
+
+   const delayedEndpoint=base+'/api/fixture/delayed-refresh-log';
+   const delayedSeed=await page.request.post(delayedEndpoint,{headers,data:{action:'seed'}});
+   assert.equal(delayedSeed.status(),200);
+   const delayedId=(await delayedSeed.json()).request_id;
+   let delayedLogPolls=0;
+   const countDelayedPolls=request=>{if(request.url().includes('/api/online-scripts/refresh-log/'+delayedId)) delayedLogPolls++;};
+   page.on('request',countDelayedPolls);
+   const delayedPage=await page.goto(base+'/online-scripts/refresh-log/'+delayedId);
+   assert.equal(delayedPage.status(),200);
+   const waitingNotice=page.locator('#refreshLogWaiting');
+   await waitingNotice.waitFor({state:'visible'});
+   assert.equal(await page.locator('#refreshLogStatus').textContent(),'运行中');
+   assert.equal(await page.locator('#refreshLogError').isVisible(),false);
+   assert.match(await waitingNotice.textContent(),/日志尚未生成/);
+   await page.screenshot({path:'/tmp/fls-delayed-refresh-log-'+viewport.width+'.png'});
+   const publishDelayed=await page.request.post(delayedEndpoint,{headers,data:{action:'publish'}});
+   assert.equal(publishDelayed.status(),200);
+   await page.waitForFunction(()=>document.querySelector('#refreshLogText').textContent.includes('delayed refresh log available'));
+   assert.equal(await waitingNotice.isHidden(),true);
+   const completeDelayed=await page.request.post(delayedEndpoint,{headers,data:{action:'complete'}});
+   assert.equal(completeDelayed.status(),200);
+   await page.waitForFunction(()=>document.querySelector('#refreshLogStatus').textContent==='已完成');
+   const terminalPollCount=delayedLogPolls;
+   await page.waitForTimeout(2200);
+   assert.equal(delayedLogPolls,terminalPollCount);
+   page.off('request',countDelayedPolls);
+   const removeDelayed=await page.request.post(delayedEndpoint,{headers,data:{action:'remove'}});
+   assert.equal(removeDelayed.status(),200);
+   const terminalMissing=await page.request.get(base+'/api/online-scripts/refresh-log/'+delayedId,{headers});
+   assert.equal(terminalMissing.status(),404);
+   assert.match((await terminalMissing.json()).error,/尚未生成或已被清理/);
+   const terminalMissingPage=await page.goto(base+'/online-scripts/refresh-log/'+delayedId);
+   assert.equal(terminalMissingPage.status(),404);
+   assert.match(await page.locator('#refreshLogQueryResult').textContent(),/已完成/);
    assert.deepEqual(errors,[]);
    console.log('online task-link recovery passed '+viewport.width);
    await context.close();

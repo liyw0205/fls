@@ -82,9 +82,15 @@ def _refresh_log_state(request_id):
         actual = candidate.resolve(strict=False)
         if candidate.is_symlink() or actual != expected.resolve(strict=False) or base not in actual.parents:
             return (state, None), ("日志边界错误", "刷新日志路径不在受控日志目录内，未读取该文件。", 500)
-        if not candidate.exists():
+        try:
+            candidate_stat = candidate.stat()
+        except FileNotFoundError:
+            if state.get("running"):
+                return (state, None), None
             return (state, None), ("日志不存在", "刷新日志尚未生成或已被清理，请返回刷新状态后重试。", 404)
-        if not candidate.is_file():
+        except OSError as exc:
+            return (state, None), ("日志不可读", f"刷新日志无法读取：{exc}。请修复日志权限后重试。", 500)
+        if not stat.S_ISREG(candidate_stat.st_mode):
             return (state, None), ("日志类型错误", "刷新日志不是普通文件，未读取该路径。", 500)
         with candidate.open("rb") as handle:
             handle.read(1)
@@ -113,6 +119,22 @@ def _refresh_log_payload(request_id, lines):
         title, message, status = failure
         return _refresh_log_error_payload(request_id, title, message, status, resolved[0] if resolved else None)
     state, candidate = resolved
+    if candidate is None:
+        return {
+            "ok": True,
+            "request_id": request_id,
+            "id": state.get("id", ""),
+            "running": True,
+            "terminal": False,
+            "status": state.get("status") or "运行中",
+            "updated_at": state.get("updated_at") or "",
+            "error": state.get("error") or "",
+            "cache_published": bool(state.get("cache_published")),
+            "log_file": str(online_refresh_log_file(state["id"])),
+            "log": "暂无日志",
+            "log_pending": True,
+            "log_status": 404,
+        }, 200
     try:
         log = tail_file(str(candidate), lines)
     except Exception as exc:
@@ -133,6 +155,8 @@ def _refresh_log_payload(request_id, lines):
         "cache_published": bool(state.get("cache_published")),
         "log_file": str(candidate),
         "log": str(log or "暂无日志"),
+        "log_pending": False,
+        "log_status": 200,
     }, 200
 
 
@@ -220,6 +244,7 @@ button.addEventListener("click", loadRefreshReceipt);
 )}
 <div class="notice red" id="refreshLogError" role="status" hidden></div>
 <div class="notice red" id="refreshLogDiagnosis" role="status"{' hidden' if not payload.get('error') else ''}>{h(payload.get('error') or '')}</div>
+<div class="notice" id="refreshLogWaiting" role="status"{' hidden' if not payload.get('log_pending') else ''}>刷新仍在运行，日志尚未生成；系统会继续轮询。</div>
 <a id="refreshLogLogin" class="btn btn-primary" hidden>重新登录</a>
 <pre class="log" id="refreshLogText">{h(payload.get("log") or "暂无日志")}</pre>
 <script>
@@ -229,6 +254,7 @@ const loginEl = document.getElementById("refreshLogLogin");
 const retryEl = document.getElementById("refreshLogRetry");
 const textEl = document.getElementById("refreshLogText");
 const diagnosisEl = document.getElementById("refreshLogDiagnosis");
+const waitingEl = document.getElementById("refreshLogWaiting");
 const confirmEl = document.getElementById("refreshLogConfirm");
 const historyEl = document.getElementById("refreshLogHistory");
 let pending = false;
@@ -260,6 +286,7 @@ async function loadRefreshLog(){{
         if(loginEl) loginEl.hidden = true;
         if(textEl) textEl.textContent = result.log || "暂无日志";
         if(diagnosisEl){{ diagnosisEl.textContent = result.error || ""; diagnosisEl.hidden = !result.error; }}
+        if(waitingEl) waitingEl.hidden = result.log_pending !== true;
         if(confirmEl) confirmEl.hidden = result.status !== "结果未知";
         if(historyEl) historyEl.hidden = ["结果未知", "失败", "启动失败", "部分完成"].indexOf(result.status) < 0;
         const status = document.getElementById("refreshLogStatus");
@@ -274,6 +301,7 @@ async function loadRefreshLog(){{
         }}
     }}catch(error){{
         stopPolling();
+        if(waitingEl) waitingEl.hidden = true;
         const denied = error && (error.status === 401 || error.status === 403);
         if(errorEl){{ errorEl.hidden = false; errorEl.textContent = "刷新日志读取失败：" + (error && error.message || String(error || "请求失败")) + "。请重新读取或返回刷新状态。"; }}
         if(loginEl){{ loginEl.hidden = !denied; if(denied) loginEl.href = "/login?next=" + encodeURIComponent(location.pathname + location.search); }}

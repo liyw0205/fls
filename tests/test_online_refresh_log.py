@@ -598,6 +598,52 @@ const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
             self.assertTrue(terminal.json["terminal"])
             self.assertFalse(terminal.json["running"])
 
+    def test_refresh_log_waits_for_missing_log_only_while_job_is_running(self):
+        with isolated_app() as (app, base_dir):
+            request_id = self._state(base_dir)
+            from fls_manager.online_scripts.constants import update_online_refresh_state
+
+            log_file = base_dir / "log" / f"online-script-source-refresh-{'a' * 32}.log"
+            log_file.unlink()
+            update_online_refresh_state(
+                running=True, status="运行中", message="still working", error="", log_file=str(log_file),
+            )
+            client = app.test_client()
+            headers = {"X-Token": TOKEN}
+
+            waiting = client.get(f"/api/online-scripts/refresh-log/{request_id}", headers=headers)
+            self.assertEqual(waiting.status_code, 200)
+            self.assertTrue(waiting.json["ok"])
+            self.assertTrue(waiting.json["running"])
+            self.assertFalse(waiting.json["terminal"])
+            self.assertTrue(waiting.json["log_pending"])
+            self.assertEqual(waiting.json["log_status"], 404)
+            self.assertEqual(waiting.json["log"], "暂无日志")
+
+            page = client.get(f"/online-scripts/refresh-log/{request_id}", headers=headers)
+            html = page.get_data(as_text=True)
+            self.assertEqual(page.status_code, 200)
+            self.assertIn('id="refreshLogWaiting" role="status">刷新仍在运行', html)
+            self.assertIn("loadRefreshLog();", html)
+
+            log_file.write_text("refresh log appeared\n", encoding="utf-8")
+            available = client.get(f"/api/online-scripts/refresh-log/{request_id}", headers=headers)
+            self.assertEqual(available.status_code, 200)
+            self.assertFalse(available.json["log_pending"])
+            self.assertEqual(available.json["log_status"], 200)
+            self.assertIn("refresh log appeared", available.json["log"])
+
+            update_online_refresh_state(running=False, status="已完成", error="")
+            completed = client.get(f"/api/online-scripts/refresh-log/{request_id}", headers=headers)
+            self.assertEqual(completed.status_code, 200)
+            self.assertTrue(completed.json["terminal"])
+            self.assertFalse(completed.json["running"])
+
+            log_file.unlink()
+            terminal_missing = client.get(f"/api/online-scripts/refresh-log/{request_id}", headers=headers)
+            self.assertEqual(terminal_missing.status_code, 404)
+            self.assertIn("尚未生成或已被清理", terminal_missing.json["error"])
+
     def test_refresh_log_keeps_old_request_after_new_refresh_replaces_current(self):
         with isolated_app() as (app, base_dir):
             old_request = self._state(base_dir, refresh_id="a" * 32, request_id="b" * 32)
@@ -1046,11 +1092,12 @@ const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
 (async()=>{
- const elements={refreshLogError:{hidden:true,textContent:''},refreshLogLogin:{hidden:true,href:''},refreshLogRetry:{disabled:false},refreshLogText:{textContent:'old'},refreshLogStatus:{textContent:'运行中'},refreshLogUpdatedAt:{textContent:'old'},refreshLogConfirm:{hidden:true},refreshLogHistory:{hidden:true},refreshLogDiagnosis:{hidden:true,textContent:''}};
+ const elements={refreshLogError:{hidden:true,textContent:''},refreshLogLogin:{hidden:true,href:''},refreshLogRetry:{disabled:false},refreshLogText:{textContent:'old'},refreshLogStatus:{textContent:'运行中'},refreshLogUpdatedAt:{textContent:'old'},refreshLogConfirm:{hidden:true},refreshLogHistory:{hidden:true},refreshLogDiagnosis:{hidden:true,textContent:''},refreshLogWaiting:{hidden:true,textContent:''}};
  const timers=[]; let pagehide=null; let calls=0; let click=null;
  const responses=[
-   {ok:true,status:200,body:{ok:true,log:'first line',status:'运行中',updated_at:'one',running:true,terminal:false}},
-   {ok:true,status:200,body:{ok:true,log:'final line',status:'已完成',updated_at:'two',running:false,terminal:true}},
+   {ok:true,status:200,body:{ok:true,log:'暂无日志',status:'运行中',updated_at:'zero',running:true,terminal:false,log_pending:true,log_status:404}},
+   {ok:true,status:200,body:{ok:true,log:'first line',status:'运行中',updated_at:'one',running:true,terminal:false,log_pending:false,log_status:200}},
+   {ok:true,status:200,body:{ok:true,log:'final line',status:'已完成',updated_at:'two',running:false,terminal:true,log_pending:false,log_status:200}},
  ];
  const fakeSetTimeout=fn=>{timers.push(fn);return fn;};
  const context={document:{getElementById:id=>elements[id]},window:{addEventListener:(name,fn)=>{if(name==='pagehide') pagehide=fn;}},location:{pathname:'/online-scripts/refresh-log/'+('b'.repeat(32)),search:''},encodeURIComponent,
@@ -1060,14 +1107,18 @@ const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
  elements.refreshLogRetry.addEventListener=(name,fn)=>{if(name==='click') click=fn;};
  vm.createContext(context);vm.runInContext(input.reader+input.script,context);
  await new Promise(resolve=>setImmediate(resolve));
- assert.equal(calls,1); assert.equal(timers.length,1); assert.equal(elements.refreshLogText.textContent,'first line');
+ assert.equal(calls,1); assert.equal(timers.length,1); assert.equal(elements.refreshLogText.textContent,'暂无日志');
+ assert.equal(elements.refreshLogWaiting.hidden,false);
  const timer=timers.shift(); timer(); await new Promise(resolve=>setImmediate(resolve));
- assert.equal(calls,2); assert.equal(timers.length,0); assert.equal(elements.refreshLogText.textContent,'final line');
+ assert.equal(calls,2); assert.equal(timers.length,1); assert.equal(elements.refreshLogText.textContent,'first line');
+ assert.equal(elements.refreshLogWaiting.hidden,true);
+ const completionTimer=timers.shift(); completionTimer(); await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(calls,3); assert.equal(timers.length,0); assert.equal(elements.refreshLogText.textContent,'final line');
  assert.equal(elements.refreshLogStatus.textContent,'已完成'); assert.equal(typeof pagehide,'function');
  assert.equal(elements.refreshLogConfirm.hidden,true); assert.equal(elements.refreshLogHistory.hidden,true);
- responses.push({ok:true,status:200,body:{ok:true,log:'original interrupted log',status:'结果未知',running:false,terminal:true,error:'original recovery diagnosis'}});
+ responses.push({ok:true,status:200,body:{ok:true,log:'original interrupted log',status:'结果未知',running:false,terminal:true,error:'original recovery diagnosis',log_pending:false,log_status:200}});
  await click();
- assert.equal(calls,3); assert.equal(timers.length,0);
+ assert.equal(calls,4); assert.equal(timers.length,0);
  assert.equal(elements.refreshLogConfirm.hidden,false); assert.equal(elements.refreshLogHistory.hidden,false);
  assert.equal(elements.refreshLogDiagnosis.hidden,false); assert.equal(elements.refreshLogDiagnosis.textContent,'original recovery diagnosis');
  assert.equal(elements.refreshLogText.textContent,'original interrupted log');
