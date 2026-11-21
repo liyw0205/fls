@@ -29,6 +29,27 @@ def _refresh_request_id(raw):
     return value
 
 
+def _refresh_status_with_failure_recovery(state):
+    request_id = str(state.get("request_id") or "")
+    if not re.fullmatch(r"[a-f0-9]{32}", request_id):
+        return state
+    try:
+        page = get_online_refresh_task_link_failures(request_id, offset=0, limit=100)
+    except LookupError:
+        return state
+    except Exception as exc:
+        state["task_link_failure_error"] = f"失败源恢复状态暂时无法读取：{exc}"
+        state["task_link_failures"] = [
+            {**item, "recovery_error": state["task_link_failure_error"]}
+            for item in state.get("task_link_failures", [])
+        ]
+        return state
+    state["task_link_failures"] = page["items"]
+    state["task_link_failure_count"] = page["total"]
+    state["task_link_failure_digest"] = page["digest"]
+    return state
+
+
 def _submit_online_refresh(proxy_id, raw_request_id=""):
     try:
         request_id = _refresh_request_id(raw_request_id)
@@ -277,7 +298,7 @@ def online_scripts_refresh():
 @bp.route("/api/online-scripts/refresh-status")
 def api_online_refresh_status():
     try:
-        return jsonify(get_online_refresh_state())
+        return jsonify(_refresh_status_with_failure_recovery(get_online_refresh_state()))
     except Exception as e:
         return jsonify({"ok": False, "error": f"读取在线脚本源同步状态失败：{e}"}), 500
 
@@ -414,7 +435,7 @@ def api_online_refresh_status_for_request(request_id):
             }), 500
         if not state:
             return jsonify({"ok": False, "error": "刷新请求不存在或已被明确的新请求替换", "request_id": expected}), 404
-    return jsonify(state)
+    return jsonify(_refresh_status_with_failure_recovery(state))
 
 
 @bp.route("/api/online-scripts/refresh", methods=["POST"])

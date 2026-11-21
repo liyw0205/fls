@@ -115,6 +115,10 @@ def online_scripts_page():
         except Exception as exc:
             refresh_task_link_failures = (failure_snapshot.get("task_link_failures") or []) if failure_offset == 0 else []
             failure_detail_error = failure_detail_error or f"原刷新失败源明细无法读取，未清除已知首屏：{exc}"
+            refresh_task_link_failures = [
+                {**item, "recovery_error": failure_detail_error}
+                for item in refresh_task_link_failures
+            ]
     else:
         refresh_task_link_failures = failure_snapshot.get("task_link_failures") or []
         failure_count = len(refresh_task_link_failures)
@@ -180,7 +184,26 @@ def online_scripts_page():
             script_id = str(failure.get("script_id") or "").strip()
             if not script_id:
                 continue
+            recovery = failure.get("recovery") or {}
+            if recovery.get("state") == "completed":
+                recovered_count = int(recovery.get("added") or 0)
+                recovered_total = int(recovery.get("total") or 0)
+                rows.append(
+                    f'<div class="help" style="margin-top:6px;">'
+                    f'{h(failure.get("name") or script_id)}：已恢复，新增 {recovered_count} 个任务，'
+                    f'当前共 {recovered_total} 个任务</div>'
+                )
+                continue
+            if failure.get("recovery_error"):
+                rows.append(
+                    f'<div class="help" style="margin-top:6px;">'
+                    f'{h(failure.get("name") or script_id)}：恢复状态不可读取，请先修复回执后重新查询</div>'
+                )
+                continue
             bound = bool(re.fullmatch(r"[a-f0-9]{32}", failure_request_id or ""))
+            task_link_request_id = str(failure.get("task_link_request_id") or "")
+            if not re.fullmatch(r"[a-f0-9]{32}", task_link_request_id):
+                continue
             if bound:
                 action = url_for(
                     "online_scripts.online_scripts_pull_refresh_task_link",
@@ -204,7 +227,7 @@ def online_scripts_page():
                 f'<div class="help" style="margin-top:6px;">{label}：{detail} '
                 f'<form class="inline-form fls-online-task-link-form" data-script-id="{h(script_id)}" '
                 f'data-api-action="{h(api_action)}" method="post" action="{h(action)}">'
-                f'<input type="hidden" name="request_id" value="{uuid.uuid4().hex}">'
+                f'<input type="hidden" name="request_id" value="{h(task_link_request_id)}">'
                 f'{origin_input}'
                 f'<input type="hidden" name="proxy_id" value="{proxy_id}">'
                 '<button class="btn btn-orange" type="submit">重新同步外部任务源</button>'
@@ -649,6 +672,14 @@ async function updateOnlineRefreshStatus(){{
                 const id = String(item && item.script_id || "").trim();
                 if(!id) return "";
                 const name = escapeHtml(item.name || id);
+                const recovery = item.recovery || {{}};
+                if(recovery.state === "completed"){{
+                    return "<div class='help' style='margin-top:6px;'>" + name + "：已恢复，新增 " +
+                        Number(recovery.added || 0) + " 个任务，当前共 " + Number(recovery.total || 0) + " 个任务</div>";
+                }}
+                if(item.recovery_error){{
+                    return "<div class='help' style='margin-top:6px;'>" + name + "：恢复状态不可读取，请先修复回执后重新查询</div>";
+                }}
                 const detail = escapeHtml(item.error || "外部任务源加载失败");
                 const bound = /^[a-f0-9]{{32}}$/.test(failureRequestId);
                 const href = bound
@@ -659,7 +690,9 @@ async function updateOnlineRefreshStatus(){{
                     : "/api/online-scripts/task-link/" + encodeURIComponent(id);
                 const proxy = escapeHtml(item.proxy_id || "");
                 const csrf = typeof flsGetCsrfToken === "function" ? escapeHtml(flsGetCsrfToken()) : "";
-                const requestId = (typeof crypto !== "undefined" && crypto.getRandomValues)
+                const requestId = /^[a-f0-9]{{32}}$/.test(String(item.task_link_request_id || ""))
+                    ? String(item.task_link_request_id)
+                    : (typeof crypto !== "undefined" && crypto.getRandomValues)
                     ? Array.from(crypto.getRandomValues(new Uint8Array(16)), function(value){{return value.toString(16).padStart(2, "0");}}).join("")
                     : Array.from({{length:32}}, function(){{return Math.floor(Math.random() * 16).toString(16);}}).join("");
                 return "<div class='help' style='margin-top:6px;'>" + name + "：" + detail +
@@ -1045,7 +1078,7 @@ async function submitTaskLinkForm(form, event){{
             if(!json || json.ok !== true || json.request_id !== requestId) throw Object.assign(new Error(json && json.msg || "同步响应无效，请查询原请求"), {{status: response.status}});
             sessionStorage.removeItem(storageKey);
             window.location.href = json.replayed
-                ? "/online-scripts/task-link-status/" + encodeURIComponent(requestId)
+                ? (json.status_url || ("/online-scripts/task-link-status/" + encodeURIComponent(requestId)))
                 : "/online-scripts?msg=" + encodeURIComponent(json.msg || "外部任务源同步完成");
         }}catch(error){{
             if(button) button.disabled = false;

@@ -18,6 +18,9 @@ from ...online_scripts.source import (
 from ...online_scripts.constants import (
     ONLINE_TASK_LINK_ACTIVE,
     get_online_refresh_task_link_failure,
+    get_online_refresh_task_link_recovery,
+    online_refresh_task_link_request_id,
+    persist_online_refresh_task_link_recovery,
 )
 from ...utils import now_str
 from ...storage import storage_transaction
@@ -106,6 +109,24 @@ def _persist_failure(record, message, status_code, *, retry=True, state="failed"
         "retry_allowed": retry,
         "resolved": True,
     }, status_code
+
+
+def _refresh_task_link_recovery_result(request_id, script_id, origin_refresh_request_id, recovery):
+    if (request_id != recovery.get("request_id")
+            or request_id != online_refresh_task_link_request_id(origin_refresh_request_id, script_id)):
+        return None
+    return {
+        "ok": True,
+        "request_id": request_id,
+        "origin_refresh_request_id": origin_refresh_request_id,
+        "state": "completed",
+        "added": recovery.get("added", 0),
+        "total": recovery.get("total", 0),
+        "msg": f"原刷新失败项已恢复，新增 {recovery.get('added', 0)} 个任务，未重复请求外部任务源",
+        "retry_allowed": False,
+        "replayed": True,
+        "status_url": f"/online-scripts?refresh_request_id={origin_refresh_request_id}#online-status",
+    }
 
 
 def _existing_task_link_result(record, script_id, proxy_id, expected_version="", origin_refresh_request_id=""):
@@ -203,6 +224,24 @@ def _submit_task_link(script_id, proxy_id, raw_request_id, origin_refresh_reques
     if origin_refresh_request_id and not re.fullmatch(r"[a-f0-9]{32}", origin_refresh_request_id):
         return {"ok": False, "msg": "原刷新请求标识无效", "request_id": request_id, "retry_allowed": False}, 400
 
+    if origin_refresh_request_id:
+        try:
+            recovery = get_online_refresh_task_link_recovery(origin_refresh_request_id, script_id)
+        except Exception as exc:
+            return {"ok": False, "request_id": request_id,
+                    "msg": f"原刷新失败项恢复回执无法读取：{exc}；未发起外部请求。",
+                    "retry_allowed": False}, 503
+        if recovery:
+            replay = _refresh_task_link_recovery_result(
+                request_id, script_id, origin_refresh_request_id, recovery,
+            )
+            if replay:
+                if proxy_id != recovery.get("proxy_id"):
+                    return {"ok": False, "request_id": request_id,
+                            "msg": "原刷新失败项已按其他代理完成恢复；未发起外部请求。",
+                            "retry_allowed": False}, 409
+                return replay, 200
+
     try:
         previous = get_task_link_request(request_id, script_id=script_id, proxy_id=proxy_id)
     except TaskLinkReceiptMissing as exc:
@@ -236,6 +275,8 @@ def _submit_task_link(script_id, proxy_id, raw_request_id, origin_refresh_reques
                     "msg": f"原刷新失败源记录无法读取，未发起外部请求：{exc}", "retry_allowed": False}, 503
         if (
             not origin_failure
+            or (request_id != origin_failure.get("task_link_request_id")
+                and not (previous and previous.get("origin_refresh_request_id") == origin_refresh_request_id))
             or str(origin_failure.get("proxy_id") or "") != proxy_id
             or str(origin_failure.get("task_link") or "") != str(item.get("task_link") or "").strip()
         ):
@@ -339,6 +380,27 @@ def _submit_task_link(script_id, proxy_id, raw_request_id, origin_refresh_reques
             return _persist_failure(record, f"任务已可能合并，但当前任务指纹无法确认：{exc}", 503, retry=False, state="unknown")
         _record_update(record, "completed", added=added, total=total)
         record["published_tasks_fingerprint"] = published_tasks_fingerprint
+        if origin_refresh_request_id:
+            try:
+                persist_online_refresh_task_link_recovery(
+                    origin_refresh_request_id, script_id, proxy_id=proxy_id,
+                    added=added, total=total,
+                )
+            except Exception as exc:
+                _record_update(
+                    record, "unknown", error=f"任务已合并但刷新失败项恢复回执无法保存：{exc}",
+                    added=added, total=total,
+                )
+                record["published_tasks_fingerprint"] = published_tasks_fingerprint
+                try:
+                    persist_task_link_request(record)
+                except Exception:
+                    pass
+                return {
+                    "ok": False, "request_id": request_id,
+                    "msg": f"任务已可能合并，但恢复结果无法持久确认：{exc}；请查询原同步请求。",
+                    "retry_allowed": False, "resolved": False,
+                }, 503
         try:
             persist_task_link_request(record)
         except Exception as exc:
@@ -486,10 +548,25 @@ def _confirm_task_link_locked(request_id):
     published = str(record.get("published_tasks_fingerprint") or "")
     expected = str(record.get("expected_tasks_fingerprint") or "")
     if published and current_fingerprint == published:
-        _record_update(record, "completed")
+        _record_update(
+            record, "completed", added=record.get("added", 0), total=record.get("total", 0),
+        )
         record["confirmation"] = "merged"
         record["confirmation_fingerprint"] = current_fingerprint
         record["error"] = ""
+        if record.get("origin_refresh_request_id"):
+            try:
+                persist_online_refresh_task_link_recovery(
+                    record["origin_refresh_request_id"], record["script_id"],
+                    proxy_id=record.get("proxy_id", ""), added=record.get("added", 0),
+                    total=record.get("total", 0),
+                )
+            except Exception as exc:
+                return {
+                    "ok": False, "request_id": request_id,
+                    "msg": f"任务已确认合并，但刷新失败项恢复回执无法保存：{exc}；请查询原同步请求。",
+                    "retry_allowed": False,
+                }, 503
         msg = "已确认外部任务源已合并，未重复抓取或追加任务"
         retry_allowed = False
     elif not published and expected and current_fingerprint == expected:

@@ -312,6 +312,13 @@ def _refresh_task_failure_digest(items):
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def online_refresh_task_link_request_id(request_id, script_id):
+    if (not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id)
+            or not isinstance(script_id, str) or not script_id):
+        raise ValueError("在线脚本源失败项身份无效")
+    return hashlib.sha256(f"{request_id}\0{script_id}".encode("utf-8")).hexdigest()[:32]
+
+
 ONLINE_REFRESH_STATE = {
     "id": "",
     "request_id": "",
@@ -402,6 +409,7 @@ def _validate_refresh_snapshot(info):
         or not isinstance(item.get("task_link"), str)
         or not isinstance(item.get("error"), str)
         or ("proxy_id" in item and not isinstance(item.get("proxy_id"), str))
+        or (item.get("task_link_request_id") and not re.fullmatch(r"[a-f0-9]{32}", item["task_link_request_id"]))
         for item in failures
     ):
         raise RuntimeError("在线脚本源同步状态损坏，未覆盖原文件")
@@ -423,9 +431,10 @@ def _validate_online_refresh_task_failures(items):
     for item in items:
         if (
             not isinstance(item, dict)
-            or any(not isinstance(item.get(field, ""), str) for field in ("script_id", "name", "task_link", "error", "proxy_id"))
+            or any(not isinstance(item.get(field, ""), str) for field in ("script_id", "name", "task_link", "error", "proxy_id", "task_link_request_id"))
             or not item.get("script_id")
             or any(len(item.get(field, "")) > 1000 for field in ("script_id", "name", "task_link", "error", "proxy_id"))
+            or (item.get("task_link_request_id") and not re.fullmatch(r"[a-f0-9]{32}", item["task_link_request_id"]))
         ):
             raise RuntimeError("在线脚本源同步失败明细结构损坏，未覆盖原文件")
     return [dict(item) for item in items]
@@ -435,6 +444,12 @@ def _online_refresh_task_failures_path(request_id):
     if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
         raise ValueError("在线脚本源刷新请求标识无效")
     return ONLINE_REFRESH_TASK_FAILURES_DIR / f"{request_id}.json"
+
+
+def _online_refresh_task_recoveries_path(request_id):
+    if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
+        raise ValueError("在线脚本源刷新请求标识无效")
+    return ONLINE_REFRESH_TASK_FAILURES_DIR / f"{request_id}.recovery.json"
 
 
 def _read_online_refresh_task_failures_file(request_id):
@@ -466,6 +481,55 @@ def _read_online_refresh_task_failures_file(request_id):
     return {"request_id": request_id, "count": len(items), "digest": value["digest"], "items": items}
 
 
+def _read_online_refresh_task_recoveries_file(request_id):
+    if ONLINE_REFRESH_TASK_FAILURES_DIR.is_symlink():
+        raise RuntimeError("在线脚本源失败明细目录不能是符号链接")
+    path = _online_refresh_task_recoveries_path(request_id)
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise RuntimeError("在线脚本源失败恢复状态必须是普通文件")
+    try:
+        if path.stat().st_size > ONLINE_REFRESH_TASK_FAILURE_FILE_LIMIT:
+            raise RuntimeError("在线脚本源失败恢复状态文件超过安全上限")
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"在线脚本源失败恢复状态损坏：{exc}") from exc
+    if (not isinstance(value, dict) or value.get("version") != 1
+            or value.get("request_id") != request_id or not isinstance(value.get("items"), dict)):
+        raise RuntimeError("在线脚本源失败恢复状态结构损坏")
+    result = {}
+    for script_id, item in value["items"].items():
+        if (not isinstance(script_id, str) or not script_id or len(script_id) > 200
+                or not isinstance(item, dict) or item.get("state") != "completed"
+                or item.get("request_id") != online_refresh_task_link_request_id(request_id, script_id)
+                or not isinstance(item.get("proxy_id"), str) or len(item["proxy_id"]) > 200
+                or type(item.get("added")) is not int or type(item.get("total")) is not int
+                or item["added"] < 0 or item["total"] < 0
+                or not isinstance(item.get("updated_at"), str)):
+            raise RuntimeError("在线脚本源失败恢复状态记录损坏")
+        result[script_id] = dict(item)
+    return result
+
+
+def _online_refresh_failure_items_for_request_unlocked(request_id):
+    stored = _read_online_refresh_task_failures_file(request_id)
+    if stored:
+        return stored["items"]
+    current = _read_online_refresh_file()
+    if current.get("request_id") == request_id:
+        info = current
+    else:
+        info = _read_online_refresh_history_file().get(request_id)
+    if not isinstance(info, dict):
+        return []
+    snapshot = _validate_refresh_snapshot(info)
+    failures = snapshot["task_link_failures"]
+    if snapshot["task_link_failure_count"] > len(failures):
+        raise RuntimeError("原刷新失败源明细缺失，不能确认恢复绑定")
+    return failures
+
+
 def _write_online_refresh_task_failures_file(request_id, items, digest, retained_request_ids):
     if not items:
         return
@@ -489,7 +553,7 @@ def _write_online_refresh_task_failures_file(request_id, items, digest, retained
     for candidate in ONLINE_REFRESH_TASK_FAILURES_DIR.iterdir():
         if candidate.is_symlink() or not candidate.is_file():
             raise RuntimeError("在线脚本源失败明细目录包含非普通文件")
-        match = re.fullmatch(r"([a-f0-9]{32})\.json", candidate.name)
+        match = re.fullmatch(r"([a-f0-9]{32})(?:\.recovery)?\.json", candidate.name)
         if match and match.group(1) not in retained_request_ids:
             continue
         if candidate != path:
@@ -512,13 +576,16 @@ def _prune_online_refresh_task_failures_files(retained_request_ids):
     for path in ONLINE_REFRESH_TASK_FAILURES_DIR.iterdir():
         if path.is_symlink() or not path.is_file():
             raise RuntimeError("在线脚本源失败明细目录包含非普通文件")
-        if re.fullmatch(r"\.[a-f0-9]{32}\.[0-9]+\.tmp", path.name):
+        if (re.fullmatch(r"\.[a-f0-9]{32}\.[0-9]+\.tmp", path.name)
+                or re.fullmatch(r"\.[a-f0-9]{32}\.[0-9]+\.recovery\.tmp", path.name)):
             path.unlink()
             continue
         match = re.fullmatch(r"([a-f0-9]{32})\.json", path.name)
-        if not match:
+        recovery_match = re.fullmatch(r"([a-f0-9]{32})\.recovery\.json", path.name)
+        if not match and not recovery_match:
             raise RuntimeError("在线脚本源失败明细目录包含未知文件")
-        if match.group(1) not in retained_request_ids:
+        request_id = (match or recovery_match).group(1)
+        if request_id not in retained_request_ids:
             path.unlink()
 
 
@@ -849,9 +916,19 @@ def get_online_refresh_task_link_failures(request_id, offset=0, limit=ONLINE_REF
             failures = stored["items"]
         elif _refresh_task_failure_digest(failures) != snapshot["task_link_failure_digest"]:
             raise RuntimeError("原刷新失败源明细摘要不一致")
+        recoveries = _read_online_refresh_task_recoveries_file(request_id)
+        items = []
+        for failure in failures[offset:offset + limit]:
+            item = dict(failure)
+            item["task_link_request_id"] = item.get("task_link_request_id") or online_refresh_task_link_request_id(
+                request_id, item["script_id"],
+            )
+            if item["script_id"] in recoveries:
+                item["recovery"] = recoveries[item["script_id"]]
+            items.append(item)
         return {
             "request_id": request_id,
-            "items": failures[offset:offset + limit],
+            "items": items,
             "total": total,
             "offset": offset,
             "limit": limit,
@@ -882,7 +959,107 @@ def get_online_refresh_task_link_failure(request_id, script_id):
         matches = [item for item in failures if item.get("script_id") == script_id]
         if len(matches) > 1:
             raise RuntimeError("原刷新失败源脚本标识重复，拒绝绑定重试")
-        return dict(matches[0]) if matches else None
+        if not matches:
+            return None
+        failure = dict(matches[0])
+        failure["task_link_request_id"] = failure.get("task_link_request_id") or online_refresh_task_link_request_id(
+            request_id, script_id,
+        )
+        recovery = _read_online_refresh_task_recoveries_file(request_id).get(script_id)
+        if recovery:
+            failure["recovery"] = recovery
+        return failure
+
+
+def get_online_refresh_task_link_recovery(request_id, script_id):
+    if (not isinstance(script_id, str) or not script_id or len(script_id) > 200
+            or not re.fullmatch(r"[a-f0-9]{32}", request_id or "")):
+        raise ValueError("在线脚本源失败项身份无效")
+    with storage_transaction():
+        recoveries = _read_online_refresh_task_recoveries_file(request_id)
+        recovery = recoveries.get(script_id)
+        if not recovery:
+            return None
+        failures = _online_refresh_failure_items_for_request_unlocked(request_id)
+        if not any(item.get("script_id") == script_id for item in failures):
+            raise RuntimeError("恢复状态与原刷新失败项不一致")
+        return recovery
+
+
+def has_online_refresh_task_link_failure(request_id, script_id):
+    if (not isinstance(script_id, str) or not script_id or len(script_id) > 200
+            or not re.fullmatch(r"[a-f0-9]{32}", request_id or "")):
+        raise ValueError("在线脚本源失败项身份无效")
+    with storage_transaction():
+        return any(
+            item.get("script_id") == script_id
+            for item in _online_refresh_failure_items_for_request_unlocked(request_id)
+        )
+
+
+def persist_online_refresh_task_link_recovery(request_id, script_id, *, proxy_id, added, total):
+    if (not isinstance(script_id, str) or not script_id or len(script_id) > 200
+            or not re.fullmatch(r"[a-f0-9]{32}", request_id or "")
+            or type(added) is not int or type(total) is not int or added < 0 or total < 0):
+        raise ValueError("在线脚本源失败恢复结果无效")
+    with storage_transaction():
+        failures = _online_refresh_failure_items_for_request_unlocked(request_id)
+        if not failures or not any(item.get("script_id") == script_id for item in failures):
+            raise LookupError("原刷新失败项不存在，不能保存恢复结果")
+        origin = next(item for item in failures if item.get("script_id") == script_id)
+        if str(origin.get("proxy_id") or "") != str(proxy_id or ""):
+            raise RuntimeError("原刷新失败项代理绑定不一致，未保存恢复结果")
+        task_request_id = origin.get("task_link_request_id") or online_refresh_task_link_request_id(
+            request_id, script_id,
+        )
+        if task_request_id != online_refresh_task_link_request_id(request_id, script_id):
+            raise RuntimeError("原刷新失败项请求身份不一致，未保存恢复结果")
+        recoveries = _read_online_refresh_task_recoveries_file(request_id)
+        item = {
+            "request_id": task_request_id,
+            "state": "completed",
+            "proxy_id": str(proxy_id or ""),
+            "added": added,
+            "total": total,
+            "updated_at": now_str(),
+        }
+        previous = recoveries.get(script_id)
+        if previous and previous != item:
+            if any(previous.get(key) != item[key] for key in ("request_id", "proxy_id", "added", "total")):
+                raise RuntimeError("原刷新失败项已有不同的恢复结果，拒绝覆盖")
+            item = previous
+        recoveries[script_id] = item
+        payload = json.dumps({
+            "version": 1,
+            "request_id": request_id,
+            "items": recoveries,
+        }, ensure_ascii=False, separators=(",", ":")) + "\n"
+        if len(payload.encode("utf-8")) > ONLINE_REFRESH_TASK_FAILURE_FILE_LIMIT:
+            raise OnlineRefreshTaskFailureLimit("在线脚本源失败恢复状态超过安全上限")
+        if ONLINE_REFRESH_TASK_FAILURES_DIR.is_symlink():
+            raise RuntimeError("在线脚本源失败明细目录不能是符号链接")
+        ONLINE_REFRESH_TASK_FAILURES_DIR.mkdir(parents=True, exist_ok=True)
+        path = _online_refresh_task_recoveries_path(request_id)
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise RuntimeError("在线脚本源失败恢复状态必须是普通文件")
+        total_size = 0
+        for candidate in ONLINE_REFRESH_TASK_FAILURES_DIR.iterdir():
+            if candidate.is_symlink() or not candidate.is_file():
+                raise RuntimeError("在线脚本源失败明细目录包含非普通文件")
+            match = re.fullmatch(r"([a-f0-9]{32})(?:\.recovery)?\.json", candidate.name)
+            if match and match.group(1) not in {request_id}:
+                total_size += candidate.stat().st_size
+            elif candidate != path:
+                total_size += candidate.stat().st_size
+        if total_size + len(payload.encode("utf-8")) > ONLINE_REFRESH_TASK_FAILURE_TOTAL_LIMIT:
+            raise OnlineRefreshTaskFailureLimit("在线脚本源失败明细存储已达安全上限")
+        temp = path.with_name(f".{request_id}.{threading.get_ident()}.recovery.tmp")
+        try:
+            temp.write_text(payload, encoding="utf-8")
+            os.replace(temp, path)
+        finally:
+            temp.unlink(missing_ok=True)
+        return item
 
 
 def get_online_refresh_history(limit=50, request_id=""):
