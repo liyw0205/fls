@@ -369,6 +369,22 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    await page.waitForFunction(()=>document.querySelector('#installPollError').hidden
      &&document.querySelector('#log').textContent.includes('installer log became available'));
    assert.equal(await page.locator('#installStopAction').isVisible(),true);
+   const beforeTransientRecovery=(await state()).downloads;
+   const preservedOnlineLog=await page.locator('#log').textContent();
+   const delayedLogApi='**/api/online-scripts/log/'+delayedLogId+'?lines=1600';
+   for(const failure of [503,'network',429]){
+    await page.route(delayedLogApi,route=>failure==='network'?route.abort('failed'):
+      route.fulfill({status:failure,contentType:'text/plain',body:'transient install log outage'}),{times:1});
+    await page.waitForFunction(()=>!document.querySelector('#installPollError').hidden
+      &&document.querySelector('#installPollError').textContent.includes('自动重试'));
+    assert.equal(await page.locator('#log').textContent(),preservedOnlineLog);
+    assert.equal(await page.locator('#installStopAction').isVisible(),true);
+    await page.waitForFunction(()=>document.querySelector('#installPollError').hidden);
+    assert.equal(await page.locator('#log').textContent(),preservedOnlineLog);
+   }
+   assert.equal((await state()).downloads,beforeTransientRecovery);
+   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true);
+   await page.screenshot({path:'/tmp/fls-online-install-log-transient-'+viewport.width+'.png',fullPage:true});
    await fixture({complete_delayed_online_log:true,width:viewport.width});
    await page.waitForFunction(()=>document.querySelector('#installStatus').textContent==='已完成');
    assert.equal(await page.evaluate(()=>window.__FLS_ACTIVE_LOG_INTERVAL__),null);

@@ -844,6 +844,218 @@ setImmediate(()=>{
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertTrue(info["running"])
 
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise install log retry recovery")
+    def test_running_install_log_recovers_transient_failures_with_bounded_backoff(self):
+        with isolated_app() as (app, base_dir):
+            from tests.test_ui_route_components import ROOT
+
+            self.register(base_dir)
+            html = app.test_client().get(
+                "/online-scripts/log/install", headers={"X-Token": TOKEN},
+            ).get_data(as_text=True)
+            script = next(
+                value for value in re.findall(r"<script>(.*?)</script>", html, re.S)
+                if "async function loadLog(" in value
+            )
+            source = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+            reader = source[
+                source.index("function flsResponseErrorDiagnostic("):
+                source.index("async function flsReadTextResponse(")
+            ]
+            result = subprocess.run(["node", "-e", r"""
+const vm=require('node:vm'),assert=require('node:assert/strict');
+const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const names=['installStatus','installPhase','installError','installReturncode','installStopAction',
+  'installRecoveryAction','installPollError','installPollLogin','installPollLogs','installPollRetry',
+  'installStopQuery','log','flsLogNewTip'];
+const elements=Object.fromEntries(names.map(id=>[id,{hidden:id==='installStopAction',textContent:'',style:{},dataset:{},innerHTML:'',
+  addEventListener(name,fn){this[name]=fn;},querySelector(){return null;}}]));
+elements.log.textContent='last good output';
+const listeners={}; const intervals=new Map(); const timeouts=new Map(); let nextTimer=1; let calls=0;
+const response=(status,payload)=>({ok:status>=200&&status<300,status,text:async()=>JSON.stringify(payload)});
+const failures=[503,'network',408,429,502,503];
+const context={window:{innerHeight:800,scrollY:0,addEventListener(name,fn){listeners[name]=fn;},scrollTo(){}},
+  document:{documentElement:{scrollHeight:800},getElementById:id=>elements[id],querySelector:()=>null},
+  location:{pathname:'/online-scripts/log/install',search:''},
+  fetch:async()=>{calls++;const failure=failures.shift();if(failure==='network')throw new Error('network unavailable');
+    return response(failure,{msg:'temporary outage',running:true,status:'运行中'});},
+  setInterval(fn,ms){const id=nextTimer++;intervals.set(id,{fn,ms});return id;},
+  clearInterval(id){intervals.delete(id);},
+  setTimeout(fn,ms){const id=nextTimer++;timeouts.set(id,{fn,ms});return id;},
+  clearTimeout(id){timeouts.delete(id);},
+};
+vm.createContext(context);vm.runInContext(input.reader+input.script,context);
+const flush=()=>new Promise(resolve=>setImmediate(resolve));
+const fireTimeout=async()=>{const [id,timer]=timeouts.entries().next().value;timeouts.delete(id);timer.fn();await flush();};
+(async()=>{
+  await flush();
+  assert.equal(calls,1);assert.equal(elements.log.textContent,'last good output');
+  assert.equal(timeouts.size,1);assert.deepEqual([...timeouts.values()].map(x=>x.ms),[2000]);
+  for(const delay of [4000,8000,16000,30000]){
+    await fireTimeout();
+    assert.equal([...timeouts.values()][0].ms,delay);
+  }
+  await fireTimeout();
+  assert.equal(calls,6);assert.equal(timeouts.size,0);
+  assert.equal(elements.installPollRetry.hidden,false);
+  assert.match(elements.installPollError.textContent,/自动重试已用尽/);
+
+  context.fetch=async()=>{calls++;return response(200,{ok:true,running:true,status:'运行中',phase:'downloading',log:'recovered output'});};
+  await elements.installPollRetry.onclick();await flush();
+  assert.equal(elements.log.textContent,'recovered output');
+  assert.equal(elements.installPollError.hidden,true);assert.equal(context.window.__FLS_ACTIVE_LOG_INTERVAL__!==null,true);
+
+  const beforePageHide=calls;
+  listeners.pagehide();assert.equal(intervals.size,0);assert.equal(timeouts.size,0);
+  listeners.pageshow({persisted:false});await flush();assert.equal(calls,beforePageHide);
+  listeners.pageshow({persisted:true});await flush();assert.equal(calls,beforePageHide+1);
+  assert.equal(intervals.size,1);
+
+  const interval=[...intervals.values()][0];
+  context.fetch=async()=>{calls++;return response(503,{ok:false,running:true,status:'运行中',log_status:503,error:'retryable log error'});};
+  interval.fn();await flush();
+  assert.equal(elements.log.textContent,'recovered output');assert.equal(timeouts.size,1);
+  listeners.pagehide();
+  assert.equal(timeouts.size,0);assert.equal(intervals.size,0);
+  const beforeRestore=calls;
+  listeners.pageshow({persisted:false});await flush();assert.equal(calls,beforeRestore);
+  listeners.pageshow({persisted:true});await flush();assert.equal(calls,beforeRestore+1);
+
+  context.fetch=async()=>response(500,{ok:false,running:false,status:'记录不可读',error:'temporary receipt read failure'});
+  await elements.installPollRetry.onclick();await flush();
+  assert.equal(timeouts.size,1);assert.equal([...timeouts.values()][0].ms,2000);
+  assert.match(elements.installPollError.textContent,/1\/5/);
+  context.fetch=async()=>response(500,{ok:false,install_id:'install',running:false,status:'失败',
+    log:'',error:'terminal log read failure'});
+  await fireTimeout();
+  assert.equal(timeouts.size,0);assert.equal(intervals.size,0);
+  assert.equal(elements.log.textContent,'recovered output');
+  context.fetch=async()=>response(200,{ok:false,running:false,status:'已完成',phase:'completed',
+    log_status:404,log:'',error:'terminal log missing'});
+  await elements.installPollRetry.onclick();await flush();
+  assert.equal(timeouts.size,0);assert.equal(intervals.size,0);
+  assert.equal(elements.log.textContent,'recovered output');
+  assert.equal(elements.installPollLogs.hidden,false);
+
+  for(const status of [401,403]){
+    const authElements=Object.fromEntries(names.map(id=>[id,{hidden:true,textContent:'',style:{},dataset:{},innerHTML:'',addEventListener(){}}]));
+    const authListeners={};let authTimers=0;let authCalls=0;
+    const auth={window:{innerHeight:800,scrollY:0,addEventListener(name,fn){authListeners[name]=fn;},scrollTo(){}},
+      document:{documentElement:{scrollHeight:800},getElementById:id=>authElements[id],querySelector:()=>null},
+      location:{pathname:'/online-scripts/log/install',search:''},
+      fetch:async()=>{authCalls++;return response(status,{msg:'login expired'});},
+      setInterval:()=>1,clearInterval(){},setTimeout(){authTimers++;return 1;},clearTimeout(){}};
+    vm.createContext(auth);vm.runInContext(input.reader+input.script,auth);await flush();
+    assert.equal(authTimers,0);assert.equal(authElements.installPollLogin.hidden,false);
+    assert.equal(authElements.installPollRetry.hidden,false);
+    authListeners.pagehide();authListeners.pageshow({persisted:true});await flush();
+    assert.equal(authCalls,1,'permission errors must stay paused after BFCache restore');
+  }
+  console.log('install log transient retry, cap, manual recovery and page lifecycle passed');
+})().catch(error=>{console.error(error);process.exitCode=1;});
+"""], input=json.dumps({"script": script, "reader": reader}), capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise stop query retry")
+    def test_stop_query_retries_original_state_after_lost_post_without_reposting(self):
+        with isolated_app() as (app, base_dir):
+            from tests.test_ui_route_components import ROOT
+
+            self.register(base_dir)
+            html = app.test_client().get(
+                "/online-scripts/log/install", headers={"X-Token": TOKEN},
+            ).get_data(as_text=True)
+            script = next(value for value in re.findall(r"<script>(.*?)</script>", html, re.S)
+                          if "async function loadLog(" in value)
+            source = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+            reader = source[source.index("function flsResponseErrorDiagnostic("):
+                            source.index("async function flsReadTextResponse(")]
+            result = subprocess.run(["node", "-e", r"""
+const vm=require('node:vm'),assert=require('node:assert/strict');
+const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const names=['installStatus','installPhase','installError','installReturncode','installStopAction',
+  'installRecoveryAction','installPollError','installPollLogin','installPollLogs','installPollRetry',
+  'installStopQuery','log','flsLogNewTip'];
+const elements=Object.fromEntries(names.map(id=>[id,{hidden:false,textContent:'',style:{},dataset:{},innerHTML:'',
+  addEventListener(name,fn){this[name]=fn;}}]));
+const stopButton={disabled:false};
+const stopForm={dataset:{apiAction:'/api/online-scripts/install-stop/install'},querySelector:()=>stopButton,
+  addEventListener(name,fn){this[name]=fn;}};
+const calls=[],timers=new Map(),listeners={};let nextTimer=1;let oldLog;let stateAttempt=0;
+elements.log.textContent='original output';
+const response=(status,payload)=>({ok:status>=200&&status<300,status,text:async()=>JSON.stringify(payload)});
+const context={window:{innerHeight:800,scrollY:0,scrollTo(){},addEventListener(name,fn){listeners[name]=fn;}},
+  document:{documentElement:{scrollHeight:800},getElementById:id=>elements[id],querySelector:()=>stopForm},
+  location:{pathname:'/online-scripts/log/install',search:''},flsGetCsrfToken:()=> 'stop-csrf',
+  fetch:async(url,options)=>{calls.push({url,options});
+    if(url.endsWith('?lines=1600'))return new Promise(resolve=>{oldLog=resolve;});
+    if(options&&options.method==='POST')return response(502,{msg:'stop response lost'});
+    stateAttempt++;
+    if(stateAttempt===1)return response(503,{msg:'temporary status failure'});
+    return response(200,{ok:true,install_id:'install',running:false,status:'已停止',phase:'stopped',returncode:-15});},
+  setInterval:()=>1,clearInterval(){},
+  setTimeout(fn,ms){const id=nextTimer++;timers.set(id,{fn,ms});return id;},clearTimeout(id){timers.delete(id);}};
+const flush=()=>new Promise(resolve=>setImmediate(resolve));
+vm.createContext(context);vm.runInContext(input.reader+input.script,context);
+(async()=>{
+  assert.equal(calls.length,1);
+  await stopForm.submit({preventDefault(){}});
+  assert.equal(calls.length,2);assert.equal(calls[1].options.headers['X-CSRF-Token'],'stop-csrf');
+  assert.equal(elements.installStopQuery.hidden,false);
+  await elements.installStopQuery.click();
+  assert.equal(calls[2].url,'/api/online-scripts/log/install?state_only=1');
+  assert.equal(timers.size,1);assert.equal([...timers.values()][0].ms,2000);
+  oldLog(response(200,{ok:true,running:true,log:'stale output',status:'运行中'}));await flush();
+  assert.equal(elements.log.textContent,'original output');
+  const [id,timer]=timers.entries().next().value;timers.delete(id);timer.fn();await flush();
+  assert.equal(calls.length,4);assert.equal(calls[3].url,calls[2].url);
+  assert.equal(calls.filter(call=>call.options&&call.options.method==='POST').length,1);
+  assert.equal(elements.installStatus.textContent,'已停止');assert.equal(elements.installStopAction.hidden,true);
+  assert.equal(elements.log.textContent,'original output');assert.equal(timers.size,0);
+  assert.equal(context.window.__FLS_ACTIVE_LOG_INTERVAL__,null);
+  const beforeRestore=calls.length;listeners.pagehide();listeners.pageshow({persisted:true});await flush();
+  assert.equal(calls.length,beforeRestore,'terminal installs must not resume polling after BFCache restore');
+})().catch(error=>{console.error(error);process.exitCode=1;});
+"""], input=json.dumps({"script": script, "reader": reader}), capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_log_read_failure_then_recovery_keeps_original_job_and_permissions(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE, persist_online_install
+
+            info = self.register(base_dir)
+            log_file = base_dir / "install.log"
+            log_file.write_text("installer output\n", encoding="utf-8")
+            info.update(status="运行中", phase="downloading", log_file=str(log_file))
+            persist_online_install(info)
+            original = ONLINE_INSTALL_JOBS_FILE.read_bytes()
+            client = app.test_client()
+            with patch("fls_manager.routes.online_scripts.logs.tail_file", return_value="读取日志失败: temporary IO failure"), patch(
+                "fls_manager.routes.online_scripts.install.start_install_thread",
+            ) as start:
+                failed = client.get("/api/online-scripts/log/install?lines=1600", headers={"X-Token": TOKEN})
+                self.assertEqual(failed.status_code, 500)
+                self.assertEqual(failed.json["install_id"], "install")
+                self.assertTrue(failed.json["running"])
+                self.assertIn("temporary IO failure", failed.json["error"])
+                self.assertEqual(failed.json["log"], "")
+                state = client.get("/api/online-scripts/log/install?state_only=1", headers={"X-Token": TOKEN})
+                self.assertEqual(state.status_code, 200)
+                self.assertTrue(state.json["running"])
+                start.assert_not_called()
+            recovered = client.get("/api/online-scripts/log/install?lines=1600", headers={"X-Token": TOKEN})
+            self.assertEqual(recovered.status_code, 200)
+            self.assertEqual(recovered.json["log"], "installer output")
+            self.assertEqual(recovered.json["install_id"], "install")
+            self.assertEqual(ONLINE_INSTALL_JOBS_FILE.read_bytes(), original)
+            with patch("fls_manager.routes.online_scripts.logs.get_online_install_job") as read:
+                denied = client.get("/api/online-scripts/log/install")
+                self.assertEqual(denied.status_code, 401)
+                with patch("fls_manager.auth.query_token_enabled", return_value=False):
+                    forbidden = client.get("/api/online-scripts/log/install", query_string={"token": TOKEN})
+                self.assertEqual(forbidden.status_code, 403)
+                read.assert_not_called()
+
     @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise the polling script")
     def test_log_polling_keeps_terminal_error_and_exit_code_visible(self):
         with isolated_app() as (app, base_dir):

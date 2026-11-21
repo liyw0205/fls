@@ -803,8 +803,30 @@ let pending = false;
 let postingStop = false;
 let needsStopQuery = false;
 let logRequestGeneration = 0;
+let transientFailures = 0;
+let retryTimer = null;
+let pageHidden = false;
+let resumeOnPageshow = false;
+let autoPollingPaused = false;
+let lastKnownRunning = {str(bool(info.get("running"))).lower()};
+const retryDelays = [2000, 4000, 8000, 16000, 30000];
 window.__FLS_LOG_LAST_TEXT__ = "";
 window.__FLS_LOG_NEAR_BOTTOM__ = true;
+
+function clearLogTimers(){{
+    clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
+    window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
+    if(retryTimer !== null){{
+        clearTimeout(retryTimer);
+        retryTimer = null;
+    }}
+}}
+
+function isTransientLogError(error){{
+    if(!error || error.status === undefined || error.status === null) return true;
+    const status = Number(error.status);
+    return status === 0 || status === 408 || status === 429 || (status >= 500 && status <= 599);
+}}
 
 function escapeHtml(value){{
     return String(value).replace(/[&<>"']/g, function(char){{
@@ -821,7 +843,7 @@ window.addEventListener("scroll", function(){{
 }}, {{passive:true}});
 
 async function loadLog(stateOnly = false){{
-    if(pending || postingStop || (!stateOnly && needsStopQuery) || document.getElementById("installPollError") !== pollError) return;
+    if(pageHidden || pending || postingStop || (!stateOnly && needsStopQuery) || document.getElementById("installPollError") !== pollError) return;
     const requestGeneration = ++logRequestGeneration;
     pending = true;
     if(retryAction) retryAction.disabled = true;
@@ -834,14 +856,20 @@ async function loadLog(stateOnly = false){{
         const json = await flsReadJsonResponse(res);
         if(requestGeneration !== logRequestGeneration || postingStop || (!stateOnly && needsStopQuery) || document.getElementById("installPollError") !== pollError) return;
         if(!json || typeof json.running !== "boolean" || (stateOnly ? json.install_id !== installId : typeof json.log !== "string")){{
-            throw new Error("安装状态响应无效，请重新读取安装状态");
+            const invalid = new Error("安装状态响应无效，请重新读取安装状态");
+            invalid.status = res.status;
+            throw invalid;
         }}
         if(json.ok === false){{
             const missingError = new Error(json.error || "安装日志暂不可读");
             missingError.status = json.log_status || 500;
             missingError.payload = json;
+            if(json.running && missingError.status === 404) transientFailures = 0;
             throw missingError;
         }}
+        transientFailures = 0;
+        autoPollingPaused = false;
+        lastKnownRunning = json.running;
         if(stateOnly){{
             needsStopQuery = false;
             if(pollError){{
@@ -903,6 +931,7 @@ async function loadLog(stateOnly = false){{
         if(stopAction) stopAction.hidden = !json.running;
         if(recoveryEl) recoveryEl.hidden = json.running;
         if(json.running){{
+            if(retryTimer !== null){{ clearTimeout(retryTimer); retryTimer = null; }}
             if(stopActionButton) stopActionButton.disabled = json.status === "停止中";
             if(stopQueryAction) stopQueryAction.hidden = json.status !== "停止中";
             if(!window.__FLS_ACTIVE_LOG_INTERVAL__){{
@@ -973,8 +1002,8 @@ async function loadLog(stateOnly = false){{
                 recoveryEl.innerHTML = html;
                 delete recoveryEl.dataset.ready;
             }}
-            clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
-            window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
+            clearLogTimers();
+            lastKnownRunning = false;
         }}
     }} catch(e) {{
         if(requestGeneration !== logRequestGeneration || postingStop || (!stateOnly && needsStopQuery) || document.getElementById("installPollError") !== pollError) return;
@@ -982,12 +1011,35 @@ async function loadLog(stateOnly = false){{
         const denied = e && (e.status === 401 || e.status === 403);
         const missing = e && e.status === 404;
         const payload = e && e.payload || {{}};
+        if((payload.install_id === installId || typeof payload.log_status === "number")
+            && typeof payload.running === "boolean")
+            lastKnownRunning = payload.running;
         const startingLog = missing && payload.running === true && payload.log_status === 404;
+        if(startingLog) lastKnownRunning = true;
         const next = denied ? "重新登录后继续读取" :
             (startingLog ? "安装仍在运行，日志尚未生成；系统将继续轮询，可随时停止安装" :
                 (missing ? "到日志管理检查已保留的安装日志" : "检查安装日志文件和服务状态，稍后会重新读取"));
+        let scheduledRetry = false;
+        if(!denied && !startingLog && lastKnownRunning && isTransientLogError(e)
+            && transientFailures < retryDelays.length && !pageHidden){{
+            const delay = retryDelays[transientFailures++];
+            clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
+            window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
+            if(retryTimer !== null) clearTimeout(retryTimer);
+            if(pollError){{
+                pollError.textContent = "日志读取失败：" + message + "。已保留现有日志，将在 "
+                    + Math.ceil(delay / 1000) + " 秒后自动重试（" + transientFailures + "/" + retryDelays.length + "）。";
+            }}
+            retryTimer = setTimeout(() => {{ retryTimer = null; loadLog(needsStopQuery); }}, delay);
+            scheduledRetry = true;
+        }}
         if(pollError){{
-            pollError.textContent = "日志读取失败：" + message + "。下一步：" + next;
+            if(!scheduledRetry){{
+                const exhausted = lastKnownRunning && isTransientLogError(e) && transientFailures >= retryDelays.length;
+                pollError.textContent = "日志读取失败：" + message + (exhausted
+                    ? "。自动重试已用尽（" + retryDelays.length + " 次）；可手动重新读取。"
+                    : "。下一步：" + next);
+            }}
             pollError.hidden = false;
         }}
         if(loginAction){{
@@ -1003,6 +1055,7 @@ async function loadLog(stateOnly = false){{
         if(retryAction) retryAction.hidden = missing && !startingLog;
         if(stopQueryAction) stopQueryAction.hidden = !needsStopQuery;
         if(startingLog){{
+            autoPollingPaused = false;
             const stopAction = document.getElementById("installStopAction");
             const recoveryEl = document.getElementById("installRecoveryAction");
             if(stopAction) stopAction.hidden = false;
@@ -1015,15 +1068,17 @@ async function loadLog(stateOnly = false){{
                 window.__FLS_ACTIVE_LOG_INTERVAL__ = setInterval(loadLog, 2000);
             }}
         }}else if(denied || missing){{
+            autoPollingPaused = true;
             const stopAction = document.getElementById("installStopAction");
             const recoveryEl = document.getElementById("installRecoveryAction");
             if(stopAction) stopAction.hidden = true;
             if(recoveryEl) recoveryEl.hidden = true;
-            clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
-            window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
+            clearLogTimers();
+        }}else if(scheduledRetry){{
+            autoPollingPaused = false;
         }}else{{
-            clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
-            window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
+            autoPollingPaused = true;
+            clearLogTimers();
         }}
     }}finally{{
         if(requestGeneration === logRequestGeneration){{
@@ -1040,8 +1095,7 @@ async function requestStop(event){{
     logRequestGeneration++;
     pending = false;
     if(typeof flsClearPageCache === "function") flsClearPageCache();
-    clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
-    window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
+    clearLogTimers();
     if(stopActionButton) stopActionButton.disabled = true;
     if(pollError){{ pollError.textContent = "停止请求已发送，正在确认状态..."; pollError.hidden = false; }}
     try{{
@@ -1079,9 +1133,31 @@ async function queryStop(){{
 
 if(stopActionInitial) stopActionInitial.addEventListener("submit", requestStop);
 if(stopQueryAction) stopQueryAction.addEventListener("click", queryStop);
-if(retryAction) retryAction.onclick = () => loadLog(needsStopQuery);
+if(retryAction) retryAction.onclick = () => {{
+    if(retryTimer !== null){{ clearTimeout(retryTimer); retryTimer = null; }}
+    transientFailures = 0;
+    autoPollingPaused = false;
+    return loadLog(needsStopQuery);
+}};
+window.addEventListener("pagehide", function(){{
+    resumeOnPageshow = lastKnownRunning && !autoPollingPaused;
+    pageHidden = true;
+    logRequestGeneration++;
+    pending = false;
+    clearLogTimers();
+}});
+window.addEventListener("pageshow", function(event){{
+    if(!event || !event.persisted) return;
+    pageHidden = false;
+    if(resumeOnPageshow && lastKnownRunning){{
+        resumeOnPageshow = false;
+        loadLog(needsStopQuery);
+    }}
+}});
 if(window.__FLS_ACTIVE_LOG_INTERVAL__) clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
 window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
+if(retryTimer !== null) clearTimeout(retryTimer);
+retryTimer = null;
 loadLog();
 }})();
 </script>
