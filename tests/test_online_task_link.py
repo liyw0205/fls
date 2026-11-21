@@ -1827,6 +1827,7 @@ class OnlineTaskLinkTests(unittest.TestCase):
 
     def test_rendered_form_preserves_proxy_and_csrf_through_error_and_retry(self):
         with isolated_app() as (app, _base_dir):
+            import fls_manager.app as app_module
             from fls_manager.models import save_proxies
             from fls_manager.online_scripts import source
 
@@ -1837,7 +1838,8 @@ class OnlineTaskLinkTests(unittest.TestCase):
             with client.session_transaction() as session:
                 session.update(token=TOKEN, token_expire_at=int(time.time()) + 3600,
                                security_verified=True, csrf_token="task-link-csrf")
-            page = client.get("/online-scripts")
+            with patch.object(app_module, "dispatch_frontend_open_event"):
+                page = client.get("/online-scripts")
             self.assertEqual(page.status_code, 200)
             parser = TaskLinkFormParser()
             parser.feed(page.get_data(as_text=True))
@@ -1858,7 +1860,8 @@ class OnlineTaskLinkTests(unittest.TestCase):
             with patch("fls_manager.routes.online_scripts.task_link.fetch_task_link_tasks", return_value=[self.task("importable")]):
                 recovered = client.post(retry["attrs"]["action"], data={"proxy_id": "chosen", "csrf_token": retry_csrf}, headers=headers)
             self.assertEqual(recovered.status_code, 302)
-            selected_page = client.get("/online-scripts/install-select/demo")
+            with patch.object(app_module, "dispatch_frontend_open_event"):
+                selected_page = client.get("/online-scripts/install-select/demo")
             self.assertEqual(selected_page.status_code, 200)
             self.assertIn("importable", selected_page.get_data(as_text=True))
 
@@ -1969,7 +1972,7 @@ vm.runInContext(input.handler, context);
 const vm=require('node:vm'),assert=require('node:assert/strict');
 const input=JSON.parse(require('node:fs').readFileSync(0,'utf8')),requestId='a'.repeat(32);
 function element(tag='div'){
- return {tagName:tag.toUpperCase(),children:[],listeners:{},hidden:true,disabled:false,textContent:'',href:'',value:'',
+    return {tagName:tag.toUpperCase(),children:[],listeners:{},dataset:{},hidden:true,disabled:false,textContent:'',href:'',value:'',
    appendChild(child){this.children.push(child);},addEventListener(name,fn){this.listeners[name]=fn;},
    setAttribute(name,value){(this.attrs||(this.attrs={}))[name]=value;},
    getAttribute(name){return this.attrs&&this.attrs[name]||'';}};
@@ -2128,7 +2131,7 @@ const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
 const requestId = 'a'.repeat(32);
 
 function makeElement(tag='div') {
-  return {tagName:tag.toUpperCase(), hidden:true, disabled:false, textContent:'', href:'', value:'',
+  return {tagName:tag.toUpperCase(), dataset:{}, hidden:true, disabled:false, textContent:'', href:'', value:'',
     children:[], listeners:{}, className:'', type:'', appendChild(child){this.children.push(child);},
     addEventListener(name, fn){this.listeners[name]=fn;},
         querySelector(selector){

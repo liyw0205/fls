@@ -10,6 +10,7 @@ from ...online_scripts.constants import (
     confirm_online_refresh_result,
     get_online_refresh_history,
     get_online_refresh_request,
+    get_online_refresh_task_link_failures,
     get_online_refresh_submission,
     get_online_refresh_retry,
     reserve_online_refresh,
@@ -296,6 +297,24 @@ def api_online_refresh_history():
     except Exception as e:
         return jsonify(ok=False, error=f"读取在线脚本源刷新历史失败：{e}", items=[]), 500
     return jsonify(ok=True, items=items), 200
+
+
+@bp.route("/api/online-scripts/refresh-task-link-failures/<request_id>")
+def api_online_refresh_task_link_failures(request_id):
+    try:
+        offset = int(request.args.get("offset", "0"))
+        limit = int(request.args.get("limit", "100"))
+    except (TypeError, ValueError):
+        return jsonify(ok=False, error="offset 和 limit 必须为整数", items=[]), 400
+    try:
+        payload = get_online_refresh_task_link_failures(request_id, offset=offset, limit=limit)
+    except ValueError as exc:
+        return jsonify(ok=False, error=str(exc), items=[]), 400
+    except LookupError as exc:
+        return jsonify(ok=False, error=str(exc), items=[]), 404
+    except Exception as exc:
+        return jsonify(ok=False, error=f"读取在线脚本源失败明细失败：{exc}", request_id=request_id, items=[]), 503
+    return jsonify(ok=True, **payload), 200
 
 
 @bp.route("/api/online-scripts/refresh-retry/<request_id>", methods=["POST"])

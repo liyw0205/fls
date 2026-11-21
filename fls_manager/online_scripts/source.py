@@ -18,6 +18,8 @@ from .constants import (
     ONLINE_TASK_LINK_ACTIVE,
     ONLINE_REFRESH_LOCK,
     ONLINE_REFRESH_STATE,
+    ONLINE_REFRESH_TASK_FAILURE_RECORD_LIMIT,
+    OnlineRefreshTaskFailureLimit,
     RefreshPublicationError,
     update_online_refresh_state,
 )
@@ -180,9 +182,11 @@ def _validate_task_link_requests(data):
             raise RuntimeError("在线任务源同步回执标识不一致，未覆盖原文件")
         if value.get("state") not in ("prepared", "running", "failed", "unknown", "completed"):
             raise RuntimeError("在线任务源同步回执状态损坏，未覆盖原文件")
-        for field in ("script_id", "proxy_id", "expected_version", "error", "updated_at", "expected_tasks_fingerprint", "published_tasks_fingerprint", "confirmation", "confirmation_fingerprint"):
+        for field in ("script_id", "proxy_id", "expected_version", "error", "updated_at", "expected_tasks_fingerprint", "published_tasks_fingerprint", "confirmation", "confirmation_fingerprint", "origin_refresh_request_id"):
             if not isinstance(value.get(field, ""), str):
                 raise RuntimeError("在线任务源同步回执字段损坏，未覆盖原文件")
+        if value.get("origin_refresh_request_id") and not re.fullmatch(r"[a-f0-9]{32}", value["origin_refresh_request_id"]):
+            raise RuntimeError("在线任务源原刷新请求绑定损坏，未覆盖原文件")
         if any(
             value.get(field) and not re.fullmatch(r"[a-f0-9]{64}", value.get(field))
             for field in ("expected_tasks_fingerprint", "published_tasks_fingerprint", "confirmation_fingerprint")
@@ -202,6 +206,7 @@ def _task_link_request_snapshot(info):
         "request_id", "script_id", "proxy_id", "expected_version", "state",
         "added", "total", "error", "updated_at", "expected_tasks_fingerprint",
         "published_tasks_fingerprint", "confirmation", "confirmation_fingerprint",
+        "origin_refresh_request_id",
     )
     snapshot = {field: info.get(field, 0 if field in ("added", "total") else "") for field in fields}
     snapshot["archived"] = info.get("archived", False)
@@ -551,6 +556,15 @@ def fetch_online_scripts(proxy_id="", timeout=12, publish_cache=True, task_link_
 
     items = validate_online_script_source_items(data)
 
+    def record_task_link_failure(item, error):
+        if task_link_failures is None:
+            return
+        if len(task_link_failures) >= ONLINE_REFRESH_TASK_FAILURE_RECORD_LIMIT:
+            raise OnlineRefreshTaskFailureLimit(
+                f"在线脚本源失败源超过 {ONLINE_REFRESH_TASK_FAILURE_RECORD_LIMIT} 项，未发布缓存"
+            )
+        task_link_failures.append(_task_link_failure(item, error, proxy_id))
+
     for item in items:
         task_link = str(item.get("task_link") or "").strip()
 
@@ -565,10 +579,9 @@ def fetch_online_scripts(proxy_id="", timeout=12, publish_cache=True, task_link_
             )
 
             if not linked_tasks:
-                if task_link_failures is not None and len(task_link_failures) < 100:
-                    task_link_failures.append(
-                        _task_link_failure(item, "外部任务源没有可用任务，请检查任务字段后重新同步", proxy_id)
-                    )
+                record_task_link_failure(
+                    item, "外部任务源没有可用任务，请检查任务字段后重新同步",
+                )
                 print(
                     f"[OnlineScripts] 任务源为空: "
                     f"{item.get('name')} task_link={task_link}"
@@ -585,8 +598,7 @@ def fetch_online_scripts(proxy_id="", timeout=12, publish_cache=True, task_link_
             )
 
         except Exception as e:
-            if task_link_failures is not None and len(task_link_failures) < 100:
-                task_link_failures.append(_task_link_failure(item, e, proxy_id))
+            record_task_link_failure(item, e)
             print(
                 f"[OnlineScripts] 任务源加载失败: "
                 f"{item.get('name')} task_link={task_link} error={e}"
@@ -650,9 +662,24 @@ def refresh_worker(refresh_id, proxy_id="", log_file=""):
             update_online_refresh_state(
                 status="发布中",
                 message="已获取脚本源，正在原子发布本地缓存",
+                task_link_failures=task_link_failures,
                 published_cache_fingerprint=published_cache_fingerprint,
                 updated_at=now_str(),
             )
+            if task_link_failures:
+                failure_state = dict(ONLINE_REFRESH_STATE)
+                append_log(
+                    log_file,
+                    f"外部任务源失败明细已持久化：{failure_state.get('task_link_failure_count', len(task_link_failures))} 项；"
+                    f"摘要 {failure_state.get('task_link_failure_digest', '')}；"
+                    f"分页 API /api/online-scripts/refresh-task-link-failures/{request_id}。",
+                )
+                for failure in task_link_failures:
+                    append_log(
+                        log_file,
+                        f"外部任务源失败 [{failure.get('script_id', '')}] "
+                        f"{failure.get('name', '')}：{failure.get('error', '')}",
+                    )
             save_online_script_cache(items)
             if online_script_cache_fingerprint() != published_cache_fingerprint:
                 raise RuntimeError("缓存发布后指纹与预期不一致，结果未知")
@@ -660,7 +687,6 @@ def refresh_worker(refresh_id, proxy_id="", log_file=""):
         # fact when the later status-file write cannot be confirmed.
         with ONLINE_REFRESH_LOCK:
             ONLINE_REFRESH_STATE["cache_published"] = True
-            ONLINE_REFRESH_STATE["task_link_failures"] = list(task_link_failures)
             ONLINE_REFRESH_STATE["published_cache_fingerprint"] = published_cache_fingerprint
         if task_link_failures:
             msg = (
