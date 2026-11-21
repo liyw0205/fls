@@ -8,7 +8,7 @@ import uuid
 
 from ..paths import DATA_DIR
 from .logs import online_refresh_log_file
-from ..storage import mutate_json, storage_transaction
+from ..storage import mutate_json, storage_transaction, write_json
 from ..utils import now_str
 
 DEFAULT_ONLINE_SCRIPT_SOURCE = "https://cdn.jsdelivr.net/gh/liyw0205/fls-scripts@main/index.json"
@@ -1528,6 +1528,7 @@ def _install_snapshot(info):
         "error",
         "scheduler_reload_pending",
         "scheduler_reload_error",
+        "task_recovery",
         "updated_at",
     )
     return {field: info.get(field) for field in fields}
@@ -1574,6 +1575,7 @@ def _bounded_online_install_jobs(data):
             job.get("running")
             or job.get("status") in ("准备中", "运行中", "停止中")
             or bool(job.get("scheduler_reload_pending"))
+            or bool((job.get("task_recovery") or {}).get("pending"))
             for job in jobs
         ):
             protected.append(group)
@@ -1673,6 +1675,20 @@ def persist_online_install(info):
         previous = ONLINE_INSTALL_RUNNING.get(str(snapshot.get("retry_of") or ""))
         if isinstance(previous, dict):
             previous["retried_by"] = install_id
+
+
+def persist_online_install_task_recovery(install_id, recovery, **changes):
+    # Task publication already holds the task/storage locks. Do not acquire
+    # ONLINE_INSTALL_LOCK here: install readers use install -> storage order.
+    with storage_transaction():
+        jobs = _read_install_jobs()
+        current = jobs.get(install_id)
+        if not current or (current.get("task_recovery") or {}).get("id") != recovery.get("id"):
+            raise RuntimeError("原任务恢复认领已变化，未覆盖安装回执")
+        updated = dict(current, **changes, task_recovery=dict(recovery))
+        jobs[install_id] = _install_snapshot(updated)
+        write_json(ONLINE_INSTALL_JOBS_FILE, jobs)
+        return updated
 
 
 def _load_persisted_online_install(install_id):

@@ -218,7 +218,7 @@ def task_import_publication_state(record):
             if signature == record.get("task_baseline"):
                 return "not_published", signature
         raise RuntimeError("原回执没有写入前任务证据，不能自动确认；请核对任务或从备份恢复")
-    tasks, signature = _read_import_task_file()
+    tasks, signature = _read_import_task_file(allow_missing=publication["before_source"] == "")
     if signature == publication["before_source"]:
         return "not_published", signature
     matching = _publication_tasks(tasks, record["script_id"], publication)

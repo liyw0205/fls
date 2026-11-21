@@ -12,6 +12,27 @@ from tests.test_ui_route_components import ROOT, TOKEN, isolated_app
 
 
 class OnlineInstallSchedulerRecoveryTests(unittest.TestCase):
+    def unconfirmed_task_import(self, app, base_dir, enable_task=False):
+        from fls_manager import storage
+        from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE, get_online_install_job, persist_online_install
+
+        install_id = self.pending_task_import(base_dir)
+        if enable_task:
+            info = get_online_install_job(install_id)
+            info["enable_task"] = True
+            persist_online_install(info)
+        write = storage._write_json_unlocked
+
+        def fail_completion(path, data):
+            if path == ONLINE_INSTALL_JOBS_FILE and data[install_id].get("phase") == "completed":
+                raise PermissionError("completion receipt unavailable")
+            return write(path, data)
+
+        with patch("fls_manager.storage._write_json_unlocked", side_effect=fail_completion):
+            response = app.test_client().post(f"/api/online-scripts/install-task-retry/{install_id}", headers={"X-Token": TOKEN})
+        self.assertEqual(response.status_code, 503)
+        return install_id
+
     def pending_task_import(self, base_dir):
         from fls_manager.online_scripts.constants import persist_online_install
         from fls_manager.online_scripts.install import capture_install_outputs
@@ -174,6 +195,501 @@ class OnlineInstallSchedulerRecoveryTests(unittest.TestCase):
                 importer.assert_not_called()
                 self.assertEqual(load_tasks(), tasks)
                 self.assertEqual(protected.read_text(encoding="utf-8"), "do not read or modify")
+
+    def test_task_retry_completion_requires_a_durable_receipt_before_and_after_publication(self):
+        for failure in ("before", "after"):
+            with self.subTest(failure=failure), isolated_app() as (app, base_dir):
+                from fls_manager import storage
+                from fls_manager.models import load_tasks
+                from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE, ONLINE_INSTALL_RUNNING
+
+                install_id = self.pending_task_import(base_dir)
+                write = storage._write_json_unlocked
+
+                def fail_completion(path, data):
+                    if path == ONLINE_INSTALL_JOBS_FILE and data[install_id].get("phase") == "completed":
+                        if failure == "after":
+                            write(path, data)
+                        raise PermissionError("completion receipt unavailable")
+                    return write(path, data)
+
+                client = app.test_client()
+                headers = {"X-Token": TOKEN}
+                with patch("fls_manager.storage._write_json_unlocked", side_effect=fail_completion), patch(
+                    "fls_manager.online_scripts.tasks.reload_scheduler",
+                ) as reload:
+                    response = client.post(f"/api/online-scripts/install-task-retry/{install_id}", headers=headers)
+                self.assertEqual(response.status_code, 503 if failure == "before" else 200)
+                self.assertEqual(response.json["ok"], failure == "after")
+                reload.assert_called_once()
+                self.assertEqual(len(load_tasks()), 1)
+                tasks = (base_dir / "data" / "tasks.json").read_bytes()
+                ONLINE_INSTALL_RUNNING.clear()
+                state = client.get(f"/api/online-scripts/log/{install_id}?state_only=1", headers=headers)
+                if failure == "after":
+                    self.assertEqual(state.json["status"], "已完成")
+                    continue
+                self.assertEqual(state.json["recovery"]["label"], "核实任务导入结果")
+                with patch("fls_manager.routes.online_scripts.install.import_task_if_needed") as importer, patch(
+                    "fls_manager.routes.online_scripts.install.reload_scheduler",
+                ) as reload, patch("fls_manager.online_scripts.install.download_online_script_logged") as download:
+                    confirmed = client.post(state.json["recovery"]["api_action"], headers=headers)
+                    self.assertEqual(confirmed.status_code, 200)
+                    self.assertTrue(confirmed.json["scheduler_reload_required"])
+                    replayed = client.post(state.json["recovery"]["api_action"], headers=headers)
+                    self.assertEqual(replayed.status_code, 200)
+                    self.assertTrue(replayed.json["replayed"])
+                    pending = client.get(state.json["state_url"], headers=headers).json
+                    self.assertEqual(pending["recovery"]["label"], "重新加载调度器")
+                    recovered = client.post(pending["recovery"]["api_action"], headers=headers)
+                    self.assertEqual(recovered.status_code, 200)
+                    reload.assert_called_once()
+                    importer.assert_not_called()
+                    download.assert_not_called()
+                self.assertEqual((base_dir / "data" / "tasks.json").read_bytes(), tasks)
+                self.assertEqual(client.get(state.json["state_url"], headers=headers).json["status"], "已完成")
+
+    def test_task_retry_publication_failures_confirm_actual_files_then_resume_original_install(self):
+        for failure in ("evidence_before", "evidence_after", "tasks_before", "tasks_after"):
+            with self.subTest(failure=failure), isolated_app() as (app, base_dir):
+                from fls_manager import storage
+                from fls_manager.models import TASK_FILE, load_tasks
+                from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE, ONLINE_INSTALL_RUNNING
+
+                install_id = self.pending_task_import(base_dir)
+                write = storage._write_json_unlocked
+                triggered = []
+
+                def fail_publication(path, data):
+                    evidence = (path == ONLINE_INSTALL_JOBS_FILE and data[install_id].get("running")
+                                and (data[install_id].get("task_recovery") or {}).get("publication"))
+                    if (failure.startswith("evidence") and evidence) or (failure.startswith("tasks") and path == TASK_FILE):
+                        triggered.append(path)
+                        if failure.endswith("after"):
+                            write(path, data)
+                        raise PermissionError("publication interrupted")
+                    return write(path, data)
+
+                client = app.test_client()
+                headers = {"X-Token": TOKEN}
+                with patch("fls_manager.storage._write_json_unlocked", side_effect=fail_publication), patch(
+                    "fls_manager.online_scripts.tasks.reload_scheduler",
+                ) as reload:
+                    failed = client.post(f"/api/online-scripts/install-task-retry/{install_id}", headers=headers)
+                self.assertTrue(triggered)
+                self.assertEqual(failed.status_code, 503)
+                self.assertTrue(failed.json["receipt_confirmation_required"])
+                reload.assert_not_called()
+                published = failure == "tasks_after"
+                self.assertEqual(len(load_tasks()), 1 if published else 0)
+                ONLINE_INSTALL_RUNNING.clear()
+                state = client.get(failed.json["state_url"], headers=headers).json
+                confirmation = client.post(state["recovery"]["api_action"], headers=headers)
+                self.assertEqual(confirmation.status_code, 200)
+                self.assertEqual(confirmation.json["confirmation"], "published" if published else "not_published")
+                resumed = client.get(failed.json["state_url"], headers=headers).json
+                self.assertEqual(resumed["recovery"]["label"], "重新加载调度器" if published else "仅恢复任务导入")
+                with patch("fls_manager.online_scripts.install.download_online_script_logged") as download:
+                    completed = client.post(resumed["recovery"]["api_action"], headers=headers)
+                self.assertEqual(completed.status_code, 200)
+                download.assert_not_called()
+                self.assertEqual(len(load_tasks()), 1)
+                self.assertEqual(client.get(failed.json["state_url"], headers=headers).json["status"], "已完成")
+
+    def test_task_confirmation_api_and_native_form_keep_auth_csrf_and_zero_write_boundaries(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.models import TASK_FILE
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE
+
+            install_id = self.unconfirmed_task_import(app, base_dir)
+            api = f"/api/online-scripts/install-task-confirm/{install_id}"
+            action = f"/online-scripts/install-task-confirm/{install_id}"
+            client = app.test_client()
+            tasks, receipt = TASK_FILE.read_bytes(), ONLINE_INSTALL_JOBS_FILE.read_bytes()
+            csrf = "task-confirm-csrf"
+
+            def login():
+                with client.session_transaction() as session:
+                    session.update(token=TOKEN, token_expire_at=int(time.time()) + 3600,
+                                   security_verified=True, csrf_token=csrf)
+
+            with patch("fls_manager.routes.online_scripts.install.reload_scheduler") as reload, patch(
+                "fls_manager.routes.online_scripts.install.import_task_if_needed",
+            ) as importer, patch("fls_manager.online_scripts.install.download_online_script_logged") as download:
+                self.assertEqual(client.post(api).status_code, 400)
+                self.assertEqual(client.get(f"/api/online-scripts/log/{install_id}?state_only=1").status_code, 401)
+                self.assertEqual(client.post("/api/online-scripts/install-task-confirm/invalid", headers={"X-Token": TOKEN}).status_code, 400)
+                self.assertEqual(client.post("/api/online-scripts/install-task-confirm/" + "a" * 32, headers={"X-Token": TOKEN}).status_code, 404)
+                self.assertEqual(client.get(api, headers={"X-Token": TOKEN}).status_code, 405)
+                login()
+                for page in (f"/online-scripts/log/{install_id}", "/online-scripts/install-history", "/online-scripts"):
+                    html = client.get(page).get_data(as_text=True)
+                    if page == "/online-scripts/install-history":
+                        self.assertIn(f"/online-scripts/log/{install_id}", html)
+                    else:
+                        self.assertIn(action, html)
+                        self.assertIn(f'name="csrf_token" value="{csrf}"', html)
+                self.assertEqual(client.post(api, headers={"X-CSRF-Token": "wrong"}).status_code, 400)
+                self.assertEqual(client.post(action, data={"csrf_token": "wrong"}).status_code, 400)
+                with client.session_transaction() as session:
+                    session["token_expire_at"] = 1
+                self.assertEqual(client.post(api, headers={"X-CSRF-Token": csrf}).status_code, 401)
+                login()
+                with client.session_transaction() as session:
+                    session["token_expire_at"] = 1
+                expired = client.post(action, data={"csrf_token": csrf})
+                self.assertEqual(expired.status_code, 302)
+                self.assertIn("/login?next=", expired.location)
+                login()
+                with patch("fls_manager.auth.query_token_enabled", return_value=False):
+                    self.assertEqual(client.post(api, query_string={"token": TOKEN}, headers={"X-CSRF-Token": csrf}).status_code, 403)
+                self.assertEqual(TASK_FILE.read_bytes(), tasks)
+                self.assertEqual(ONLINE_INSTALL_JOBS_FILE.read_bytes(), receipt)
+                login()
+                restored = client.post(action, data={"csrf_token": csrf})
+                self.assertEqual(restored.status_code, 302)
+                self.assertEqual(restored.location, f"/online-scripts/log/{install_id}")
+                repeated = client.post(api, headers={"X-CSRF-Token": csrf})
+                self.assertEqual(repeated.status_code, 200)
+                self.assertTrue(repeated.json["replayed"])
+                reload.assert_not_called()
+                importer.assert_not_called()
+                download.assert_not_called()
+                self.assertEqual(TASK_FILE.read_bytes(), tasks)
+
+    def test_task_confirmation_refuses_later_edits_and_unreadable_evidence_without_reimport(self):
+        for failure in ("edited", "deleted", "corrupt", "symlink"):
+            with self.subTest(failure=failure), isolated_app() as (app, base_dir):
+                from fls_manager.models import TASK_FILE, load_tasks, save_tasks
+                from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE
+
+                install_id = self.unconfirmed_task_import(app, base_dir)
+                tasks = load_tasks()
+                if failure == "edited":
+                    tasks[0]["command"] = "task later-edit.sh"
+                    save_tasks(tasks)
+                elif failure == "deleted":
+                    save_tasks([])
+                elif failure == "corrupt":
+                    TASK_FILE.write_text("broken json", encoding="utf-8")
+                else:
+                    protected = base_dir / "protected-tasks.json"
+                    protected.write_bytes(TASK_FILE.read_bytes())
+                    TASK_FILE.unlink()
+                    TASK_FILE.symlink_to(protected)
+                original, receipt = TASK_FILE.read_bytes(), ONLINE_INSTALL_JOBS_FILE.read_bytes()
+                client = app.test_client()
+                headers = {"X-Token": TOKEN}
+                with patch("fls_manager.routes.online_scripts.install.reload_scheduler") as reload, patch(
+                    "fls_manager.routes.online_scripts.install.import_task_if_needed",
+                ) as importer, patch("fls_manager.routes.online_scripts.install.start_install_thread") as start:
+                    result = client.post(f"/api/online-scripts/install-task-confirm/{install_id}", headers=headers)
+                    self.assertEqual(result.status_code, 503)
+                    self.assertFalse(result.json["ok"])
+                    self.assertTrue(result.json["receipt_confirmation_required"])
+                    self.assertEqual(client.post(f"/api/online-scripts/install-task-retry/{install_id}", headers=headers).status_code, 409)
+                    self.assertEqual(client.post(f"/api/online-scripts/install-reload/{install_id}", headers=headers).status_code, 409)
+                    reinstall = client.post(f"/online-scripts/install-retry/{install_id}", data={"force": "1"}, headers=headers)
+                    self.assertEqual(reinstall.status_code, 409)
+                    self.assertIn(f"/online-scripts/install-task-confirm/{install_id}", reinstall.get_data(as_text=True))
+                    reload.assert_not_called()
+                    importer.assert_not_called()
+                    start.assert_not_called()
+                self.assertEqual(TASK_FILE.read_bytes(), original)
+                self.assertEqual(ONLINE_INSTALL_JOBS_FILE.read_bytes(), receipt)
+
+    def test_task_confirmation_receipt_failures_are_retryable_and_check_actual_publication(self):
+        for failure in ("before", "after", "symlink", "corrupt"):
+            with self.subTest(failure=failure), isolated_app() as (app, base_dir):
+                from fls_manager import storage
+                from fls_manager.models import TASK_FILE
+                from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE, ONLINE_INSTALL_RUNNING
+
+                install_id = self.unconfirmed_task_import(app, base_dir)
+                tasks = TASK_FILE.read_bytes()
+                write = storage._write_json_unlocked
+                if failure in ("symlink", "corrupt"):
+                    ONLINE_INSTALL_RUNNING.clear()
+                    if failure == "symlink":
+                        protected = base_dir / "protected-receipt.json"
+                        protected.write_bytes(ONLINE_INSTALL_JOBS_FILE.read_bytes())
+                        ONLINE_INSTALL_JOBS_FILE.unlink()
+                        ONLINE_INSTALL_JOBS_FILE.symlink_to(protected)
+                    else:
+                        ONLINE_INSTALL_JOBS_FILE.write_text("broken json", encoding="utf-8")
+                original = ONLINE_INSTALL_JOBS_FILE.read_bytes()
+
+                def fail_confirmation(path, data):
+                    if path == ONLINE_INSTALL_JOBS_FILE and (data[install_id].get("task_recovery") or {}).get("confirmation"):
+                        if failure == "after":
+                            write(path, data)
+                        raise PermissionError("confirmation receipt unavailable")
+                    return write(path, data)
+
+                client = app.test_client()
+                headers = {"X-Token": TOKEN}
+                action = f"/api/online-scripts/install-task-confirm/{install_id}"
+                with patch("fls_manager.storage._write_json_unlocked", side_effect=fail_confirmation), patch(
+                    "fls_manager.routes.online_scripts.install.reload_scheduler",
+                ) as reload:
+                    failed = client.post(action, headers=headers)
+                self.assertEqual(failed.status_code, 200 if failure == "after" else 503)
+                reload.assert_not_called()
+                self.assertEqual(TASK_FILE.read_bytes(), tasks)
+                if failure in ("before", "corrupt", "symlink"):
+                    self.assertEqual(ONLINE_INSTALL_JOBS_FILE.read_bytes(), original)
+                if failure == "before":
+                    self.assertEqual(client.post(action, headers=headers).status_code, 200)
+                elif failure == "after":
+                    state = client.get(f"/api/online-scripts/log/{install_id}?state_only=1", headers=headers).json
+                    self.assertEqual(state["recovery"]["label"], "重新加载调度器")
+
+    def test_confirmed_tasks_restore_real_scheduler_after_restart_without_source_or_reimport(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.models import TASK_FILE, load_tasks
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING
+            from fls_manager.online_scripts.source import save_online_script_cache
+            from fls_manager.scheduler import get_scheduler_state
+            from fls_manager.state import scheduler
+
+            install_id = self.unconfirmed_task_import(app, base_dir, enable_task=True)
+            task_id = load_tasks()[0]["id"]
+            self.assertIsNotNone(scheduler.get_job(f"task_{task_id}"))
+            scheduler.remove_all_jobs()
+            ONLINE_INSTALL_RUNNING.clear()
+            save_online_script_cache([])
+            original = TASK_FILE.read_bytes()
+            client = app.test_client()
+            headers = {"X-Token": TOKEN}
+            with patch("fls_manager.routes.online_scripts.install.import_task_if_needed") as importer, patch(
+                "fls_manager.online_scripts.install.download_online_script_logged",
+            ) as download:
+                confirmed = client.post(f"/api/online-scripts/install-task-confirm/{install_id}", headers=headers)
+                self.assertEqual(confirmed.status_code, 200)
+                self.assertIsNone(scheduler.get_job(f"task_{task_id}"))
+                state = client.get(f"/api/online-scripts/log/{install_id}?state_only=1", headers=headers).json
+                recovered = client.post(state["recovery"]["action"], headers=headers)
+                self.assertEqual(recovered.status_code, 302)
+                self.assertIsNotNone(scheduler.get_job(f"task_{task_id}"))
+                self.assertEqual(get_scheduler_state()["status"], "succeeded")
+                self.assertEqual(get_scheduler_state()["scheduled_count"], 1)
+                self.assertEqual(TASK_FILE.read_bytes(), original)
+                importer.assert_not_called()
+                download.assert_not_called()
+
+    def test_task_publication_and_install_query_have_bounded_lock_order_and_one_import(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import constants
+
+            install_id = self.pending_task_import(base_dir)
+            entered, release, querying = threading.Event(), threading.Event(), threading.Event()
+            publish = constants.persist_online_install_task_recovery
+            read = constants._read_install_jobs
+            responses, errors = [], []
+
+            def paused_publication(*args, **kwargs):
+                entered.set()
+                if not release.wait(3):
+                    raise RuntimeError("publication was not released")
+                return publish(*args, **kwargs)
+
+            def observed_read():
+                if threading.current_thread().name == "install-query":
+                    querying.set()
+                return read()
+
+            def request(path, method):
+                try:
+                    responses.append(getattr(app.test_client(), method)(path, headers={"X-Token": TOKEN}))
+                except Exception as exc:
+                    errors.append(exc)
+
+            worker = threading.Thread(target=request, args=(f"/api/online-scripts/install-task-retry/{install_id}", "post"), daemon=True)
+            query = threading.Thread(target=request, name="install-query", args=(f"/api/online-scripts/log/{install_id}?state_only=1", "get"), daemon=True)
+            with patch("fls_manager.routes.online_scripts.install.persist_online_install_task_recovery", side_effect=paused_publication), patch(
+                "fls_manager.online_scripts.constants._read_install_jobs", side_effect=observed_read,
+            ), patch("fls_manager.online_scripts.tasks.reload_scheduler") as reload:
+                worker.start()
+                try:
+                    self.assertTrue(entered.wait(3))
+                    duplicate = app.test_client().post(f"/api/online-scripts/install-task-retry/{install_id}", headers={"X-Token": TOKEN})
+                    self.assertEqual(duplicate.status_code, 409)
+                    query.start()
+                    self.assertTrue(querying.wait(3))
+                finally:
+                    release.set()
+                    worker.join(4)
+                    if query.ident:
+                        query.join(4)
+                self.assertFalse(worker.is_alive())
+                self.assertFalse(query.is_alive())
+                self.assertFalse(errors)
+                self.assertEqual(sorted(response.status_code for response in responses), [200, 200])
+                reload.assert_called_once()
+
+    def test_edit_after_confirmation_blocks_scheduler_reload_without_overwriting_tasks(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.models import TASK_FILE, load_tasks, save_tasks
+
+            install_id = self.unconfirmed_task_import(app, base_dir)
+            client = app.test_client()
+            headers = {"X-Token": TOKEN}
+            self.assertEqual(client.post(f"/api/online-scripts/install-task-confirm/{install_id}", headers=headers).status_code, 200)
+            tasks = load_tasks()
+            tasks[0]["command"] = "task later.sh"
+            save_tasks(tasks)
+            original = TASK_FILE.read_bytes()
+            with patch("fls_manager.routes.online_scripts.install.reload_scheduler") as reload:
+                refused = client.post(f"/api/online-scripts/install-reload/{install_id}", headers=headers)
+                self.assertEqual(refused.status_code, 503)
+                self.assertIn("已变化", refused.json["msg"])
+                reload.assert_not_called()
+            self.assertEqual(TASK_FILE.read_bytes(), original)
+
+    def test_partial_task_recovery_receipt_failure_keeps_original_scheduler_diagnosis(self):
+        for failure in ("before", "after"):
+            with self.subTest(failure=failure), isolated_app() as (app, base_dir):
+                from fls_manager import storage
+                from fls_manager.models import TASK_FILE
+                from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE, ONLINE_INSTALL_RUNNING
+
+                install_id = self.pending_task_import(base_dir)
+                write = storage._write_json_unlocked
+
+                def fail_partial(path, data):
+                    if path == ONLINE_INSTALL_JOBS_FILE and data[install_id].get("phase") == "scheduler_reload_pending":
+                        if failure == "after":
+                            write(path, data)
+                        raise PermissionError("partial receipt unavailable")
+                    return write(path, data)
+
+                client = app.test_client()
+                headers = {"X-Token": TOKEN}
+                with patch("fls_manager.storage._write_json_unlocked", side_effect=fail_partial), patch(
+                    "fls_manager.online_scripts.tasks.reload_scheduler", side_effect=RuntimeError("scheduler unavailable"),
+                ):
+                    failed = client.post(f"/api/online-scripts/install-task-retry/{install_id}", headers=headers)
+                self.assertEqual(failed.status_code, 503)
+                self.assertIn("scheduler unavailable", failed.json["msg"])
+                original = TASK_FILE.read_bytes()
+                ONLINE_INSTALL_RUNNING.clear()
+                url = f"/api/online-scripts/log/{install_id}?state_only=1"
+                state = client.get(url, headers=headers).json
+                if failure == "before":
+                    self.assertEqual(state["recovery"]["label"], "核实任务导入结果")
+                    self.assertEqual(client.post(state["recovery"]["api_action"], headers=headers).status_code, 200)
+                    state = client.get(url, headers=headers).json
+                self.assertEqual(state["recovery"]["label"], "重新加载调度器")
+                restored = client.post(state["recovery"]["api_action"], headers=headers)
+                self.assertEqual(restored.status_code, 200)
+                self.assertEqual(client.get(url, headers=headers).json["status"], "已完成")
+                self.assertEqual(TASK_FILE.read_bytes(), original)
+
+    def test_concurrent_task_confirmations_have_one_claim_and_idempotent_replay(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.tasks import task_import_publication_state
+
+            install_id = self.unconfirmed_task_import(app, base_dir)
+            entered, release = threading.Event(), threading.Event()
+            responses = []
+            action = f"/api/online-scripts/install-task-confirm/{install_id}"
+            headers = {"X-Token": TOKEN}
+
+            def paused_confirmation(record):
+                entered.set()
+                if not release.wait(3):
+                    raise RuntimeError("confirmation was not released")
+                return task_import_publication_state(record)
+
+            worker = threading.Thread(target=lambda: responses.append(app.test_client().post(action, headers=headers)), daemon=True)
+            with patch("fls_manager.routes.online_scripts.install.task_import_publication_state", side_effect=paused_confirmation) as confirm, patch(
+                "fls_manager.routes.online_scripts.install.reload_scheduler",
+            ) as reload:
+                worker.start()
+                try:
+                    self.assertTrue(entered.wait(3))
+                    self.assertEqual(app.test_client().post(action, headers=headers).status_code, 409)
+                finally:
+                    release.set()
+                    worker.join(4)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual([response.status_code for response in responses], [200])
+                replayed = app.test_client().post(action, headers=headers)
+                self.assertEqual(replayed.status_code, 200)
+                self.assertTrue(replayed.json["replayed"])
+                confirm.assert_called_once()
+                reload.assert_not_called()
+
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise receipt confirmation recovery")
+    def test_receipt_failure_page_queries_then_confirms_and_reloads_without_reimporting(self):
+        with isolated_app() as (app, base_dir):
+            install_id = self.pending_task_import(base_dir)
+            client = app.test_client()
+            headers = {"X-Token": TOKEN}
+            url = f"/api/online-scripts/log/{install_id}"
+            html = client.get(f"/online-scripts/log/{install_id}", headers=headers).get_data(as_text=True)
+            initial = client.get(url, headers=headers).json
+            with patch("fls_manager.routes.online_scripts.install._save_install_task_result", side_effect=PermissionError("completion unavailable")):
+                failed = client.post(initial["recovery"]["api_action"], headers=headers)
+            unknown = client.get(url + "?state_only=1", headers=headers).json
+            confirmed = client.post(unknown["recovery"]["api_action"], headers=headers)
+            pending = client.get(url, headers=headers).json
+            reloaded = client.post(pending["recovery"]["api_action"], headers=headers)
+            completed = client.get(url, headers=headers).json
+            script = next(value for value in re.findall(r"<script>(.*?)</script>", html, re.S) if "async function loadLog(" in value)
+            source = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+            reader = source[source.index("function flsResponseErrorDiagnostic("):source.index("async function flsReadTextResponse(")]
+            result = subprocess.run(["node", "-e", r"""
+const vm=require('node:vm'),assert=require('node:assert/strict');
+const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const elements=Object.fromEntries(['installStatus','installPhase','installError','installReturncode','installStopAction',
+  'installPollError','installPollLogin','installPollLogs','installPollRetry','installStateQuery','installStopQuery','log','flsLogNewTip']
+  .map(id=>[id,{hidden:true,textContent:'',dataset:{},style:{},addEventListener(name,fn){this[name]=fn;}}]));
+const recovery={hidden:true,dataset:{},form:null,html:'',set innerHTML(value){this.html=value;
+  this.form=value.includes('<form')?{button:{disabled:false},querySelector(){return this.button;},
+    addEventListener(name,fn){this[name]=fn;}}:null;},get innerHTML(){return this.html;},querySelector(){return this.form;}};
+elements.installRecoveryAction=recovery;
+const response=(status,payload)=>({ok:status>=200&&status<300,status,text:async()=>JSON.stringify(payload)});
+const replies=[response(200,input.initial),response(503,input.failed),response(503,{msg:'state unavailable'}),
+  response(200,input.unknown),response(200,input.confirmed),response(200,input.pending),
+  response(200,input.reloaded),response(200,input.completed)];
+const calls=[];
+const context={window:{innerHeight:800,scrollY:0,scrollTo(){},addEventListener(){}},
+  document:{documentElement:{scrollHeight:800},getElementById:id=>elements[id],
+    querySelector:selector=>selector==='#installRecoveryAction form[data-api-action]'?recovery.form:null},
+  location:{pathname:'/online-scripts/log/'+input.initial.install_id,search:''},flsGetCsrfToken:()=> 'confirm-csrf',
+  setInterval:()=>1,clearInterval(){},setTimeout(){throw new Error('terminal recovery must not auto poll');},clearTimeout(){},
+  fetch:async(url,options={})=>{calls.push({url,options});assert.ok(replies.length,'unexpected request');return replies.shift();}};
+vm.createContext(context);vm.runInContext(input.reader+input.script,context);
+const flush=()=>new Promise(resolve=>setImmediate(resolve));
+(async()=>{
+  await flush();const originalForm=recovery.form;
+  assert.match(recovery.html,/仅恢复任务导入/);
+  await originalForm.submit({preventDefault(){}});
+  assert.equal(calls.length,3);assert.equal(calls[2].url,input.failed.state_url);
+  assert.equal(originalForm.button.disabled,true);
+  assert.match(elements.installPollError.textContent,/state unavailable/);
+  await originalForm.submit({preventDefault(){}});assert.equal(calls.length,3);
+  await elements.installStateQuery.click();
+  assert.match(recovery.html,/核实任务导入结果/);assert.match(recovery.html,/confirm-csrf/);
+  const confirmForm=recovery.form;
+  await confirmForm.submit({preventDefault(){}});
+  assert.match(recovery.html,/重新加载调度器/);
+  assert.equal(calls[4].url,input.unknown.recovery.api_action);
+  await confirmForm.submit({preventDefault(){}});assert.equal(calls.length,6,'stale confirm form must not post');
+  await recovery.form.submit({preventDefault(){}});
+  assert.equal(elements.installStatus.textContent,'已完成');assert.equal(recovery.form,null);
+  assert.equal(calls.length,8);assert.equal(replies.length,0);
+  const posts=calls.filter(call=>call.options.method==='POST');
+  assert.equal(posts.length,3);
+  assert.equal(posts[0].url,input.initial.recovery.api_action);
+  assert.equal(posts[2].url,input.pending.recovery.api_action);
+  assert.ok(posts.every(call=>call.options.headers['X-CSRF-Token']==='confirm-csrf'));
+})().catch(error=>{console.error(error);process.exitCode=1;});
+"""], input=json.dumps({"reader": reader, "script": script, "initial": initial, "failed": failed.json,
+                        "unknown": unknown, "confirmed": confirmed.json, "pending": pending,
+                        "reloaded": reloaded.json, "completed": completed}), capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise missing log recovery")
     def test_missing_log_page_keeps_recovery_and_refreshes_state_without_losing_diagnostics(self):

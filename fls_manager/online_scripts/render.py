@@ -188,7 +188,12 @@ def render_online_script_rows(items):
                 recovery_status = (latest_install_info or {}).get("status") or "结果未知"
                 recovery_error = (latest_install_info or {}).get("error") or "请查看安装日志确认结果"
                 retry_action = ""
-                if (latest_install_info or {}).get("scheduler_reload_pending"):
+                if ((latest_install_info or {}).get("task_recovery") or {}).get("pending"):
+                    retry_action = f'''
+    <form class="inline-form" method="post" action="/online-scripts/install-task-confirm/{h(latest_install_id)}">
+        <button class="btn btn-primary" type="submit">核实任务导入结果</button>
+    </form>'''
+                elif (latest_install_info or {}).get("scheduler_reload_pending"):
                     recovery_error = (latest_install_info or {}).get("scheduler_reload_error") or recovery_error
                     retry_action = f'''
     <form class="inline-form" method="post" action="/online-scripts/install-reload/{h(latest_install_id)}">

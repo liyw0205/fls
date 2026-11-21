@@ -1,6 +1,7 @@
 """Real HTTP/Chromium recovery for online and dependency install logs."""
 import os
 import json
+import hashlib
 from pathlib import Path
 import shlex
 import subprocess
@@ -23,9 +24,10 @@ def main():
         from fls_manager.app import create_app
         import fls_manager.app as app_module
         from fls_manager import scheduler
+        from fls_manager import storage
         from fls_manager.install_records import INSTALL_JOBS_FILE, persist_install_job
         from fls_manager.online_scripts import install, source, tasks as online_tasks
-        from fls_manager.models import load_tasks
+        from fls_manager.models import TASK_FILE, load_tasks
         from fls_manager.online_scripts.constants import (
             ONLINE_INSTALL_JOBS_FILE, ONLINE_INSTALL_RETRYING, ONLINE_INSTALL_RUNNING,
             persist_online_install,
@@ -62,6 +64,18 @@ def main():
         source.save_online_script_cache([item, *task_items.values()])
         downloads = []
         task_reload_state = {"failures": 0, "calls": 0}
+        receipt_fault = {"install_id": "", "remaining": 0}
+        write = storage._write_json_unlocked
+
+        def write_with_receipt_failure(path, data):
+            install_id = receipt_fault["install_id"]
+            if (path == ONLINE_INSTALL_JOBS_FILE and receipt_fault["remaining"]
+                    and data.get(install_id, {}).get("phase") == "completed"):
+                receipt_fault["remaining"] -= 1
+                raise PermissionError("browser completion receipt unavailable")
+            return write(path, data)
+
+        storage._write_json_unlocked = write_with_receipt_failure
 
         def task_import_reload():
             task_reload_state["calls"] += 1
@@ -229,7 +243,13 @@ def main():
                 if data.get("seed_online_history"):
                     seed_online_history()
                 if data.get("seed_task_retry_recovery"):
-                    seed_task_retry_recovery(int(data["width"]), missing_log=bool(data.get("missing_log")))
+                    install_id = seed_task_retry_recovery(int(data["width"]), missing_log=bool(data.get("missing_log")))
+                    if data.get("fail_task_receipt"):
+                        task_reload_state["failures"] = 0
+                        receipt_fault.update(install_id=install_id, remaining=1)
+                if data.get("restart_task_install"):
+                    ONLINE_INSTALL_RUNNING.clear()
+                    ONLINE_INSTALL_RETRYING.clear()
                 if data.get("seed_delayed_online_log"):
                     seed_delayed_online_log(int(data["width"]))
                 if data.get("publish_delayed_online_log"):
@@ -309,6 +329,7 @@ def main():
                 downloads=len(downloads),
                 task_reload_count=task_reload_state["calls"],
                 task_imports=task_imports,
+                tasks_fingerprint=hashlib.sha256(TASK_FILE.read_bytes()).hexdigest() if TASK_FILE.exists() else "",
                 online=[{"id": job_id, "running": info.get("running")} for job_id, info in ONLINE_INSTALL_RUNNING.items()],
                 deps_running=bool(DEPS_RUNNING.get("browser-deps", {}).get("process") and
                                   DEPS_RUNNING["browser-deps"]["process"].poll() is None),
@@ -355,6 +376,63 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
      await page.waitForLoadState('domcontentloaded');
     }
    };
+   if(process.env.FLS_INSTALL_LOG_ONLY==='task-receipt'){
+    await page.goto(base+'/login');await login();
+    await fixture({seed_task_retry_recovery:true,width:viewport.width,missing_log:true,fail_task_receipt:true});
+    const installId=(viewport.width===390?'a':'b').repeat(32);
+    const scriptId='browser-task-recovery-'+viewport.width;
+    const before=await state();
+    await page.goto(base+'/online-scripts/log/'+installId);
+    await page.locator('#installRecoveryAction').getByRole('button',{name:'仅恢复任务导入',exact:true}).click();
+    await page.locator('#installRecoveryAction').getByRole('button',{name:'核实任务导入结果',exact:true}).waitFor();
+    assert.equal(await page.locator('#installStatus').textContent(),'结果未知');
+    const published=await state();
+    assert.equal(published.task_imports[scriptId],1);assert.equal(published.task_reload_count,1);
+    assert.equal(published.downloads,before.downloads);
+    await fixture({restart_task_install:true});
+    await page.reload();
+    await page.locator('#installRecoveryAction').getByRole('button',{name:'核实任务导入结果',exact:true}).waitFor();
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true);
+    await page.screenshot({path:'/tmp/fls-install-task-confirm-'+viewport.width+'.png',fullPage:true});
+    let confirmPosts=0;
+    const confirmApi='**/api/online-scripts/install-task-confirm/'+installId;
+    await page.route(confirmApi,async route=>{
+     confirmPosts++;
+     const committed=await route.fetch();assert.equal(committed.status(),200);
+     await route.fulfill({status:502,contentType:'text/plain',body:'confirmation response lost'});
+    });
+    await page.locator('#installRecoveryAction').getByRole('button',{name:'核实任务导入结果',exact:true}).click();
+    await page.waitForFunction(()=>document.querySelector('#installPollError').textContent.includes('confirmation response lost'));
+    assert.equal(await page.locator('#installRecoveryAction button').isDisabled(),true);
+    await page.route('**/api/online-scripts/log/'+installId+'?state_only=1',route=>route.fulfill({
+     status:503,contentType:'text/plain',body:'confirmation state unavailable'}),{times:1});
+    await page.locator('#installStateQuery').click();
+    await page.waitForFunction(()=>document.querySelector('#installPollError').textContent.includes('confirmation state unavailable'));
+    assert.equal(await page.locator('#installRecoveryAction button').isDisabled(),true);
+    await page.locator('#installStateQuery').click();
+    await page.locator('#installRecoveryAction').getByRole('button',{name:'重新加载调度器',exact:true}).waitFor();
+    assert.equal(confirmPosts,1);
+    assert.equal(await page.locator('#installStatus').textContent(),'部分完成');
+    const csrf=await page.evaluate(()=>flsGetCsrfToken());
+    const denied=await page.request.post(base+'/api/online-scripts/install-reload/'+installId,{headers:{'X-CSRF-Token':'wrong'}});
+    assert.equal(denied.status(),400);
+    const pending=await state();assert.equal(pending.task_reload_count,1);
+    assert.equal(pending.tasks_fingerprint,published.tasks_fingerprint);
+    await Promise.all([page.waitForNavigation(),page.locator('#installRecoveryAction form').evaluate(form=>form.submit())]);
+    await page.waitForFunction(()=>document.querySelector('#installStatus').textContent==='已完成');
+    const completed=await state();
+    assert.equal(completed.task_reload_count,2);assert.equal(completed.task_imports[scriptId],1);
+    assert.equal(completed.tasks_fingerprint,published.tasks_fingerprint);assert.equal(completed.downloads,before.downloads);
+    const repeated=await page.request.post(base+'/api/online-scripts/install-task-confirm/'+installId,{headers:{'X-CSRF-Token':csrf}});
+    assert.equal(repeated.status(),200);assert.equal((await repeated.json()).replayed,true);
+    await page.goto(base+'/online-scripts/install-history?script_id='+scriptId);
+    await page.locator('tbody tr').first().getByRole('link',{name:'查看安装日志'}).click();
+    await page.waitForFunction(()=>document.querySelector('#installStatus').textContent==='已完成');
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true);
+    await page.screenshot({path:'/tmp/fls-install-task-confirm-completed-'+viewport.width+'.png',fullPage:true});
+    assert.deepEqual(errors,[]);await context.close();console.log('task receipt recovery passed '+viewport.width);
+    continue;
+   }
    if(process.env.FLS_INSTALL_LOG_ONLY!=='online-stop'){
    await fixture({seed_retry_chain:true});await fixture({reset:true});
    await page.goto(base+'/login');await login();

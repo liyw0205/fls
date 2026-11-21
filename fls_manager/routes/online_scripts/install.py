@@ -2,7 +2,8 @@ from ._common import *
 import re
 
 from ...utils import now_str
-from ...models import TaskSchedulerReloadError
+from ...models import TASKS_MUTATION_LOCK, TaskSchedulerReloadError
+from ...storage import storage_transaction
 from ...scheduler import reload_scheduler
 from ...online_scripts.constants import (
     ONLINE_INSTALL_LOCK,
@@ -13,8 +14,11 @@ from ...online_scripts.constants import (
     InstallHistoryLimitError,
     online_install_retry_relation,
     persist_online_install,
+    persist_online_install_task_recovery,
+    _load_persisted_online_install,
 )
 from ...online_scripts.install import capture_install_outputs, _persist_install_state
+from ...online_scripts.tasks import task_import_file_signature, task_import_publication_state
 
 
 def _install_request_id(raw):
@@ -659,6 +663,38 @@ def _install_scheduler_reload_form(install_id):
     )
 
 
+def _install_task_confirmation_form(install_id):
+    return (
+        '<form class="inline-form" method="post" '
+        f'action="/online-scripts/install-task-confirm/{h(quote(install_id, safe=""))}">'
+        '<button class="btn btn-primary" type="submit">核实任务导入结果</button></form>'
+    )
+
+
+def _unconfirmed_install_tasks(info, message):
+    info["task_recovery"] = dict(info["task_recovery"], pending=True)
+    info.update(running=False, status="结果未知", phase="task_import_confirmation_pending", returncode=None,
+                scheduler_reload_pending=False, error=message, updated_at=now_str())
+    _persist_install_state(info)
+    return {
+        "ok": False, "request_id": info["id"], "status": info["status"], "phase": info["phase"],
+        "msg": info["error"], "receipt_confirmation_required": True,
+        "state_url": url_for("online_scripts.api_online_install_log", install_id=info["id"], state_only="1"),
+    }, 503
+
+
+def _save_install_task_result(info):
+    info["task_recovery"] = dict(info["task_recovery"], pending=False)
+    try:
+        persist_online_install(info)
+    except Exception:
+        with ONLINE_INSTALL_LOCK:
+            actual = _load_persisted_online_install(info["id"])
+        fields = ("running", "status", "phase", "scheduler_reload_pending", "task_recovery")
+        if not actual or any(actual.get(key) != info.get(key) for key in fields):
+            raise
+
+
 def _retry_install_tasks(install_id):
     """Retry only the task import after a script download already succeeded."""
     with ONLINE_INSTALL_LOCK:
@@ -670,6 +706,9 @@ def _retry_install_tasks(install_id):
             return {"ok": False, "request_id": install_id, "msg": "安装记录不存在。"}, 404
         if info.get("running") or install_id in ONLINE_INSTALL_RETRYING:
             return {"ok": False, "request_id": install_id, "msg": "安装或恢复仍在进行，请稍后重试。"}, 409
+        if (info.get("task_recovery") or {}).get("pending"):
+            return {"ok": False, "request_id": install_id, "receipt_confirmation_required": True,
+                    "msg": "原任务导入结果尚未确认，请先核实原结果，未重复导入任务。"}, 409
         if not info.get("import_task") or info.get("phase") != "importing_tasks":
             return {"ok": False, "request_id": install_id, "msg": "当前安装没有可单独恢复的任务导入阶段。"}, 409
         from .logs import _install_log_file
@@ -700,6 +739,12 @@ def _retry_install_tasks(install_id):
         updated = dict(info)
         updated.update(running=True, status="运行中", phase="importing_tasks", error="", updated_at=now_str())
         try:
+            with storage_transaction():
+                baseline = task_import_file_signature()
+            updated["task_recovery"] = {
+                "id": uuid.uuid4().hex, "pending": True,
+                "task_baseline_captured": True, "task_baseline": baseline,
+            }
             persist_online_install(updated)
         except Exception as exc:
             return {"ok": False, "request_id": install_id, "msg": f"任务恢复未启动，安装回执无法保存：{exc}"}, 500
@@ -707,6 +752,11 @@ def _retry_install_tasks(install_id):
         ONLINE_INSTALL_RETRYING.add(install_id)
 
     try:
+        def before_publish(publication):
+            recovery = dict(updated["task_recovery"], publication=publication)
+            updated["task_recovery"] = recovery
+            persist_online_install_task_recovery(install_id, recovery)
+
         try:
             import_task_if_needed(
                 item,
@@ -714,6 +764,7 @@ def _retry_install_tasks(install_id):
                 enable_task=bool(updated.get("enable_task")),
                 selected_task_indexes=selected,
                 raise_on_reload_error=True,
+                before_publish=before_publish,
             )
         except TaskSchedulerReloadError as exc:
             snapshot_error = ""
@@ -736,7 +787,10 @@ def _retry_install_tasks(install_id):
                 error=scheduler_error,
                 updated_at=now_str(),
             )
-            _persist_install_state(updated)
+            try:
+                _save_install_task_result(updated)
+            except Exception as persistence_exc:
+                return _unconfirmed_install_tasks(updated, f"{scheduler_error}；部分完成回执无法确认：{persistence_exc}")
             return {
                 "ok": False,
                 "request_id": install_id,
@@ -757,7 +811,10 @@ def _retry_install_tasks(install_id):
             scheduler_reload_error="",
             updated_at=now_str(),
         )
-        _persist_install_state(updated)
+        try:
+            _save_install_task_result(updated)
+        except Exception as exc:
+            return _unconfirmed_install_tasks(updated, f"任务已导入，但完成回执无法确认：{exc}。请核实原任务导入结果，勿重复安装或导入。")
         return {
             "ok": True,
             "request_id": install_id,
@@ -766,15 +823,7 @@ def _retry_install_tasks(install_id):
             "msg": "任务导入已恢复，未重复下载安装",
         }, 200
     except Exception as exc:
-        updated.update(
-            running=False,
-            status="失败",
-            phase="importing_tasks",
-            error=f"任务导入恢复失败：{exc}",
-            updated_at=now_str(),
-        )
-        _persist_install_state(updated)
-        return {"ok": False, "request_id": install_id, "status": "失败", "phase": "importing_tasks", "msg": updated["error"]}, 500
+        return _unconfirmed_install_tasks(updated, f"任务导入恢复结果无法确认：{exc}。请核实原任务导入结果。")
     finally:
         with ONLINE_INSTALL_LOCK:
             ONLINE_INSTALL_RETRYING.discard(install_id)
@@ -786,6 +835,8 @@ def online_scripts_install_task_retry(install_id):
     if payload.get("ok"):
         return redirect(url_for("online_scripts.online_install_log", install_id=install_id))
     actions = _install_scheduler_reload_form(install_id) if payload.get("scheduler_reload_required") else ""
+    if payload.get("receipt_confirmation_required"):
+        actions = _install_task_confirmation_form(install_id)
     return _install_retry_error(install_id, "任务导入恢复失败", payload.get("msg") or "任务导入恢复失败", status, actions_html=actions)
 
 
@@ -795,6 +846,77 @@ def api_online_scripts_install_task_retry(install_id):
         return jsonify(ok=False, request_id=install_id, msg="在线脚本安装请求标识无效"), 400
     payload, status = _retry_install_tasks(install_id)
     return jsonify(payload), status
+
+
+def _confirm_install_tasks(install_id):
+    identity = {"request_id": install_id}
+    if not re.fullmatch(r"[a-f0-9]{32}", install_id or ""):
+        return {**identity, "ok": False, "msg": "在线脚本安装请求标识无效"}, 400
+    with ONLINE_INSTALL_LOCK:
+        try:
+            info = get_online_install_job(install_id)
+        except Exception as exc:
+            return {**identity, "ok": False, "msg": f"安装回执无法读取：{exc}"}, 503
+        if not info:
+            return {**identity, "ok": False, "msg": "安装记录不存在"}, 404
+        recovery = info.get("task_recovery") or {}
+        if info.get("running") or install_id in ONLINE_INSTALL_RETRYING:
+            return {**identity, "ok": False, "msg": "安装或恢复仍在进行，请稍后查询原结果。"}, 409
+        if not recovery.get("id"):
+            return {**identity, "ok": False, "msg": "当前安装没有待核实的任务恢复回执。"}, 409
+        if not recovery.get("pending"):
+            return {**identity, "ok": True, "replayed": True, "status": info.get("status"),
+                    "scheduler_reload_required": bool(info.get("scheduler_reload_pending")),
+                    "msg": "原任务导入结果已核实，未重复导入。"}, 200
+        ONLINE_INSTALL_RETRYING.add(install_id)
+    try:
+        with TASKS_MUTATION_LOCK, storage_transaction():
+            actual = _load_persisted_online_install(install_id)
+            if not actual or (actual.get("task_recovery") or {}).get("id") != recovery["id"]:
+                raise RuntimeError("原任务恢复回执已变化，请重新查询原安装结果")
+            confirmation, signature = task_import_publication_state({"script_id": actual["script_id"], **actual["task_recovery"]})
+            published = confirmation == "published"
+            recovery = dict(actual["task_recovery"], pending=False, confirmation=confirmation, confirmation_source=signature)
+            message = ("已核实任务已写入，仅需重新加载调度器，无需重复导入。" if published
+                       else "已核实任务未写入，可沿原安装继续恢复任务导入。")
+            try:
+                updated = persist_online_install_task_recovery(
+                    install_id, recovery, running=False, status="部分完成" if published else "失败",
+                    phase="scheduler_reload_pending" if published else "importing_tasks",
+                    returncode=0 if published else None, scheduler_reload_pending=published,
+                    scheduler_reload_error=message if published else "", error=message, updated_at=now_str(),
+                )
+            except Exception:
+                updated = _load_persisted_online_install(install_id)
+                if not updated or updated.get("task_recovery") != recovery:
+                    raise
+        with ONLINE_INSTALL_LOCK:
+            live = ONLINE_INSTALL_RUNNING.get(install_id)
+            if isinstance(live, dict):
+                live.update(updated)
+        return {**identity, "ok": True, "confirmation": confirmation, "scheduler_reload_required": published,
+                "status": updated["status"], "msg": message}, 200
+    except Exception as exc:
+        return {**identity, "ok": False, "receipt_confirmation_required": True,
+                "msg": f"原任务导入结果无法确认，未修改任务或调度器：{exc}"}, 503
+    finally:
+        with ONLINE_INSTALL_LOCK:
+            ONLINE_INSTALL_RETRYING.discard(install_id)
+
+
+@bp.route("/api/online-scripts/install-task-confirm/<install_id>", methods=["POST"])
+def api_online_scripts_install_task_confirm(install_id):
+    payload, status = _confirm_install_tasks(install_id)
+    return jsonify(payload), status
+
+
+@bp.route("/online-scripts/install-task-confirm/<install_id>", methods=["POST"])
+def online_scripts_install_task_confirm(install_id):
+    payload, status = _confirm_install_tasks(install_id)
+    if payload.get("ok"):
+        return redirect(url_for("online_scripts.online_install_log", install_id=install_id))
+    return _install_retry_error(install_id, "无法核实任务导入结果", payload["msg"], status,
+                                actions_html=_install_task_confirmation_form(install_id))
 
 
 def _reload_install_scheduler(install_id):
@@ -812,13 +934,23 @@ def _reload_install_scheduler(install_id):
             return {"ok": False, "request_id": install_id, "msg": "安装记录不存在。"}, 404
         if info.get("running") or install_id in ONLINE_INSTALL_RETRYING:
             return {"ok": False, "request_id": install_id, "msg": "安装或恢复仍在进行，请稍后重试。"}, 409
+        if (info.get("task_recovery") or {}).get("pending"):
+            return {"ok": False, "request_id": install_id, "receipt_confirmation_required": True,
+                    "msg": "原任务导入回执尚未确认，请先核实原结果。"}, 409
         if not info.get("scheduler_reload_pending"):
             return {"ok": False, "request_id": install_id, "msg": "该安装没有待恢复的调度器重载。"}, 409
         ONLINE_INSTALL_RETRYING.add(install_id)
 
     try:
         try:
-            reload_scheduler()
+            with TASKS_MUTATION_LOCK:
+                recovery = info.get("task_recovery") or {}
+                if recovery.get("publication"):
+                    with storage_transaction():
+                        confirmation, _signature = task_import_publication_state({"script_id": info["script_id"], **recovery})
+                    if confirmation != "published":
+                        raise RuntimeError("原任务导入尚未写入，请先核实原结果")
+                reload_scheduler()
         except Exception as exc:
             return {
                 "ok": False,
@@ -941,6 +1073,11 @@ def online_scripts_install_retry(install_id):
             )
         if not info:
             return _install_retry_error(install_id, "无法重试在线安装", "安装记录不存在。", 404)
+        if (info.get("task_recovery") or {}).get("pending"):
+            return _install_retry_error(
+                install_id, "请先核实任务导入结果", "原任务导入结果尚未确认，未重新下载或导入。", 409,
+                actions_html=_install_task_confirmation_form(install_id),
+            )
         relation = online_install_retry_relation(info)
         if relation.get("retry_relation_error"):
             return _install_retry_error(
