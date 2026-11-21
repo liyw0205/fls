@@ -2369,7 +2369,7 @@ const terminal=response(200,{ok:true,id:serverId,request_id:requestId,running:fa
         with isolated_app() as (app, _base_dir):
             html = app.test_client().get("/online-scripts", headers={"X-Token": TOKEN}).get_data(as_text=True)
             script = next(script for script in re.findall(r"<script>(.*?)</script>", html, re.S)
-                          if "async function updateOnlineRefreshHistory()" in script)
+                          if "async function updateOnlineRefreshHistory(options)" in script)
             start = script.index("function hideOnlineRefreshHistoryReadActions()")
             end = script.index("\nfunction randomOnlineRefreshRequestId()", start)
             history_script = script[start:end]
@@ -2385,12 +2385,25 @@ const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
 const settle=async()=>{await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));};
 const response=(status,body,type='application/json')=>({ok:status>=200&&status<300,status,
  headers:{get:()=>type},text:async()=>typeof body==='string'?body:JSON.stringify(body)});
-function setup(queue){
+const snapshot='a'.repeat(64);
+const page=(items,total=1,offset=0,version=snapshot)=>({ok:true,items,total,offset,limit:8,snapshot:version,
+ previous_offset:offset?Math.max(0,offset-8):null,next_offset:offset+items.length<total?offset+8:null});
+const row=(id)=>({request_id:id,status:'已完成',updated_at:'now',task_link_failure_count:0});
+function historyLink(){return {hidden:true,href:'',dataset:{},attributes:{},setAttribute(name,value){this.attributes[name]=String(value);},
+ getAttribute(name){return this.attributes[name]||null;}};}
+function setup(queue, overrides={}){
  const row='<div id="old-history">previous valid history</div>';
+ const location={pathname:'/online-scripts',search:'?refresh_request_id='+'a'.repeat(32),href:'http://example.test/online-scripts?refresh_request_id='+'a'.repeat(32)};
+ const navState={pushes:0,replacements:0};
+ const listeners={};
+ const history={state:null,replaceState(_state,_title,url){navState.replacements++;location.href=new URL(url,location.href).href;},
+  pushState(_state,_title,url){navState.pushes++;location.href=new URL(url,location.href).href;}};
  const elements={onlineRefreshHistory:{innerHTML:row},onlineRefreshHistoryError:{hidden:true,textContent:''},
-  onlineRefreshHistoryRetry:{hidden:true,disabled:false},onlineRefreshHistoryLogin:{hidden:true,href:''},onlineRefreshQuery:{hidden:true}};
+  onlineRefreshHistoryRetry:{hidden:true,disabled:false,textContent:'重新读取刷新历史'},onlineRefreshHistoryLogin:{hidden:true,href:''},
+  onlineRefreshQuery:{hidden:true},onlineRefreshHistoryPagination:{hidden:true},onlineRefreshHistoryPrevious:historyLink(),
+  onlineRefreshHistoryNext:historyLink(),onlineRefreshHistoryRange:{textContent:''}};
  const reads=[];
- const context={window:{},location:{pathname:'/online-scripts',search:'?refresh_request_id='+ 'a'.repeat(32)},
+ const context={window:{history,addEventListener(name,handler){listeners[name]=handler;}},history,location,URL,
   document:{getElementById:id=>elements[id]},onlineRefreshHistoryControl:{pending:false,generation:0},
   fetch:async(url,options)=>{reads.push({url:String(url),options});const next=queue.shift();return next&&next.promise?await next.promise:next;},
   flsReadJsonResponse:async response=>{
@@ -2402,10 +2415,11 @@ function setup(queue){
   },
   escapeHtml:value=>String(value==null?'':value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char])),
   bindOnlineRefreshRetryForms:()=>{},bindOnlineRefreshConfirmForms:()=>{},updateOnlineRefreshStatus:async()=>{},
-  encodeURIComponent,Array,String,Number,Boolean,JSON,Math,
+  encodeURIComponent,Array,String,Number,Boolean,JSON,Math,Set,
  };
+ Object.assign(context.onlineRefreshHistoryControl,{offset:0,limit:8,total:1,snapshot,requestId:'a'.repeat(32)},overrides);
  vm.createContext(context);vm.runInContext(input.historyScript,context);vm.runInContext(input.binding,context);
- return {context,elements,reads,row};
+ return {context,elements,reads,row,location,navState,listeners};
 }
 (async()=>{
  let release;
@@ -2425,17 +2439,15 @@ function setup(queue){
  assert.equal(typeof concurrent.elements.onlineRefreshHistoryRetry.onclick,'function');
 
  concurrent.reads.length=0;
- const recovery=setup([response(503,{error:'temporary history outage'}),response(200,{ok:true,items:[
-  {request_id:'b'.repeat(32),status:'已完成',updated_at:'now',task_link_failure_count:0}
- ]})]);
+ const recovery=setup([response(503,{error:'temporary history outage'}),response(200,page([row('a'.repeat(32))]))]);
  await recovery.context.updateOnlineRefreshHistory();
  const retry=recovery.elements.onlineRefreshHistoryRetry.onclick();
  const duplicateRetry=recovery.context.updateOnlineRefreshHistory();
  await Promise.all([retry,duplicateRetry]);await settle();
  assert.equal(recovery.reads.length,2);
- assert.ok(recovery.reads.every(read=>read.url==='/api/online-scripts/refresh-history?limit=8'));
+ assert.ok(recovery.reads.every(read=>read.url==='/api/online-scripts/refresh-history?limit=8&offset=0&request_id='+'a'.repeat(32)+'&snapshot='+snapshot));
  assert.ok(recovery.reads.every(read=>read.options.cache==='no-store'&&read.options.credentials==='same-origin'));
- assert.match(recovery.elements.onlineRefreshHistory.innerHTML,/refresh-log\/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/);
+ assert.match(recovery.elements.onlineRefreshHistory.innerHTML,/refresh-log\/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/);
  assert.equal(recovery.elements.onlineRefreshHistoryError.hidden,true);
  assert.equal(recovery.elements.onlineRefreshHistoryRetry.hidden,true);
  assert.equal(recovery.elements.onlineRefreshHistoryLogin.hidden,true);
@@ -2444,15 +2456,76 @@ function setup(queue){
  for(const invalid of [
   response(503,'<html>proxy unavailable</html>','text/html'),
   response(200,'not-json'),
-  response(200,{ok:true,items:{}}),
-  response(200,{ok:true,items:[{}]}),
-  response(200,{ok:false,error:'invalid response',items:[]}),
+  response(200,{...page([]),items:{}}),
+  response(200,{...page([]),items:[{}]}),
+  response(200,{...page([]),ok:false,error:'invalid response'}),
  ]){
   const broken=setup([invalid]);await broken.context.updateOnlineRefreshHistory();
   assert.equal(broken.elements.onlineRefreshHistory.innerHTML,broken.row);
   assert.equal(broken.elements.onlineRefreshHistoryRetry.hidden,false);
   assert.equal(broken.elements.onlineRefreshHistoryError.hidden,false);
  }
+
+ const navigation=setup([
+  response(200,page(Array.from({length:8},(_,index)=>row((index+1).toString(16).padStart(32,'0'))),17)),
+  response(200,page(Array.from({length:8},(_,index)=>row((index+9).toString(16).padStart(32,'0'))),17,8)),
+  response(200,page(Array.from({length:8},(_,index)=>row((index+1).toString(16).padStart(32,'0'))),17)),
+  response(200,page(Array.from({length:8},(_,index)=>row((index+9).toString(16).padStart(32,'0'))),17,8)),
+  response(409,{ok:false,code:'snapshot_changed',error:'history changed',items:[],snapshot:'b'.repeat(64),total:17,
+   offset:16,limit:8,request_missing:false}),
+  response(503,{error:'latest history temporarily unavailable'}),
+  response(200,page(Array.from({length:8},(_,index)=>row((index+1).toString(16).padStart(32,'0'))),17,0,'b'.repeat(64))),
+ ],{requestId:''});
+ navigation.location.search='';navigation.location.href='http://example.test/online-scripts';
+ await navigation.context.updateOnlineRefreshHistory();
+ assert.equal(navigation.elements.onlineRefreshHistoryRange.textContent,'显示 1-8 / 17');
+ let prevented=false;
+ await navigation.elements.onlineRefreshHistoryNext.onclick({preventDefault(){prevented=true;}});
+ assert.equal(prevented,true,'history paging must use the read API without a page reload');
+ assert.equal(navigation.elements.onlineRefreshHistoryRange.textContent,'显示 9-16 / 17');
+ assert.match(navigation.elements.onlineRefreshHistory.innerHTML,/00000000000000000000000000000009/);
+ assert.equal(navigation.navState.pushes,1,'successful page navigation must create a history entry');
+ const firstPageUrl='http://example.test/online-scripts?refresh_history_offset=0&refresh_history_snapshot='+snapshot+'#online-status';
+ const secondPageUrl=navigation.location.href;
+ navigation.location.href=firstPageUrl;
+ await navigation.listeners.popstate();
+ assert.equal(navigation.elements.onlineRefreshHistoryRange.textContent,'显示 1-8 / 17','browser back must restore the previous page');
+ navigation.location.href=secondPageUrl;
+ await navigation.listeners.popstate();
+ assert.equal(navigation.elements.onlineRefreshHistoryRange.textContent,'显示 9-16 / 17','browser forward must restore the next page');
+ const previousMarkup=navigation.elements.onlineRefreshHistory.innerHTML;
+ await navigation.elements.onlineRefreshHistoryNext.onclick({preventDefault(){}});
+ assert.equal(navigation.elements.onlineRefreshHistory.innerHTML,previousMarkup,'snapshot conflict must preserve the last valid page');
+ assert.equal(navigation.elements.onlineRefreshHistoryError.hidden,false);
+ assert.equal(navigation.elements.onlineRefreshHistoryRetry.textContent,'重新读取最新历史');
+ await navigation.elements.onlineRefreshHistoryRetry.onclick();
+ assert.equal(navigation.elements.onlineRefreshHistoryRetry.textContent,'重新读取最新历史',
+  'a failed latest-page request must retain the reset recovery action');
+ await navigation.elements.onlineRefreshHistoryRetry.onclick();
+ assert.equal(navigation.elements.onlineRefreshHistoryRange.textContent,'显示 1-8 / 17');
+ assert.equal(navigation.elements.onlineRefreshHistoryError.hidden,true);
+ assert.equal(navigation.context.onlineRefreshHistoryControl.snapshot,'b'.repeat(64));
+ assert.equal(new URL(navigation.location.href).searchParams.get('refresh_history_offset'),'0');
+ assert.equal(navigation.navState.pushes,1);
+ assert.equal(navigation.navState.replacements,2,'initial load and explicit reset must replace the current URL');
+ assert.ok(navigation.reads.every(read=>!read.options.method||read.options.method==='GET'));
+
+ const missingSelection=setup([
+  response(404,{ok:false,error:'selected record was pruned',items:[]}),
+  response(200,page(Array.from({length:8},(_,index)=>row((index+20).toString(16).padStart(32,'0'))),10,0,'c'.repeat(64))),
+ ],{offset:8,requestId:'f'.repeat(32)});
+ missingSelection.location.href='http://example.test/online-scripts?refresh_history_offset=8&refresh_history_snapshot='+snapshot+
+  '&refresh_request_id='+'f'.repeat(32)+'#online-status';
+ missingSelection.location.search=new URL(missingSelection.location.href).search;
+ await missingSelection.context.updateOnlineRefreshHistory();
+ assert.equal(missingSelection.elements.onlineRefreshHistory.innerHTML,missingSelection.row,
+  'missing selected records must preserve the current page until reset succeeds');
+ assert.equal(missingSelection.context.onlineRefreshHistoryControl.requestMissing,true);
+ await missingSelection.elements.onlineRefreshHistoryRetry.onclick();
+ assert.equal(missingSelection.context.onlineRefreshHistoryControl.requestId,'');
+ assert.ok(!missingSelection.reads[1].url.includes('request_id='));
+ assert.equal(new URL(missingSelection.location.href).searchParams.has('refresh_request_id'),false);
+ assert.match(missingSelection.elements.onlineRefreshHistory.innerHTML,/00000000000000000000000000000014/);
 
  for(const status of [401,403]){
   const denied=setup([response(status,{error:'authentication required'})]);

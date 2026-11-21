@@ -342,7 +342,8 @@ class OnlineRefreshLogTests(unittest.TestCase):
             self.assertEqual(page.status_code, 200)
             html = page.get_data(as_text=True)
             self.assertIn(f'action="/online-scripts/refresh-retry/{original}"', html)
-            self.assertIn(f'refresh-history?limit=8&request_id={original}', html)
+            self.assertIn(f'onlineRefreshHistoryControl.requestId = "{original}"', html)
+            self.assertIn("refresh_history_snapshot=", html)
             self.assertIn('name="csrf_token"', html)
             before = constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes()
             current_before = constants.ONLINE_REFRESH_STATE_FILE.read_bytes()
@@ -725,7 +726,7 @@ const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
             self.assertEqual(missing.json["items"], [])
             self.assertEqual(constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes(), history_before_errors)
             with patch(
-                "fls_manager.routes.online_scripts.refresh.get_online_refresh_history",
+                "fls_manager.routes.online_scripts.refresh.get_online_refresh_history_page",
                 side_effect=RuntimeError("history disk unavailable"),
             ):
                 failed_api = client.get(
@@ -735,12 +736,179 @@ const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
             self.assertEqual(failed_api.json["items"], [])
             self.assertEqual(constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes(), history_before_errors)
             with patch(
-                "fls_manager.routes.online_scripts.pages.get_online_refresh_history",
+                "fls_manager.routes.online_scripts.pages.get_online_refresh_history_page",
                 side_effect=RuntimeError("history disk unavailable"),
             ):
                 failed_page = client.get("/online-scripts", headers={"X-Token": TOKEN})
             self.assertEqual(failed_page.status_code, 200)
             self.assertIn("历史无法读取", failed_page.get_data(as_text=True))
+
+    def test_refresh_history_pages_are_stable_and_recover_after_change_or_pruning(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import constants
+            from fls_manager.online_scripts.constants import update_online_refresh_state
+
+            request_ids = []
+            for number in range(1, 12):
+                request_id = f"{number:032x}"
+                self._state(
+                    base_dir,
+                    refresh_id=f"{number + 100:032x}",
+                    request_id=request_id,
+                )
+                update_online_refresh_state(
+                    updated_at=f"2026-11-21T00:00:{number:02d}",
+                )
+                request_ids.append(request_id)
+
+            client = app.test_client()
+            headers = {"X-Token": TOKEN}
+            before_reads = (
+                constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes(),
+                constants.ONLINE_REFRESH_STATE_FILE.read_bytes(),
+            )
+            first = client.get(
+                "/api/online-scripts/refresh-history?limit=4&offset=0", headers=headers,
+            )
+            self.assertEqual(first.status_code, 200)
+            self.assertEqual(first.json["total"], 11)
+            self.assertEqual(first.json["offset"], 0)
+            self.assertEqual(first.json["limit"], 4)
+            self.assertRegex(first.json["snapshot"], r"^[a-f0-9]{64}$")
+            self.assertIsNone(first.json["previous_offset"])
+            self.assertEqual(first.json["next_offset"], 4)
+
+            second = client.get(
+                "/api/online-scripts/refresh-history?limit=4&offset=4&snapshot=" + first.json["snapshot"],
+                headers=headers,
+            )
+            third = client.get(
+                "/api/online-scripts/refresh-history?limit=4&offset=8&snapshot=" + first.json["snapshot"],
+                headers=headers,
+            )
+            self.assertEqual(second.status_code, 200)
+            self.assertEqual(third.status_code, 200)
+            self.assertEqual(second.json["previous_offset"], 0)
+            self.assertEqual(second.json["next_offset"], 8)
+            self.assertEqual(third.json["previous_offset"], 4)
+            self.assertIsNone(third.json["next_offset"])
+            all_ids = [item["request_id"] for page in (first, second, third) for item in page.json["items"]]
+            self.assertEqual(len(all_ids), 11)
+            self.assertEqual(len(set(all_ids)), 11)
+            self.assertEqual(set(all_ids), set(request_ids))
+            self.assertEqual(first.json["snapshot"], second.json["snapshot"])
+            self.assertEqual(second.json["snapshot"], third.json["snapshot"])
+            self.assertEqual(
+                (constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes(), constants.ONLINE_REFRESH_STATE_FILE.read_bytes()),
+                before_reads,
+                "history GETs must not publish state",
+            )
+
+            selected = client.get(
+                "/api/online-scripts/refresh-history?limit=4&request_id=" + request_ids[0],
+                headers=headers,
+            )
+            self.assertEqual(selected.status_code, 200)
+            self.assertEqual(selected.json["items"][0]["request_id"], request_ids[0])
+            self.assertEqual(selected.json["total"], 11)
+
+            page = client.get("/online-scripts", headers=headers)
+            page_html = page.get_data(as_text=True)
+            self.assertIn('id="onlineRefreshHistoryPagination"', page_html)
+            self.assertIn("显示 1-8 / 11", page_html)
+            self.assertIn('data-history-offset="8"', page_html)
+            self.assertIn("refresh_history_snapshot=" + first.json["snapshot"], page_html)
+            page_two = client.get(
+                "/online-scripts?refresh_history_offset=8&refresh_history_snapshot=" + first.json["snapshot"],
+                headers=headers,
+            )
+            self.assertEqual(page_two.status_code, 200)
+            self.assertIn("显示 9-11 / 11", page_two.get_data(as_text=True))
+
+            invalid_urls = (
+                "/api/online-scripts/refresh-history?limit=0",
+                "/api/online-scripts/refresh-history?offset=-1",
+                "/api/online-scripts/refresh-history?offset=8",
+                "/api/online-scripts/refresh-history?offset=8&snapshot=bad",
+                "/api/online-scripts/refresh-history?request_id=bad",
+            )
+            for url in invalid_urls:
+                with self.subTest(url=url):
+                    self.assertEqual(client.get(url, headers=headers).status_code, 400)
+            out_of_range = client.get(
+                "/api/online-scripts/refresh-history?limit=4&offset=12&snapshot=" + first.json["snapshot"],
+                headers=headers,
+            )
+            self.assertEqual(out_of_range.status_code, 416)
+            self.assertEqual(out_of_range.json["code"], "offset_out_of_range")
+            self.assertRegex(out_of_range.json["snapshot"], r"^[a-f0-9]{64}$")
+            out_of_range_page = client.get(
+                "/online-scripts?refresh_history_offset=12&refresh_history_snapshot=" + first.json["snapshot"],
+                headers=headers,
+            )
+            self.assertEqual(out_of_range_page.status_code, 200)
+            self.assertIn("显示 1-8 / 11", out_of_range_page.get_data(as_text=True))
+            self.assertIn("重新读取刷新历史", out_of_range_page.get_data(as_text=True))
+            self.assertEqual(client.get("/online-scripts?refresh_history_offset=bad", headers=headers).status_code, 400)
+            self.assertEqual(client.get("/online-scripts?refresh_history_offset=201", headers=headers).status_code, 400)
+            malformed_snapshot = client.get(
+                "/online-scripts?refresh_history_snapshot=%3C%2Fscript%3E%3Cscript%3Ealert(1)%3C%2Fscript%3E",
+                headers=headers,
+            ).get_data(as_text=True)
+            self.assertNotIn("</script><script>alert(1)", malformed_snapshot)
+            self.assertIn('onlineRefreshHistoryControl.snapshot = ""', malformed_snapshot)
+
+            update_online_refresh_state(updated_at="2026-11-22T00:00:00", message="changed during pagination")
+            changed_before_read = (
+                constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes(),
+                constants.ONLINE_REFRESH_STATE_FILE.read_bytes(),
+            )
+            changed = client.get(
+                "/api/online-scripts/refresh-history?limit=4&offset=4&snapshot=" + first.json["snapshot"],
+                headers=headers,
+            )
+            self.assertEqual(changed.status_code, 409)
+            self.assertEqual(changed.json["code"], "snapshot_changed")
+            self.assertFalse(changed.json["request_missing"])
+            self.assertNotEqual(changed.json["snapshot"], first.json["snapshot"])
+            self.assertEqual(
+                (constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes(), constants.ONLINE_REFRESH_STATE_FILE.read_bytes()),
+                changed_before_read,
+            )
+            stale_page = client.get(
+                "/online-scripts?refresh_history_offset=8&refresh_history_snapshot=" + first.json["snapshot"],
+                headers=headers,
+            )
+            self.assertEqual(stale_page.status_code, 200)
+            stale_html = stale_page.get_data(as_text=True)
+            self.assertIn("翻页期间发生变化", stale_html)
+            self.assertIn("显示 1-8 / 11", stale_html)
+            self.assertIn("onlineRefreshHistoryControl.offset = 0", stale_html)
+
+            history = json.loads(constants.ONLINE_REFRESH_HISTORY_FILE.read_text(encoding="utf-8"))
+            history.pop(request_ids[0])
+            constants.ONLINE_REFRESH_HISTORY_FILE.write_text(json.dumps(history), encoding="utf-8")
+            pruned_before_read = constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes()
+            pruned = client.get(
+                "/api/online-scripts/refresh-history?limit=4&offset=4&request_id=" + request_ids[0]
+                + "&snapshot=" + changed.json["snapshot"],
+                headers=headers,
+            )
+            self.assertEqual(pruned.status_code, 404)
+            self.assertEqual(constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes(), pruned_before_read)
+            missing = client.get(
+                "/api/online-scripts/refresh-history?request_id=" + request_ids[0], headers=headers,
+            )
+            self.assertEqual(missing.status_code, 404)
+
+            missing_page = client.get(
+                "/online-scripts?refresh_request_id=" + request_ids[0], headers=headers,
+            )
+            self.assertEqual(missing_page.status_code, 404)
+            missing_html = missing_page.get_data(as_text=True)
+            self.assertIn("原刷新记录不存在或已清理", missing_html)
+            self.assertIn("重新读取最新历史", missing_html)
+            self.assertEqual(constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes(), pruned_before_read)
 
     def test_corrupt_refresh_history_is_reported_without_falling_back_to_new_log(self):
         with isolated_app() as (app, base_dir):

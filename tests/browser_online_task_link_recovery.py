@@ -290,6 +290,8 @@ def main():
             update_online_refresh_state(
                 id=refresh_id, request_id=original, proxy_id="", running=False,
                 status="失败", error="fixture retry needed", message="", task_link_failures=[],
+                task_link_failure_count=0,
+                task_link_failure_digest=constants._refresh_task_failure_digest([]),
                 cache_published=False, expected_cache_fingerprint=source.online_script_cache_fingerprint(),
                 published_cache_fingerprint="", source_fingerprint=source.online_script_source_fingerprint(),
                 retry_of="", confirmation="", confirmation_fingerprint="",
@@ -334,6 +336,11 @@ def main():
             constants.ONLINE_REFRESH_HISTORY_FILE.write_text(json.dumps(records), encoding="utf-8")
             update_online_refresh_state(**records[previous_id])
             return jsonify(original=previous_id, count=len(records))
+
+        @app.route("/api/fixture/refresh-history-change", methods=["POST"])
+        def refresh_history_change_fixture():
+            update_online_refresh_state(status="部分完成", message="history changed fixture", updated_at="zz-history-change")
+            return jsonify(ok=True)
 
         @app.route("/api/fixture/refresh-publication-failure", methods=["POST"])
         def refresh_publication_failure_fixture():
@@ -460,7 +467,9 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
 (async()=>{
  const browser=await chromium.launch({executablePath:process.env.FLS_CHROMIUM,args:['--no-sandbox']});
  try{
-  for(const viewport of [{width:390,height:844},{width:1280,height:800}]){
+  const paginationWidth=Number(process.env.FLS_REFRESH_HISTORY_PAGINATION_VIEWPORT||0);
+  const viewports=paginationWidth===390?[{width:390,height:844}]:paginationWidth===1280?[{width:1280,height:800}]:[{width:390,height:844},{width:1280,height:800}];
+  for(const viewport of viewports){
    const context=await browser.newContext({viewport}),page=await context.newPage();
    const errors=[];page.on('pageerror',e=>errors.push(e.message));
    const base=process.env.FLS_UI_BASE,headers={'X-Token':process.env.FLS_UI_TOKEN};
@@ -837,18 +846,18 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    const historyRequestId=('c'+viewport.width.toString(16)).padEnd(32,'c');
    const historyRefreshId=('d'+viewport.width.toString(16)).padEnd(32,'d');
    await fixture({reset:true,fail:true});
-   const historyFixture=await page.request.post(base+'/api/fixture/online-refresh',{headers,data:{
+   const refreshHistoryFixture=await page.request.post(base+'/api/fixture/online-refresh',{headers,data:{
      running:false,request_id:historyRequestId,refresh_id:historyRefreshId,
    }});
-   assert.equal(historyFixture.status(),200);
+   assert.equal(refreshHistoryFixture.status(),200);
    await page.evaluate(()=>sessionStorage.removeItem('fls-online-refresh-request'));
-   const historyUrl=base+'/api/online-scripts/refresh-history?limit=8';
+   const historyUrl=base+'/api/online-scripts/refresh-history';
    let historyReads=0,historyRefreshPosts=0;
    const countHistoryRefreshPosts=request=>{
      if(request.method()==='POST'&&request.url().includes('/api/online-scripts/refresh')) historyRefreshPosts++;
    };
    page.on('request',countHistoryRefreshPosts);
-   await page.route(historyUrl,route=>{
+   await page.route('**/api/online-scripts/refresh-history*',route=>{
      historyReads++;
      if(historyReads===1) return route.fulfill({status:503,contentType:'text/html',body:'history gateway unavailable'});
      if(historyReads===2) return route.fulfill({status:401,contentType:'application/json',body:JSON.stringify({error:'login expired'})});
@@ -867,7 +876,7 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    assert.equal(await page.locator('#onlineRefreshHistoryLogin').getAttribute('href'),'/login?next=%2Fonline-scripts');
    assert.equal(await historyRow.count(),1,'failed history reads must preserve the server-rendered row');
    const [historyRecovered]=await Promise.all([
-     page.waitForResponse(response=>response.url()===historyUrl&&response.status()===200),
+     page.waitForResponse(response=>response.url().startsWith(historyUrl)&&response.status()===200),
      page.locator('#onlineRefreshHistoryRetry').click(),
    ]);
    assert.equal(historyRecovered.status(),200);
@@ -878,7 +887,7 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    assert.equal(historyReads,3);
    assert.equal(historyRefreshPosts,0,'history recovery must not submit a refresh or task-link request');
    page.off('request',countHistoryRefreshPosts);
-   await page.unroute(historyUrl);
+   await page.unroute('**/api/online-scripts/refresh-history*');
 
    const manyFailureRequestId='9'.repeat(32);
    await fixture({reset:true,fail:true});
@@ -1001,6 +1010,59 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    const capacitySetup=await page.request.post(base+'/api/fixture/refresh-history-capacity',{headers,data:{}});
    assert.equal(capacitySetup.status(),200);
    const capacityOriginal=(await capacitySetup.json()).original;
+   await page.goto(base+'/online-scripts');
+   await page.waitForFunction(()=>document.querySelector('#onlineRefreshHistoryRange').textContent==='显示 1-8 / 200');
+   const historyPagerBinding=await page.locator('#onlineRefreshHistoryNext').evaluate(link=>({
+     onclick:typeof link.onclick,bound:link.dataset.historyBound,href:link.href,hidden:link.hidden,
+     localNavigation:link.hasAttribute('data-fls-local-navigation'),
+   }));
+   assert.equal(historyPagerBinding.onclick,'function',JSON.stringify(historyPagerBinding));
+   assert.equal(historyPagerBinding.bound,'true',JSON.stringify(historyPagerBinding));
+   assert.equal(historyPagerBinding.localNavigation,true,JSON.stringify(historyPagerBinding));
+   const firstHistoryPage=await page.locator('#onlineRefreshHistory').innerHTML();
+   const documentNavigations=[];
+   const recordHistoryDocumentNavigation=request=>{
+     if(request.isNavigationRequest()&&request.url().includes('/online-scripts?refresh_history_offset='))
+       documentNavigations.push(request.url());
+   };
+   page.on('request',recordHistoryDocumentNavigation);
+   const [historyPageTwo]=await Promise.all([
+     page.waitForResponse(response=>response.url().includes('/api/online-scripts/refresh-history?limit=8&offset=8&')&&response.status()===200),
+     page.locator('#onlineRefreshHistoryNext').click(),
+   ]);
+   assert.equal(historyPageTwo.status(),200);
+   await page.waitForFunction(()=>document.querySelector('#onlineRefreshHistoryRange').textContent==='显示 9-16 / 200');
+   assert.equal(new URL(page.url()).searchParams.get('refresh_history_offset'),'8');
+   assert.deepEqual(documentNavigations,[],'pagination should update through its history API, not a document request');
+   assert.notEqual(await page.locator('#onlineRefreshHistory').innerHTML(),firstHistoryPage);
+   await page.goBack();
+   await page.waitForFunction(()=>document.querySelector('#onlineRefreshHistoryRange').textContent==='显示 1-8 / 200');
+   assert.equal(new URL(page.url()).searchParams.get('refresh_history_offset'),'0');
+   await page.goForward();
+   await page.waitForFunction(()=>document.querySelector('#onlineRefreshHistoryRange').textContent==='显示 9-16 / 200');
+   assert.equal(new URL(page.url()).searchParams.get('refresh_history_offset'),'8');
+   const secondHistoryPage=await page.locator('#onlineRefreshHistory').innerHTML();
+   const changeHistory=await page.request.post(base+'/api/fixture/refresh-history-change',{headers,data:{}});
+   assert.equal(changeHistory.status(),200);
+   await page.locator('#onlineRefreshHistoryNext').click();
+   await page.waitForFunction(()=>document.querySelector('#onlineRefreshHistoryError').textContent.includes('HTTP 409'));
+   assert.deepEqual(documentNavigations,[],'stale pagination should not navigate away while recovering');
+   assert.equal(await page.locator('#onlineRefreshHistory').innerHTML(),secondHistoryPage,
+     'a stale snapshot must keep the last rendered page until recovery succeeds');
+   await page.locator('#onlineRefreshHistoryRetry').click();
+   await page.waitForFunction(()=>document.querySelector('#onlineRefreshHistoryError').hidden&&
+     document.querySelector('#onlineRefreshHistoryRange').textContent==='显示 1-8 / 200');
+   assert.equal(new URL(page.url()).searchParams.get('refresh_history_offset'),'0');
+   assert.equal(await page.locator('#onlineRefreshHistoryPrevious').isVisible(),false);
+   assert.equal(await page.locator('#onlineRefreshHistoryNext').isVisible(),true);
+   await page.screenshot({path:'/tmp/fls-refresh-history-pagination-'+viewport.width+'.png'});
+   page.off('request',recordHistoryDocumentNavigation);
+   if(process.env.FLS_REFRESH_HISTORY_PAGINATION_ONLY==='1'){
+     assert.deepEqual(errors,[]);
+     console.log('online refresh history pagination passed '+viewport.width);
+     await context.close();
+     continue;
+   }
    await page.goto(base+'/online-scripts?refresh_request_id='+capacityOriginal+'#onlineRefreshHistory');
    const capacityForm=page.locator('#onlineRefreshHistory form[data-refresh-retry-of="'+capacityOriginal+'"]');
    await capacityForm.waitFor();
