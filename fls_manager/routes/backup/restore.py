@@ -3,8 +3,10 @@ from . import _common as backup_state
 import hashlib
 import json
 import re
-from flask import send_file
-from contextlib import nullcontext
+import threading
+import uuid
+from flask import redirect, send_file
+from contextlib import contextmanager, nullcontext
 from ... import models
 from ...csrf import csrf_token
 from ...storage import storage_transaction
@@ -31,8 +33,209 @@ def _restore_archive_backup_path():
     return BACKUP_RESTORE_REQUESTS_DIR / ".archive.bak"
 
 
-RESTORE_ARCHIVE_MAINTENANCE_NOTICE = ""
-RESTORE_ARCHIVE_MAINTENANCE_REQUIRED = False
+RESTORE_ARCHIVE_MAINTENANCE_NAME = ".archive-maintenance"
+_RESTORE_ARCHIVE_PROCESS_LOCK_STATE = threading.local()
+
+
+@contextmanager
+def _restore_archive_process_lock():
+    depth = getattr(_RESTORE_ARCHIVE_PROCESS_LOCK_STATE, "depth", 0)
+    if depth:
+        _RESTORE_ARCHIVE_PROCESS_LOCK_STATE.depth = depth + 1
+        try:
+            yield
+        finally:
+            _RESTORE_ARCHIVE_PROCESS_LOCK_STATE.depth -= 1
+        return
+
+    lock_path = BACKUP_RESTORE_REQUESTS_DIR.with_name(BACKUP_RESTORE_REQUESTS_DIR.name + ".lock")
+    if lock_path.is_symlink():
+        raise RuntimeError("备份恢复跨进程锁不能是符号链接")
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
+    fd = os.open(lock_path, flags, 0o600)
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise RuntimeError("备份恢复跨进程锁必须是普通文件")
+    if os.name == "nt":
+        import msvcrt
+        if os.fstat(fd).st_size == 0:
+            os.write(fd, b"\0")
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    _RESTORE_ARCHIVE_PROCESS_LOCK_STATE.depth = 1
+    try:
+        yield
+    finally:
+        _RESTORE_ARCHIVE_PROCESS_LOCK_STATE.depth = 0
+        try:
+            if os.name == "nt":
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def _restore_archive_maintenance_path():
+    return BACKUP_RESTORE_REQUESTS_DIR / RESTORE_ARCHIVE_MAINTENANCE_NAME
+
+
+def _restore_archive_maintenance_notice(state):
+    if state["required"] and state["kind"] == "publication":
+        return "恢复归档索引发布尚未完成；请求明细已保留，请核对历史后重试。"
+    if state["required"]:
+        return "恢复归档索引冗余修复尚未完成；原恢复请求仍保留，请核对后重试。"
+    if state["kind"] == "publication":
+        return "恢复归档索引发布已确认；原恢复请求未重复提交目录。"
+    return "恢复归档索引副本已自动合并并修复；原恢复请求已保留，重放不会再次覆盖目录。"
+
+
+def _read_restore_archive_maintenance_state():
+    directory = BACKUP_RESTORE_REQUESTS_DIR
+    if directory.is_symlink() or directory.exists() and not directory.is_dir():
+        raise RuntimeError("备份恢复维护状态目录无效")
+    path = _restore_archive_maintenance_path()
+    if path.is_symlink() or path.exists() and not path.is_file():
+        raise RuntimeError("备份恢复维护状态文件无效")
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("备份恢复维护状态损坏") from exc
+    if (not isinstance(state, dict) or state.get("version") != 1
+        or not isinstance(state.get("event_id"), str)
+        or not re.fullmatch(r"[a-f0-9]{32}", state["event_id"])
+        or type(state.get("required")) is not bool
+        or not isinstance(state.get("fingerprint"), str)
+        or not re.fullmatch(r"[a-f0-9]{64}", state["fingerprint"])
+        or not isinstance(state.get("target_digest"), str)
+        or not re.fullmatch(r"[a-f0-9]{64}", state["target_digest"])
+        or state.get("kind") not in ("repair", "publication", "unavailable")):
+        raise RuntimeError("备份恢复维护状态结构无效")
+    return state
+
+
+def _write_restore_archive_maintenance_state(state):
+    directory = BACKUP_RESTORE_REQUESTS_DIR
+    if directory.is_symlink() or not directory.is_dir():
+        raise RuntimeError("备份恢复回执目录无效")
+    path = _restore_archive_maintenance_path()
+    temp = path.with_name(path.name + ".tmp")
+    if path.is_symlink() or path.exists() and not path.is_file():
+        raise RuntimeError("备份恢复维护状态文件无效")
+    if temp.is_symlink() or temp.exists() and not temp.is_file():
+        raise RuntimeError("备份恢复维护状态临时文件无效")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
+    fd = os.open(temp, flags, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            fd = -1
+            json.dump(state, stream, ensure_ascii=True, separators=(",", ":"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
+        _sync_restore_archive_directory()
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        temp.unlink(missing_ok=True)
+
+
+def _clear_restore_archive_maintenance_state(event_id):
+    state = _read_restore_archive_maintenance_state()
+    if state is None or state["event_id"] != event_id:
+        return False
+    _restore_archive_maintenance_path().unlink()
+    _sync_restore_archive_directory()
+    return True
+
+
+def _restore_archive_observation(parsed, index, errors):
+    paths = (_restore_archive_index_path(), _restore_archive_backup_path())
+    copies = []
+    for path, candidate in zip(paths, parsed):
+        if candidate is None:
+            if path.is_symlink():
+                copies.append("symlink")
+            elif path.exists():
+                copies.append("invalid")
+            else:
+                copies.append("missing")
+        else:
+            copies.append("current" if candidate == index else "stale")
+    material = {
+        "copies": copies,
+        "index": hashlib.sha256(json.dumps(
+            index, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest(),
+        "errors": [bool(error) for error in errors],
+    }
+    return hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _restore_archive_index_digest(index):
+    return hashlib.sha256(json.dumps(
+        index, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+
+
+def _persist_restore_archive_maintenance(required, fingerprint, target_digest, kind):
+    previous = _read_restore_archive_maintenance_state()
+    reusable = previous and previous["target_digest"] == target_digest and (not required or previous["required"])
+    event_id = previous["event_id"] if reusable else uuid.uuid4().hex
+    state = {
+        "version": 1, "event_id": event_id, "required": bool(required),
+        "fingerprint": fingerprint, "target_digest": target_digest, "kind": kind,
+    }
+    if previous == state:
+        return previous
+    _write_restore_archive_maintenance_state(state)
+    return state
+
+
+def _restore_archive_maintenance_payload(state=None, *, unreadable=False):
+    if unreadable:
+        return {
+            "event_id": "",
+            "required": True,
+            "notice": "恢复归档维护状态无法读取；原恢复请求与目录均未清理，请重试核对。",
+        }
+    if state is None:
+        state = _read_restore_archive_maintenance_state()
+    if state is None:
+        return None
+    return {
+        "event_id": state["event_id"],
+        "required": state["required"],
+        "notice": _restore_archive_maintenance_notice(state),
+    }
+
+
+def _attach_restore_archive_maintenance(payload, state=None, *, unreadable=False):
+    maintenance = _restore_archive_maintenance_payload(state, unreadable=unreadable)
+    payload["maintenance"] = maintenance
+    notices = [payload.get("maintenance_error", "")]
+    if maintenance:
+        notices.append(maintenance["notice"])
+    payload["maintenance_error"] = "；".join(dict.fromkeys(filter(None, notices)))
+    payload["maintenance_required"] = bool(maintenance and maintenance["required"])
+    return payload
+
+
+def _attach_current_restore_archive_maintenance(payload):
+    try:
+        state = _read_restore_archive_maintenance_state()
+        if state is None:
+            return _attach_restore_archive_maintenance(payload, unreadable=True)
+        return _attach_restore_archive_maintenance(payload, state)
+    except Exception:
+        return _attach_restore_archive_maintenance(payload, unreadable=True)
 
 
 def _read_restore_archive_index_file(path):
@@ -89,7 +292,6 @@ def _sync_restore_archive_directory():
 
 
 def _write_restore_archive_index_file(path, index):
-    global RESTORE_ARCHIVE_MAINTENANCE_NOTICE, RESTORE_ARCHIVE_MAINTENANCE_REQUIRED
     directory = BACKUP_RESTORE_REQUESTS_DIR
     if directory.is_symlink() or not directory.is_dir():
         raise RuntimeError("备份恢复回执目录无效")
@@ -109,12 +311,7 @@ def _write_restore_archive_index_file(path, index):
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temp, path)
-        try:
-            _sync_restore_archive_directory()
-        except Exception as exc:
-            RESTORE_ARCHIVE_MAINTENANCE_NOTICE = f"恢复归档索引副本目录同步尚未完成：{exc}"
-            RESTORE_ARCHIVE_MAINTENANCE_REQUIRED = True
-            raise
+        _sync_restore_archive_directory()
     finally:
         if fd >= 0:
             os.close(fd)
@@ -128,12 +325,10 @@ def _write_restore_archive_index_pair(index):
 
 
 def _read_restore_archive_index(*, require_redundancy=False):
-    global RESTORE_ARCHIVE_MAINTENANCE_NOTICE, RESTORE_ARCHIVE_MAINTENANCE_REQUIRED
     directory = BACKUP_RESTORE_REQUESTS_DIR
     if directory.is_symlink():
         raise RuntimeError("备份恢复回执目录不能是符号链接")
     if not directory.exists():
-        RESTORE_ARCHIVE_MAINTENANCE_REQUIRED = False
         return {"version": 1, "records": {}}
     if not directory.is_dir():
         raise RuntimeError("备份恢复回执目录无效")
@@ -147,44 +342,62 @@ def _read_restore_archive_index(*, require_redundancy=False):
             errors.append(f"{path.name}: {exc}")
     if all(index is None for index in parsed):
         if errors:
-            raise RuntimeError("主备恢复归档索引均不可用：" + "；".join(errors))
-        RESTORE_ARCHIVE_MAINTENANCE_REQUIRED = False
+            empty_index = {"version": 1, "records": {}}
+            fingerprint = _restore_archive_observation(parsed, empty_index, errors)
+            _persist_restore_archive_maintenance(
+                True, fingerprint, _restore_archive_index_digest(empty_index), "unavailable",
+            )
+            raise RuntimeError("主备恢复归档索引均不可用")
+        _read_restore_archive_maintenance_state()
         return {"version": 1, "records": {}}
 
     index = _merge_restore_archive_indexes(parsed)
     needs_repair = any(candidate is None or candidate != index for candidate in parsed)
+    maintenance = _read_restore_archive_maintenance_state()
     if needs_repair:
-        sources = "主索引" if parsed[0] is not None else "备份索引"
-        notice = f"恢复归档索引副本不完整，正在从有效{sources}恢复。"
+        fingerprint = _restore_archive_observation(parsed, index, errors)
+        target_digest = _restore_archive_index_digest(index)
+        maintenance = _persist_restore_archive_maintenance(True, fingerprint, target_digest, "repair")
         try:
             _write_restore_archive_index_pair(index)
-        except Exception as exc:
-            RESTORE_ARCHIVE_MAINTENANCE_NOTICE = f"{notice}冗余副本修复尚未完成：{exc}"
-            RESTORE_ARCHIVE_MAINTENANCE_REQUIRED = True
+        except Exception:
             if require_redundancy:
-                raise RuntimeError(RESTORE_ARCHIVE_MAINTENANCE_NOTICE) from exc
-        else:
-            RESTORE_ARCHIVE_MAINTENANCE_NOTICE = f"恢复归档索引副本不完整，已从有效{sources}自动合并并修复。"
-            RESTORE_ARCHIVE_MAINTENANCE_REQUIRED = False
+                raise RuntimeError("恢复归档索引冗余副本修复尚未完成")
+            return index
+        try:
+            _persist_restore_archive_maintenance(False, fingerprint, target_digest, "repair")
+        except Exception:
+            if require_redundancy:
+                raise RuntimeError("恢复归档维护状态尚未确认")
+            return index
+    elif maintenance and maintenance["required"]:
+        target_digest = _restore_archive_index_digest(index)
+        if maintenance["kind"] == "unavailable" or target_digest != maintenance["target_digest"]:
+            return index
+        try:
+            _sync_restore_archive_directory()
+            if maintenance["kind"] == "publication":
+                _persist_restore_archive_maintenance(
+                    False, maintenance["fingerprint"], target_digest, "publication",
+                )
+            else:
+                _persist_restore_archive_maintenance(
+                    False, maintenance["fingerprint"], target_digest, "repair",
+                )
+        except Exception as exc:
+            if require_redundancy:
+                raise RuntimeError("恢复归档维护状态尚未确认") from exc
+            return index
     elif require_redundancy:
-        # A previous replace may have succeeded before directory fsync failed.
         try:
             _sync_restore_archive_directory()
         except Exception as exc:
-            RESTORE_ARCHIVE_MAINTENANCE_NOTICE = f"恢复归档索引副本目录同步尚未完成：{exc}"
-            RESTORE_ARCHIVE_MAINTENANCE_REQUIRED = True
-            raise
-        if RESTORE_ARCHIVE_MAINTENANCE_REQUIRED:
-            RESTORE_ARCHIVE_MAINTENANCE_NOTICE = ""
-        RESTORE_ARCHIVE_MAINTENANCE_REQUIRED = False
+            fingerprint = _restore_archive_observation(parsed, index, errors)
+            _persist_restore_archive_maintenance(
+                True, fingerprint, _restore_archive_index_digest(index), "repair",
+            )
+            raise RuntimeError("恢复归档索引副本目录同步尚未完成") from exc
     return index
-
-
-def _take_restore_archive_maintenance_notice():
-    global RESTORE_ARCHIVE_MAINTENANCE_NOTICE
-    notice = RESTORE_ARCHIVE_MAINTENANCE_NOTICE
-    RESTORE_ARCHIVE_MAINTENANCE_NOTICE = ""
-    return notice
 
 
 def _restore_request_identity_matches(left, right):
@@ -212,7 +425,7 @@ def _restore_archive_summary(record):
 
 
 def _compact_restore_receipts():
-    with storage_transaction(), BACKUP_RESTORE_REQUEST_LOCK:
+    with storage_transaction(), BACKUP_RESTORE_REQUEST_LOCK, _restore_archive_process_lock():
         directory = BACKUP_RESTORE_REQUESTS_DIR
         if directory.is_symlink():
             raise RuntimeError("备份恢复回执目录不能是符号链接")
@@ -259,7 +472,11 @@ def _compact_restore_receipts():
             if existing and not _restore_request_identity_matches(existing, summary):
                 raise RuntimeError("恢复归档请求标识冲突")
             index["records"][request_id] = existing or summary
+        target_digest = _restore_archive_index_digest(index)
+        fingerprint = hashlib.sha256(("archive-publication:" + target_digest).encode()).hexdigest()
+        pending = _persist_restore_archive_maintenance(True, fingerprint, target_digest, "publication")
         _write_restore_archive_index_pair(index)
+        _clear_restore_archive_maintenance_state(pending["event_id"])
         for record in selected:
             _restore_request_path(record["request_id"]).unlink()
         return len(selected)
@@ -371,15 +588,12 @@ def api_backup_restore_history():
         return jsonify(ok=False, msg="恢复历史分页参数无效"), 400
 
     try:
-        with storage_transaction(), BACKUP_RESTORE_REQUEST_LOCK:
+        with storage_transaction(), BACKUP_RESTORE_REQUEST_LOCK, _restore_archive_process_lock():
             maintenance_notices = []
             try:
                 _compact_restore_receipts()
             except Exception as exc:
                 maintenance_notices.append(_bounded_restore_diagnostic(str(exc)))
-            previous_notice = _take_restore_archive_maintenance_notice()
-            if previous_notice:
-                maintenance_notices.append(previous_notice)
 
             directory = BACKUP_RESTORE_REQUESTS_DIR
             if directory.is_symlink():
@@ -411,9 +625,10 @@ def api_backup_restore_history():
                         _save_restore_request(record)
                     records_by_id[request_id] = record
 
-            repair_notice = _take_restore_archive_maintenance_notice()
-            if repair_notice:
-                maintenance_notices.append(repair_notice)
+            maintenance = _read_restore_archive_maintenance_state()
+            maintenance_payload = _restore_archive_maintenance_payload(maintenance)
+            if maintenance_payload:
+                maintenance_notices.append(maintenance_payload["notice"])
 
             records = []
             for record in records_by_id.values():
@@ -429,20 +644,24 @@ def api_backup_restore_history():
             ).encode("utf-8")).hexdigest()
             total = len(records)
             items = records[offset:offset + limit]
-            return jsonify(
-                ok=True,
-                items=items,
-                snapshot=snapshot,
-                total=total,
-                limit=limit,
-                offset=offset,
-                has_more=offset + len(items) < total,
-                active=bool(backup_state.RESTORE_ACTIVE),
-                maintenance_error="；".join(dict.fromkeys(filter(None, maintenance_notices))),
-                maintenance_required=RESTORE_ARCHIVE_MAINTENANCE_REQUIRED,
-            )
+            return jsonify(_attach_restore_archive_maintenance(
+                {
+                    "ok": True,
+                    "items": items,
+                    "snapshot": snapshot,
+                    "total": total,
+                    "limit": limit,
+                    "offset": offset,
+                    "has_more": offset + len(items) < total,
+                    "active": bool(backup_state.RESTORE_ACTIVE),
+                    "maintenance_error": "；".join(dict.fromkeys(filter(None, maintenance_notices))),
+                },
+                maintenance,
+            ))
     except Exception:
-        return jsonify(ok=False, msg="备份恢复历史无法完整读取，请修复回执后重试"), 500
+        return jsonify(_attach_current_restore_archive_maintenance(
+            {"ok": False, "msg": "备份恢复历史无法完整读取，请修复回执后重试"},
+        )), 500
 
 
 @bp.route("/api/backup/restore/<request_id>")
@@ -450,8 +669,9 @@ def api_backup_restore_request(request_id):
     if not re.fullmatch(r"[a-f0-9]{32}", request_id):
         return jsonify(ok=False, msg="恢复请求标识无效"), 400
     try:
-        with storage_transaction(), BACKUP_RESTORE_REQUEST_LOCK:
+        with storage_transaction(), BACKUP_RESTORE_REQUEST_LOCK, _restore_archive_process_lock():
             archived = _read_restore_archive_index()["records"].get(request_id)
+            maintenance = _read_restore_archive_maintenance_state()
             record = _read_restore_request(request_id)
             if archived:
                 if record and not _restore_request_identity_matches(record, archived):
@@ -465,11 +685,75 @@ def api_backup_restore_request(request_id):
                 except Exception:
                     pass
     except Exception:
-        return jsonify(ok=False, msg="备份恢复回执无法读取，请修复文件后重试"), 500
+        return jsonify(_attach_current_restore_archive_maintenance(
+            {"ok": False, "msg": "备份恢复回执无法读取，请修复文件后重试", "request_id": request_id},
+        )), 500
     if record is None:
-        return jsonify(ok=False, msg="未找到原恢复请求。请重新选择文件后提交新请求。", request_received=False), 404
+        return jsonify(_attach_restore_archive_maintenance(
+            {"ok": False, "msg": "未找到原恢复请求。请重新选择文件后提交新请求。", "request_received": False},
+            maintenance,
+        )), 404
     payload, status = _restore_request_response(record)
+    return jsonify(_attach_restore_archive_maintenance(payload, maintenance)), status
+
+
+def _ack_restore_archive_maintenance(event_id):
+    if not re.fullmatch(r"[a-f0-9]{32}", event_id or ""):
+        return {"ok": False, "msg": "恢复维护事件标识无效"}, 400
+    try:
+        with storage_transaction(), BACKUP_RESTORE_REQUEST_LOCK, _restore_archive_process_lock():
+            state = _read_restore_archive_maintenance_state()
+            if state is None:
+                return {"ok": True, "cleared": True, "maintenance": None}, 200
+            if state["event_id"] != event_id:
+                payload = _attach_restore_archive_maintenance(
+                    {"ok": False, "msg": "恢复维护状态已变化，请重新核对历史"}, state,
+                )
+                return payload, 409
+
+            _read_restore_archive_index(require_redundancy=True)
+            state = _read_restore_archive_maintenance_state()
+            if state is None:
+                return {"ok": True, "cleared": True, "maintenance": None}, 200
+            if state["event_id"] != event_id:
+                payload = _attach_restore_archive_maintenance(
+                    {"ok": False, "msg": "恢复维护状态已变化，请重新核对历史"}, state,
+                )
+                return payload, 409
+            if state["required"]:
+                payload = {"ok": False, "msg": "恢复归档仍待维护，不能清除提示"}
+                return _attach_restore_archive_maintenance(payload, state), 409
+
+            path = _restore_archive_maintenance_path()
+            path.unlink()
+            _sync_restore_archive_directory()
+            return {"ok": True, "cleared": True, "maintenance": None}, 200
+    except Exception:
+        payload = _attach_current_restore_archive_maintenance(
+            {"ok": False, "msg": "恢复维护状态未能清除；原恢复请求与目录保持不变"},
+        )
+        return payload, 503
+
+
+@bp.route("/api/backup/restore-maintenance/<event_id>/ack", methods=["POST"])
+def api_backup_restore_maintenance_ack(event_id):
+    payload, status = _ack_restore_archive_maintenance(event_id)
     return jsonify(payload), status
+
+
+@bp.route("/backup/restore-maintenance/ack", methods=["POST"])
+def backup_restore_maintenance_ack():
+    event_id = request.form.get("event_id", "")
+    payload, status = _ack_restore_archive_maintenance(event_id)
+    if status != 200:
+        return restore_error(payload.get("msg", "恢复维护状态未能清除"), status,
+                             request_id=request.form.get("request_id", ""),
+                             maintenance=payload.get("maintenance"))
+    request_id = request.form.get("request_id", "")
+    target = "/backup"
+    if re.fullmatch(r"[a-f0-9]{32}", request_id):
+        target += "?restore_request_id=" + request_id
+    return redirect(target)
 
 
 def _reload_restore_scheduler(request_id):
@@ -557,6 +841,19 @@ def api_backup_restore_reload(request_id):
 def restore_error(message, status, *, restored=False, restored_items=None, **details):
     payload = {"ok": False, "msg": message, "restored": restored,
                "restored_items": restored_items or [], "scheduler_reload_required": restored, **details}
+    maintenance = details.get("maintenance")
+    if isinstance(maintenance, dict) and "notice" not in maintenance:
+        maintenance = _restore_archive_maintenance_payload(maintenance)
+        payload["maintenance"] = maintenance
+    if maintenance is None and request.path in ("/api/backup/import", "/backup/import"):
+        try:
+            maintenance = _restore_archive_maintenance_payload()
+        except Exception:
+            maintenance = _restore_archive_maintenance_payload(unreadable=True)
+        payload["maintenance"] = maintenance
+    if isinstance(maintenance, dict):
+        payload["maintenance_error"] = maintenance.get("notice", "")
+        payload["maintenance_required"] = bool(maintenance.get("required"))
     if payload["scheduler_reload_required"]:
         if isinstance(details.get("request_id"), str) and re.fullmatch(r"[a-f0-9]{32}", details["request_id"]):
             payload["reload_url"] = f"/api/backup/restore/{details['request_id']}/reload"
@@ -565,6 +862,22 @@ def restore_error(message, status, *, restored=False, restored_items=None, **det
     if request.path.startswith("/api/"):
         return jsonify(payload), status
     body = f'<section class="section" role="alert"><p>{h(message)}</p></section>'
+    request_id = details.get("request_id")
+    if isinstance(maintenance, dict):
+        body += f'<section class="section" role="status"><p>{h(maintenance.get("notice", ""))}</p>'
+        if not maintenance.get("required") and re.fullmatch(r"[a-f0-9]{32}", str(maintenance.get("event_id", ""))):
+            event_id = h(maintenance["event_id"])
+            preserved_id = h(request_id) if isinstance(request_id, str) and re.fullmatch(r"[a-f0-9]{32}", request_id) else ""
+            body += (
+                '<form method="post" action="/backup/restore-maintenance/ack">'
+                f'<input type="hidden" name="csrf_token" value="{h(csrf_token())}">'
+                f'<input type="hidden" name="event_id" value="{event_id}">'
+                f'<input type="hidden" name="request_id" value="{preserved_id}">'
+                '<button class="btn btn-gray" type="submit">确认已读并清除维护提示</button></form>'
+            )
+        body += "</section>"
+    if isinstance(request_id, str) and re.fullmatch(r"[a-f0-9]{32}", request_id):
+        body += f'<a class="btn btn-blue" href="/backup?restore_request_id={h(request_id)}">核对原恢复请求</a>'
     if payload["scheduler_reload_required"]:
         request_id = details.get("request_id")
         reload_action = (
@@ -725,6 +1038,7 @@ def backup_import():
     request_owned = False
     commit_attempted = False
     staged = []
+    maintenance = None
 
     try:
         original = os.path.basename(f.filename or "backup")
@@ -736,19 +1050,26 @@ def backup_import():
                 digest.update(chunk)
 
         if request_id:
-            with storage_transaction(), BACKUP_RESTORE_REQUEST_LOCK:
-                archived = _read_restore_archive_index()["records"].get(request_id)
+            with storage_transaction(), BACKUP_RESTORE_REQUEST_LOCK, _restore_archive_process_lock():
+                try:
+                    archived = _read_restore_archive_index()["records"].get(request_id)
+                    maintenance = _read_restore_archive_maintenance_state()
+                except Exception:
+                    maintenance = _restore_archive_maintenance_payload(unreadable=True)
+                    raise
                 restore_record = _read_restore_request(request_id)
                 if archived:
                     if restore_record and not _restore_request_identity_matches(restore_record, archived):
                         return restore_error("归档请求标识已绑定其他文件或恢复范围，未覆盖任何目录。", 409,
                                              request_id=request_id, request_conflict=True)
                     payload, status = _restore_request_response(archived)
+                    payload = _attach_restore_archive_maintenance(payload, maintenance)
                     if request.path.startswith("/api/"):
                         return jsonify(payload), status
                     return restore_error(payload["msg"], status, restored=payload["restored"],
                                          restored_items=payload["restored_items"], request_id=request_id,
-                                         state=payload["state"], archived=True)
+                                         state=payload["state"], archived=True,
+                                         maintenance=payload["maintenance"])
                 if restore_record:
                     if (restore_record["archive_sha256"] != digest.hexdigest()
                         or restore_record["restore_items"] != restore_items
@@ -764,6 +1085,7 @@ def backup_import():
                             except Exception:
                                 pass
                         payload, status = _restore_request_response(restore_record)
+                        payload = _attach_restore_archive_maintenance(payload, maintenance)
                         if request.path.startswith("/api/"):
                             return jsonify(payload), status
                         return restore_error(payload["msg"], status, restored=payload["restored"],
@@ -773,7 +1095,8 @@ def backup_import():
                                              dependencies=payload["dependencies"],
                                              dependency_log=payload["dependency_log"],
                                              restore_outcome_unknown=payload["restore_outcome_unknown"],
-                                             request_id=request_id)
+                                             request_id=request_id,
+                                             maintenance=payload["maintenance"])
                 else:
                     restore_record = {
                         "request_id": request_id,
@@ -967,6 +1290,7 @@ def backup_import():
         return restore_error(
             f"备份导入失败：{e}。请调低文件大小或调整服务端备份限制。",
             413,
+            maintenance=maintenance,
             **details,
         )
     except BackupRestoreWriteError as e:
@@ -990,6 +1314,7 @@ def backup_import():
             restore_outcome_unknown=outcome_unknown,
             request_id=request_id,
             state="unknown" if outcome_unknown else "failed",
+            maintenance=maintenance,
         )
     except Exception as e:
         if request_owned and not directories_restored:
@@ -1010,11 +1335,14 @@ def backup_import():
             return restore_error(f"所选目录已恢复，但后续处理失败：{e}。请检查已恢复数据，不要重复导入。", 503,
                                  restored=True, restored_items=restore_items,
                                  scheduler_reload_required=not scheduler_reloaded,
-                                 dependencies_failed=bool(restore_deps), dependency_log=str(e), request_id=request_id)
+                                 dependencies_failed=bool(restore_deps), dependency_log=str(e), request_id=request_id,
+                                 maintenance=maintenance)
         if commit_attempted:
             return restore_error(f"恢复提交结果未知：{e}。请检查目录和调度器状态，不要重复导入。", 503,
-                                 restore_outcome_unknown=True, scheduler_reload_required=True, request_id=request_id)
-        return restore_error(f"备份导入失败：{e}。下一步：检查备份内容和恢复范围后重试", 500 if isinstance(e, OSError) or request_id and not request_owned else 400)
+                                 restore_outcome_unknown=True, scheduler_reload_required=True, request_id=request_id,
+                                 maintenance=maintenance)
+        return restore_error(f"备份导入失败：{e}。下一步：检查备份内容和恢复范围后重试", 500 if isinstance(e, OSError) or request_id and not request_owned else 400,
+                             maintenance=maintenance)
 
     finally:
         for entry in staged:
