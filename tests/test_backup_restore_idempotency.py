@@ -463,7 +463,7 @@ class BackupRestoreIdempotencyTests(unittest.TestCase):
                 f"/api/backup/restore-maintenance/{first_event}/ack", headers={"X-Token": TOKEN},
             )
             self.assertEqual(cleared.status_code, 200)
-            self.assertFalse(state_path.exists())
+            self.assertTrue(restore._read_restore_archive_maintenance_state()["acknowledged"])
 
             restore._restore_archive_index_path().write_text("{damaged again", encoding="utf-8")
             second = app.test_client().get(
@@ -479,14 +479,8 @@ class BackupRestoreIdempotencyTests(unittest.TestCase):
             self.assertEqual(stale.json["maintenance"]["event_id"], second_event)
             self.assertEqual(restore._read_restore_archive_maintenance_state()["event_id"], second_event)
 
-            unlink = Path.unlink
-
-            def fail_maintenance_clear(path, *args, **kwargs):
-                if path == state_path:
-                    raise OSError("fixture maintenance clear failure")
-                return unlink(path, *args, **kwargs)
-
-            with patch.object(Path, "unlink", fail_maintenance_clear):
+            with patch.object(restore, "_write_restore_archive_maintenance_state",
+                              side_effect=OSError("fixture maintenance acknowledgement write failure")):
                 failed_clear = app.test_client().post(
                     f"/api/backup/restore-maintenance/{second_event}/ack", headers={"X-Token": TOKEN},
                 )
@@ -497,7 +491,65 @@ class BackupRestoreIdempotencyTests(unittest.TestCase):
                 f"/api/backup/restore-maintenance/{second_event}/ack", headers={"X-Token": TOKEN},
             )
             self.assertEqual(retried_clear.status_code, 200)
-            self.assertFalse(state_path.exists())
+            self.assertTrue(restore._read_restore_archive_maintenance_state()["acknowledged"])
+
+    def test_maintenance_ack_directory_fsync_failure_recovers_after_restart(self):
+        with isolated_app() as (app, base):
+            from fls_manager.routes.backup import restore
+
+            directory = base / ".backup_restore_requests"
+            directory.mkdir()
+            restore._write_restore_archive_index_pair({"version": 1, "records": {}})
+            restore._restore_archive_index_path().write_text("{damaged", encoding="utf-8")
+            history = app.test_client().get(
+                "/api/backup/restore-history?limit=20", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(history.status_code, 200)
+            event_id = history.json["maintenance"]["event_id"]
+            state_path = restore._restore_archive_maintenance_path()
+
+            sync_calls = 0
+
+            def fail_ack_sync():
+                nonlocal sync_calls
+                sync_calls += 1
+                if sync_calls >= 2:
+                    raise OSError("fixture acknowledgement directory fsync failure")
+
+            with patch.object(restore, "_sync_restore_archive_directory", side_effect=fail_ack_sync):
+                failed = app.test_client().post(
+                    f"/api/backup/restore-maintenance/{event_id}/ack", headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(failed.status_code, 503)
+            self.assertEqual(failed.json["maintenance"]["event_id"], event_id)
+            self.assertTrue(state_path.exists())
+            self.assertTrue(restore._read_restore_archive_maintenance_state().get("acknowledged"))
+
+            restarted = subprocess.run(
+                [sys.executable, "-c", (
+                    "import json; from fls_manager.routes.backup import restore; "
+                    "state=restore._read_restore_archive_maintenance_state(); "
+                    "payload=restore._restore_archive_maintenance_payload(state); "
+                    "print(json.dumps({'state':state,'payload':payload}))"
+                )],
+                cwd=Path(__file__).resolve().parents[1],
+                env=os.environ.copy(), capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(restarted.returncode, 0, restarted.stderr)
+            restarted_state = json.loads(restarted.stdout)
+            self.assertEqual(restarted_state["state"]["event_id"], event_id)
+            self.assertIsNone(restarted_state["payload"])
+
+            retry = app.test_client().post(
+                f"/api/backup/restore-maintenance/{event_id}/ack", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(retry.status_code, 200)
+            self.assertTrue(retry.json["cleared"])
+            self.assertTrue(restore._read_restore_archive_maintenance_state()["acknowledged"])
+            queried = app.test_client().get(
+                "/api/backup/restore-history?limit=20", headers={"X-Token": TOKEN},
+            )
+            self.assertIsNone(queried.json["maintenance"])
 
     def test_archive_maintenance_publication_failure_and_corrupt_receipt_fail_closed(self):
         with isolated_app() as (app, base):
@@ -616,7 +668,7 @@ class BackupRestoreIdempotencyTests(unittest.TestCase):
             )
             self.assertEqual(acknowledged.status_code, 302)
             self.assertEqual(acknowledged.headers["Location"], "/backup?restore_request_id=" + request_id)
-            self.assertFalse(restore._restore_archive_maintenance_path().exists())
+            self.assertTrue(restore._read_restore_archive_maintenance_state()["acknowledged"])
 
     def test_unrepairable_index_symlink_keeps_details_and_reports_maintenance(self):
         for linked_copy in ("primary", "backup"):
