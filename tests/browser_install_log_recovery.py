@@ -143,7 +143,7 @@ def main():
             ONLINE_INSTALL_RETRYING.clear()
             (base_dir / "scripts" / "demo.py").unlink(missing_ok=True)
 
-        def seed_task_retry_recovery(width):
+        def seed_task_retry_recovery(width, missing_log=False):
             task_item = task_items[width]
             install_id = ("a" if width == 390 else "b") * 32
             target = base_dir / "scripts" / f"task-recovery-{width}.sh"
@@ -152,6 +152,8 @@ def main():
             log_file = online_install_log_file(install_id, task_item["name"])
             log_file.parent.mkdir(parents=True, exist_ok=True)
             log_file.write_text("download completed\n", encoding="utf-8")
+            if missing_log:
+                log_file.unlink()
             job = {
                 "id": install_id, "script_id": task_item["id"], "script_name": task_item["name"],
                 "log_file": str(log_file), "proxy_id": "", "import_task": True,
@@ -227,7 +229,7 @@ def main():
                 if data.get("seed_online_history"):
                     seed_online_history()
                 if data.get("seed_task_retry_recovery"):
-                    seed_task_retry_recovery(int(data["width"]))
+                    seed_task_retry_recovery(int(data["width"]), missing_log=bool(data.get("missing_log")))
                 if data.get("seed_delayed_online_log"):
                     seed_delayed_online_log(int(data["width"]))
                 if data.get("publish_delayed_online_log"):
@@ -369,6 +371,22 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    await page.waitForFunction(()=>document.querySelector('#installPollError').hidden
      &&document.querySelector('#log').textContent.includes('installer log became available'));
    assert.equal(await page.locator('#installStopAction').isVisible(),true);
+   const beforeTransientRecovery=(await state()).downloads;
+   const preservedOnlineLog=await page.locator('#log').textContent();
+   const delayedLogApi='**/api/online-scripts/log/'+delayedLogId+'?lines=1600';
+   for(const failure of [503,'network',429]){
+    await page.route(delayedLogApi,route=>failure==='network'?route.abort('failed'):
+      route.fulfill({status:failure,contentType:'text/plain',body:'transient install log outage'}),{times:1});
+    await page.waitForFunction(()=>!document.querySelector('#installPollError').hidden
+      &&document.querySelector('#installPollError').textContent.includes('自动重试'));
+    assert.equal(await page.locator('#log').textContent(),preservedOnlineLog);
+    assert.equal(await page.locator('#installStopAction').isVisible(),true);
+    await page.waitForFunction(()=>document.querySelector('#installPollError').hidden);
+    assert.equal(await page.locator('#log').textContent(),preservedOnlineLog);
+   }
+   assert.equal((await state()).downloads,beforeTransientRecovery);
+   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true);
+   await page.screenshot({path:'/tmp/fls-online-install-log-transient-'+viewport.width+'.png',fullPage:true});
    await fixture({complete_delayed_online_log:true,width:viewport.width});
    await page.waitForFunction(()=>document.querySelector('#installStatus').textContent==='已完成');
    assert.equal(await page.evaluate(()=>window.__FLS_ACTIVE_LOG_INTERVAL__),null);
@@ -643,9 +661,21 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    assert.equal((await state()).downloads,onlineDownloadsBefore+2);
 
    const beforeTaskRecovery=await state();
-   await fixture({seed_task_retry_recovery:true,width:viewport.width});
+   await fixture({seed_task_retry_recovery:true,width:viewport.width,missing_log:true});
    const taskRecoveryId=(viewport.width===390?'a':'b').repeat(32);
    await page.goto(base+'/online-scripts/log/'+taskRecoveryId);
+   await page.locator('#installStateQuery').waitFor({state:'visible'});
+   await page.locator('#installRecoveryAction').getByRole('button',{name:'仅恢复任务导入',exact:true}).waitFor();
+   assert.equal(await page.locator('#installStatus').textContent(),'失败');
+   assert.equal(await page.locator('#installPollError').isVisible(),true);
+   await page.locator('#installStateQuery').click();
+   await page.waitForFunction(()=>document.querySelector('#installPollError').textContent.includes('原安装状态已确认'));
+   assert.match(await page.locator('#installPollError').textContent(),/日志/);
+   assert.equal((await state()).downloads,beforeTaskRecovery.downloads);
+   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true);
+   await page.screenshot({path:'/tmp/fls-online-install-missing-log-'+viewport.width+'.png',fullPage:true});
+   await fixture({seed_task_retry_recovery:true,width:viewport.width});
+   await page.reload();
    await page.locator('#installRecoveryAction').getByRole('button',{name:'仅恢复任务导入',exact:true}).waitFor();
    await page.locator('#installRecoveryAction').getByRole('button',{name:'仅恢复任务导入',exact:true}).click();
    await page.locator('#installRecoveryAction').getByRole('button',{name:'重新加载调度器',exact:true}).waitFor();

@@ -405,6 +405,17 @@ def _install_recovery(info):
     if relation.get("retry_relation_error"):
         return {"available": False, "reason": relation["retry_relation_error"]}
     if (info or {}).get("phase") == "importing_tasks" and (info or {}).get("import_task"):
+        _, log_failure = _install_log_file(info)
+        if (
+            not isinstance(info.get("log_file"), str) or not info["log_file"].strip()
+            or (log_failure and log_failure[2] != 404)
+        ):
+            return {
+                "available": False,
+                "reason": "安装日志路径不可用，未恢复任务导入。请修复原日志路径或权限后重新查询。",
+                "href": url_for("online_scripts.online_install_log", install_id=info.get("id")),
+                "label": "重新读取安装记录",
+            }
         consistency = verify_install_outputs(info)
         if consistency.get("changed"):
             return {
@@ -610,35 +621,6 @@ def api_online_install_log(install_id):
         }), 404
 
     recovery = _install_recovery(info)
-    if request.args.get("state_only") == "1":
-        return jsonify(
-            ok=True, install_id=install_id, running=bool(info.get("running")),
-            status=info.get("status") or "-", phase=_install_phase(info),
-            returncode=info.get("returncode"), error=_install_error(info), recovery=recovery,
-        )
-    log_file, log_failure = _install_log_file(info)
-    if log_failure:
-        title, message, failure_status = log_failure
-        payload = {
-            "ok": False,
-            "running": bool(info.get("running")),
-            "status": info.get("status") or title,
-            "phase": _install_phase(info),
-            "returncode": info.get("returncode"),
-            "error": "；".join(filter(None, (info.get("error"), message))),
-            "log_file": "",
-            "log": "",
-            "recovery_url": "/online-scripts/install-history",
-            "log_status": failure_status,
-        }
-        if recovery.get("available") or recovery.get("reason"):
-            payload["recovery"] = recovery
-        # A not-yet-created log is a normal early install state. Keep the
-        # historical 200 response for existing polling clients while exposing
-        # the real missing-log status in the JSON payload.
-        response_status = 200 if failure_status == 404 else failure_status
-        return jsonify(payload), response_status
-
     payload = {
         "ok": True,
         "install_id": install_id,
@@ -647,27 +629,46 @@ def api_online_install_log(install_id):
         "phase": _install_phase(info),
         "returncode": info.get("returncode"),
         "error": _install_error(info),
-        "log_file": str(log_file),
-        "log": tail_file(str(log_file), lines),
+        "install_error": _install_error(info),
+        "state_url": url_for("online_scripts.api_online_install_log", install_id=install_id, state_only="1"),
     }
-    relation = online_install_retry_relation(info)
-    payload.update(relation)
+    payload.update(online_install_retry_relation(info))
+    if info.get("scheduler_reload_pending"):
+        payload["scheduler_reload_pending"] = True
+        payload["scheduler_reload_error"] = info.get("scheduler_reload_error") or ""
+    if request.args.get("state_only") == "1":
+        payload["recovery"] = recovery
+        return jsonify(payload)
+    consistency = verify_install_outputs(info)
+    if consistency.get("checked"):
+        payload["consistency"] = consistency
+    if recovery.get("available") or recovery.get("reason"):
+        payload["recovery"] = recovery
+    log_file, log_failure = _install_log_file(info)
+    if log_failure:
+        title, message, failure_status = log_failure
+        payload.update(
+            ok=False, error="；".join(filter(None, (payload["install_error"], message))),
+            log_file="", log="", log_error=message, log_status=failure_status,
+            recovery_url="/online-scripts/install-history",
+        )
+        # A not-yet-created log is a normal early install state. Keep the
+        # historical 200 response for existing polling clients while exposing
+        # the real missing-log status in the JSON payload.
+        response_status = 200 if failure_status == 404 else failure_status
+        return jsonify(payload), response_status
+
+    payload.update(log_file=str(log_file), log=tail_file(str(log_file), lines))
     if str(payload["log"]).startswith("读取日志失败:"):
         payload.update(
             ok=False,
             error=payload["log"],
+            log_error=payload["log"],
+            log_status=500,
             log="",
             recovery_url="/online-scripts/install-history",
         )
         return jsonify(payload), 500
-    consistency = verify_install_outputs(info)
-    if consistency.get("checked"):
-        payload["consistency"] = consistency
-    if info.get("scheduler_reload_pending"):
-        payload["scheduler_reload_pending"] = True
-        payload["scheduler_reload_error"] = info.get("scheduler_reload_error") or ""
-    if recovery.get("available") or recovery.get("reason"):
-        payload["recovery"] = recovery
     return jsonify(payload)
 
 
@@ -704,6 +705,7 @@ def online_install_log(install_id):
         return layout("在线脚本日志", "online_scripts", body), 404
 
     log_path, log_failure = _install_log_file(info)
+    recovery = _install_recovery(info)
     log_notice = ""
     if log_failure:
         title, message, failure_status = log_failure
@@ -713,7 +715,6 @@ def online_install_log(install_id):
     else:
         info = dict(info)
         info["log_file"] = str(log_path)
-    recovery = _install_recovery(info)
     if recovery.get("action") and back_url != "/online-scripts":
         recovery["action"] += "?back=" + quote(back_url, safe="")
     recovery_html = _install_recovery_html(recovery)
@@ -784,6 +785,7 @@ def online_install_log(install_id):
 <a id="installPollLogin" class="btn btn-primary" hidden>重新登录</a>
 <a id="installPollLogs" class="btn btn-orange" href="/logs" hidden>查看日志管理</a>
 <button id="installPollRetry" class="btn btn-primary" type="button" hidden>重新读取安装状态</button>
+<button id="installStateQuery" class="btn btn-gray" type="button" hidden>仅查询安装结果</button>
 <button id="installStopQuery" class="btn btn-gray" type="button" hidden>查询停止结果</button>
 <pre class="log" id="log">{"暂无日志" if log_failure else "加载中..."}</pre>
 {log_controls()}
@@ -794,6 +796,7 @@ const pollError = document.getElementById("installPollError");
 const loginAction = document.getElementById("installPollLogin");
 const logsAction = document.getElementById("installPollLogs");
 const retryAction = document.getElementById("installPollRetry");
+const stateQueryAction = document.getElementById("installStateQuery");
 const stopQueryAction = document.getElementById("installStopQuery");
 const stopActionInitial = document.querySelector("#installStopAction form");
 const stopActionButton = stopActionInitial ? stopActionInitial.querySelector("button") : null;
@@ -801,10 +804,41 @@ const installId = {json.dumps(install_id)};
 const logUrl = "/api/online-scripts/log/" + encodeURIComponent(installId);
 let pending = false;
 let postingStop = false;
+let postingRecovery = false;
+let needsRecoveryQuery = false;
+let lastLogFailure = null;
 let needsStopQuery = false;
 let logRequestGeneration = 0;
+let transientFailures = 0;
+let retryTimer = null;
+let pageHidden = false;
+let resumeOnPageshow = false;
+let autoPollingPaused = false;
+let lastKnownRunning = {str(bool(info.get("running"))).lower()};
+const retryDelays = [2000, 4000, 8000, 16000, 30000];
 window.__FLS_LOG_LAST_TEXT__ = "";
 window.__FLS_LOG_NEAR_BOTTOM__ = true;
+
+function clearLogTimers(){{
+    clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
+    window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
+    if(retryTimer !== null){{
+        clearTimeout(retryTimer);
+        retryTimer = null;
+    }}
+}}
+
+function isTransientLogError(error){{
+    if(!error || error.status === undefined || error.status === null) return true;
+    const status = Number(error.status);
+    return status === 0 || status === 408 || status === 429 || (status >= 500 && status <= 599);
+}}
+
+function knownLogFailure(payload){{
+    return !!payload && payload.install_id === installId && payload.ok === false
+        && typeof payload.running === "boolean" && typeof payload.status === "string"
+        && typeof payload.phase === "string" && (payload.log_status === 404 || payload.log_status === 500);
+}}
 
 function escapeHtml(value){{
     return String(value).replace(/[&<>"']/g, function(char){{
@@ -821,31 +855,50 @@ window.addEventListener("scroll", function(){{
 }}, {{passive:true}});
 
 async function loadLog(stateOnly = false){{
-    if(pending || postingStop || (!stateOnly && needsStopQuery) || document.getElementById("installPollError") !== pollError) return;
+    if(pageHidden || pending || postingStop || postingRecovery || (!stateOnly && needsStopQuery) || document.getElementById("installPollError") !== pollError) return;
     const requestGeneration = ++logRequestGeneration;
+    let appliedLogFailure = false;
     pending = true;
     if(retryAction) retryAction.disabled = true;
+    if(stateQueryAction) stateQueryAction.disabled = true;
     try {{
         const beforeScroll = window.scrollY;
         const beforeHeight = document.documentElement.scrollHeight;
         const wasNearBottom = nearBottom();
 
         const res = await fetch(logUrl + (stateOnly ? "?state_only=1" : "?lines=1600"), {{cache:"no-store"}});
-        const json = await flsReadJsonResponse(res);
-        if(requestGeneration !== logRequestGeneration || postingStop || (!stateOnly && needsStopQuery) || document.getElementById("installPollError") !== pollError) return;
-        if(!json || typeof json.running !== "boolean" || (stateOnly ? json.install_id !== installId : typeof json.log !== "string")){{
-            throw new Error("安装状态响应无效，请重新读取安装状态");
+        let json;
+        try{{ json = await flsReadJsonResponse(res); }}
+        catch(error){{
+            if(!stateOnly && res.status >= 500 && knownLogFailure(error && error.payload)) json = error.payload;
+            else throw error;
         }}
+        if(requestGeneration !== logRequestGeneration || postingStop || (!stateOnly && needsStopQuery) || document.getElementById("installPollError") !== pollError) return;
+        if(!json || typeof json.running !== "boolean" || (json.install_id !== undefined && json.install_id !== installId)
+            || (stateOnly ? json.install_id !== installId : typeof json.log !== "string")){{
+            const invalid = new Error("安装状态响应无效，请重新读取安装状态");
+            invalid.status = res.status;
+            throw invalid;
+        }}
+        let logFailure = null;
         if(json.ok === false){{
             const missingError = new Error(json.error || "安装日志暂不可读");
             missingError.status = json.log_status || 500;
             missingError.payload = json;
-            throw missingError;
+            if(json.running && missingError.status === 404) transientFailures = 0;
+            if(!stateOnly && knownLogFailure(json)) logFailure = missingError;
+            else throw missingError;
         }}
+        if(!logFailure) transientFailures = 0;
+        autoPollingPaused = false;
+        lastKnownRunning = json.running;
+        needsRecoveryQuery = false;
+        if(!stateOnly) lastLogFailure = logFailure;
         if(stateOnly){{
             needsStopQuery = false;
             if(pollError){{
-                pollError.textContent = "原安装状态已确认：" + (json.status || "-");
+                pollError.textContent = "原安装状态已确认：" + (json.status || "-")
+                    + (lastLogFailure ? "。日志读取仍失败：" + lastLogFailure.message : "");
                 pollError.hidden = false;
             }}
         }}
@@ -854,22 +907,23 @@ async function loadLog(stateOnly = false){{
             pollError.textContent = "";
         }}
         if(loginAction) loginAction.hidden = true;
-        if(logsAction) logsAction.hidden = true;
-        if(retryAction) retryAction.hidden = true;
+        if(logsAction) logsAction.hidden = !lastLogFailure;
+        if(retryAction) retryAction.hidden = !lastLogFailure;
+        if(stateQueryAction) stateQueryAction.hidden = !lastLogFailure;
         if(stopQueryAction) stopQueryAction.hidden = true;
 
         document.getElementById("installStatus").textContent = json.status || "-";
         const phaseEl = document.getElementById("installPhase");
         if(phaseEl) phaseEl.textContent = json.phase || "unknown";
         const errorEl = document.getElementById("installError");
-        let errorText = json.error || "";
+        let errorText = json.install_error === undefined ? json.error || "" : json.install_error;
         if(json.consistency && json.consistency.changed){{
             errorText = (errorText ? errorText + "；" : "") + "安装后的脚本或任务已被后来修改，恢复不会自动覆盖";
         }}
         if(errorEl) errorEl.textContent = errorText ? "错误：" + errorText : "";
         document.getElementById("installReturncode").textContent = json.returncode == null ? "-" : String(json.returncode);
 
-        if(!stateOnly){{
+        if(!stateOnly && !logFailure){{
         const text = json.log || "暂无日志";
         const old = window.__FLS_LOG_LAST_TEXT__ || "";
         const changed = text !== old;
@@ -903,6 +957,7 @@ async function loadLog(stateOnly = false){{
         if(stopAction) stopAction.hidden = !json.running;
         if(recoveryEl) recoveryEl.hidden = json.running;
         if(json.running){{
+            if(retryTimer !== null){{ clearTimeout(retryTimer); retryTimer = null; }}
             if(stopActionButton) stopActionButton.disabled = json.status === "停止中";
             if(stopQueryAction) stopQueryAction.hidden = json.status !== "停止中";
             if(!window.__FLS_ACTIVE_LOG_INTERVAL__){{
@@ -931,6 +986,13 @@ async function loadLog(stateOnly = false){{
                 if(recoveryForm && recovery.api_action){{
                     recoveryForm.addEventListener("submit", async function(event){{
                         event.preventDefault();
+                        if(postingRecovery || postingStop || needsRecoveryQuery || pageHidden
+                            || recoveryEl.querySelector("form[data-api-action]") !== recoveryForm
+                            || document.getElementById("installPollError") !== pollError) return;
+                        postingRecovery = true;
+                        const recoveryGeneration = ++logRequestGeneration;
+                        pending = false;
+                        clearLogTimers();
                         const button = recoveryForm.querySelector("button");
                         if(button) button.disabled = true;
                         try{{
@@ -940,13 +1002,19 @@ async function loadLog(stateOnly = false){{
                                 method: "POST", headers, credentials: "same-origin",
                             }});
                             const result = await flsReadJsonResponse(response);
+                            if(pageHidden || recoveryGeneration !== logRequestGeneration
+                                || document.getElementById("installPollError") !== pollError) return;
                             if(!result || result.ok !== true){{
                                 const error = new Error(result && result.msg || "调度器恢复失败");
                                 error.payload = result;
                                 throw error;
                             }}
+                            postingRecovery = false;
                             await loadLog();
                         }}catch(error){{
+                            postingRecovery = false;
+                            if(pageHidden || recoveryGeneration !== logRequestGeneration
+                                || document.getElementById("installPollError") !== pollError) return;
                             const payload = error && error.payload || {{}};
                             if(payload.scheduler_reload_required){{
                                 await loadLog();
@@ -956,11 +1024,21 @@ async function loadLog(stateOnly = false){{
                                 return;
                             }}
                             const message = error && error.message ? error.message : String(error || "调度器恢复失败");
+                            needsRecoveryQuery = true;
                             if(pollError){{
-                                pollError.textContent = "调度器恢复失败：" + message + "。请稍后重试。";
+                                pollError.textContent = "安装恢复未确认：" + message + "。请先查询原安装结果。";
                                 pollError.hidden = false;
                             }}
-                            if(button) button.disabled = false;
+                            if(stateQueryAction){{ stateQueryAction.hidden = false; stateQueryAction.disabled = false; }}
+                            if(retryAction){{ retryAction.hidden = false; retryAction.disabled = false; }}
+                            if(loginAction && (error.status === 401 || error.status === 403)){{
+                                loginAction.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
+                                loginAction.hidden = false;
+                            }}
+                        }}finally{{
+                            postingRecovery = false;
+                            if(needsRecoveryQuery && !pageHidden && recoveryGeneration !== logRequestGeneration
+                                && document.getElementById("installPollError") === pollError) await loadLog(true);
                         }}
                     }});
                 }}
@@ -973,21 +1051,54 @@ async function loadLog(stateOnly = false){{
                 recoveryEl.innerHTML = html;
                 delete recoveryEl.dataset.ready;
             }}
-            clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
-            window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
+            clearLogTimers();
+            lastKnownRunning = false;
         }}
+        if(logFailure){{ appliedLogFailure = true; throw logFailure; }}
     }} catch(e) {{
         if(requestGeneration !== logRequestGeneration || postingStop || (!stateOnly && needsStopQuery) || document.getElementById("installPollError") !== pollError) return;
         const message = e && e.message ? e.message : String(e);
         const denied = e && (e.status === 401 || e.status === 403);
         const missing = e && e.status === 404;
         const payload = e && e.payload || {{}};
-        const startingLog = missing && payload.running === true && payload.log_status === 404;
+        if(stateOnly){{
+            needsRecoveryQuery = true;
+            const recoveryEl = document.getElementById("installRecoveryAction");
+            const recoveryForm = recoveryEl && typeof recoveryEl.querySelector === "function"
+                ? recoveryEl.querySelector("form[data-api-action]") : null;
+            const recoveryButton = recoveryForm && recoveryForm.querySelector("button");
+            if(recoveryButton) recoveryButton.disabled = true;
+        }}
+        if((payload.install_id === installId || (payload.install_id === undefined && typeof payload.log_status === "number"))
+            && typeof payload.running === "boolean")
+            lastKnownRunning = payload.running;
+        const startingLog = missing && (payload.install_id === undefined || payload.install_id === installId)
+            && payload.running === true && payload.log_status === 404;
+        if(startingLog) lastKnownRunning = true;
         const next = denied ? "重新登录后继续读取" :
             (startingLog ? "安装仍在运行，日志尚未生成；系统将继续轮询，可随时停止安装" :
                 (missing ? "到日志管理检查已保留的安装日志" : "检查安装日志文件和服务状态，稍后会重新读取"));
+        let scheduledRetry = false;
+        if(!denied && !startingLog && lastKnownRunning && isTransientLogError(e)
+            && transientFailures < retryDelays.length && !pageHidden){{
+            const delay = retryDelays[transientFailures++];
+            clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
+            window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
+            if(retryTimer !== null) clearTimeout(retryTimer);
+            if(pollError){{
+                pollError.textContent = "日志读取失败：" + message + "。已保留现有日志，将在 "
+                    + Math.ceil(delay / 1000) + " 秒后自动重试（" + transientFailures + "/" + retryDelays.length + "）。";
+            }}
+            retryTimer = setTimeout(() => {{ retryTimer = null; loadLog(needsStopQuery || needsRecoveryQuery); }}, delay);
+            scheduledRetry = true;
+        }}
         if(pollError){{
-            pollError.textContent = "日志读取失败：" + message + "。下一步：" + next;
+            if(!scheduledRetry){{
+                const exhausted = lastKnownRunning && isTransientLogError(e) && transientFailures >= retryDelays.length;
+                pollError.textContent = "日志读取失败：" + message + (exhausted
+                    ? "。自动重试已用尽（" + retryDelays.length + " 次）；可手动重新读取。"
+                    : "。下一步：" + next);
+            }}
             pollError.hidden = false;
         }}
         if(loginAction){{
@@ -997,16 +1108,18 @@ async function loadLog(stateOnly = false){{
             }}
         }}
         if(logsAction){{
-            logsAction.hidden = !missing || startingLog;
-            if(missing && !startingLog) logsAction.href = payload.recovery_url || "/logs";
+            logsAction.hidden = (!missing && !appliedLogFailure) || startingLog;
+            if((missing || appliedLogFailure) && !startingLog) logsAction.href = payload.recovery_url || "/logs";
         }}
-        if(retryAction) retryAction.hidden = missing && !startingLog;
+        if(retryAction) retryAction.hidden = missing && !startingLog && !appliedLogFailure;
+        if(stateQueryAction && appliedLogFailure) stateQueryAction.hidden = false;
         if(stopQueryAction) stopQueryAction.hidden = !needsStopQuery;
         if(startingLog){{
+            autoPollingPaused = false;
             const stopAction = document.getElementById("installStopAction");
             const recoveryEl = document.getElementById("installRecoveryAction");
             if(stopAction) stopAction.hidden = false;
-            if(recoveryEl) recoveryEl.hidden = true;
+            if(recoveryEl && !appliedLogFailure) recoveryEl.hidden = true;
             const statusEl = document.getElementById("installStatus");
             const phaseEl = document.getElementById("installPhase");
             if(statusEl) statusEl.textContent = payload.status || "运行中";
@@ -1015,33 +1128,35 @@ async function loadLog(stateOnly = false){{
                 window.__FLS_ACTIVE_LOG_INTERVAL__ = setInterval(loadLog, 2000);
             }}
         }}else if(denied || missing){{
+            autoPollingPaused = true;
             const stopAction = document.getElementById("installStopAction");
             const recoveryEl = document.getElementById("installRecoveryAction");
             if(stopAction) stopAction.hidden = true;
-            if(recoveryEl) recoveryEl.hidden = true;
-            clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
-            window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
+            if(recoveryEl && !appliedLogFailure) recoveryEl.hidden = true;
+            clearLogTimers();
+        }}else if(scheduledRetry){{
+            autoPollingPaused = false;
         }}else{{
-            clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
-            window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
+            autoPollingPaused = true;
+            clearLogTimers();
         }}
     }}finally{{
         if(requestGeneration === logRequestGeneration){{
             pending = false;
             if(retryAction) retryAction.disabled = false;
+            if(stateQueryAction) stateQueryAction.disabled = false;
         }}
     }}
 }}
 
 async function requestStop(event){{
     event.preventDefault();
-    if(postingStop || needsStopQuery || stopActionButton.disabled) return;
+    if(postingStop || postingRecovery || needsStopQuery || needsRecoveryQuery || stopActionButton.disabled) return;
     postingStop = true;
     logRequestGeneration++;
     pending = false;
     if(typeof flsClearPageCache === "function") flsClearPageCache();
-    clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
-    window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
+    clearLogTimers();
     if(stopActionButton) stopActionButton.disabled = true;
     if(pollError){{ pollError.textContent = "停止请求已发送，正在确认状态..."; pollError.hidden = false; }}
     try{{
@@ -1079,9 +1194,33 @@ async function queryStop(){{
 
 if(stopActionInitial) stopActionInitial.addEventListener("submit", requestStop);
 if(stopQueryAction) stopQueryAction.addEventListener("click", queryStop);
-if(retryAction) retryAction.onclick = () => loadLog(needsStopQuery);
+if(stateQueryAction) stateQueryAction.addEventListener("click", () => loadLog(true));
+if(retryAction) retryAction.onclick = () => {{
+    if(retryTimer !== null){{ clearTimeout(retryTimer); retryTimer = null; }}
+    transientFailures = 0;
+    autoPollingPaused = false;
+    return loadLog(needsStopQuery || needsRecoveryQuery);
+}};
+window.addEventListener("pagehide", function(){{
+    resumeOnPageshow = postingRecovery || (lastKnownRunning && !autoPollingPaused);
+    if(postingRecovery) needsRecoveryQuery = true;
+    pageHidden = true;
+    logRequestGeneration++;
+    pending = false;
+    clearLogTimers();
+}});
+window.addEventListener("pageshow", function(event){{
+    if(!event || !event.persisted) return;
+    pageHidden = false;
+    if(resumeOnPageshow && (lastKnownRunning || needsRecoveryQuery)){{
+        resumeOnPageshow = false;
+        loadLog(needsStopQuery || needsRecoveryQuery);
+    }}
+}});
 if(window.__FLS_ACTIVE_LOG_INTERVAL__) clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
 window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
+if(retryTimer !== null) clearTimeout(retryTimer);
+retryTimer = null;
 loadLog();
 }})();
 </script>

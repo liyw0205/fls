@@ -2546,6 +2546,8 @@ class UiRouteComponentTests(unittest.TestCase):
                 {
                     "ok": True,
                     "install_id": "install-1",
+                    "install_error": "",
+                    "state_url": "/api/online-scripts/log/install-1?state_only=1",
                     "running": True,
                     "status": "安装中",
                     "phase": "running",
