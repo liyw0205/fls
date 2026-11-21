@@ -1867,6 +1867,7 @@ if (document.readyState === "loading") {
 
     function shouldAjaxLink(a){
         if (!a) return false;
+        if (a.hasAttribute("data-fls-local-navigation")) return false;
 
         const href = a.getAttribute("href") || "";
         if (!href) return false;
@@ -2527,6 +2528,7 @@ if (document.readyState === "loading") {
     }, true);
 
     window.addEventListener("popstate", function(){
+        if(window.__FLS_ONLINE_REFRESH_HISTORY_POPSTATE_BOUND__ && location.pathname === "/online-scripts") return;
         ajaxLoad(location.href, false);
     });
 

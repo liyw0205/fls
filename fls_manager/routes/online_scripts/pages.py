@@ -1,8 +1,12 @@
 import re
+from urllib.parse import urlencode
 
 from ._common import *
 from ...online_scripts.constants import (
-    get_online_refresh_history,
+    ONLINE_REFRESH_HISTORY_LIMIT,
+    OnlineRefreshHistoryChanged,
+    OnlineRefreshHistoryPageOutOfRange,
+    get_online_refresh_history_page,
     get_online_refresh_request,
     get_online_refresh_task_link_failures,
 )
@@ -16,20 +20,77 @@ def online_scripts_page():
             "刷新请求标识无效", help_html="请返回刷新状态重新选择。",
             actions_html='<a class="btn btn-gray" href="/online-scripts#online-status">返回刷新状态</a>',
         )), 400
-    refresh_history_url = "/api/online-scripts/refresh-history?limit=8"
-    if selected_refresh_request:
-        refresh_history_url += "&request_id=" + selected_refresh_request
     try:
-        refresh_history = get_online_refresh_history(limit=8, request_id=selected_refresh_request)
-        refresh_history_error = ""
+        refresh_history_offset = int(request.args.get("refresh_history_offset", "0") or 0)
+    except (TypeError, ValueError):
+        return layout("刷新历史", "online_scripts", page_header_card(
+            "刷新历史页码无效", help_html="请返回第一页重新读取历史。",
+            actions_html='<a class="btn btn-gray" href="/online-scripts#online-status">返回刷新状态</a>',
+        )), 400
+    if not 0 <= refresh_history_offset <= ONLINE_REFRESH_HISTORY_LIMIT:
+        return layout("刷新历史", "online_scripts", page_header_card(
+            "刷新历史页码超出范围", help_html="请返回第一页重新读取历史。",
+            actions_html='<a class="btn btn-gray" href="/online-scripts#online-status">返回刷新状态</a>',
+        )), 400
+    requested_history_snapshot = request.args.get("refresh_history_snapshot", "").strip()
+    refresh_history_page = {
+        "items": [], "offset": refresh_history_offset, "limit": 8, "total": 0,
+        "snapshot": requested_history_snapshot, "previous_offset": None, "next_offset": None,
+    }
+    refresh_history_error = ""
+    refresh_history_reset_required = False
+    refresh_history_request_missing = False
+    try:
+        refresh_history_page = get_online_refresh_history_page(
+            limit=8,
+            offset=refresh_history_offset,
+            request_id=selected_refresh_request,
+            snapshot=requested_history_snapshot,
+        )
+        refresh_history = refresh_history_page["items"]
     except LookupError as exc:
         return layout("刷新历史", "online_scripts", page_header_card(
-            "原刷新记录不可用", help_html=h(exc),
-            actions_html='<a class="btn btn-gray" href="/online-scripts#online-status">返回刷新状态</a>',
+            "原刷新记录不可用", help_html=f"{h(exc)}。请清除失效记录筛选，重新选择并读取最新历史。",
+            actions_html='<a class="btn btn-gray" href="/online-scripts#online-status">重新读取最新历史</a>',
         )), 404
+    except OnlineRefreshHistoryChanged as exc:
+        refresh_history_error = str(exc)
+        refresh_history_reset_required = True
+        refresh_history_request_missing = exc.request_missing
+        if exc.request_missing:
+            selected_refresh_request = ""
+        refresh_history_offset = 0
+        refresh_history_page.update(offset=0, snapshot="")
+        try:
+            refresh_history_page = get_online_refresh_history_page(
+                limit=8, request_id=selected_refresh_request,
+            )
+            refresh_history = refresh_history_page["items"]
+        except Exception as latest_exc:
+            refresh_history = []
+            refresh_history_page["total"] = exc.total
+            refresh_history_error += f"；最新历史也无法读取：{latest_exc}"
+    except OnlineRefreshHistoryPageOutOfRange as exc:
+        refresh_history_error = str(exc)
+        refresh_history_reset_required = True
+        refresh_history_offset = 0
+        refresh_history_page.update(offset=0, snapshot="")
+        try:
+            refresh_history_page = get_online_refresh_history_page(
+                limit=8, request_id=selected_refresh_request,
+            )
+            refresh_history = refresh_history_page["items"]
+        except Exception as latest_exc:
+            refresh_history = []
+            refresh_history_page["total"] = exc.total
+            refresh_history_error += f"；最新历史也无法读取：{latest_exc}"
     except Exception as exc:
         refresh_history = []
         refresh_history_error = f"在线脚本源刷新历史无法读取，未覆盖当前状态：{exc}"
+    history_snapshot_for_api = str(refresh_history_page.get("snapshot", "") or "")
+    if history_snapshot_for_api and not re.fullmatch(r"[a-f0-9]{64}", history_snapshot_for_api):
+        history_snapshot_for_api = ""
+        refresh_history_reset_required = True
     source = get_online_script_source()
     cache_error = ""
     try:
@@ -187,6 +248,46 @@ def online_scripts_page():
                     '<button class="btn btn-gray" type="submit">检查当前缓存结果</button></form>'
                 )
         return "".join(rows) or '<span class="help">暂无可查询的刷新历史</span>'
+
+    def refresh_history_page_href(offset, snapshot):
+        params = {
+            "refresh_history_offset": str(offset),
+            "refresh_history_snapshot": str(snapshot or ""),
+        }
+        if selected_refresh_request:
+            params["refresh_request_id"] = selected_refresh_request
+        for key in ("q", "page", "msg", "err"):
+            value = request.args.get(key, "").strip()
+            if value:
+                params[key] = value
+        return "/online-scripts?" + urlencode(params) + "#online-status"
+
+    def refresh_history_pagination_html(page_info):
+        offset = page_info["offset"]
+        end = min(offset + len(page_info["items"]), page_info["total"])
+        first = offset + 1 if page_info["items"] else 0
+        previous_offset = page_info.get("previous_offset")
+        next_offset = page_info.get("next_offset")
+        previous = (
+            f'<a id="onlineRefreshHistoryPrevious" class="btn btn-gray" data-fls-local-navigation '
+            f'data-history-offset="{previous_offset}" data-history-snapshot="{h(page_info["snapshot"])}" '
+            f'href="{h(refresh_history_page_href(previous_offset, page_info["snapshot"]))}">上一页</a>'
+            if previous_offset is not None else
+            '<a id="onlineRefreshHistoryPrevious" class="btn btn-gray" data-fls-local-navigation hidden>上一页</a>'
+        )
+        following = (
+            f'<a id="onlineRefreshHistoryNext" class="btn btn-gray" data-fls-local-navigation '
+            f'data-history-offset="{next_offset}" data-history-snapshot="{h(page_info["snapshot"])}" '
+            f'href="{h(refresh_history_page_href(next_offset, page_info["snapshot"]))}">下一页</a>'
+            if next_offset is not None else
+            '<a id="onlineRefreshHistoryNext" class="btn btn-gray" data-fls-local-navigation hidden>下一页</a>'
+        )
+        hidden = refresh_history_error or page_info["total"] <= page_info["limit"]
+        return (
+            f'<nav id="onlineRefreshHistoryPagination" class="action-row" aria-label="刷新历史分页"{ " hidden" if hidden else ""}>'
+            f'{previous}<span id="onlineRefreshHistoryRange" class="help">显示 {first}-{end} / {page_info["total"]}</span>'
+            f'{following}</nav>'
+        )
 
     def refresh_task_link_actions(failures, failure_request_id, failure_count, failure_offset):
         if not failures and not failure_count:
@@ -362,8 +463,9 @@ def online_scripts_page():
     <button id="onlineRefreshQuery" class="btn btn-primary" type="button" hidden>重新查询同步状态</button>
     <div id="onlineRefreshPersistence">{refresh_persistence_html}</div>
     <div id="onlineRefreshHistory" class="action-row" style="margin-top:8px;">{refresh_history_html(refresh_history)}</div>
+    {refresh_history_pagination_html(refresh_history_page)}
     <div id="onlineRefreshHistoryError" class="notice red" role="status"{' hidden' if not refresh_history_error else ''}>{h(refresh_history_error)}</div>
-    <button id="onlineRefreshHistoryRetry" class="btn btn-gray" type="button" hidden>重新读取刷新历史</button>
+    <button id="onlineRefreshHistoryRetry" class="btn btn-gray" type="button"{' hidden' if not refresh_history_error else ''}>重新读取刷新历史</button>
     <a id="onlineRefreshHistoryLogin" class="btn btn-gray" href="/login?next=%2Fonline-scripts" hidden>重新登录</a>
 </div>
 </section>
@@ -424,6 +526,13 @@ var onlineRefreshHistoryControl = window.__FLS_ONLINE_REFRESH_HISTORY_CONTROL__ 
 window.__FLS_ONLINE_REFRESH_HISTORY_CONTROL__ = onlineRefreshHistoryControl;
 onlineRefreshHistoryControl.generation++;
 onlineRefreshHistoryControl.pending = false;
+onlineRefreshHistoryControl.offset = {refresh_history_page["offset"]};
+onlineRefreshHistoryControl.limit = 8;
+onlineRefreshHistoryControl.total = {refresh_history_page["total"]};
+onlineRefreshHistoryControl.snapshot = {json.dumps(history_snapshot_for_api)};
+onlineRefreshHistoryControl.requestId = {json.dumps(selected_refresh_request)};
+onlineRefreshHistoryControl.resetRequired = {str(refresh_history_reset_required).lower()};
+onlineRefreshHistoryControl.requestMissing = {str(refresh_history_request_missing).lower()};
 
 function clearOnlineRefreshStatusTimer(){{
     if(onlineRefreshStatusControl.timer !== null){{
@@ -527,20 +636,128 @@ function hideOnlineRefreshHistoryReadActions(){{
     if(login) login.hidden = true;
 }}
 
-async function updateOnlineRefreshHistory(){{
+function onlineRefreshHistoryApiUrl(offset, snapshot){{
+    let url = "/api/online-scripts/refresh-history?limit=" + onlineRefreshHistoryControl.limit + "&offset=" + offset;
+    if(onlineRefreshHistoryControl.requestId)
+        url += "&request_id=" + encodeURIComponent(onlineRefreshHistoryControl.requestId);
+    if(snapshot) url += "&snapshot=" + encodeURIComponent(snapshot);
+    return url;
+}}
+
+function onlineRefreshHistoryPageHref(offset, snapshot){{
+    if(typeof URL === "undefined" || !location.href) return "/online-scripts";
+    const pageUrl = new URL(location.href);
+    pageUrl.searchParams.set("refresh_history_offset", String(offset));
+    pageUrl.searchParams.set("refresh_history_snapshot", String(snapshot || ""));
+    if(onlineRefreshHistoryControl.requestId)
+        pageUrl.searchParams.set("refresh_request_id", onlineRefreshHistoryControl.requestId);
+    else
+        pageUrl.searchParams.delete("refresh_request_id");
+    return pageUrl.pathname + pageUrl.search + "#online-status";
+}}
+
+function updateOnlineRefreshHistoryPager(json){{
+    const pager = document.getElementById("onlineRefreshHistoryPagination");
+    if(!pager) return;
+    const previous = document.getElementById("onlineRefreshHistoryPrevious");
+    const next = document.getElementById("onlineRefreshHistoryNext");
+    const range = document.getElementById("onlineRefreshHistoryRange");
+    pager.hidden = json.total <= json.limit;
+    if(range){{
+        const first = json.total ? json.offset + 1 : 0;
+        const last = json.offset + json.items.length;
+        range.textContent = "显示 " + first + "-" + last + " / " + json.total;
+    }}
+    if(previous){{
+        previous.hidden = json.previous_offset === null;
+        if(json.previous_offset !== null){{
+            previous.setAttribute("data-history-offset", String(json.previous_offset));
+            previous.setAttribute("data-history-snapshot", json.snapshot);
+            previous.href = onlineRefreshHistoryPageHref(json.previous_offset, json.snapshot);
+        }}
+    }}
+    if(next){{
+        next.hidden = json.next_offset === null;
+        if(json.next_offset !== null){{
+            next.setAttribute("data-history-offset", String(json.next_offset));
+            next.setAttribute("data-history-snapshot", json.snapshot);
+            next.href = onlineRefreshHistoryPageHref(json.next_offset, json.snapshot);
+        }}
+    }}
+    bindOnlineRefreshHistoryPager();
+}}
+
+function bindOnlineRefreshHistoryPager(){{
+    ["onlineRefreshHistoryPrevious", "onlineRefreshHistoryNext"].forEach(function(id){{
+        const link = document.getElementById(id);
+        if(!link || link.dataset.historyBound === "true") return;
+        link.dataset.historyBound = "true";
+        link.onclick = function(event){{
+            if(event && typeof event.preventDefault === "function") event.preventDefault();
+            const offset = Number(link.getAttribute("data-history-offset"));
+            if(!Number.isInteger(offset) || offset < 0) return false;
+            return updateOnlineRefreshHistory({{
+                offset:offset,
+                snapshot:link.getAttribute("data-history-snapshot") || "",
+                navigation:true
+            }});
+        }};
+    }});
+}}
+
+function bindOnlineRefreshHistoryPopstate(){{
+    if(window.__FLS_ONLINE_REFRESH_HISTORY_POPSTATE_BOUND__ || typeof window.addEventListener !== "function") return;
+    window.__FLS_ONLINE_REFRESH_HISTORY_POPSTATE_BOUND__ = true;
+    window.addEventListener("popstate", function(){{
+        if(location.pathname !== "/online-scripts") return;
+        if(typeof URL === "undefined" || !location.href) return;
+        const pageUrl = new URL(location.href);
+        const parsedOffset = Number(pageUrl.searchParams.get("refresh_history_offset") || "0");
+        onlineRefreshHistoryControl.requestId = pageUrl.searchParams.get("refresh_request_id") || "";
+        return updateOnlineRefreshHistory({{
+            offset:Number.isInteger(parsedOffset) ? parsedOffset : 0,
+            snapshot:pageUrl.searchParams.get("refresh_history_snapshot") || "",
+            fromPopState:true
+        }});
+    }});
+}}
+
+function updateOnlineRefreshHistoryLocation(offset, snapshot, push){{
+    if(!window.history) return;
+    const method = push ? "pushState" : "replaceState";
+    if(typeof window.history[method] !== "function") return;
+    window.history[method](window.history.state, "", onlineRefreshHistoryPageHref(offset, snapshot));
+}}
+
+async function updateOnlineRefreshHistory(options){{
     const history = document.getElementById("onlineRefreshHistory");
     const error = document.getElementById("onlineRefreshHistoryError");
     const retry = document.getElementById("onlineRefreshHistoryRetry");
     const login = document.getElementById("onlineRefreshHistoryLogin");
     if(!history || onlineRefreshHistoryControl.pending) return;
+    options = options || {{}};
+    const reset = options.reset === true;
+    const requestedOffset = reset ? 0 : (options.offset === undefined ? onlineRefreshHistoryControl.offset : Number(options.offset));
+    const requestedSnapshot = reset ? "" : (typeof options.snapshot === "string" ? options.snapshot : onlineRefreshHistoryControl.snapshot);
     const generation = ++onlineRefreshHistoryControl.generation;
     onlineRefreshHistoryControl.pending = true;
     if(retry) retry.disabled = true;
     try{{
-        const response = await fetch({json.dumps(refresh_history_url)}, {{cache:"no-store", credentials:"same-origin"}});
+        const response = await fetch(onlineRefreshHistoryApiUrl(requestedOffset, requestedSnapshot), {{cache:"no-store", credentials:"same-origin"}});
         const json = await flsReadJsonResponse(response);
         if(generation !== onlineRefreshHistoryControl.generation || document.getElementById("onlineRefreshHistory") !== history) return;
-        if(!json || json.ok !== true || !Array.isArray(json.items) || json.items.some(function(item){{
+        const expectedPrevious = requestedOffset ? Math.max(0, requestedOffset - onlineRefreshHistoryControl.limit) : null;
+        const expectedNext = json && Array.isArray(json.items) && requestedOffset + json.items.length < Number(json.total)
+            ? requestedOffset + onlineRefreshHistoryControl.limit : null;
+        const itemIds = json && Array.isArray(json.items)
+            ? json.items.map(function(item){{return String(item && item.request_id || "");}}) : [];
+        if(!json || json.ok !== true || !Array.isArray(json.items) ||
+            json.offset !== requestedOffset || json.limit !== onlineRefreshHistoryControl.limit ||
+            !Number.isInteger(json.total) || json.total < 0 || json.total > 200 ||
+            !/^[a-f0-9]{{64}}$/.test(String(json.snapshot || "")) ||
+            (requestedSnapshot && json.snapshot !== requestedSnapshot) || json.items.length > json.limit ||
+            json.offset + json.items.length > json.total || json.previous_offset !== expectedPrevious ||
+            json.next_offset !== expectedNext || new Set(itemIds).size !== itemIds.length || json.items.some(function(item){{
             return !item || typeof item !== "object" || Array.isArray(item) ||
                 !/^[a-f0-9]{{32}}$/.test(String(item.request_id || "")) || typeof item.status !== "string";
         }}))
@@ -573,17 +790,37 @@ async function updateOnlineRefreshHistory(){{
         history.innerHTML = rows || "<span class='help'>暂无可查询的刷新历史</span>";
         bindOnlineRefreshRetryForms(history);
         bindOnlineRefreshConfirmForms(history);
+        onlineRefreshHistoryControl.offset = json.offset;
+        onlineRefreshHistoryControl.total = json.total;
+        onlineRefreshHistoryControl.snapshot = json.snapshot;
+        onlineRefreshHistoryControl.resetRequired = false;
+        onlineRefreshHistoryControl.requestMissing = false;
+        updateOnlineRefreshHistoryPager(json);
+        if(!options.fromPopState)
+            updateOnlineRefreshHistoryLocation(json.offset, json.snapshot, options.navigation === true);
         if(error){{ error.hidden = true; error.textContent = ""; }}
+        if(retry) retry.textContent = "重新读取刷新历史";
         hideOnlineRefreshHistoryReadActions();
     }}catch(e){{
         if(generation !== onlineRefreshHistoryControl.generation || document.getElementById("onlineRefreshHistory") !== history) return;
         const denied = e && (e.status === 401 || e.status === 403);
+        const changed = e && e.status === 409 && e.payload && e.payload.code === "snapshot_changed";
+        onlineRefreshHistoryControl.requestMissing = !!(
+            (changed && e.payload.request_missing === true) || (e && e.status === 404 && onlineRefreshHistoryControl.requestId)
+        );
+        onlineRefreshHistoryControl.resetRequired = !!(
+            reset || changed || (e && [400, 416].indexOf(e.status) >= 0) || onlineRefreshHistoryControl.requestMissing
+        );
         if(error){{
             const status = e && e.status ? "HTTP " + e.status : "请求失败";
             error.hidden = false;
             error.textContent = "刷新历史读取失败（" + status + "）：" + (e && e.message || String(e || "未知错误")) + "。当前已显示的历史未清除。";
         }}
-        if(retry){{ retry.hidden = false; retry.disabled = false; }}
+        if(retry){{
+            retry.hidden = false;
+            retry.disabled = false;
+            retry.textContent = onlineRefreshHistoryControl.resetRequired ? "重新读取最新历史" : "重试读取刷新历史";
+        }}
         if(login){{
             login.hidden = !denied;
             if(denied) login.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
@@ -956,7 +1193,14 @@ async function updateOnlineRefreshStatus(options){{
 var onlineRefreshQuery = document.getElementById("onlineRefreshQuery");
 if(onlineRefreshQuery) onlineRefreshQuery.onclick = function(){{ return updateOnlineRefreshStatus(); }};
 var onlineRefreshHistoryRetry = document.getElementById("onlineRefreshHistoryRetry");
-if(onlineRefreshHistoryRetry) onlineRefreshHistoryRetry.onclick = function(){{ return updateOnlineRefreshHistory(); }};
+if(onlineRefreshHistoryRetry) onlineRefreshHistoryRetry.onclick = function(){{
+    const reset = onlineRefreshHistoryControl.resetRequired === true;
+    if(reset && onlineRefreshHistoryControl.requestMissing) onlineRefreshHistoryControl.requestId = "";
+    if(reset) onlineRefreshHistoryControl.offset = 0;
+    return updateOnlineRefreshHistory({{reset:reset}});
+}};
+bindOnlineRefreshHistoryPager();
+bindOnlineRefreshHistoryPopstate();
 updateOnlineRefreshStatus();
 updateOnlineRefreshHistory();
 bindOnlineRefreshRetryForms(document);

@@ -720,6 +720,21 @@ class OnlineRefreshHistoryFull(RuntimeError):
     pass
 
 
+class OnlineRefreshHistoryChanged(RuntimeError):
+    def __init__(self, snapshot, total, request_missing=False):
+        super().__init__("在线脚本源刷新历史在翻页期间发生变化，请重新读取第一页")
+        self.snapshot = snapshot
+        self.total = total
+        self.request_missing = bool(request_missing)
+
+
+class OnlineRefreshHistoryPageOutOfRange(ValueError):
+    def __init__(self, total, snapshot):
+        super().__init__("刷新历史页码超出当前保留范围")
+        self.total = total
+        self.snapshot = snapshot
+
+
 def _prune_online_refresh_history(history, current_request_id):
     neighbours = {request_id: set() for request_id in history}
     for request_id, info in history.items():
@@ -1145,10 +1160,62 @@ def get_online_refresh_history(limit=50, request_id=""):
             history[current["request_id"]] = current
         ordered = sorted(
             history.values(),
-            key=lambda value: (value.get("request_id") == request_id, str(value.get("updated_at") or "")),
+            key=lambda value: (
+                value.get("request_id") == request_id,
+                str(value.get("updated_at") or ""),
+                str(value.get("request_id") or ""),
+            ),
             reverse=True,
         )
         return [dict(value) for value in ordered[:limit]]
+
+
+def get_online_refresh_history_page(limit=8, offset=0, request_id="", snapshot=""):
+    try:
+        limit = int(limit)
+        offset = int(offset)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("刷新历史 limit 和 offset 必须为整数") from exc
+    if not 1 <= limit <= ONLINE_REFRESH_HISTORY_LIMIT:
+        raise ValueError(f"刷新历史 limit 必须在 1 到 {ONLINE_REFRESH_HISTORY_LIMIT} 之间")
+    if not 0 <= offset <= ONLINE_REFRESH_HISTORY_LIMIT:
+        raise ValueError(f"刷新历史 offset 必须在 0 到 {ONLINE_REFRESH_HISTORY_LIMIT} 之间")
+    request_id = str(request_id or "").strip()
+    if request_id and not re.fullmatch(r"[a-f0-9]{32}", request_id):
+        raise ValueError("刷新请求标识无效")
+    snapshot = str(snapshot or "").strip()
+    if snapshot and not re.fullmatch(r"[a-f0-9]{64}", snapshot):
+        raise ValueError("刷新历史快照无效")
+    if offset and not snapshot:
+        raise ValueError("翻页必须提供第一页返回的刷新历史快照")
+
+    items = get_online_refresh_history(ONLINE_REFRESH_HISTORY_LIMIT, request_id=request_id)
+    selected = next((item for item in items if item.get("request_id") == request_id), None) if request_id else None
+    if request_id and selected is None and not snapshot:
+        raise LookupError("原刷新记录不存在或已清理，请返回刷新状态重新选择")
+    if selected is not None:
+        items = [selected] + [item for item in items if item.get("request_id") != request_id]
+
+    current_snapshot = hashlib.sha256(
+        json.dumps(items, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    if snapshot and snapshot != current_snapshot:
+        raise OnlineRefreshHistoryChanged(current_snapshot, len(items), request_missing=bool(request_id and selected is None))
+    total = len(items)
+    if offset > total or (total and offset == total):
+        raise OnlineRefreshHistoryPageOutOfRange(total, current_snapshot)
+    page_items = items[offset:offset + limit]
+    next_offset = offset + limit if offset + len(page_items) < total else None
+    previous_offset = max(0, offset - limit) if offset else None
+    return {
+        "items": page_items,
+        "offset": offset,
+        "limit": limit,
+        "total": total,
+        "snapshot": current_snapshot,
+        "previous_offset": previous_offset,
+        "next_offset": next_offset,
+    }
 
 
 def recover_online_refresh_receipt(request_id):

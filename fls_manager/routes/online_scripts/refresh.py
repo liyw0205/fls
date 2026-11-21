@@ -6,9 +6,11 @@ from ...online_scripts.constants import (
     ONLINE_REFRESH_LOCK,
     ONLINE_REFRESH_STATE,
     OnlineRefreshHistoryFull,
+    OnlineRefreshHistoryChanged,
+    OnlineRefreshHistoryPageOutOfRange,
     claim_online_refresh_retry,
     confirm_online_refresh_result,
-    get_online_refresh_history,
+    get_online_refresh_history_page,
     get_online_refresh_request,
     get_online_refresh_task_link_failures,
     get_online_refresh_submission,
@@ -308,17 +310,34 @@ def api_online_refresh_status():
 def api_online_refresh_history():
     try:
         limit = int(request.args.get("limit", "50"))
+        offset = int(request.args.get("offset", "0"))
     except (TypeError, ValueError):
-        return jsonify(ok=False, error="limit 必须为整数", items=[]), 400
+        return jsonify(ok=False, error="limit 和 offset 必须为整数", items=[]), 400
     try:
-        items = get_online_refresh_history(limit, request_id=request.args.get("request_id", "").strip())
+        page = get_online_refresh_history_page(
+            limit=limit,
+            offset=offset,
+            request_id=request.args.get("request_id", "").strip(),
+            snapshot=request.args.get("snapshot", "").strip(),
+        )
+    except OnlineRefreshHistoryChanged as e:
+        return jsonify(
+            ok=False, code="snapshot_changed", error=str(e), items=[],
+            snapshot=e.snapshot, total=e.total, offset=offset, limit=limit,
+            request_missing=e.request_missing,
+        ), 409
+    except OnlineRefreshHistoryPageOutOfRange as e:
+        return jsonify(
+            ok=False, code="offset_out_of_range", error=str(e), items=[],
+            total=e.total, snapshot=e.snapshot, offset=offset, limit=limit,
+        ), 416
     except ValueError as e:
         return jsonify(ok=False, error=str(e), items=[]), 400
     except LookupError as e:
         return jsonify(ok=False, error=str(e), items=[]), 404
     except Exception as e:
         return jsonify(ok=False, error=f"读取在线脚本源刷新历史失败：{e}", items=[]), 500
-    return jsonify(ok=True, items=items), 200
+    return jsonify(ok=True, **page), 200
 
 
 @bp.route("/api/online-scripts/refresh-task-link-failures/<request_id>")
