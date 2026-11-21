@@ -37,6 +37,8 @@ def main():
             "fail": True, "reloads": 0, "recovery_reloads": 0, "startup_failure": "",
             "publication_failure": False, "receipt_failure_request": "",
             "receipt_failure_mode": "", "receipt_failure_remaining": 0,
+            "confirmation_failure_request": "", "confirmation_failure_mode": "",
+            "confirmation_failure_remaining": 0,
         }
 
         def task_reload():
@@ -56,6 +58,15 @@ def main():
         def write(path, data):
             request_id = fault["receipt_failure_request"]
             receipt = data.get(request_id, {}) if path == constants.ONLINE_TASK_IMPORT_REQUESTS_FILE else {}
+            confirmation_request_id = fault["confirmation_failure_request"]
+            confirmation_receipt = (data.get(confirmation_request_id, {})
+                                    if path == constants.ONLINE_TASK_IMPORT_REQUESTS_FILE else {})
+            if (confirmation_request_id and fault["confirmation_failure_remaining"]
+                    and confirmation_receipt.get("confirmation") in ("published", "not_published")):
+                fault["confirmation_failure_remaining"] = 0
+                if fault["confirmation_failure_mode"] == "after":
+                    real_write(path, data)
+                raise OSError("browser confirmation receipt publication lost")
             if (request_id and fault["receipt_failure_remaining"] and receipt.get("state") == "completed"):
                 fault["receipt_failure_remaining"] = 0
                 if fault["receipt_failure_mode"] == "after":
@@ -100,6 +111,11 @@ def main():
                              receipt_failure_mode=data.get("receipt_failure_mode", "after"),
                              receipt_failure_remaining=1)
                 return jsonify(ok=True)
+            if data.get("confirmation_failure_request"):
+                fault.update(confirmation_failure_request=data["confirmation_failure_request"],
+                             confirmation_failure_mode=data.get("confirmation_failure_mode", "after"),
+                             confirmation_failure_remaining=1)
+                return jsonify(ok=True)
             source.save_online_script_cache([item])
             save_tasks([])
             constants.ONLINE_TASK_IMPORT_ACTIVE.clear()
@@ -107,7 +123,8 @@ def main():
             fault.update(fail=data.get("fail", True), startup_failure=data.get("startup_failure", ""),
                          publication_failure=data.get("publication_failure", False), reloads=0,
                          recovery_reloads=0, receipt_failure_request="", receipt_failure_mode="",
-                         receipt_failure_remaining=0)
+                         receipt_failure_remaining=0, confirmation_failure_request="",
+                         confirmation_failure_mode="", confirmation_failure_remaining=0)
             request_id = uuid.uuid4().hex
             if data.get("capacity"):
                 normalized = source.load_online_script_cache()[0]
@@ -300,13 +317,21 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    await page.reload();
    await page.getByRole('button',{name:'检查原导入结果',exact:true}).waitFor({state:'visible'});
    const confirmPost=base+'/api/online-scripts/import-tasks-confirm/'+uncertainId;
-   await page.route(confirmPost,route=>route.fulfill({status:503,contentType:'text/html',body:'confirmation temporarily unavailable'}));
+   await fixture({confirmation_failure_request:uncertainId,confirmation_failure_mode:'after'});
+   let confirmPosts=0;
+   await page.route(confirmPost,async route=>{
+    confirmPosts++;
+    const response=await route.fetch();assert.equal(response.status(),200);
+    const receipt=await response.json();assert.equal(receipt.receipt_recovered,true);
+    await route.fulfill({status:502,contentType:'text/plain',body:'confirmation response lost after receipt publication'});
+   },{times:1});
    await page.getByRole('button',{name:'检查原导入结果',exact:true}).click();
-   await page.waitForFunction(()=>document.querySelector('#onlineInstallRecoveryStatus').textContent.includes('confirmation temporarily unavailable'));
+   await page.waitForFunction(()=>document.querySelector('#onlineInstallRecoveryStatus').textContent.includes('confirmation response lost after receipt publication'));
    assert.equal(await page.evaluate(()=>JSON.parse(sessionStorage.getItem('fls-online-install-request')).request_id),uncertainId);
    await page.unroute(confirmPost);
    await page.getByRole('button',{name:'检查原导入结果',exact:true}).click();
    await page.waitForFunction(()=>document.querySelector('#onlineInstallRecoveryStatus').textContent.includes('仅需恢复调度器'));
+   assert.equal(confirmPosts,1);
    assert.equal((await fixture({inspect:true})).tasks.length,1);
    assert.equal((await fixture({inspect:true})).recovery_reloads,0);
    await page.getByRole('button',{name:'仅重新加载调度器',exact:true}).click();

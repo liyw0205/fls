@@ -166,9 +166,176 @@ class OnlineTaskImportConfirmationTests(unittest.TestCase):
 
                 with patch.object(install_select, "persist_online_task_import_request", side_effect=persist):
                     failed = self.confirm(app)
-                    self.assertEqual(failed.status_code, 503)
-                    self.assertEqual(self.confirm(app).status_code, 200)
+                    self.assertEqual(failed.status_code, 200 if after else 503)
+                    if after:
+                        self.assertTrue(failed.json["receipt_confirmed"])
+                        self.assertTrue(failed.json["receipt_recovered"])
+                        self.assertEqual(failed.json["request_id"], self.request_id)
+                        self.assertEqual(failed.json["state_url"], "/api/online-scripts/import-tasks-status/" + self.request_id)
+                        self.assertEqual(failed.json["state"], "scheduler_pending")
+                    else:
+                        recovered = self.confirm(app)
+                        self.assertEqual(recovered.status_code, 200)
+                        self.assertFalse(recovered.json["receipt_recovered"])
+                    repeated = self.confirm(app)
+                    self.assertEqual(repeated.status_code, 200)
+                    self.assertTrue(repeated.json["replayed"])
                 self.assertEqual(constants.get_online_task_import_request(self.request_id)["state"], "scheduler_pending")
+
+    def test_confirmation_does_not_accept_a_different_persisted_snapshot(self):
+        def conflict(record, field):
+            updated = dict(record)
+            if field == "request_id":
+                updated[field] = "b" * 32
+            elif field == "script_id":
+                updated[field] = "other-script"
+                updated["publication"] = dict(record["publication"], keys=["other-script:1:key"])
+            elif field == "expected_version":
+                updated[field] = "different-version"
+            elif field == "selected_task_indexes":
+                updated[field] = ["2"]
+                updated["publication"] = dict(record["publication"], keys=["demo:2:key"], task_ids=["changed-task"])
+            elif field == "publication":
+                updated[field] = dict(record[field], after="f" * 64)
+            elif field == "confirmation_source":
+                updated[field] = "f" * 64
+            elif field == "state":
+                updated[field] = "failed"
+            elif field == "confirmation":
+                updated[field] = "not_published"
+            return updated
+
+        for field in ("request_id", "script_id", "expected_version", "selected_task_indexes",
+                      "publication", "confirmation_source", "state", "confirmation"):
+            with self.subTest(field=field), self.app() as (app, _base_dir):
+                from fls_manager.online_scripts import constants
+                from fls_manager.routes.online_scripts import install_select
+
+                self.failed_publication(app)
+                real = constants.persist_online_task_import_request
+                changed = False
+                conflicting_value = None
+
+                def persist(record):
+                    nonlocal changed, conflicting_value
+                    if record.get("confirmation") == "published" and not changed:
+                        changed = True
+                        conflicting = conflict(record, field)
+                        conflicting_value = conflicting[field]
+                        real(conflicting)
+                        raise OSError("confirmation response interrupted after a conflicting write")
+                    return real(record)
+
+                with patch.object(install_select, "persist_online_task_import_request", side_effect=persist):
+                    response = self.confirm(app)
+                self.assertEqual(response.status_code, 503)
+                self.assertFalse(response.json["ok"])
+                self.assertTrue(response.json["receipt_confirmation_required"])
+                self.assertIn("不一致", response.json["msg"])
+                state_url = "/api/online-scripts/import-tasks-status/" + self.request_id
+                self.assertEqual(response.json["state_url"], state_url)
+                status = app.test_client().get(state_url, headers=self.headers)
+                self.assertEqual(status.status_code, 200)
+                if field == "request_id":
+                    self.assertEqual(status.json["state"], "unknown")
+                else:
+                    self.assertEqual(status.json[field], conflicting_value)
+
+    def test_confirmation_receipt_read_failure_keeps_read_only_recovery_link(self):
+        with self.app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_TASK_IMPORT_REQUESTS_FILE
+            from fls_manager.routes.online_scripts import install_select
+
+            self.failed_publication(app)
+            original_write = ONLINE_TASK_IMPORT_REQUESTS_FILE.write_text
+
+            def persist(record):
+                if record.get("confirmation") == "published":
+                    original_write("broken receipt", encoding="utf-8")
+                    raise OSError("confirmation receipt fsync unavailable")
+                raise AssertionError("unexpected receipt write")
+
+            with patch.object(install_select, "persist_online_task_import_request", side_effect=persist):
+                response = self.confirm(app)
+            self.assertEqual(response.status_code, 503)
+            self.assertTrue(response.json["receipt_confirmation_required"])
+            self.assertEqual(response.json["state_url"], "/api/online-scripts/import-tasks-status/" + self.request_id)
+            self.assertIn("回执复核失败", response.json["msg"])
+            self.assertEqual(ONLINE_TASK_IMPORT_REQUESTS_FILE.read_text(encoding="utf-8"), "broken receipt")
+
+    def test_concurrent_confirmations_publish_once_and_replay_same_request(self):
+        with self.app() as (app, _base_dir):
+            from fls_manager.online_scripts import constants
+            from fls_manager.routes.online_scripts import install_select
+
+            self.failed_publication(app)
+            real = constants.persist_online_task_import_request
+            entered, release, second_done = threading.Event(), threading.Event(), threading.Event()
+            writes = []
+            results = {}
+
+            def persist(record):
+                if record.get("confirmation") == "published":
+                    writes.append(record["request_id"])
+                    entered.set()
+                    if not release.wait(5):
+                        raise TimeoutError("concurrent confirmation was not released")
+                return real(record)
+
+            def confirm(key, done=None):
+                results[key] = self.confirm(app)
+                if done:
+                    done.set()
+
+            with patch.object(install_select, "persist_online_task_import_request", side_effect=persist):
+                first = threading.Thread(target=confirm, args=("first",))
+                second = threading.Thread(target=confirm, args=("second", second_done))
+                first.start()
+                self.assertTrue(entered.wait(5))
+                second.start()
+                self.assertFalse(second_done.wait(0.1))
+                release.set()
+                first.join(5)
+                second.join(5)
+                self.assertFalse(first.is_alive())
+                self.assertFalse(second.is_alive())
+
+            self.assertEqual(len(writes), 1)
+            self.assertEqual({response.status_code for response in results.values()}, {200})
+            self.assertEqual({response.json["request_id"] for response in results.values()}, {self.request_id})
+            self.assertEqual(sorted(response.json["replayed"] for response in results.values()), [False, True])
+            self.assertEqual(constants.get_online_task_import_request(self.request_id)["state"], "scheduler_pending")
+
+    def test_native_csrf_form_recovers_atomic_confirmation_write_exception(self):
+        with self.app() as (app, _base_dir):
+            from fls_manager.online_scripts import constants
+            from fls_manager.routes.online_scripts import install_select
+
+            self.failed_publication(app)
+            client = app.test_client()
+            csrf = "import-confirm-csrf"
+            with client.session_transaction() as session:
+                session.update(token=TOKEN, token_expire_at=int(time.time()) + 3600,
+                               security_verified=True, csrf_token=csrf)
+            real = constants.persist_online_task_import_request
+
+            def persist(record):
+                real(record)
+                if record.get("confirmation") == "published":
+                    raise OSError("confirmation form response interrupted after replace")
+
+            with patch.object(install_select, "persist_online_task_import_request", side_effect=persist):
+                response = client.post(
+                    "/online-scripts/import-tasks-confirm/" + self.request_id,
+                    data={"csrf_token": csrf},
+                )
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.location, "/online-scripts/import-tasks-status/" + self.request_id)
+            status = client.get("/api/online-scripts/import-tasks-status/" + self.request_id,
+                                headers=self.headers)
+            self.assertEqual(status.status_code, 200)
+            self.assertEqual(status.json["state"], "scheduler_pending")
+            self.assertEqual(status.json["confirmation"], "published")
 
     def test_completed_receipt_failure_keeps_publication_evidence_for_restarted_query(self):
         with self.app() as (app, _base_dir):

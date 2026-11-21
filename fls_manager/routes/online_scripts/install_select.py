@@ -466,7 +466,8 @@ def _confirm_task_import(request_id):
         if not record:
             return {"ok": False, "request_id": request_id, "msg": "导入请求不存在", "retry_allowed": False}, 404
         identity = {"request_id": request_id, "script_id": record["script_id"], "retry_allowed": False,
-                    "status_url": f"/online-scripts/import-tasks-status/{request_id}"}
+                    "status_url": f"/online-scripts/import-tasks-status/{request_id}",
+                    "state_url": f"/api/online-scripts/import-tasks-status/{request_id}"}
         if record.get("active") or record.get("archived"):
             return {**identity, "ok": False, "msg": "原导入仍在处理中或已归档，不能确认。"}, 409
         if record["state"] == "completed":
@@ -479,6 +480,7 @@ def _confirm_task_import(request_id):
             return {**identity, "ok": False, "state": record["state"], "msg": f"原导入结果无法确认：{exc}"}, 409
         state = "scheduler_pending" if confirmation == "published" else "failed"
         replayed = record.get("confirmation") == confirmation and record["state"] == state
+        receipt_recovered = False
         if not replayed:
             message = ("已核对原选择，任务已写入，仅需恢复调度器。" if confirmation == "published"
                        else "已核对任务文件未变化，原导入未写入，可继续原请求。")
@@ -486,12 +488,27 @@ def _confirm_task_import(request_id):
                 message += "原诊断：" + record["message"]
             _import_record_update(record, state, message, record.get("scheduler_reload_error", ""))
             record.update(confirmation=confirmation, confirmation_source=signature)
+            expected_receipt = _task_import_snapshot(record)
             try:
                 persist_online_task_import_request(record)
             except Exception as exc:
-                return {**identity, "ok": False, "msg": f"检查结果回执无法确认，请查询原导入请求后重试：{exc}"}, 503
+                try:
+                    saved = get_online_task_import_request(request_id, recover=False)
+                    receipt_recovered = _task_import_receipt_matches(expected_receipt, saved)
+                except Exception as verify_exc:
+                    verify_error = f"；回执复核失败：{verify_exc}"
+                else:
+                    verify_error = "" if receipt_recovered else "；磁盘回执与本次核实结果不一致"
+                if not receipt_recovered:
+                    return {
+                        **identity,
+                        "ok": False,
+                        "msg": f"检查结果回执无法确认，请通过只读状态查询核实后再操作：{exc}{verify_error}",
+                        "receipt_confirmation_required": True,
+                    }, 503
         return {**identity, "ok": True, "state": state, "confirmation": confirmation, "replayed": replayed,
                 "retry_allowed": state == "failed", "scheduler_reload_required": state == "scheduler_pending",
+                "receipt_confirmed": True, "receipt_recovered": receipt_recovered,
                 "msg": record["message"]}, 200
 
 
