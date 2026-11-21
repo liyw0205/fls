@@ -2528,7 +2528,8 @@ if (document.readyState === "loading") {
     }, true);
 
     window.addEventListener("popstate", function(){
-        if(window.__FLS_ONLINE_REFRESH_HISTORY_POPSTATE_BOUND__ && location.pathname === "/online-scripts") return;
+        if(window.__FLS_ONLINE_REFRESH_HISTORY_POPSTATE_BOUND__ && location.pathname === "/online-scripts" &&
+            document.getElementById("onlineRefreshHistory")) return;
         ajaxLoad(location.href, false);
     });
 
