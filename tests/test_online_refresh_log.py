@@ -647,6 +647,7 @@ const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
     def test_refresh_log_keeps_old_request_after_new_refresh_replaces_current(self):
         with isolated_app() as (app, base_dir):
             old_request = self._state(base_dir, refresh_id="a" * 32, request_id="b" * 32)
+            from fls_manager.online_scripts import constants
             from fls_manager.online_scripts.constants import update_online_refresh_state
 
             (base_dir / "data" / "online_script_refresh_requests.json").unlink()
@@ -703,10 +704,26 @@ const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
             status_html = status_page.get_data(as_text=True)
             self.assertIn('id="onlineRefreshHistory"', status_html)
             self.assertIn(f"/online-scripts/refresh-log/{old_request}", status_html)
+            history_before_errors = constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes()
+            anonymous = app.test_client()
+            self.assertEqual(
+                anonymous.get("/api/online-scripts/refresh-history").status_code,
+                401,
+            )
+            with patch("fls_manager.auth.query_token_enabled", return_value=False):
+                forbidden = client.get("/api/online-scripts/refresh-history?token=invalid")
+            self.assertEqual(forbidden.status_code, 403)
             invalid_limit = client.get(
                 "/api/online-scripts/refresh-history?limit=bad", headers={"X-Token": TOKEN},
             )
             self.assertEqual(invalid_limit.status_code, 400)
+            missing = client.get(
+                "/api/online-scripts/refresh-history?request_id=" + "f" * 32,
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(missing.status_code, 404)
+            self.assertEqual(missing.json["items"], [])
+            self.assertEqual(constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes(), history_before_errors)
             with patch(
                 "fls_manager.routes.online_scripts.refresh.get_online_refresh_history",
                 side_effect=RuntimeError("history disk unavailable"),
@@ -716,6 +733,7 @@ const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
                 )
             self.assertEqual(failed_api.status_code, 500)
             self.assertEqual(failed_api.json["items"], [])
+            self.assertEqual(constants.ONLINE_REFRESH_HISTORY_FILE.read_bytes(), history_before_errors)
             with patch(
                 "fls_manager.routes.online_scripts.pages.get_online_refresh_history",
                 side_effect=RuntimeError("history disk unavailable"),

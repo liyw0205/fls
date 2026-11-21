@@ -2364,6 +2364,115 @@ const terminal=response(200,{ok:true,id:serverId,request_id:requestId,running:fa
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise history-read recovery")
+    def test_refresh_history_read_failure_preserves_rows_and_has_single_flight_get_retry(self):
+        with isolated_app() as (app, _base_dir):
+            html = app.test_client().get("/online-scripts", headers={"X-Token": TOKEN}).get_data(as_text=True)
+            script = next(script for script in re.findall(r"<script>(.*?)</script>", html, re.S)
+                          if "async function updateOnlineRefreshHistory()" in script)
+            start = script.index("function hideOnlineRefreshHistoryReadActions()")
+            end = script.index("\nfunction randomOnlineRefreshRequestId()", start)
+            history_script = script[start:end]
+            binding_start = script.index("var onlineRefreshQuery = document.getElementById(\"onlineRefreshQuery\")")
+            binding_end = script.index("\nupdateOnlineRefreshStatus();", binding_start)
+            binding = script[binding_start:binding_end]
+            static = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+            reader = static[static.index("async function flsReadJsonResponse("):static.index("async function flsReadTextResponse(")]
+            result = subprocess.run(
+                ["node", "-e", r'''
+const vm=require('node:vm'),assert=require('node:assert/strict');
+const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const settle=async()=>{await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));};
+const response=(status,body,type='application/json')=>({ok:status>=200&&status<300,status,
+ headers:{get:()=>type},text:async()=>typeof body==='string'?body:JSON.stringify(body)});
+function setup(queue){
+ const row='<div id="old-history">previous valid history</div>';
+ const elements={onlineRefreshHistory:{innerHTML:row},onlineRefreshHistoryError:{hidden:true,textContent:''},
+  onlineRefreshHistoryRetry:{hidden:true,disabled:false},onlineRefreshHistoryLogin:{hidden:true,href:''},onlineRefreshQuery:{hidden:true}};
+ const reads=[];
+ const context={window:{},location:{pathname:'/online-scripts',search:'?refresh_request_id='+ 'a'.repeat(32)},
+  document:{getElementById:id=>elements[id]},onlineRefreshHistoryControl:{pending:false,generation:0},
+  fetch:async(url,options)=>{reads.push({url:String(url),options});const next=queue.shift();return next&&next.promise?await next.promise:next;},
+  flsReadJsonResponse:async response=>{
+   if(!response.ok){let body='';try{body=await response.text();}catch(_){}
+    let payload=null;try{payload=JSON.parse(body);}catch(_){}
+    const error=new Error('HTTP '+response.status+(payload&&payload.error?': '+payload.error:''));
+    error.status=response.status;error.payload=payload;throw error;}
+   try{return JSON.parse(await response.text());}catch(_){const error=new Error('响应解析失败：'+response.status);error.status=response.status;throw error;}
+  },
+  escapeHtml:value=>String(value==null?'':value).replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char])),
+  bindOnlineRefreshRetryForms:()=>{},bindOnlineRefreshConfirmForms:()=>{},updateOnlineRefreshStatus:async()=>{},
+  encodeURIComponent,Array,String,Number,Boolean,JSON,Math,
+ };
+ vm.createContext(context);vm.runInContext(input.historyScript,context);vm.runInContext(input.binding,context);
+ return {context,elements,reads,row};
+}
+(async()=>{
+ let release;
+ const pending=new Promise(resolve=>release=resolve);
+ const concurrent=setup([{promise:pending}]);
+ const first=concurrent.context.updateOnlineRefreshHistory();
+ const duplicate=concurrent.context.updateOnlineRefreshHistory();
+ assert.equal(concurrent.reads.length,1,'concurrent history reads must be single-flight');
+ assert.equal(concurrent.elements.onlineRefreshHistoryRetry.disabled,true);
+ release(response(503,{error:'temporary history outage'}));
+ await Promise.all([first,duplicate]);await settle();
+ assert.equal(concurrent.elements.onlineRefreshHistory.innerHTML,concurrent.row,'failed GET must preserve rendered history');
+ assert.match(concurrent.elements.onlineRefreshHistoryError.textContent,/HTTP 503.*temporary history outage/);
+ assert.equal(concurrent.elements.onlineRefreshHistoryRetry.hidden,false);
+ assert.equal(concurrent.elements.onlineRefreshHistoryRetry.disabled,false);
+ assert.equal(concurrent.elements.onlineRefreshHistoryLogin.hidden,true);
+ assert.equal(typeof concurrent.elements.onlineRefreshHistoryRetry.onclick,'function');
+
+ concurrent.reads.length=0;
+ const recovery=setup([response(503,{error:'temporary history outage'}),response(200,{ok:true,items:[
+  {request_id:'b'.repeat(32),status:'已完成',updated_at:'now',task_link_failure_count:0}
+ ]})]);
+ await recovery.context.updateOnlineRefreshHistory();
+ const retry=recovery.elements.onlineRefreshHistoryRetry.onclick();
+ const duplicateRetry=recovery.context.updateOnlineRefreshHistory();
+ await Promise.all([retry,duplicateRetry]);await settle();
+ assert.equal(recovery.reads.length,2);
+ assert.ok(recovery.reads.every(read=>read.url==='/api/online-scripts/refresh-history?limit=8'));
+ assert.ok(recovery.reads.every(read=>read.options.cache==='no-store'&&read.options.credentials==='same-origin'));
+ assert.match(recovery.elements.onlineRefreshHistory.innerHTML,/refresh-log\/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/);
+ assert.equal(recovery.elements.onlineRefreshHistoryError.hidden,true);
+ assert.equal(recovery.elements.onlineRefreshHistoryRetry.hidden,true);
+ assert.equal(recovery.elements.onlineRefreshHistoryLogin.hidden,true);
+ assert.ok(recovery.reads.every(read=>!read.options.method||read.options.method==='GET'));
+
+ for(const invalid of [
+  response(503,'<html>proxy unavailable</html>','text/html'),
+  response(200,'not-json'),
+  response(200,{ok:true,items:{}}),
+  response(200,{ok:true,items:[{}]}),
+  response(200,{ok:false,error:'invalid response',items:[]}),
+ ]){
+  const broken=setup([invalid]);await broken.context.updateOnlineRefreshHistory();
+  assert.equal(broken.elements.onlineRefreshHistory.innerHTML,broken.row);
+  assert.equal(broken.elements.onlineRefreshHistoryRetry.hidden,false);
+  assert.equal(broken.elements.onlineRefreshHistoryError.hidden,false);
+ }
+
+ for(const status of [401,403]){
+  const denied=setup([response(status,{error:'authentication required'})]);
+  await denied.context.updateOnlineRefreshHistory();
+  assert.equal(denied.elements.onlineRefreshHistory.innerHTML,denied.row);
+  assert.equal(denied.elements.onlineRefreshHistoryRetry.hidden,false);
+  assert.equal(denied.elements.onlineRefreshHistoryLogin.hidden,false);
+  assert.equal(denied.elements.onlineRefreshHistoryLogin.href,
+   '/login?next=%2Fonline-scripts%3Frefresh_request_id%3D'+'a'.repeat(32));
+ }
+ console.log('online refresh history read recovery passed');
+})().catch(error=>{console.error(error);process.exitCode=1;});
+'''],
+                input=json.dumps({"historyScript": history_script, "binding": binding}),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise the response reader")
     def test_response_readers_preserve_bounded_non_json_http_diagnostic(self):
         source = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")

@@ -363,6 +363,8 @@ def online_scripts_page():
     <div id="onlineRefreshPersistence">{refresh_persistence_html}</div>
     <div id="onlineRefreshHistory" class="action-row" style="margin-top:8px;">{refresh_history_html(refresh_history)}</div>
     <div id="onlineRefreshHistoryError" class="notice red" role="status"{' hidden' if not refresh_history_error else ''}>{h(refresh_history_error)}</div>
+    <button id="onlineRefreshHistoryRetry" class="btn btn-gray" type="button" hidden>重新读取刷新历史</button>
+    <a id="onlineRefreshHistoryLogin" class="btn btn-gray" href="/login?next=%2Fonline-scripts" hidden>重新登录</a>
 </div>
 </section>
 
@@ -418,6 +420,10 @@ onlineRefreshStatusControl.outcome = {str(bool(refresh_running)).lower()} ? "run
 onlineRefreshStatusControl.requestId = onlineRefreshPending ? onlineRefreshPending.request_id : "";
 onlineRefreshStatusControl.pageHidden = false;
 var onlineRefreshMissingRequest = false;
+var onlineRefreshHistoryControl = window.__FLS_ONLINE_REFRESH_HISTORY_CONTROL__ || {{pending:false, generation:0}};
+window.__FLS_ONLINE_REFRESH_HISTORY_CONTROL__ = onlineRefreshHistoryControl;
+onlineRefreshHistoryControl.generation++;
+onlineRefreshHistoryControl.pending = false;
 
 function clearOnlineRefreshStatusTimer(){{
     if(onlineRefreshStatusControl.timer !== null){{
@@ -514,14 +520,31 @@ async function submitOnlineRefreshRecoverForm(form, event){{
     }}
 }}
 
+function hideOnlineRefreshHistoryReadActions(){{
+    const retry = document.getElementById("onlineRefreshHistoryRetry");
+    const login = document.getElementById("onlineRefreshHistoryLogin");
+    if(retry){{ retry.hidden = true; retry.disabled = false; }}
+    if(login) login.hidden = true;
+}}
+
 async function updateOnlineRefreshHistory(){{
     const history = document.getElementById("onlineRefreshHistory");
     const error = document.getElementById("onlineRefreshHistoryError");
-    if(!history) return;
+    const retry = document.getElementById("onlineRefreshHistoryRetry");
+    const login = document.getElementById("onlineRefreshHistoryLogin");
+    if(!history || onlineRefreshHistoryControl.pending) return;
+    const generation = ++onlineRefreshHistoryControl.generation;
+    onlineRefreshHistoryControl.pending = true;
+    if(retry) retry.disabled = true;
     try{{
         const response = await fetch({json.dumps(refresh_history_url)}, {{cache:"no-store", credentials:"same-origin"}});
         const json = await flsReadJsonResponse(response);
-        if(!json || !Array.isArray(json.items)) throw new Error("刷新历史响应无效");
+        if(generation !== onlineRefreshHistoryControl.generation || document.getElementById("onlineRefreshHistory") !== history) return;
+        if(!json || json.ok !== true || !Array.isArray(json.items) || json.items.some(function(item){{
+            return !item || typeof item !== "object" || Array.isArray(item) ||
+                !/^[a-f0-9]{{32}}$/.test(String(item.request_id || "")) || typeof item.status !== "string";
+        }}))
+            throw new Error(json && (json.error || json.msg) || "刷新历史响应无效");
         const rows = json.items.map(function(item){{
             const requestId = String(item && item.request_id || "");
             if(!/^[a-f0-9]{{32}}$/.test(requestId)) return "";
@@ -551,11 +574,24 @@ async function updateOnlineRefreshHistory(){{
         bindOnlineRefreshRetryForms(history);
         bindOnlineRefreshConfirmForms(history);
         if(error){{ error.hidden = true; error.textContent = ""; }}
+        hideOnlineRefreshHistoryReadActions();
     }}catch(e){{
+        if(generation !== onlineRefreshHistoryControl.generation || document.getElementById("onlineRefreshHistory") !== history) return;
+        const denied = e && (e.status === 401 || e.status === 403);
         if(error){{
             const status = e && e.status ? "HTTP " + e.status : "请求失败";
             error.hidden = false;
             error.textContent = "刷新历史读取失败（" + status + "）：" + (e && e.message || String(e || "未知错误")) + "。当前已显示的历史未清除。";
+        }}
+        if(retry){{ retry.hidden = false; retry.disabled = false; }}
+        if(login){{
+            login.hidden = !denied;
+            if(denied) login.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
+        }}
+    }}finally{{
+        if(generation === onlineRefreshHistoryControl.generation){{
+            onlineRefreshHistoryControl.pending = false;
+            if(retry) retry.disabled = false;
         }}
     }}
 }}
@@ -919,6 +955,8 @@ async function updateOnlineRefreshStatus(options){{
 
 var onlineRefreshQuery = document.getElementById("onlineRefreshQuery");
 if(onlineRefreshQuery) onlineRefreshQuery.onclick = function(){{ return updateOnlineRefreshStatus(); }};
+var onlineRefreshHistoryRetry = document.getElementById("onlineRefreshHistoryRetry");
+if(onlineRefreshHistoryRetry) onlineRefreshHistoryRetry.onclick = function(){{ return updateOnlineRefreshHistory(); }};
 updateOnlineRefreshStatus();
 updateOnlineRefreshHistory();
 bindOnlineRefreshRetryForms(document);

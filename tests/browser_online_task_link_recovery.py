@@ -834,6 +834,52 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    page.off('request',countRefreshPosts);
    await page.unroute(autoStatusUrl);
 
+   const historyRequestId=('c'+viewport.width.toString(16)).padEnd(32,'c');
+   const historyRefreshId=('d'+viewport.width.toString(16)).padEnd(32,'d');
+   await fixture({reset:true,fail:true});
+   const historyFixture=await page.request.post(base+'/api/fixture/online-refresh',{headers,data:{
+     running:false,request_id:historyRequestId,refresh_id:historyRefreshId,
+   }});
+   assert.equal(historyFixture.status(),200);
+   await page.evaluate(()=>sessionStorage.removeItem('fls-online-refresh-request'));
+   const historyUrl=base+'/api/online-scripts/refresh-history?limit=8';
+   let historyReads=0,historyRefreshPosts=0;
+   const countHistoryRefreshPosts=request=>{
+     if(request.method()==='POST'&&request.url().includes('/api/online-scripts/refresh')) historyRefreshPosts++;
+   };
+   page.on('request',countHistoryRefreshPosts);
+   await page.route(historyUrl,route=>{
+     historyReads++;
+     if(historyReads===1) return route.fulfill({status:503,contentType:'text/html',body:'history gateway unavailable'});
+     if(historyReads===2) return route.fulfill({status:401,contentType:'application/json',body:JSON.stringify({error:'login expired'})});
+     return route.continue();
+   });
+   await page.goto(base+'/online-scripts');
+   const historyRow=page.locator('#onlineRefreshHistory a[href="/online-scripts/refresh-log/'+historyRequestId+'"]');
+   await historyRow.waitFor();
+   await page.waitForFunction(()=>document.querySelector('#onlineRefreshHistoryError').textContent.includes('HTTP 503'));
+   assert.equal(await page.locator('#onlineRefreshHistoryRetry').isVisible(),true);
+   assert.equal(await page.locator('#onlineRefreshHistoryLogin').isVisible(),false);
+   await page.screenshot({path:'/tmp/fls-refresh-history-retry-'+viewport.width+'.png'});
+   await page.locator('#onlineRefreshHistoryRetry').click();
+   await page.waitForFunction(()=>document.querySelector('#onlineRefreshHistoryError').textContent.includes('HTTP 401'));
+   assert.equal(await page.locator('#onlineRefreshHistoryLogin').isVisible(),true);
+   assert.equal(await page.locator('#onlineRefreshHistoryLogin').getAttribute('href'),'/login?next=%2Fonline-scripts');
+   assert.equal(await historyRow.count(),1,'failed history reads must preserve the server-rendered row');
+   const [historyRecovered]=await Promise.all([
+     page.waitForResponse(response=>response.url()===historyUrl&&response.status()===200),
+     page.locator('#onlineRefreshHistoryRetry').click(),
+   ]);
+   assert.equal(historyRecovered.status(),200);
+   await page.waitForFunction(()=>document.querySelector('#onlineRefreshHistoryError').hidden);
+   assert.equal(await historyRow.count(),1);
+   assert.equal(await page.locator('#onlineRefreshHistoryRetry').isVisible(),false);
+   assert.equal(await page.locator('#onlineRefreshHistoryLogin').isVisible(),false);
+   assert.equal(historyReads,3);
+   assert.equal(historyRefreshPosts,0,'history recovery must not submit a refresh or task-link request');
+   page.off('request',countHistoryRefreshPosts);
+   await page.unroute(historyUrl);
+
    const manyFailureRequestId='9'.repeat(32);
    await fixture({reset:true,fail:true});
    const manyFailures=await page.request.post(base+'/api/fixture/online-refresh',{headers,data:{failure_count:105,request_id:manyFailureRequestId,refresh_id:'8'.repeat(32)}});
