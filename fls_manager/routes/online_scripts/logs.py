@@ -472,22 +472,29 @@ def _install_history_filter_form(script_id="", status="", limit=50):
 
 @bp.route("/api/online-scripts/install-history")
 def api_online_install_history():
+    requested_snapshot = request.args.get("snapshot")
+    if requested_snapshot is not None and not re.fullmatch(r"[a-f0-9]{64}", requested_snapshot):
+        return jsonify(ok=False, msg="在线脚本安装历史快照无效"), 400
     try:
-        items, total = list_online_install_jobs(
+        items, total, snapshot = list_online_install_jobs(
             request.args.get("limit", 50),
             request.args.get("script_id", ""),
             request.args.get("status", ""),
             request.args.get("offset", 0),
+            include_snapshot=True,
         )
     except ValueError as exc:
         return jsonify(ok=False, msg=str(exc)), 400
     except Exception as exc:
         return jsonify(ok=False, msg=f"安装历史无法读取：{exc}"), 500
+    if requested_snapshot is not None and requested_snapshot != snapshot:
+        return jsonify(ok=False, msg="安装历史在分页期间发生变化，请重新读取完整历史"), 409
     limit = int(request.args.get("limit", 50))
     offset = int(request.args.get("offset", 0))
     return jsonify(
         ok=True, items=items, total=total, offset=offset, limit=limit,
         has_more=offset + len(items) < total,
+        snapshot=snapshot,
     )
 
 

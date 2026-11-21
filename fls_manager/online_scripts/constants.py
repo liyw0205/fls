@@ -24,6 +24,7 @@ ONLINE_INSTALL_RETRYING = set()
 ONLINE_INSTALL_JOBS_FILE = DATA_DIR / "online_install_jobs.json"
 ONLINE_INSTALL_LOCK = threading.RLock()
 ONLINE_INSTALL_LIMIT = 100
+ONLINE_INSTALL_HISTORY_OFFSET_LIMIT = 1_000_000
 ONLINE_INSTALL_STATUSES = (
     "准备中", "运行中", "停止中", "停止失败", "超时（停止失败）", "部分完成", "已完成", "失败",
     "超时", "已停止", "启动失败", "结果未知",
@@ -1786,9 +1787,9 @@ def _install_history_integer(value, label, minimum, maximum):
     return number
 
 
-def list_online_install_jobs(limit=50, script_id="", status="", offset=0):
+def list_online_install_jobs(limit=50, script_id="", status="", offset=0, *, include_snapshot=False):
     limit = _install_history_integer(limit, "数量", 1, ONLINE_INSTALL_LIMIT)
-    offset = _install_history_integer(offset, "偏移", 0, ONLINE_INSTALL_LIMIT)
+    offset = _install_history_integer(offset, "偏移", 0, ONLINE_INSTALL_HISTORY_OFFSET_LIMIT)
     script_id = str(script_id or "").strip()
     if len(script_id) > 200 or any(ord(char) < 32 for char in script_id):
         raise ValueError("在线脚本安装历史脚本 ID 无效")
@@ -1820,7 +1821,11 @@ def list_online_install_jobs(limit=50, script_id="", status="", offset=0):
 
         items.sort(key=order, reverse=True)
         total = len(items)
+        snapshot = hashlib.sha256(json.dumps(
+            {"script_id": script_id, "status": status, "items": items},
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
+        ).encode("utf-8")).hexdigest()
         selected = items[offset:offset + limit]
         for info in selected:
             info.update(online_install_retry_relation(info, jobs))
-        return selected, total
+        return (selected, total, snapshot) if include_snapshot else (selected, total)

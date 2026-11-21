@@ -1054,6 +1054,59 @@ const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
             )
             self.assertIn("暂无安装历史", empty_page.get_data(as_text=True))
 
+    def test_install_history_api_paginates_legacy_records_and_rejects_changed_snapshot(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE
+
+            jobs = {}
+            for index in range(205):
+                install_id = f"legacy-{index:03d}"
+                jobs[install_id] = {
+                    "id": install_id, "script_id": "demo", "script_name": "Demo",
+                    "log_file": str(base_dir / f"{install_id}.log"), "running": False,
+                    "status": "已完成", "phase": "completed", "start_time": 205 - index,
+                    "returncode": 0, "error": "", "updated_at": f"2026-11-19 00:{index:03d}",
+                    "retry_of": "", "retried_by": "",
+                }
+            ONLINE_INSTALL_JOBS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            ONLINE_INSTALL_JOBS_FILE.write_text(json.dumps(jobs), encoding="utf-8")
+            client = app.test_client()
+            pages = []
+            for offset in (0, 100, 200):
+                query = {"limit": 100, "offset": offset}
+                if pages:
+                    query["snapshot"] = pages[0].json["snapshot"]
+                page = client.get(
+                    "/api/online-scripts/install-history", query_string=query,
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(page.status_code, 200)
+                pages.append(page)
+
+            self.assertEqual([page.json["total"] for page in pages], [205, 205, 205])
+            self.assertEqual([len(page.json["items"]) for page in pages], [100, 100, 5])
+            self.assertEqual([page.json["has_more"] for page in pages], [True, True, False])
+            self.assertEqual({page.json["snapshot"] for page in pages}, {pages[0].json["snapshot"]})
+            self.assertEqual(
+                [item["id"] for page in pages for item in page.json["items"]],
+                [f"legacy-{index:03d}" for index in range(205)],
+            )
+
+            jobs["legacy-204"]["status"] = "失败"
+            ONLINE_INSTALL_JOBS_FILE.write_text(json.dumps(jobs), encoding="utf-8")
+            changed = client.get(
+                "/api/online-scripts/install-history?limit=100&offset=200&snapshot="
+                + pages[0].json["snapshot"], headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(changed.status_code, 409)
+            self.assertIn("变化", changed.json["msg"])
+
+            invalid_snapshot = client.get(
+                "/api/online-scripts/install-history?limit=100&snapshot=invalid",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(invalid_snapshot.status_code, 400)
+
     def test_install_history_rejects_invalid_pagination_filters_without_writing(self):
         with isolated_app() as (app, _base_dir):
             from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE
@@ -1063,7 +1116,7 @@ const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
             original = ONLINE_INSTALL_JOBS_FILE.read_bytes()
             client = app.test_client()
             for query in (
-                "limit=0", "limit=101", "limit=1.5", "offset=-1", "offset=101",
+                "limit=0", "limit=101", "limit=1.5", "offset=-1", "offset=1000001",
                 "offset=1.5", "status=not-a-status", "script_id=" + ("x" * 201),
             ):
                 with self.subTest(query=query):

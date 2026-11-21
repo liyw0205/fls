@@ -1,4 +1,5 @@
 """Real HTTP/Chromium recovery for pre-accepted online install rejections."""
+import json
 import os
 import tempfile
 import threading
@@ -20,6 +21,7 @@ def main():
         from fls_manager.app import create_app
         import fls_manager.app as app_module
         from fls_manager.online_scripts import source
+        from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE
         from fls_manager.routes.online_scripts import install as install_route
 
         item = {
@@ -60,6 +62,35 @@ def main():
                 "scheduler_reload_error": "",
                 "updated_at": "2099-01-01T00:00:00",
             })
+            history = {}
+            for index in range(100):
+                install_id = f"legacy-{index:03d}"
+                history[install_id] = {
+                    "id": install_id,
+                    "script_id": kwargs["script_id"],
+                    "script_name": script.get("name"),
+                    "log_file": os.path.join(temp, "logs", f"online-script-install-{install_id}.log"),
+                    "proxy_id": "",
+                    "import_task": False,
+                    "enable_task": False,
+                    "selected_task_indexes": [],
+                    "selected_tasks": [],
+                    "force": False,
+                    "retry_of": "",
+                    "retried_by": "",
+                    "running": False,
+                    "status": "已完成",
+                    "phase": "completed",
+                    "target_path": "",
+                    "start_time": index + 1,
+                    "returncode": 0,
+                    "error": "",
+                    "scheduler_reload_pending": False,
+                    "scheduler_reload_error": "",
+                    "updated_at": f"2026-11-20T00:00:{index:02d}",
+                }
+            history[request_id] = install_route.get_online_install_job(request_id)
+            ONLINE_INSTALL_JOBS_FILE.write_text(json.dumps(history), encoding="utf-8")
             return {}
 
         real_start = install_route._start_install_job
@@ -105,8 +136,12 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
  try{
   const base=process.env.FLS_UI_BASE,headers={'X-Token':process.env.FLS_UI_TOKEN};
   for(const viewport of [{width:390,height:844},{width:1280,height:800}]){
-   const context=await browser.newContext({viewport}),page=await context.newPage(),errors=[];
+   const context=await browser.newContext({viewport}),page=await context.newPage(),errors=[],historyQueries=[];
    page.on('pageerror',error=>errors.push(error.message));
+   page.on('request',request=>{
+     const url=new URL(request.url());
+     if(url.pathname==='/api/online-scripts/install-history')historyQueries.push(url);
+   });
    await page.goto(base+'/login');
    await page.locator('[name="token"]').fill(process.env.FLS_UI_TOKEN);
    await page.locator('button[type="submit"]').click();
@@ -173,14 +208,22 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    await page.waitForURL(base+'/online-scripts/install-select/browser-install');
    await page.waitForFunction(()=>document.getElementById('onlineInstallRecoveryStatus').textContent.includes('原安装已明确结束'));
    assert.equal(await page.locator('#onlineInstallRecoveryLog').isVisible(),true);
+   const historyQueryStart=historyQueries.length;
    await page.locator('#onlineInstallRecoveryCheckHistory').click();
    await page.waitForFunction(()=>document.getElementById('onlineInstallRecoveryClear').hidden===false);
    await page.waitForFunction(()=>document.getElementById('onlineInstallRecoveryStatus').textContent.includes('可以确认清理本地请求'));
+   const historyPages=historyQueries.slice(historyQueryStart);
+   assert.equal(historyPages.length,2);
+   assert.equal(historyPages[0].searchParams.get('limit'),'100');
+   assert.equal(historyPages[0].searchParams.get('offset'),null);
+   assert.equal(historyPages[1].searchParams.get('offset'),'100');
+   assert.match(historyPages[1].searchParams.get('snapshot'),/^[a-f0-9]{64}$/);
+   assert.match(await page.locator('#onlineInstallRecoveryHistoryItems').textContent(),/101/);
    page.once('dialog',dialog=>dialog.accept());
    await page.locator('#onlineInstallRecoveryClear').click();
    await page.waitForFunction(()=>{
      const form=document.getElementById('onlineInstallSelectForm');
-     return sessionStorage.getItem('fls-online-install-request')===null
+     return !!form&&sessionStorage.getItem('fls-online-install-request')===null
        &&form.__flsInstallRecoveryLocked===false;
    });
    const nextRequestId=await page.locator('#onlineInstallSelectForm [name="request_id"]').inputValue();

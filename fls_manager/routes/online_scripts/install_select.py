@@ -1425,29 +1425,59 @@ async function flsInstallCheckHistory(){{
         return;
     }}
     const pending = state.kind === "valid" ? state.value : null;
-    const query = "?limit=100" + (pending && pending.script_id
-        ? "&script_id=" + encodeURIComponent(pending.script_id) : "");
+    const scriptQuery = pending && pending.script_id
+        ? "&script_id=" + encodeURIComponent(pending.script_id) : "";
     const check = document.getElementById("onlineInstallRecoveryCheckHistory");
     if(check) check.disabled = true;
     flsInstallSetStatus("正在读取完整安装历史；在核对完成前不会启动新请求。");
     try{{
-        const response = await fetch("/api/online-scripts/install-history" + query,
-            {{cache:"no-store", credentials:"same-origin"}});
-        const json = await flsReadJsonResponse(response);
-        if(!json || json.ok !== true || !Array.isArray(json.items)
-            || !Number.isInteger(json.total) || json.total < 0
-            || json.offset !== 0 || json.limit !== 100 || typeof json.has_more !== "boolean"
-            || json.items.some(item => !flsInstallHistoryItemValid(item))){{
-            throw new Error("安装历史响应无效或结构不完整");
+        const history = [], seenIds = new Set();
+        let total = null, offset = 0, snapshot = "";
+        while(true){{
+            const query = "?limit=100" + scriptQuery
+                + (offset ? "&offset=" + offset : "")
+                + (snapshot ? "&snapshot=" + encodeURIComponent(snapshot) : "");
+            const response = await fetch("/api/online-scripts/install-history" + query,
+                {{cache:"no-store", credentials:"same-origin"}});
+            const json = await flsReadJsonResponse(response);
+            if(!json || json.ok !== true || !Array.isArray(json.items)
+                || !Number.isInteger(json.total) || json.total < 0
+                || json.offset !== offset || json.limit !== 100 || typeof json.has_more !== "boolean"
+                || typeof json.snapshot !== "string" || !/^[a-f0-9]{{64}}$/.test(json.snapshot)
+                || json.items.some(item => !flsInstallHistoryItemValid(item))){{
+                throw new Error("安装历史响应无效或结构不完整");
+            }}
+            if(total === null){{
+                total = json.total;
+                snapshot = json.snapshot;
+            }}else if(total !== json.total || snapshot !== json.snapshot){{
+                throw new Error("安装历史在分页期间发生变化，请重新查询");
+            }}
+            const expectedCount = Math.min(100, Math.max(0, total - offset));
+            if(json.items.length !== expectedCount
+                || json.has_more !== (offset + json.items.length < total)){{
+                throw new Error("安装历史分页不完整，请重新查询");
+            }}
+            const pageIds = new Set();
+            for(const item of json.items){{
+                if(seenIds.has(item.id) || pageIds.has(item.id))
+                    throw new Error("安装历史分页包含重复记录，请重新查询");
+                pageIds.add(item.id);
+            }}
+            json.items.forEach(item => seenIds.add(item.id));
+            history.push(...json.items);
+            if(!json.has_more) break;
+            if(!json.items.length) throw new Error("安装历史分页未前进，请重新查询");
+            offset += json.items.length;
         }}
-        const complete = json.has_more === false && json.total === json.items.length;
+        const complete = total !== null && history.length === total;
         const installId = pending && (pending.install_id || pending.request_id);
-        const original = installId ? json.items.find(item => item.id === installId) : null;
-        const safe = complete && json.items.every(item => flsInstallHistoryItemSafe(item))
+        const original = installId ? history.find(item => item.id === installId) : null;
+        const safe = complete && history.every(item => flsInstallHistoryItemSafe(item))
             && (pending ? (!original || (original.script_id === pending.script_id
                 && flsInstallHistoryItemSafe(original))) : true);
-        flsInstallRenderHistory(json.items, complete
-            ? "已读取 " + json.items.length + " 条相关安装记录。"
+        flsInstallRenderHistory(history, complete
+            ? "已读取 " + history.length + " 条相关安装记录。"
             : "安装历史未完整读取，当前仅显示已返回记录，不能确认请求可以清理。");
         if(pending && original && !flsInstallHistoryItemSafe(original)){{
             flsInstallSetStatus("原安装仍处于 " + original.status + " 状态或需要恢复；保留原请求，不允许新安装。");
