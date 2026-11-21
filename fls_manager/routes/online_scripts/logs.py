@@ -260,18 +260,29 @@ const historyEl = document.getElementById("refreshLogHistory");
 let pending = false;
 let pollTimer = null;
 let pollingStopped = false;
+let pageHidden = false;
+let transientFailures = 0;
+let lastKnownRunning = {str(bool(payload.get("running"))).lower()};
+const MAX_TRANSIENT_RETRIES = 5;
 
 function stopPolling(){{
     pollingStopped = true;
     if(pollTimer){{ clearTimeout(pollTimer); pollTimer = null; }}
 }}
 
-function schedulePolling(){{
-    if(pollingStopped || pollTimer) return;
+function schedulePolling(delay){{
+    if(pollingStopped || pageHidden || pollTimer) return;
     pollTimer = setTimeout(function(){{
         pollTimer = null;
         loadRefreshLog();
-    }}, 2000);
+    }}, delay);
+}}
+
+function isRetryableReadFailure(error){{
+    const status = Number(error && error.status);
+    if(Number.isInteger(status) && status > 0)
+        return status === 408 || status === 429 || (status >= 500 && status <= 599);
+    return !!error && (error.name === "TypeError" || error.name === "NetworkError");
 }}
 
 async function loadRefreshLog(){{
@@ -282,6 +293,8 @@ async function loadRefreshLog(){{
         const response = await fetch("/api/online-scripts/refresh-log/{h(payload.get("request_id"))}?lines=1200", {{cache:"no-store", credentials:"same-origin"}});
         const result = await flsReadJsonResponse(response);
         if(!result || typeof result.log !== "string") throw new Error("刷新日志响应无效");
+        transientFailures = 0;
+        lastKnownRunning = result.running === true || result.terminal !== true;
         if(errorEl){{ errorEl.hidden = true; errorEl.textContent = ""; }}
         if(loginEl) loginEl.hidden = true;
         if(textEl) textEl.textContent = result.log || "暂无日志";
@@ -294,24 +307,52 @@ async function loadRefreshLog(){{
         if(status) status.textContent = result.status || "-";
         if(updated) updated.textContent = result.updated_at || "-";
         if(result.running || !result.terminal){{
-            pollingStopped = false;
-            schedulePolling();
+            if(!pageHidden){{
+                pollingStopped = false;
+                schedulePolling(2000);
+            }}
         }}else{{
             stopPolling();
         }}
     }}catch(error){{
-        stopPolling();
-        if(waitingEl) waitingEl.hidden = true;
         const denied = error && (error.status === 401 || error.status === 403);
-        if(errorEl){{ errorEl.hidden = false; errorEl.textContent = "刷新日志读取失败：" + (error && error.message || String(error || "请求失败")) + "。请重新读取或返回刷新状态。"; }}
+        const state = error && error.payload && error.payload.refresh_state;
+        if(state && typeof state.running === "boolean") lastKnownRunning = state.running;
+        const retryable = !denied && lastKnownRunning && isRetryableReadFailure(error);
+        const failureMessage = "刷新日志读取失败：" + (error && error.message || String(error || "请求失败"));
+        if(retryable && !pageHidden && transientFailures < MAX_TRANSIENT_RETRIES){{
+            transientFailures += 1;
+            const delay = Math.min(2000 * Math.pow(2, transientFailures - 1), 30000);
+            pollingStopped = false;
+            if(errorEl){{
+                errorEl.hidden = false;
+                errorEl.textContent = failureMessage + "。系统将在 " + Math.ceil(delay / 1000)
+                    + " 秒后自动重试（" + transientFailures + "/" + MAX_TRANSIENT_RETRIES + "），也可手动重新读取。";
+            }}
+            if(loginEl) loginEl.hidden = true;
+            schedulePolling(delay);
+        }}else{{
+            stopPolling();
+            if(waitingEl) waitingEl.hidden = true;
+            if(errorEl){{
+                errorEl.hidden = false;
+                errorEl.textContent = failureMessage + (denied
+                    ? "。请重新登录后继续读取。"
+                    : (retryable && transientFailures >= MAX_TRANSIENT_RETRIES
+                        ? "。自动重试次数已达上限，请手动重新读取或返回刷新状态。"
+                        : "。请重新读取或返回刷新状态。"));
+            }}
+        }}
         if(loginEl){{ loginEl.hidden = !denied; if(denied) loginEl.href = "/login?next=" + encodeURIComponent(location.pathname + location.search); }}
     }}finally{{ pending = false; if(retryEl) retryEl.disabled = false; }}
 }}
 if(retryEl) retryEl.addEventListener("click", function(){{
+    if(pollTimer){{ clearTimeout(pollTimer); pollTimer = null; }}
+    transientFailures = 0;
     pollingStopped = false;
     if(!pending) return loadRefreshLog();
 }});
-window.addEventListener("pagehide", stopPolling, {{once:true}});
+window.addEventListener("pagehide", function(){{ pageHidden = true; stopPolling(); }}, {{once:true}});
 if({str(bool(payload.get("running"))).lower()}){{
     pollingStopped = false;
     loadRefreshLog();

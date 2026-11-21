@@ -1128,6 +1128,87 @@ const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise refresh log retry backoff")
+    def test_refresh_log_retries_transient_errors_with_bounded_backoff(self):
+        with isolated_app() as (app, base_dir):
+            request_id = self._state(base_dir)
+            from fls_manager.online_scripts.constants import update_online_refresh_state
+
+            update_online_refresh_state(running=True, status="运行中", message="still working", error="")
+            html = app.test_client().get(
+                f"/online-scripts/refresh-log/{request_id}", headers={"X-Token": TOKEN},
+            ).get_data(as_text=True)
+            script = next(script for script in re.findall(r"<script>(.*?)</script>", html, re.S) if "schedulePolling" in script)
+            static = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+            reader = static[static.index("async function flsReadJsonResponse("):static.index("async function flsReadTextResponse(")]
+            result = subprocess.run(
+                ["node", "-e", r'''
+const vm=require('node:vm'),assert=require('node:assert/strict');
+const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const settle=async()=>{await new Promise(resolve=>setImmediate(resolve));await new Promise(resolve=>setImmediate(resolve));};
+const ok=(status,log,terminal=false)=>({status:200,body:{ok:true,log,status,updated_at:'now',running:!terminal,terminal,log_pending:false}});
+const http=(status,body={error:'temporary gateway error'})=>({status,body});
+function setup(queue){
+ const elements={refreshLogError:{hidden:true,textContent:''},refreshLogLogin:{hidden:true,href:''},refreshLogRetry:{disabled:false},refreshLogText:{textContent:'last valid log'},refreshLogStatus:{textContent:'运行中'},refreshLogUpdatedAt:{textContent:'old'},refreshLogConfirm:{hidden:true},refreshLogHistory:{hidden:true},refreshLogDiagnosis:{hidden:true,textContent:''},refreshLogWaiting:{hidden:true,textContent:''}};
+ const timers=[];let calls=0,click=null,pagehide=null;
+ const context={document:{getElementById:id=>elements[id]},window:{addEventListener:(name,fn)=>{if(name==='pagehide')pagehide=fn;}},location:{pathname:'/online-scripts/refresh-log/'+('b'.repeat(32)),search:''},encodeURIComponent,
+  fetch:async()=>{calls++;const item=queue.shift();if(item.network)throw new TypeError('network offline');return {ok:item.status===200,status:item.status,headers:{get:()=> 'application/json'},text:async()=>JSON.stringify(item.body)};},
+  setTimeout:(fn,delay)=>{const timer={fn,delay};timers.push(timer);return timer;},
+  clearTimeout:timer=>{const index=timers.indexOf(timer);if(index>=0)timers.splice(index,1);},
+  flsResponseErrorDiagnostic:(_response,body)=>({payload:JSON.parse(body),message:JSON.parse(body).error||''})};
+ elements.refreshLogRetry.addEventListener=(_name,fn)=>{click=fn;};
+ vm.createContext(context);vm.runInContext(input.reader+input.script,context);
+ return {elements,timers,context,calls:()=>calls,click:()=>click(),pagehide:()=>pagehide()};
+}
+(async()=>{
+ const recovery=setup([http(503),{network:true},http(429),http(502),ok('运行中','recovered log'),ok('已完成','final log',true)]);
+ await settle();
+ assert.equal(recovery.calls(),1);assert.equal(recovery.timers[0].delay,2000);
+ assert.match(recovery.elements.refreshLogError.textContent,/1\/5/);
+ assert.equal(recovery.elements.refreshLogText.textContent,'last valid log');
+ let timer=recovery.timers.shift();timer.fn();await settle();
+ assert.equal(recovery.calls(),2);assert.equal(recovery.timers[0].delay,4000);
+ assert.match(recovery.elements.refreshLogError.textContent,/2\/5/);
+ await recovery.click();await settle();
+ assert.equal(recovery.calls(),3);assert.equal(recovery.timers.length,1);
+ assert.equal(recovery.timers[0].delay,2000);
+ assert.match(recovery.elements.refreshLogError.textContent,/1\/5/);
+ timer=recovery.timers.shift();timer.fn();await settle();
+ assert.equal(recovery.calls(),4);assert.equal(recovery.timers[0].delay,4000);
+ timer=recovery.timers.shift();timer.fn();await settle();
+ assert.equal(recovery.calls(),5);assert.equal(recovery.elements.refreshLogText.textContent,'recovered log');
+ assert.equal(recovery.elements.refreshLogError.hidden,true);
+ assert.equal(recovery.timers[0].delay,2000);
+ timer=recovery.timers.shift();timer.fn();await settle();
+ assert.equal(recovery.calls(),6);assert.equal(recovery.elements.refreshLogText.textContent,'final log');
+ assert.equal(recovery.elements.refreshLogStatus.textContent,'已完成');assert.equal(recovery.timers.length,0);
+
+ for(const status of [401,403,404]){
+  const body=status===404?{error:'terminal log missing',refresh_state:{running:false,status:'已完成'}}:{error:'request denied'};
+  const stopped=setup([http(status,body)]);await settle();
+  assert.equal(stopped.calls(),1);assert.equal(stopped.timers.length,0);
+  assert.equal(stopped.elements.refreshLogLogin.hidden,!(status===401||status===403));
+ }
+
+ const bounded=setup([...Array.from({length:6},()=>http(503)),ok('运行中','manual recovery')]);
+ await settle();
+ const delays=[];
+ while(bounded.timers.length){timer=bounded.timers.shift();delays.push(timer.delay);timer.fn();await settle();}
+ assert.deepEqual(delays,[2000,4000,8000,16000,30000]);
+ assert.equal(bounded.calls(),6);assert.equal(bounded.timers.length,0);
+ assert.match(bounded.elements.refreshLogError.textContent,/次数已达上限/);
+ await bounded.click();await settle();
+ assert.equal(bounded.calls(),7);assert.equal(bounded.timers.length,1);
+ assert.equal(bounded.timers[0].delay,2000);
+ assert.equal(bounded.elements.refreshLogText.textContent,'manual recovery');
+ bounded.pagehide();
+ assert.equal(bounded.timers.length,0);
+ console.log('transient refresh log retry/backoff passed');
+})().catch(error=>{console.error(error);process.exitCode=1});
+'''], input=json.dumps({"script": script, "reader": reader}), text=True, capture_output=True, timeout=8,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise refresh log recovery")
     def test_refresh_log_page_restores_retry_and_login_actions_on_http_errors(self):
         with isolated_app() as (app, base_dir):
