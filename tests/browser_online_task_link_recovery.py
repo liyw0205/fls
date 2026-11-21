@@ -138,6 +138,8 @@ def main():
                     error="",
                     cache_published=False,
                     task_link_failures=[],
+                    task_link_failure_count=0,
+                    task_link_failure_digest=constants._refresh_task_failure_digest([]),
                     updated_at="",
                     log_file="",
                 )
@@ -186,6 +188,8 @@ def main():
                 error="",
                 cache_published=True,
                 task_link_failures=failures,
+                task_link_failure_count=len(failures),
+                task_link_failure_digest=constants._refresh_task_failure_digest(failures),
                 updated_at="now",
                 log_file=str(online_refresh_log_file(refresh_id)),
             )
@@ -420,6 +424,42 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    await page.goto(base+'/login');
    await page.locator('[name="token"]').fill(process.env.FLS_UI_TOKEN);
    await page.locator('button[type="submit"]').click();
+   const refreshRecoveryId=('c'+viewport.width.toString(16)).padEnd(32,'c');
+   const refreshRecoveryRequest=('b'+viewport.width.toString(16)).padEnd(32,'b');
+   await fixture({reset:true,fail:true});
+   const refreshSetup=await page.request.post(base+'/api/fixture/online-refresh',{headers,data:{
+     failure_count:105,request_id:refreshRecoveryRequest,refresh_id:refreshRecoveryId,
+   }});
+   assert.equal(refreshSetup.status(),200);
+   const refreshFailureUrl=base+'/online-scripts?refresh_request_id='+refreshRecoveryRequest+'&failure_offset=100#online-status';
+   await page.goto(refreshFailureUrl);
+   const recoveredFailure=page.locator('#onlineRefreshTaskLinkFailures form[data-script-id="browser-link-104"]');
+   await recoveredFailure.waitFor();
+   const stableRecoveryRequest=await recoveredFailure.locator('[name="request_id"]').inputValue();
+   assert.match(stableRecoveryRequest,/^[a-f0-9]{32}$/);
+   await page.reload();
+   assert.equal(await recoveredFailure.locator('[name="request_id"]').inputValue(),stableRecoveryRequest);
+   await fixture({fail:false});
+   const [recoveredResponse]=await Promise.all([
+     page.waitForResponse(response=>response.url().includes('/api/online-scripts/refresh-task-link/'+refreshRecoveryRequest+'/task-link/browser-link-104')&&response.request().method()==='POST'),
+     recoveredFailure.locator('button[type="submit"]').click(),
+   ]);
+   assert.equal(recoveredResponse.status(),200);
+   await page.waitForURL(url=>url.searchParams.get('msg')?.includes('外部任务源同步完成'));
+   assert.equal((await fixture({})).fetches,1);
+   await page.goto(refreshFailureUrl);
+   await page.locator('#onlineRefreshTaskLinkFailures').getByText(/浏览器任务源 104：已恢复/).waitFor();
+   assert.equal(await page.locator('#onlineRefreshTaskLinkFailures form[data-script-id="browser-link-104"]').count(),0);
+   const recoveredStatus=await page.request.get(base+'/api/online-scripts/refresh-task-link-failures/'+refreshRecoveryRequest+'?offset=100&limit=100',{headers});
+   assert.equal(recoveredStatus.status(),200);
+   assert.equal((await recoveredStatus.json()).items[4].recovery.state,'completed');
+   await page.screenshot({path:'/tmp/fls-refresh-failure-page-'+viewport.width+'.png'});
+   if(process.env.FLS_REFRESH_RECOVERY_ONLY==='1'){
+     assert.deepEqual(errors,[]);
+     console.log('online refresh failure recovery passed '+viewport.width);
+     await context.close();
+     continue;
+   }
    const historyFixture=async mode=>{
      const response=await page.request.post(base+'/api/fixture/task-link-history',{headers,data:{mode}});
      assert.equal(response.status(),200);return response.json();
@@ -717,6 +757,8 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    assert.match(await page.locator('#onlineRefreshTaskLinkFailures').textContent(),/失败源 101-105 \/ 105/);
    assert.equal(await lastFailure.getAttribute('action'),'/online-scripts/refresh-task-link/'+manyFailureRequestId+'/task-link/browser-link-104');
    const lastFailureRequestId=await lastFailure.locator('[name="request_id"]').inputValue();
+   await page.reload();
+   assert.equal(await lastFailure.locator('[name="request_id"]').inputValue(),lastFailureRequestId);
    const [lastFailureResponse]=await Promise.all([
      page.waitForResponse(response=>response.url().includes('/api/online-scripts/refresh-task-link/'+manyFailureRequestId+'/task-link/browser-link-104')&&response.request().method()==='POST'),
      lastFailure.locator('button[type="submit"]').click(),
@@ -725,6 +767,7 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    const failurePending=JSON.parse(await page.evaluate(()=>sessionStorage.getItem('fls-online-task-link-request')));
    assert.equal(failurePending.request_id,lastFailureRequestId);
    assert.equal(failurePending.origin_refresh_request_id,manyFailureRequestId);
+   assert.equal((await fixture({})).fetches,1);
    const continueLastFailure=page.getByRole('button',{name:'继续原同步请求',exact:true});
    await continueLastFailure.waitFor();
    await fixture({fail:false});
@@ -733,7 +776,12 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    const boundReceipt=await page.request.get(base+'/api/online-scripts/task-link-status/'+lastFailureRequestId,{headers});
    assert.equal(boundReceipt.status(),200);
    assert.equal((await boundReceipt.json()).origin_refresh_request_id,manyFailureRequestId);
-   assert.equal((await fixture({})).fetches,1);
+   assert.equal((await fixture({})).fetches,2);
+   await page.goto(base+'/online-scripts?refresh_request_id='+manyFailureRequestId+'&failure_offset=100#online-status');
+   await page.locator('#onlineRefreshTaskLinkFailures').getByText(/浏览器任务源 104：已恢复/).waitFor();
+   assert.match(await page.locator('#onlineRefreshTaskLinkFailures').textContent(),/已恢复/);
+   assert.equal(await page.locator('#onlineRefreshTaskLinkFailures form[data-script-id="browser-link-104"]').count(),0);
+   assert.equal((await fixture({})).fetches,2);
    await page.screenshot({path:'/tmp/fls-refresh-failure-page-'+viewport.width+'.png'});
    const setup=await page.request.post(base+'/api/fixture/refresh-retry',{headers,data:{}});
    assert.equal(setup.status(),200);

@@ -268,6 +268,7 @@ class OnlineSourceRefreshTests(unittest.TestCase):
             from fls_manager.routes.online_scripts import task_link
 
             refresh_request_id = "e" * 32
+            task_request_id = constants.online_refresh_task_link_request_id(refresh_request_id, "demo")
             task_link_url = "https://example.invalid/demo-tasks.json"
             source.save_online_script_cache([
                 {"id": "demo", "name": "Demo", "type": "raw", "link": "demo.sh", "task_link": task_link_url, "task_cron": []},
@@ -314,21 +315,26 @@ class OnlineSourceRefreshTests(unittest.TestCase):
 
                 first = client.post(
                     endpoint,
-                    json={"request_id": "5" * 32, "origin_refresh_request_id": refresh_request_id},
+                    json={"request_id": task_request_id, "origin_refresh_request_id": refresh_request_id},
                     headers=headers,
                 )
+                retry_page = client.get(
+                    f"/online-scripts?refresh_request_id={refresh_request_id}",
+                    headers={"X-Token": TOKEN},
+                ).get_data(as_text=True)
+                self.assertIn(f'name="request_id" value="{task_request_id}"', retry_page)
                 recovered = client.post(
                     endpoint,
-                    json={"request_id": "5" * 32, "origin_refresh_request_id": refresh_request_id},
+                    json={"request_id": task_request_id, "origin_refresh_request_id": refresh_request_id},
                     headers=headers,
                 )
                 replay = client.post(
                     endpoint,
-                    json={"request_id": "5" * 32, "origin_refresh_request_id": refresh_request_id},
+                    json={"request_id": task_request_id, "origin_refresh_request_id": refresh_request_id},
                     headers=headers,
                 )
                 generic_replay = client.post(
-                    "/api/online-scripts/task-link/demo", json={"request_id": "5" * 32}, headers=headers,
+                    "/api/online-scripts/task-link/demo", json={"request_id": task_request_id}, headers=headers,
                 )
             self.assertEqual(first.status_code, 502)
             self.assertEqual(recovered.status_code, 200)
@@ -336,7 +342,7 @@ class OnlineSourceRefreshTests(unittest.TestCase):
             self.assertTrue(replay.json["replayed"])
             self.assertEqual(generic_replay.status_code, 409)
             self.assertEqual(fetch.call_count, 2)
-            receipt = source.get_task_link_request("5" * 32)
+            receipt = source.get_task_link_request(task_request_id)
             self.assertEqual(receipt["origin_refresh_request_id"], refresh_request_id)
 
             page = client.get(
@@ -344,13 +350,31 @@ class OnlineSourceRefreshTests(unittest.TestCase):
             )
             self.assertEqual(page.status_code, 200)
             html = page.get_data(as_text=True)
-            self.assertIn(f"/online-scripts/refresh-task-link/{refresh_request_id}/task-link/demo", html)
-            self.assertIn(f"/api/online-scripts/refresh-task-link/{refresh_request_id}/task-link/demo", html)
+            self.assertIn("Demo：已恢复，新增 1 个任务，当前共 1 个任务", html)
+            self.assertNotIn(f"/online-scripts/refresh-task-link/{refresh_request_id}/task-link/demo", html)
+            paged = client.get(
+                f"/api/online-scripts/refresh-task-link-failures/{refresh_request_id}?offset=0",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(paged.json["items"][0]["task_link_request_id"], task_request_id)
+            self.assertEqual(paged.json["items"][0]["recovery"]["state"], "completed")
+            refreshed_status = client.get(
+                f"/api/online-scripts/refresh-status/{refresh_request_id}", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(refreshed_status.status_code, 200)
+            self.assertEqual(refreshed_status.json["task_link_failures"][0]["recovery"]["state"], "completed")
 
     def test_refresh_worker_exposes_partial_task_link_retry_actions(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.online_scripts import source
-            from fls_manager.online_scripts.constants import get_online_refresh_state
+            from fls_manager.online_scripts.constants import get_online_refresh_state, update_online_refresh_state
+
+            refresh_request_id = "9" * 32
+            update_online_refresh_state(
+                id="partial-refresh", request_id=refresh_request_id, proxy_id="", running=True,
+                status="运行中", message="", error="", cache_published=False,
+                task_link_failures=[], updated_at="before", log_file="",
+            )
 
             def fake_fetch(**kwargs):
                 kwargs["task_link_failures"].append({
@@ -376,15 +400,180 @@ class OnlineSourceRefreshTests(unittest.TestCase):
             ).get_json()
             self.assertEqual(payload["status"], "部分完成")
             self.assertEqual(payload["task_link_failures"][0]["script_id"], "demo")
+            self.assertEqual(
+                payload["task_link_failures"][0]["task_link_request_id"],
+                source.online_refresh_task_link_request_id(refresh_request_id, "demo"),
+            )
             page = app.test_client().get(
                 "/online-scripts", headers={"X-Token": TOKEN},
             ).get_data(as_text=True)
             self.assertIn("任务源暂时不可用", page)
-            self.assertIn("/online-scripts/task-link/demo", page)
+            self.assertIn(f"/online-scripts/refresh-task-link/{refresh_request_id}/task-link/demo", page)
             self.assertIn('class="inline-form fls-online-task-link-form"', page)
             self.assertIn('data-script-id="demo"', page)
             self.assertIn('name="csrf_token"', page)
             self.assertIn('name="proxy_id"', page)
+
+    def test_refresh_failure_recovery_survives_task_history_pruning_restart_and_cache_change(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import constants, source
+            from fls_manager.routes.online_scripts import task_link
+
+            refresh_request_id = "6" * 32
+            item = {
+                "id": "demo", "name": "Demo", "type": "raw", "link": "demo.sh",
+                "task_link": "https://example.invalid/demo-tasks.json", "task_cron": [],
+            }
+            source.save_online_script_cache([item])
+            constants.update_online_refresh_state(
+                id="7" * 32, request_id=refresh_request_id, proxy_id="", running=False,
+                status="部分完成", message="1 个任务源失败", error="", cache_published=True,
+                task_link_failures=[{
+                    "script_id": "demo", "name": "Demo", "task_link": item["task_link"],
+                    "error": "upstream timeout", "proxy_id": "",
+                }], updated_at="2026-11-21 12:00:00", log_file="",
+            )
+            (base_dir / "data" / "online_script_refresh_failures" / f"{refresh_request_id}.json").unlink()
+            task_request_id = constants.online_refresh_task_link_request_id(refresh_request_id, "demo")
+            client = app.test_client()
+            with client.session_transaction() as session:
+                session.update(token=TOKEN, token_expire_at=4102444800, security_verified=True, csrf_token="stable-refresh-csrf")
+            headers = {"X-CSRF-Token": "stable-refresh-csrf"}
+            endpoint = f"/api/online-scripts/refresh-task-link/{refresh_request_id}/task-link/demo"
+            recovered_tasks = [{"name": "Recovered", "cron": "", "command": "run recovered.sh"}]
+            with patch.object(task_link, "fetch_task_link_tasks", return_value=recovered_tasks) as fetch:
+                submitted = client.post(
+                    endpoint,
+                    json={"request_id": task_request_id, "origin_refresh_request_id": refresh_request_id},
+                    headers=headers,
+                )
+                self.assertEqual(submitted.status_code, 200)
+                self.assertFalse(submitted.json.get("replayed", False))
+                recovery_file = (
+                    base_dir / "data" / "online_script_refresh_failures"
+                    / f"{refresh_request_id}.recovery.json"
+                )
+                self.assertTrue(recovery_file.is_file())
+
+                for number in range(205):
+                    request_id = f"{number + 1:032x}"
+                    if request_id == task_request_id:
+                        request_id = f"{number + 1001:032x}"
+                    source.persist_task_link_request({
+                        "request_id": request_id, "script_id": f"other-{number}", "proxy_id": "",
+                        "expected_version": "", "state": "completed", "added": 0, "total": 0,
+                        "error": "", "updated_at": f"2099-01-01 00:00:{number:04d}",
+                        "expected_tasks_fingerprint": "", "published_tasks_fingerprint": "",
+                        "confirmation": "", "confirmation_fingerprint": "",
+                        "origin_refresh_request_id": "",
+                    })
+                self.assertIsNone(source.get_task_link_request(task_request_id))
+
+                changed_item = {**item, "task_cron": [{"name": "Later", "cron": "", "command": "later"}]}
+                source.save_online_script_cache([changed_item])
+                replay = client.post(
+                    endpoint,
+                    json={"request_id": task_request_id, "origin_refresh_request_id": refresh_request_id},
+                    headers=headers,
+                )
+                self.assertEqual(replay.status_code, 200)
+                self.assertTrue(replay.json["replayed"])
+                self.assertEqual(replay.json["added"], 1)
+                self.assertEqual(fetch.call_count, 1)
+
+            restarted = subprocess.run(
+                [sys.executable, "-c", (
+                    "import json; from fls_manager.online_scripts.constants import "
+                    "get_online_refresh_task_link_recovery; "
+                    f"print(json.dumps(get_online_refresh_task_link_recovery('{refresh_request_id}', 'demo')))"
+                )],
+                cwd=ROOT, env=os.environ.copy(), capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(restarted.returncode, 0, restarted.stderr)
+            self.assertEqual(json.loads(restarted.stdout)["request_id"], task_request_id)
+
+            page = client.get(
+                f"/online-scripts?refresh_request_id={refresh_request_id}", headers={"X-Token": TOKEN},
+            )
+            html = page.get_data(as_text=True)
+            self.assertIn("Demo：已恢复，新增 1 个任务，当前共 1 个任务", html)
+            self.assertNotIn('data-script-id="demo"', html)
+
+            recovery_file.write_text("broken", encoding="utf-8")
+            with patch.object(task_link, "fetch_task_link_tasks") as fetch_after_corruption:
+                blocked = client.post(
+                    endpoint,
+                    json={"request_id": task_request_id, "origin_refresh_request_id": refresh_request_id},
+                    headers=headers,
+                )
+            self.assertEqual(blocked.status_code, 503)
+            fetch_after_corruption.assert_not_called()
+            damaged_page = client.get(
+                f"/online-scripts?refresh_request_id={refresh_request_id}", headers={"X-Token": TOKEN},
+            ).get_data(as_text=True)
+            self.assertIn("恢复状态不可读取", damaged_page)
+            self.assertNotIn('data-script-id="demo"', damaged_page)
+
+    def test_refresh_failure_recovery_write_failure_confirms_after_cache_merge_without_refetch(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import constants, source
+            from fls_manager.routes.online_scripts import task_link
+
+            refresh_request_id = "8" * 32
+            item = {
+                "id": "demo", "name": "Demo", "type": "raw", "link": "demo.sh",
+                "task_link": "https://example.invalid/demo-tasks.json", "task_cron": [],
+            }
+            source.save_online_script_cache([item])
+            constants.update_online_refresh_state(
+                id="9" * 32, request_id=refresh_request_id, proxy_id="", running=False,
+                status="部分完成", message="1 个任务源失败", error="", cache_published=True,
+                task_link_failures=[{
+                    "script_id": "demo", "name": "Demo", "task_link": item["task_link"],
+                    "error": "upstream timeout", "proxy_id": "",
+                }], updated_at="2026-11-21 12:30:00", log_file="",
+            )
+            task_request_id = constants.online_refresh_task_link_request_id(refresh_request_id, "demo")
+            client = app.test_client()
+            with client.session_transaction() as session:
+                session.update(token=TOKEN, token_expire_at=4102444800, security_verified=True, csrf_token="recovery-write-csrf")
+            headers = {"X-CSRF-Token": "recovery-write-csrf"}
+            endpoint = f"/api/online-scripts/refresh-task-link/{refresh_request_id}/task-link/demo"
+            tasks = [{"name": "Recovered", "cron": "", "command": "run recovered.sh"}]
+            with patch.object(task_link, "fetch_task_link_tasks", return_value=tasks) as fetch, patch.object(
+                task_link, "persist_online_refresh_task_link_recovery", side_effect=OSError("recovery store read-only"),
+            ):
+                uncertain = client.post(
+                    endpoint,
+                    json={"request_id": task_request_id, "origin_refresh_request_id": refresh_request_id},
+                    headers=headers,
+                )
+            self.assertEqual(uncertain.status_code, 503)
+            self.assertFalse(uncertain.json["retry_allowed"])
+            self.assertEqual(source.get_task_link_request(task_request_id)["state"], "unknown")
+            blocked = client.post(
+                endpoint,
+                json={"request_id": task_request_id, "origin_refresh_request_id": refresh_request_id},
+                headers=headers,
+            )
+            self.assertEqual(blocked.status_code, 409)
+            self.assertEqual(fetch.call_count, 1)
+
+            confirmed = client.post(
+                f"/api/online-scripts/task-link-confirm/{task_request_id}", headers=headers,
+            )
+            self.assertEqual(confirmed.status_code, 200)
+            self.assertEqual(confirmed.json["confirmation"], "merged")
+            replay = client.post(
+                endpoint,
+                json={"request_id": task_request_id, "origin_refresh_request_id": refresh_request_id},
+                headers=headers,
+            )
+            self.assertEqual(replay.status_code, 200)
+            self.assertTrue(replay.json["replayed"])
+            self.assertEqual(fetch.call_count, 1)
+            recovery = constants.get_online_refresh_task_link_recovery(refresh_request_id, "demo")
+            self.assertEqual(recovery["state"], "completed")
 
     @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise the partial refresh UI")
     def test_refresh_polling_renders_task_link_retry_action(self):

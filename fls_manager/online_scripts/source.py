@@ -20,6 +20,10 @@ from .constants import (
     ONLINE_REFRESH_STATE,
     ONLINE_REFRESH_TASK_FAILURE_RECORD_LIMIT,
     OnlineRefreshTaskFailureLimit,
+    get_online_refresh_task_link_recovery,
+    has_online_refresh_task_link_failure,
+    online_refresh_task_link_request_id,
+    persist_online_refresh_task_link_recovery,
     RefreshPublicationError,
     update_online_refresh_state,
 )
@@ -223,8 +227,28 @@ def _task_link_request_snapshot(info):
 
 
 def _task_link_needs_recovery(value):
-    return (value.get("request_id") in ONLINE_TASK_LINK_ACTIVE
-            or (not value.get("archived") and value.get("state") != "completed"))
+    if value.get("request_id") in ONLINE_TASK_LINK_ACTIVE:
+        return True
+    if value.get("archived") or value.get("state") == "completed":
+        if value.get("state") == "completed" and value.get("origin_refresh_request_id"):
+            try:
+                recovery = get_online_refresh_task_link_recovery(
+                    value["origin_refresh_request_id"], value.get("script_id", ""),
+                )
+                if not recovery:
+                    if not has_online_refresh_task_link_failure(
+                        value["origin_refresh_request_id"], value.get("script_id", ""),
+                    ):
+                        return False
+                    persist_online_refresh_task_link_recovery(
+                        value["origin_refresh_request_id"], value.get("script_id", ""),
+                        proxy_id=value.get("proxy_id", ""), added=value.get("added", 0),
+                        total=value.get("total", 0),
+                    )
+            except Exception:
+                return True
+        return False
+    return True
 
 
 def _prune_task_link_requests(records, current_id, *, capacity=200):
@@ -501,7 +525,7 @@ def fetch_task_link_tasks(item, proxy_id="", timeout=12):
     return normalize_online_task_crons(data)
 
 
-def _task_link_failure(item, error, proxy_id=""):
+def _task_link_failure(item, error, proxy_id="", refresh_request_id=""):
     def clean(value, limit):
         text = str(value or "")
         text = "".join(char if char in "\n\t" or ord(char) >= 32 else " " for char in text)
@@ -513,10 +537,15 @@ def _task_link_failure(item, error, proxy_id=""):
         "task_link": clean(item.get("task_link"), 1000),
         "error": clean(error, 1000),
         "proxy_id": clean(proxy_id, 200),
+        "task_link_request_id": (
+            online_refresh_task_link_request_id(refresh_request_id, clean(item.get("id"), 200))
+            if re.fullmatch(r"[a-f0-9]{32}", refresh_request_id or "") else uuid.uuid4().hex
+        ),
     }
 
 
-def fetch_online_scripts(proxy_id="", timeout=12, publish_cache=True, task_link_failures=None):
+def fetch_online_scripts(proxy_id="", timeout=12, publish_cache=True, task_link_failures=None,
+                         refresh_request_id=""):
     validate_proxy_id(proxy_id)
     url = get_online_script_source()
     real_url = github_proxy_url(url, proxy_id)
@@ -563,7 +592,7 @@ def fetch_online_scripts(proxy_id="", timeout=12, publish_cache=True, task_link_
             raise OnlineRefreshTaskFailureLimit(
                 f"在线脚本源失败源超过 {ONLINE_REFRESH_TASK_FAILURE_RECORD_LIMIT} 项，未发布缓存"
             )
-        task_link_failures.append(_task_link_failure(item, error, proxy_id))
+        task_link_failures.append(_task_link_failure(item, error, proxy_id, refresh_request_id))
 
     for item in items:
         task_link = str(item.get("task_link") or "").strip()
@@ -651,6 +680,7 @@ def refresh_worker(refresh_id, proxy_id="", log_file=""):
             timeout=20,
             publish_cache=False,
             task_link_failures=task_link_failures,
+            refresh_request_id=request_id,
         )
         if source_fingerprint and online_script_source_fingerprint() != source_fingerprint:
             raise RuntimeError("在线脚本源地址在抓取期间已变化，未发布缓存")
