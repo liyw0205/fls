@@ -96,12 +96,29 @@ def _persist_failure(record, message, status_code, *, retry=True, state="failed"
     try:
         persist_task_link_request(record)
     except Exception as exc:
+        try:
+            actual = get_task_link_request(record["request_id"])
+        except Exception as read_exc:
+            receipt_error = f"{exc}；回执复核失败：{read_exc}"
+        else:
+            if _task_link_receipt_matches(record, actual):
+                return {
+                    "ok": False,
+                    "request_id": record["request_id"],
+                    "msg": message,
+                    "retry_allowed": retry,
+                    "resolved": True,
+                }, status_code
+            receipt_error = f"{exc}；磁盘回执与本次失败结果不一致"
         return {
             "ok": False,
             "request_id": record["request_id"],
-            "msg": f"{message}；同步结果回执无法保存，请查询原请求后再重试：{exc}",
+            "msg": f"{message}；同步结果回执无法确认：{receipt_error}，请查询原请求后再决定是否重试。",
             "retry_allowed": False,
             "resolved": False,
+            "receipt_confirmation_required": True,
+            "state_url": f"/api/online-scripts/task-link-status/{record['request_id']}",
+            "status_url": f"/online-scripts/task-link-status/{record['request_id']}",
         }, 503
     return {
         "ok": False,

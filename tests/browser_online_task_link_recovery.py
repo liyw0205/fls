@@ -38,7 +38,8 @@ def main():
                  "fail_retry_start": False, "fail_retry_receipt": False,
                  "confirmation_failure_request": "", "confirmation_failure_mode": "",
                  "confirmation_failure_remaining": 0,
-                 "refresh_recovery_failure_request": "", "refresh_recovery_failure_remaining": 0}
+                 "refresh_recovery_failure_request": "", "refresh_recovery_failure_remaining": 0,
+                 "failure_receipt_request": "", "failure_receipt_remaining": 0}
         real_fetch = task_link.fetch_task_link_tasks
         real_persist = task_link.persist_task_link_request
         real_persist_refresh_recovery = task_link.persist_online_refresh_task_link_recovery
@@ -92,6 +93,12 @@ def main():
                 if fault["confirmation_failure_mode"] == "after":
                     real_persist(record)
                 raise OSError("browser task confirmation receipt lost after replace")
+            failure_id = fault["failure_receipt_request"]
+            if (failure_id and record.get("request_id") == failure_id
+                    and fault["failure_receipt_remaining"] and record.get("state") == "failed"):
+                fault["failure_receipt_remaining"] = 0
+                real_persist(record)
+                raise OSError("browser failed receipt lost after replace")
             return real_persist(record)
 
         def persist_refresh_recovery(refresh_request_id, script_id, **kwargs):
@@ -135,7 +142,8 @@ def main():
         def fixture():
             if request.method == "POST":
                 data = request.get_json() or {}
-                fault["fail"] = bool(data.get("fail"))
+                if "fail" in data:
+                    fault["fail"] = bool(data["fail"])
                 if "confirmation_failure_request" in data:
                     fault.update(
                         confirmation_failure_request=data["confirmation_failure_request"],
@@ -147,13 +155,19 @@ def main():
                         refresh_recovery_failure_request=data["refresh_recovery_failure_request"],
                         refresh_recovery_failure_remaining=1,
                     )
+                if "failure_receipt_request" in data:
+                    fault.update(
+                        failure_receipt_request=data["failure_receipt_request"],
+                        failure_receipt_remaining=1,
+                    )
                 if "startup_failure" in data:
                     fault["startup_failure"] = data["startup_failure"]
                 if data.get("reset"):
                     fault["fetches"] = 0
                     fault.update(confirmation_failure_request="", confirmation_failure_mode="",
                                  confirmation_failure_remaining=0, refresh_recovery_failure_request="",
-                                 refresh_recovery_failure_remaining=0)
+                                 refresh_recovery_failure_remaining=0, failure_receipt_request="",
+                                 failure_receipt_remaining=0)
                     source.save_online_script_cache([item])
             cached = source.load_online_script_cache()
             return jsonify(fail=fault["fail"], fetches=fault["fetches"], refreshes=fault["refreshes"], cached=cached)
@@ -491,7 +505,13 @@ def main():
         try:
             env = dict(os.environ, FLS_UI_BASE=f"http://127.0.0.1:{server.server_port}",
                        FLS_UI_TOKEN=TOKEN, FLS_PLAYWRIGHT_CORE=str(playwright), FLS_CHROMIUM=str(chromium))
-            subprocess.run(["node", "-e", SCRIPT], env=env, check=True, timeout=180)
+            result = subprocess.run(
+                ["node", "-e", SCRIPT], env=env, capture_output=True, text=True, timeout=180,
+            )
+            if result.returncode:
+                raise AssertionError((result.stderr or result.stdout)[-6000:])
+            if result.stdout.strip():
+                print(result.stdout.strip())
         finally:
             task_link.fetch_task_link_tasks = real_fetch
             task_link.persist_task_link_request = real_persist
@@ -728,12 +748,18 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    if(process.env.FLS_TASK_LINK_STARTUP_ONLY==='1'){
      assert.deepEqual(errors,[]);await context.close();continue;
    }
+   await page.evaluate(()=>sessionStorage.removeItem('fls-online-task-link-request'));
    await fixture({reset:true,fail:true});
    await page.goto(base+'/online-scripts');
    const form=page.locator('#online-list form[action="/online-scripts/task-link/browser-link"]');
    const requestId=await form.locator('[name="request_id"]').inputValue();
    assert.match(requestId,/^[a-f0-9]{32}$/);
-   await form.locator('button[type="submit"]').click();
+   await fixture({failure_receipt_request:requestId});
+   const [failedResponse]=await Promise.all([
+     page.waitForResponse(response=>response.url()===base+'/api/online-scripts/task-link/browser-link'&&response.request().method()==='POST'),
+     form.locator('button[type="submit"]').click(),
+   ]);
+   assert.equal(failedResponse.status(),502,JSON.stringify({requestId,url:failedResponse.url(),status:failedResponse.status()}));
    const retry=page.getByRole('button',{name:'继续原同步请求',exact:true});
    await retry.waitFor();
    assert.equal(await retry.locator('xpath=ancestor::form').locator('[name="request_id"]').inputValue(),requestId);
@@ -749,6 +775,13 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    const state=await fixture({});
    assert.equal(state.fetches,2);
    assert.equal(state.cached[0].task_cron[0].name,'Browser task');
+
+   if(process.env.FLS_TASK_LINK_FAILURE_ONLY==='1'){
+     assert.deepEqual(errors,[]);
+     console.log('task-link published failure receipt recovery passed '+viewport.width);
+     await context.close();
+     continue;
+   }
 
    await fixture({reset:true,fail:false});
    await page.goto(base+'/online-scripts');
