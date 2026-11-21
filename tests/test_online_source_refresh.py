@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -500,6 +501,10 @@ class OnlineSourceRefreshTests(unittest.TestCase):
             self.assertNotIn('data-script-id="demo"', html)
 
             recovery_file.write_text("broken", encoding="utf-8")
+            recovery_backup_file = recovery_file.with_name(
+                f"{refresh_request_id}.recovery.bak.json"
+            )
+            recovery_backup_file.write_text("broken backup", encoding="utf-8")
             with patch.object(task_link, "fetch_task_link_tasks") as fetch_after_corruption:
                 blocked = client.post(
                     endpoint,
@@ -574,6 +579,236 @@ class OnlineSourceRefreshTests(unittest.TestCase):
             self.assertEqual(fetch.call_count, 1)
             recovery = constants.get_online_refresh_task_link_recovery(refresh_request_id, "demo")
             self.assertEqual(recovery["state"], "completed")
+
+    def test_refresh_failure_recovery_mirrors_and_repairs_single_damaged_copy(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import constants, source
+
+            request_id = "a" * 32
+            item = {"id": "demo", "name": "Demo", "type": "raw", "link": "demo.sh",
+                    "task_link": "https://example.invalid/tasks.json", "task_cron": []}
+            source.save_online_script_cache([item])
+            constants.update_online_refresh_state(
+                id="b" * 32, request_id=request_id, proxy_id="", running=False, status="部分完成",
+                message="1 个任务源失败", error="", cache_published=True,
+                task_link_failures=[{"script_id": "demo", "name": "Demo", "task_link": item["task_link"],
+                                    "error": "upstream timeout", "proxy_id": ""}],
+                updated_at="before", log_file="",
+            )
+            receipt = constants.persist_online_refresh_task_link_recovery(
+                request_id, "demo", proxy_id="", added=1, total=1,
+            )
+            primary = base_dir / "data" / "online_script_refresh_failures" / f"{request_id}.recovery.json"
+            backup = base_dir / "data" / "online_script_refresh_failures" / f"{request_id}.recovery.bak.json"
+            self.assertEqual(primary.read_bytes(), backup.read_bytes())
+            task_request_id = receipt["request_id"]
+
+            for damaged in (primary, backup):
+                with self.subTest(damaged=damaged.name):
+                    good = backup if damaged == primary else primary
+                    damaged.write_text("broken", encoding="utf-8")
+                    response = app.test_client().get(
+                        f"/api/online-scripts/refresh-task-link-failures/{request_id}?offset=0",
+                        headers={"X-Token": TOKEN},
+                    )
+                    self.assertEqual(response.status_code, 200)
+                    self.assertTrue(response.json["maintenance"]["repaired"])
+                    self.assertEqual(response.json["items"][0]["recovery"]["request_id"], task_request_id)
+                    self.assertEqual(primary.read_bytes(), backup.read_bytes())
+                    self.assertEqual(json.loads(primary.read_text())["items"]["demo"]["state"], "completed")
+                    self.assertEqual(good.read_bytes(), primary.read_bytes())
+
+            backup.write_text("damaged backup", encoding="utf-8")
+            page = app.test_client().get(
+                f"/online-scripts?refresh_request_id={request_id}", headers={"X-Token": TOKEN},
+            ).get_data(as_text=True)
+            self.assertIn("恢复回执副本已自动修复", page)
+            self.assertIn("重新读取恢复状态", page)
+
+    def test_refresh_failure_recovery_prefers_newer_backup_after_primary_publish_failure(self):
+        with isolated_app() as (_app, base_dir):
+            from fls_manager.online_scripts import constants, source
+
+            request_id = "c" * 32
+            failures = [
+                {"script_id": script_id, "name": script_id, "task_link": f"https://example.invalid/{script_id}.json",
+                 "error": "upstream timeout", "proxy_id": ""}
+                for script_id in ("first", "second")
+            ]
+            constants.update_online_refresh_state(
+                id="d" * 32, request_id=request_id, proxy_id="", running=False, status="部分完成",
+                message="2 个任务源失败", error="", cache_published=True, task_link_failures=failures,
+                updated_at="before", log_file="",
+            )
+            constants.persist_online_refresh_task_link_recovery(
+                request_id, "first", proxy_id="", added=1, total=1,
+            )
+            primary = base_dir / "data" / "online_script_refresh_failures" / f"{request_id}.recovery.json"
+            backup = base_dir / "data" / "online_script_refresh_failures" / f"{request_id}.recovery.bak.json"
+            original_replace = constants.os.replace
+
+            def fail_primary_publish(src, dst):
+                if Path(dst) == primary:
+                    raise OSError("primary recovery publication denied")
+                return original_replace(src, dst)
+
+            with patch.object(constants.os, "replace", side_effect=fail_primary_publish):
+                with self.assertRaisesRegex(OSError, "primary recovery publication denied"):
+                    constants.persist_online_refresh_task_link_recovery(
+                        request_id, "second", proxy_id="", added=2, total=2,
+                    )
+
+            damaged_primary = json.loads(primary.read_text(encoding="utf-8"))
+            published_backup = json.loads(backup.read_text(encoding="utf-8"))
+            self.assertEqual(damaged_primary["generation"], 1)
+            self.assertEqual(published_backup["generation"], 2)
+            self.assertEqual(set(published_backup["items"]), {"first", "second"})
+
+            recovered = constants._read_online_refresh_task_recoveries_file(request_id)
+            self.assertTrue(recovered.repaired)
+            self.assertEqual(recovered.generation, 2)
+            self.assertEqual(set(recovered), {"first", "second"})
+            self.assertEqual(primary.read_bytes(), backup.read_bytes())
+
+    def test_refresh_failure_recovery_backup_publish_limits_and_pruning(self):
+        with isolated_app() as (_app, base_dir):
+            from fls_manager.online_scripts import constants
+
+            request_id = "2" * 32
+            recovery_id = constants.online_refresh_task_link_request_id(request_id, "demo")
+            item = {
+                "demo": {
+                    "request_id": recovery_id, "state": "completed", "proxy_id": "",
+                    "added": 1, "total": 1, "updated_at": "now",
+                },
+            }
+            directory = base_dir / "data" / "online_script_refresh_failures"
+            primary = directory / f"{request_id}.recovery.json"
+            backup = directory / f"{request_id}.recovery.bak.json"
+            constants._write_online_refresh_task_recoveries_file(request_id, item, 1)
+            original_pair = (primary.read_bytes(), backup.read_bytes())
+
+            original_replace = constants.os.replace
+
+            def fail_backup_publish(src, dst):
+                if Path(dst) == backup:
+                    raise OSError("backup recovery publication denied")
+                return original_replace(src, dst)
+
+            with patch.object(constants.os, "replace", side_effect=fail_backup_publish):
+                with self.assertRaisesRegex(OSError, "backup recovery publication denied"):
+                    constants._write_online_refresh_task_recoveries_file(request_id, item, 2)
+            self.assertEqual((primary.read_bytes(), backup.read_bytes()), original_pair)
+            self.assertEqual(list(directory.glob("*.recovery.tmp")), [])
+
+            with patch.object(constants, "ONLINE_REFRESH_TASK_FAILURE_TOTAL_LIMIT", 0):
+                with self.assertRaises(constants.OnlineRefreshTaskFailureLimit):
+                    constants._write_online_refresh_task_recoveries_file(request_id, item, 2)
+            self.assertEqual((primary.read_bytes(), backup.read_bytes()), original_pair)
+
+            other_request_id = "3" * 32
+            other_recovery_id = constants.online_refresh_task_link_request_id(other_request_id, "demo")
+            constants._write_online_refresh_task_recoveries_file(other_request_id, {
+                "demo": {**item["demo"], "request_id": other_recovery_id},
+            }, 1)
+            constants._prune_online_refresh_task_failures_files({request_id})
+            self.assertTrue(primary.is_file())
+            self.assertTrue(backup.is_file())
+            self.assertFalse((directory / f"{other_request_id}.recovery.json").exists())
+            self.assertFalse((directory / f"{other_request_id}.recovery.bak.json").exists())
+            constants._prune_online_refresh_task_failures_files(set())
+            self.assertFalse(primary.exists())
+            self.assertFalse(backup.exists())
+
+    def test_refresh_failure_recovery_fails_closed_when_copies_conflict_or_both_are_invalid(self):
+        with isolated_app() as (_app, base_dir):
+            from fls_manager.online_scripts import constants
+
+            request_id = "e" * 32
+            directory = base_dir / "data" / "online_script_refresh_failures"
+            directory.mkdir(parents=True)
+            primary = directory / f"{request_id}.recovery.json"
+            backup = directory / f"{request_id}.recovery.bak.json"
+            recovery_id = constants.online_refresh_task_link_request_id(request_id, "demo")
+            first = {"demo": {"request_id": recovery_id, "state": "completed", "proxy_id": "",
+                              "added": 1, "total": 1, "updated_at": "one"}}
+            second = {"demo": {"request_id": recovery_id, "state": "completed", "proxy_id": "",
+                               "added": 2, "total": 2, "updated_at": "two"}}
+            primary.write_text(json.dumps({"version": 1, "generation": 3, "request_id": request_id, "items": first}))
+            backup.write_text(json.dumps({"version": 1, "generation": 3, "request_id": request_id, "items": second}))
+            with self.assertRaisesRegex(RuntimeError, "冲突"):
+                constants._read_online_refresh_task_recoveries_file(request_id)
+
+            primary.write_text("broken-primary")
+            backup.write_text('{"version":2,"generation":4,"request_id":"' + request_id + '","items":{}}')
+            with self.assertRaisesRegex(RuntimeError, "副本均无效"):
+                constants._read_online_refresh_task_recoveries_file(request_id)
+
+    def test_refresh_failure_recovery_migrates_legacy_copy_and_serializes_concurrent_updates(self):
+        with isolated_app() as (_app, base_dir):
+            from fls_manager.online_scripts import constants
+
+            request_id = "f" * 32
+            scripts = ("alpha", "beta", "gamma", "delta")
+            failures = [{
+                "script_id": script_id, "name": script_id,
+                "task_link": f"https://example.invalid/{script_id}.json",
+                "error": "upstream timeout", "proxy_id": "",
+            } for script_id in scripts]
+            constants.update_online_refresh_state(
+                id="1" * 32, request_id=request_id, proxy_id="", running=False, status="部分完成",
+                message="4 个任务源失败", error="", cache_published=True,
+                task_link_failures=failures, updated_at="before", log_file="",
+            )
+            directory = base_dir / "data" / "online_script_refresh_failures"
+            primary = directory / f"{request_id}.recovery.json"
+            backup = directory / f"{request_id}.recovery.bak.json"
+            legacy_item = {
+                "request_id": constants.online_refresh_task_link_request_id(request_id, "alpha"),
+                "state": "completed", "proxy_id": "", "added": 1, "total": 1,
+                "updated_at": "legacy",
+            }
+            primary.write_text(json.dumps({"version": 1, "request_id": request_id, "items": {"alpha": legacy_item}}))
+
+            migrated = constants._read_online_refresh_task_recoveries_file(request_id)
+            self.assertTrue(migrated.repaired)
+            self.assertEqual(migrated.generation, 0)
+            self.assertEqual(primary.read_bytes(), backup.read_bytes())
+            constants.persist_online_refresh_task_link_recovery(
+                request_id, "beta", proxy_id="", added=2, total=2,
+            )
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results = list(executor.map(
+                    lambda script_id: constants.persist_online_refresh_task_link_recovery(
+                        request_id, script_id, proxy_id="", added=3, total=3,
+                    ),
+                    ("gamma", "delta"),
+                ))
+            self.assertEqual(len(results), 2)
+            recovered = constants._read_online_refresh_task_recoveries_file(request_id)
+            self.assertEqual(recovered.generation, 3)
+            self.assertEqual(set(recovered), set(scripts))
+            self.assertEqual(primary.read_bytes(), backup.read_bytes())
+
+            restarted = subprocess.run(
+                [sys.executable, "-c", (
+                    "import json; from fls_manager.online_scripts.constants import "
+                    "_read_online_refresh_task_recoveries_file; "
+                    f"data=_read_online_refresh_task_recoveries_file('{request_id}'); "
+                    "print(json.dumps({'generation':data.generation,'count':len(data),'repaired':data.repaired}))"
+                )],
+                cwd=ROOT, env=os.environ.copy(), capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(restarted.returncode, 0, restarted.stderr)
+            self.assertEqual(json.loads(restarted.stdout), {"generation": 3, "count": 4, "repaired": False})
+
+            target = base_dir / "recovery-target.json"
+            target.write_text("untouched", encoding="utf-8")
+            backup.unlink()
+            backup.symlink_to(target)
+            with self.assertRaisesRegex(RuntimeError, "符号链接"):
+                constants._read_online_refresh_task_recoveries_file(request_id)
+            self.assertEqual(target.read_text(encoding="utf-8"), "untouched")
 
     @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise the partial refresh UI")
     def test_refresh_polling_renders_task_link_retry_action(self):

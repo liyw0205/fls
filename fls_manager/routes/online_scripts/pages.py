@@ -81,6 +81,7 @@ def online_scripts_page():
     failure_request_id = selected_refresh_request or refresh_request_id
     failure_snapshot = refresh_state
     failure_detail_error = ""
+    failure_recovery_maintenance = {}
     if selected_refresh_request:
         try:
             failure_snapshot = get_online_refresh_request(selected_refresh_request) or {}
@@ -112,6 +113,7 @@ def online_scripts_page():
             )
             refresh_task_link_failures = failure_page["items"]
             failure_count = failure_page["total"]
+            failure_recovery_maintenance = failure_page.get("maintenance") or {}
         except Exception as exc:
             refresh_task_link_failures = (failure_snapshot.get("task_link_failures") or []) if failure_offset == 0 else []
             failure_detail_error = failure_detail_error or f"原刷新失败源明细无法读取，未清除已知首屏：{exc}"
@@ -123,6 +125,16 @@ def online_scripts_page():
         refresh_task_link_failures = failure_snapshot.get("task_link_failures") or []
         failure_count = len(refresh_task_link_failures)
         failure_offset = 0
+    failure_recovery_maintenance_html = ""
+    if failure_recovery_maintenance.get("repaired"):
+        reread_url = (
+            f"/online-scripts?refresh_request_id={quote(failure_request_id, safe='')}"
+            f"&failure_offset={failure_offset}#online-status"
+        )
+        failure_recovery_maintenance_html = (
+            '<div class="notice green" role="status">恢复回执副本已自动修复。'
+            f'<a class="btn btn-gray" href="{h(reread_url)}">重新读取恢复状态</a></div>'
+        )
     refresh_persistence_html = ""
     if refresh_state.get("persistence_error") and re.fullmatch(r"[a-f0-9]{32}", refresh_request_id):
         persistence_diagnosis = "<br>".join(
@@ -344,7 +356,7 @@ def online_scripts_page():
         更新时间：{h(refresh_updated_at or "-")}<br>
         日志：{h(refresh_log or "-")} {f'<a class="btn btn-blue" href="{h(refresh_log_href)}">查看刷新日志</a>' if refresh_log_href else ''}
     </div>
-    <div id="onlineRefreshTaskLinkFailures">{h(failure_detail_error)}{refresh_task_link_actions(refresh_task_link_failures, failure_request_id, failure_count, failure_offset)}</div>
+    <div id="onlineRefreshTaskLinkFailures">{failure_recovery_maintenance_html}{h(failure_detail_error)}{refresh_task_link_actions(refresh_task_link_failures, failure_request_id, failure_count, failure_offset)}</div>
     <a id="onlineRefreshLogLink" class="btn btn-blue" href="{h(refresh_log_href)}"{' hidden' if not refresh_log_href else ''}>查看刷新日志</a>
     <a id="onlineRefreshLogin" class="btn btn-gray" href="/login?next=%2Fonline-scripts" hidden>重新登录</a>
     <button id="onlineRefreshQuery" class="btn btn-primary" type="button" hidden>重新查询同步状态</button>
@@ -668,7 +680,12 @@ async function updateOnlineRefreshStatus(){{
         if(failures && !{json.dumps(bool(selected_refresh_request))} && {failure_offset} === 0) {{
             const totalFailures = Number(json.task_link_failure_count || taskFailures.length);
             const failureRequestId = String(json.request_id || "");
-            failures.innerHTML = taskFailures.map(function(item) {{
+            const recoveryMaintenance = json.task_link_recovery_maintenance || {{}};
+            const recoveryMaintenanceHtml = recoveryMaintenance.repaired && /^[a-f0-9]{{32}}$/.test(failureRequestId)
+                ? "<div class='notice green' role='status'>恢复回执副本已自动修复。<a class='btn btn-gray' href='/online-scripts?refresh_request_id=" +
+                    encodeURIComponent(failureRequestId) + "&failure_offset=0#online-status'>重新读取恢复状态</a></div>"
+                : "";
+            failures.innerHTML = recoveryMaintenanceHtml + taskFailures.map(function(item) {{
                 const id = String(item && item.script_id || "").trim();
                 if(!id) return "";
                 const name = escapeHtml(item.name || id);
