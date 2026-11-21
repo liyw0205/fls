@@ -1,7 +1,9 @@
 import json
+import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import unittest
@@ -114,6 +116,237 @@ class OnlineSourceRefreshTests(unittest.TestCase):
             main.close.assert_called_once()
             task.close.assert_called_once()
 
+    def test_source_refresh_collects_task_link_failures_past_inline_limit(self):
+        with isolated_app() as (_app, _base_dir):
+            from fls_manager.online_scripts import source
+
+            source_items = [
+                {
+                    "id": f"script-{number:03d}",
+                    "name": f"Script {number:03d}",
+                    "type": "raw",
+                    "link": f"https://example.invalid/{number:03d}.sh",
+                    "task_link": f"https://example.invalid/tasks/{number:03d}.json",
+                }
+                for number in range(105)
+            ]
+            main = self.response(json.dumps(source_items))
+            failures = []
+            with patch.object(source, "requests", SimpleNamespace(get=Mock(return_value=main))), patch.object(
+                source, "github_proxy_url", side_effect=lambda url, *_args: url,
+            ), patch.object(source, "fetch_task_link_tasks", side_effect=RuntimeError("upstream timeout")):
+                items = source.fetch_online_scripts(task_link_failures=failures)
+
+            self.assertEqual(len(items), 105)
+            self.assertEqual(len(failures), 105)
+            self.assertEqual(failures[-1]["script_id"], "script-104")
+            main.close.assert_called_once()
+
+    def test_refresh_failure_details_are_bounded_paged_authenticated_and_restartable(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import constants
+
+            request_id = "a" * 32
+            failures = [
+                {
+                    "script_id": f"script-{number:03d}",
+                    "name": f"Script {number:03d}",
+                    "task_link": f"https://example.invalid/tasks/{number:03d}.json",
+                    "error": f"upstream timeout {number}",
+                    "proxy_id": "",
+                }
+                for number in range(105)
+            ]
+            constants.update_online_refresh_state(
+                id="b" * 32, request_id=request_id, proxy_id="", running=False,
+                status="部分完成", message="105 个外部任务源加载失败", error="",
+                cache_published=True, task_link_failures=failures, updated_at="2026-11-21 10:00:00",
+                log_file="",
+            )
+            state = constants.get_online_refresh_state()
+            self.assertEqual(state["task_link_failure_count"], 105)
+            self.assertEqual(len(state["task_link_failures"]), 100)
+            detail_file = base_dir / "data" / "online_script_refresh_failures" / f"{request_id}.json"
+            self.assertLessEqual(detail_file.stat().st_size, constants.ONLINE_REFRESH_TASK_FAILURE_FILE_LIMIT)
+
+            client = app.test_client()
+            first = client.get(
+                f"/api/online-scripts/refresh-task-link-failures/{request_id}?offset=0&limit=100",
+                headers={"X-Token": TOKEN},
+            )
+            second = client.get(
+                f"/api/online-scripts/refresh-task-link-failures/{request_id}?offset=100&limit=100",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(first.status_code, 200)
+            self.assertEqual(second.status_code, 200)
+            self.assertEqual(first.json["total"], 105)
+            self.assertEqual(len(first.json["items"]), 100)
+            self.assertTrue(first.json["has_more"])
+            self.assertEqual(second.json["items"][0]["script_id"], "script-100")
+            self.assertEqual(second.json["items"][-1]["script_id"], "script-104")
+            self.assertFalse(second.json["has_more"])
+            self.assertEqual(first.json["digest"], second.json["digest"])
+            self.assertIn(client.get(
+                f"/api/online-scripts/refresh-task-link-failures/{request_id}?offset=0&limit=101",
+                headers={"X-Token": TOKEN},
+            ).status_code, (400, 503))
+            self.assertIn(client.get(
+                f"/api/online-scripts/refresh-task-link-failures/{request_id}?offset=0",
+            ).status_code, (401, 302))
+
+            page = client.get(
+                f"/online-scripts?refresh_request_id={request_id}&failure_offset=100",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(page.status_code, 200)
+            html = page.get_data(as_text=True)
+            self.assertIn("script-104", html)
+            self.assertIn(f"/online-scripts/refresh-task-link/{request_id}/task-link/script-104", html)
+            self.assertIn(f'name="origin_refresh_request_id" value="{request_id}"', html)
+            self.assertIn("失败源 101-105 / 105", html)
+            self.assertIn("failure_offset=0#online-status", html)
+
+            restarted = subprocess.run(
+                [sys.executable, "-c", (
+                    "import json; from fls_manager.online_scripts.constants import "
+                    "get_online_refresh_task_link_failures; "
+                    f"print(json.dumps(get_online_refresh_task_link_failures('{request_id}', 100, 100)))"
+                )],
+                cwd=ROOT, env=os.environ.copy(), capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(restarted.returncode, 0, restarted.stderr)
+            self.assertEqual(json.loads(restarted.stdout)["items"][-1]["script_id"], "script-104")
+
+            detail_file.write_text("not-json", encoding="utf-8")
+            unavailable = client.get(
+                f"/api/online-scripts/refresh-task-link-failures/{request_id}?offset=100&limit=100",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(unavailable.status_code, 503)
+            self.assertIn("失败明细损坏", unavailable.json["error"])
+
+    def test_refresh_failure_detail_storage_error_prevents_cache_publication(self):
+        with isolated_app() as (_app, base_dir):
+            from fls_manager.online_scripts import constants, source
+
+            request_id = "c" * 32
+            original = [{"id": "old", "name": "Old", "type": "raw", "link": "old.sh"}]
+            source.save_online_script_cache(original)
+            cache_before = source.ONLINE_SCRIPT_CACHE_FILE.read_bytes()
+            constants.update_online_refresh_state(
+                id="d" * 32, request_id=request_id, proxy_id="", running=True,
+                status="运行中", message="", error="", cache_published=False,
+                task_link_failures=[], updated_at="before", log_file="",
+            )
+
+            def fake_fetch(**kwargs):
+                kwargs["task_link_failures"].extend({
+                    "script_id": f"script-{number:03d}",
+                    "name": f"Script {number:03d}",
+                    "task_link": f"https://example.invalid/tasks/{number:03d}.json",
+                    "error": "upstream timeout",
+                    "proxy_id": "",
+                } for number in range(105))
+                return [{"id": "new", "name": "New", "type": "raw", "link": "new.sh"}]
+
+            with patch.object(source, "fetch_online_scripts", side_effect=fake_fetch), patch.object(
+                constants, "_write_online_refresh_task_failures_file", side_effect=OSError("detail store read-only"),
+            ):
+                source.refresh_worker("d" * 32, log_file=str(base_dir / "refresh.log"))
+
+            self.assertEqual(source.ONLINE_SCRIPT_CACHE_FILE.read_bytes(), cache_before)
+            self.assertEqual(source.load_online_script_cache()[0]["id"], "old")
+            state = constants.get_online_refresh_state()
+            self.assertEqual(state["status"], "失败")
+            self.assertFalse(state["cache_published"])
+            self.assertIn("detail store read-only", state["error"])
+
+    def test_refresh_failure_task_link_retry_is_bound_idempotent_and_csrf_protected(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import constants, source
+            from fls_manager.routes.online_scripts import task_link
+
+            refresh_request_id = "e" * 32
+            task_link_url = "https://example.invalid/demo-tasks.json"
+            source.save_online_script_cache([
+                {"id": "demo", "name": "Demo", "type": "raw", "link": "demo.sh", "task_link": task_link_url, "task_cron": []},
+                {"id": "other", "name": "Other", "type": "raw", "link": "other.sh", "task_link": "https://example.invalid/other.json", "task_cron": []},
+            ])
+            constants.update_online_refresh_state(
+                id="f" * 32, request_id=refresh_request_id, proxy_id="", running=False,
+                status="部分完成", message="1 个任务源失败", error="", cache_published=True,
+                task_link_failures=[{
+                    "script_id": "demo", "name": "Demo", "task_link": task_link_url,
+                    "error": "upstream timeout", "proxy_id": "",
+                }], updated_at="2026-11-21 11:00:00", log_file="",
+            )
+            client = app.test_client()
+            with client.session_transaction() as session:
+                session.update(token=TOKEN, token_expire_at=4102444800, security_verified=True, csrf_token="refresh-source-csrf")
+            headers = {"X-CSRF-Token": "refresh-source-csrf"}
+            endpoint = f"/api/online-scripts/refresh-task-link/{refresh_request_id}/task-link/demo"
+            anonymous = app.test_client()
+            with anonymous.session_transaction() as session:
+                session["csrf_token"] = "anonymous-source-csrf"
+            with patch.object(task_link, "fetch_task_link_tasks", side_effect=[
+                RuntimeError("upstream timeout"),
+                [{"name": "Recovered", "cron": "", "command": "run recovered.sh"}],
+            ]) as fetch:
+                denied = anonymous.post(
+                    endpoint, json={"request_id": "1" * 32}, headers={"X-CSRF-Token": "anonymous-source-csrf"},
+                )
+                csrf_denied = client.post(endpoint, json={"request_id": "1" * 32})
+                wrong_script = client.post(
+                    f"/api/online-scripts/refresh-task-link/{refresh_request_id}/task-link/other",
+                    json={"request_id": "2" * 32}, headers=headers,
+                )
+                wrong_origin = client.post(
+                    endpoint,
+                    json={"request_id": "3" * 32, "origin_refresh_request_id": "4" * 32},
+                    headers=headers,
+                )
+                self.assertEqual(denied.status_code, 401)
+                self.assertEqual(csrf_denied.status_code, 400)
+                self.assertEqual(wrong_script.status_code, 409)
+                self.assertEqual(wrong_origin.status_code, 409)
+                fetch.assert_not_called()
+
+                first = client.post(
+                    endpoint,
+                    json={"request_id": "5" * 32, "origin_refresh_request_id": refresh_request_id},
+                    headers=headers,
+                )
+                recovered = client.post(
+                    endpoint,
+                    json={"request_id": "5" * 32, "origin_refresh_request_id": refresh_request_id},
+                    headers=headers,
+                )
+                replay = client.post(
+                    endpoint,
+                    json={"request_id": "5" * 32, "origin_refresh_request_id": refresh_request_id},
+                    headers=headers,
+                )
+                generic_replay = client.post(
+                    "/api/online-scripts/task-link/demo", json={"request_id": "5" * 32}, headers=headers,
+                )
+            self.assertEqual(first.status_code, 502)
+            self.assertEqual(recovered.status_code, 200)
+            self.assertEqual(replay.status_code, 200)
+            self.assertTrue(replay.json["replayed"])
+            self.assertEqual(generic_replay.status_code, 409)
+            self.assertEqual(fetch.call_count, 2)
+            receipt = source.get_task_link_request("5" * 32)
+            self.assertEqual(receipt["origin_refresh_request_id"], refresh_request_id)
+
+            page = client.get(
+                f"/online-scripts?refresh_request_id={refresh_request_id}", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(page.status_code, 200)
+            html = page.get_data(as_text=True)
+            self.assertIn(f"/online-scripts/refresh-task-link/{refresh_request_id}/task-link/demo", html)
+            self.assertIn(f"/api/online-scripts/refresh-task-link/{refresh_request_id}/task-link/demo", html)
+
     def test_refresh_worker_exposes_partial_task_link_retry_actions(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.online_scripts import source
@@ -208,6 +441,9 @@ setImmediate(async () => {
   assert.equal(elements.onlineRefreshStatusCard.style.display, 'block');
   assert.match(elements.onlineRefreshStatusText.innerHTML, /部分完成/);
   assert.match(elements.onlineRefreshTaskLinkFailures.innerHTML, /task-link\/demo/);
+  assert.match(elements.onlineRefreshTaskLinkFailures.innerHTML, /refresh-task-link\/d{32}\/task-link\/demo/);
+  assert.match(elements.onlineRefreshTaskLinkFailures.innerHTML, /data-api-action='\/api\/online-scripts\/refresh-task-link\/d{32}\/task-link\/demo'/);
+  assert.match(elements.onlineRefreshTaskLinkFailures.innerHTML, /origin_refresh_request_id/);
   assert.match(elements.onlineRefreshTaskLinkFailures.innerHTML, /name='csrf_token'/);
   assert.match(elements.onlineRefreshTaskLinkFailures.innerHTML, /upstream timeout/);
   assert.equal(typeof retryButton.onclick, 'function');

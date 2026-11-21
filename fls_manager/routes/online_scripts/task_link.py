@@ -15,7 +15,10 @@ from ...online_scripts.source import (
     list_task_link_requests,
     persist_task_link_request,
 )
-from ...online_scripts.constants import ONLINE_TASK_LINK_ACTIVE
+from ...online_scripts.constants import (
+    ONLINE_TASK_LINK_ACTIVE,
+    get_online_refresh_task_link_failure,
+)
 from ...utils import now_str
 from ...storage import storage_transaction
 
@@ -25,13 +28,26 @@ _STALE_TASK_LINK_CONFIRMATION = (
 )
 
 
-def _task_link_error(script_id, message, status_code, proxy_id="", request_id="", retry=False, history_full=False):
+def _task_link_error(
+    script_id, message, status_code, proxy_id="", request_id="", retry=False,
+    history_full=False, origin_refresh_request_id="",
+):
     retry_form = ""
     if retry:
         hidden = f'<input type="hidden" name="request_id" value="{h(request_id)}">' if request_id else ""
+        origin = (
+            f"/refresh-task-link/{h(origin_refresh_request_id)}"
+            if re.fullmatch(r"[a-f0-9]{32}", origin_refresh_request_id or "") else ""
+        )
+        action = f"/online-scripts{origin}/task-link/{h(quote(script_id, safe=''))}"
+        api_action = f"/api{action[len('/online-scripts'):]}"
+        origin_input = (
+            f'<input type="hidden" name="origin_refresh_request_id" value="{h(origin_refresh_request_id)}">'
+            if origin else ""
+        )
         retry_form = f'''
-<form class="inline-form" method="post" action="/online-scripts/task-link/{h(quote(script_id, safe=''))}">
-    {hidden}
+<form class="inline-form" method="post" action="{action}" data-api-action="{api_action}">
+    {hidden}{origin_input}
     <select name="proxy_id" aria-label="外部任务源代理">{proxy_select_options(proxy_id)}</select>
     <button class="btn btn-primary" type="submit">重新同步外部任务源</button>
 </form>'''
@@ -92,10 +108,11 @@ def _persist_failure(record, message, status_code, *, retry=True, state="failed"
     }, status_code
 
 
-def _existing_task_link_result(record, script_id, proxy_id, expected_version=""):
+def _existing_task_link_result(record, script_id, proxy_id, expected_version="", origin_refresh_request_id=""):
     if not record:
         return None
     if (record.get("script_id") != script_id or record.get("proxy_id") != proxy_id
+            or str(record.get("origin_refresh_request_id") or "") != origin_refresh_request_id
             or (record.get("state") == "failed" and expected_version
                 and record.get("expected_version") != expected_version)):
         return {"ok": False, "request_id": record["request_id"],
@@ -178,11 +195,13 @@ def _missing_task_link_receipt(request_id, exc):
             "status_url": f"/online-scripts/task-link-status/{request_id}"}, 503
 
 
-def _submit_task_link(script_id, proxy_id, raw_request_id):
+def _submit_task_link(script_id, proxy_id, raw_request_id, origin_refresh_request_id=""):
     try:
         request_id = _request_id(raw_request_id)
     except ValueError as exc:
         return {"ok": False, "msg": str(exc), "request_id": "", "retry_allowed": False}, 400
+    if origin_refresh_request_id and not re.fullmatch(r"[a-f0-9]{32}", origin_refresh_request_id):
+        return {"ok": False, "msg": "原刷新请求标识无效", "request_id": request_id, "retry_allowed": False}, 400
 
     try:
         previous = get_task_link_request(request_id, script_id=script_id, proxy_id=proxy_id)
@@ -191,7 +210,9 @@ def _submit_task_link(script_id, proxy_id, raw_request_id):
     except Exception as exc:
         return {"ok": False, "request_id": request_id,
                 "msg": f"同步回执无法读取，未发起外部请求：{exc}", "retry_allowed": False}, 500
-    existing = _existing_task_link_result(previous, script_id, proxy_id)
+    existing = _existing_task_link_result(
+        previous, script_id, proxy_id, origin_refresh_request_id=origin_refresh_request_id,
+    )
     if existing:
         return existing
 
@@ -204,6 +225,23 @@ def _submit_task_link(script_id, proxy_id, raw_request_id):
     if not item:
         return {"ok": False, "request_id": request_id,
                 "msg": "脚本已不在本地缓存中，请刷新在线脚本列表。", "retry_allowed": False}, 404
+
+    if origin_refresh_request_id:
+        try:
+            origin_failure = get_online_refresh_task_link_failure(origin_refresh_request_id, script_id)
+        except LookupError as exc:
+            return {"ok": False, "request_id": request_id, "msg": str(exc), "retry_allowed": False}, 404
+        except Exception as exc:
+            return {"ok": False, "request_id": request_id,
+                    "msg": f"原刷新失败源记录无法读取，未发起外部请求：{exc}", "retry_allowed": False}, 503
+        if (
+            not origin_failure
+            or str(origin_failure.get("proxy_id") or "") != proxy_id
+            or str(origin_failure.get("task_link") or "") != str(item.get("task_link") or "").strip()
+        ):
+            return {"ok": False, "request_id": request_id,
+                    "msg": "当前脚本或代理已不同于原刷新失败记录，未发起外部请求；请刷新后重新选择。",
+                    "retry_allowed": False}, 409
 
     task_link = str(item.get("task_link") or "").strip()
     if not task_link:
@@ -219,7 +257,9 @@ def _submit_task_link(script_id, proxy_id, raw_request_id):
                 "msg": f"读取代理配置失败：{exc}", "retry_allowed": True}, 500
 
     expected_version = online_task_link_version(item)
-    existing = _existing_task_link_result(previous, script_id, proxy_id, expected_version)
+    existing = _existing_task_link_result(
+        previous, script_id, proxy_id, expected_version, origin_refresh_request_id,
+    )
     if existing:
         return existing
 
@@ -231,6 +271,7 @@ def _submit_task_link(script_id, proxy_id, raw_request_id):
         "request_id": request_id,
         "script_id": script_id,
         "proxy_id": proxy_id,
+        "origin_refresh_request_id": origin_refresh_request_id,
         "expected_version": expected_version,
         "state": "prepared",
         "added": 0,
@@ -340,7 +381,7 @@ def _submit_task_link(script_id, proxy_id, raw_request_id):
         ONLINE_TASK_LINK_ACTIVE.discard(request_id)
 
 
-def _render_task_link_result(script_id, payload, status_code, proxy_id):
+def _render_task_link_result(script_id, payload, status_code, proxy_id, origin_refresh_request_id=""):
     if payload.get("ok"):
         if payload.get("replayed"):
             body = page_header_card(
@@ -365,6 +406,7 @@ def _render_task_link_result(script_id, payload, status_code, proxy_id):
         request_id="" if payload.get("history_full") else payload.get("request_id", ""),
         retry=bool(payload.get("retry_allowed")),
         history_full=bool(payload.get("history_full")),
+        origin_refresh_request_id=origin_refresh_request_id,
     )
 
 
@@ -537,6 +579,15 @@ def online_scripts_pull_task_link(script_id):
     return _render_task_link_result(script_id, payload, status_code, proxy_id)
 
 
+@bp.route("/online-scripts/refresh-task-link/<refresh_request_id>/task-link/<script_id>", methods=["POST"])
+def online_scripts_pull_refresh_task_link(refresh_request_id, script_id):
+    proxy_id = request.form.get("proxy_id", "").strip()
+    payload, status_code = _submit_task_link(
+        script_id, proxy_id, request.form.get("request_id"), refresh_request_id,
+    )
+    return _render_task_link_result(script_id, payload, status_code, proxy_id, refresh_request_id)
+
+
 @bp.route("/api/online-scripts/task-link/<script_id>", methods=["POST"])
 def api_online_scripts_pull_task_link(script_id):
     data = request.get_json(silent=True) if request.is_json else request.form
@@ -545,6 +596,22 @@ def api_online_scripts_pull_task_link(script_id):
         script_id,
         str(data.get("proxy_id", "") or "").strip(),
         data.get("request_id"),
+    )
+    return jsonify(payload), status_code
+
+
+@bp.route("/api/online-scripts/refresh-task-link/<refresh_request_id>/task-link/<script_id>", methods=["POST"])
+def api_online_scripts_pull_refresh_task_link(refresh_request_id, script_id):
+    data = request.get_json(silent=True) if request.is_json else request.form
+    data = data or {}
+    submitted_origin = str(data.get("origin_refresh_request_id", "") or "").strip()
+    if submitted_origin and submitted_origin != refresh_request_id:
+        return jsonify(ok=False, msg="原刷新请求绑定不一致，未发起外部请求", retry_allowed=False), 409
+    payload, status_code = _submit_task_link(
+        script_id,
+        str(data.get("proxy_id", "") or "").strip(),
+        data.get("request_id"),
+        refresh_request_id,
     )
     return jsonify(payload), status_code
 

@@ -147,6 +147,35 @@ def main():
             message = "正在后台同步在线脚本源，请稍候..." if running else "同步在线脚本源部分完成，请逐项重试"
             refresh_id = str(data.get("refresh_id") or "e" * 32)
             refresh_request_id = str(data.get("request_id") or "d" * 32)
+            failure_count = int(data.get("failure_count", 1))
+            failures = []
+            if failure_count > 1:
+                cache_items = []
+                for number in range(failure_count):
+                    failed_item = dict(
+                        item,
+                        id=f"browser-link-{number:03d}",
+                        name=f"浏览器任务源 {number:03d}",
+                        link=f"https://fixture.invalid/browser-link-{number:03d}.py",
+                        task_link=f"https://fixture.invalid/browser-link-{number:03d}.json",
+                    )
+                    cache_items.append(failed_item)
+                    failures.append({
+                        "script_id": failed_item["id"],
+                        "name": failed_item["name"],
+                        "task_link": failed_item["task_link"],
+                        "proxy_id": "",
+                        "error": "fixture refresh task source unavailable",
+                    })
+                source.save_online_script_cache(cache_items)
+            else:
+                failures = [{
+                    "script_id": item["id"],
+                    "name": item["name"],
+                    "task_link": item["task_link"],
+                    "proxy_id": "",
+                    "error": "fixture refresh task source unavailable",
+                }]
             update_online_refresh_state(
                 id=refresh_id,
                 request_id=refresh_request_id,
@@ -156,13 +185,7 @@ def main():
                 message=message,
                 error="",
                 cache_published=True,
-                task_link_failures=[{
-                    "script_id": item["id"],
-                    "name": item["name"],
-                    "task_link": item["task_link"],
-                    "proxy_id": "",
-                    "error": "fixture refresh task source unavailable",
-                }],
+                task_link_failures=failures,
                 updated_at="now",
                 log_file=str(online_refresh_log_file(refresh_id)),
             )
@@ -678,6 +701,40 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    await page.waitForURL(url=>url.pathname==='/online-scripts'&&(url.searchParams.get('msg')||'').includes('外部任务源同步完成'));
    const dynamicState=await fixture({});
    assert.equal(dynamicState.fetches,2);
+   const manyFailureRequestId='9'.repeat(32);
+   await fixture({reset:true,fail:true});
+   const manyFailures=await page.request.post(base+'/api/fixture/online-refresh',{headers,data:{failure_count:105,request_id:manyFailureRequestId,refresh_id:'8'.repeat(32)}});
+   assert.equal(manyFailures.status(),200);
+   const failurePageApi=await page.request.get(base+'/api/online-scripts/refresh-task-link-failures/'+manyFailureRequestId+'?offset=100&limit=100',{headers});
+   assert.equal(failurePageApi.status(),200);
+   const failurePagePayload=await failurePageApi.json();
+   assert.equal(failurePagePayload.total,105);
+   assert.equal(failurePagePayload.items.length,5);
+   assert.equal(failurePagePayload.items[4].script_id,'browser-link-104');
+   await page.goto(base+'/online-scripts?refresh_request_id='+manyFailureRequestId+'&failure_offset=100#online-status');
+   const lastFailure=page.locator('#onlineRefreshTaskLinkFailures form[data-script-id="browser-link-104"]');
+   await lastFailure.waitFor();
+   assert.match(await page.locator('#onlineRefreshTaskLinkFailures').textContent(),/失败源 101-105 \/ 105/);
+   assert.equal(await lastFailure.getAttribute('action'),'/online-scripts/refresh-task-link/'+manyFailureRequestId+'/task-link/browser-link-104');
+   const lastFailureRequestId=await lastFailure.locator('[name="request_id"]').inputValue();
+   const [lastFailureResponse]=await Promise.all([
+     page.waitForResponse(response=>response.url().includes('/api/online-scripts/refresh-task-link/'+manyFailureRequestId+'/task-link/browser-link-104')&&response.request().method()==='POST'),
+     lastFailure.locator('button[type="submit"]').click(),
+   ]);
+   assert.equal(lastFailureResponse.status(),502);
+   const failurePending=JSON.parse(await page.evaluate(()=>sessionStorage.getItem('fls-online-task-link-request')));
+   assert.equal(failurePending.request_id,lastFailureRequestId);
+   assert.equal(failurePending.origin_refresh_request_id,manyFailureRequestId);
+   const continueLastFailure=page.getByRole('button',{name:'继续原同步请求',exact:true});
+   await continueLastFailure.waitFor();
+   await fixture({fail:false});
+   await continueLastFailure.click();
+   await page.waitForURL(url=>url.pathname==='/online-scripts'&&(url.searchParams.get('msg')||'').includes('外部任务源同步完成'));
+   const boundReceipt=await page.request.get(base+'/api/online-scripts/task-link-status/'+lastFailureRequestId,{headers});
+   assert.equal(boundReceipt.status(),200);
+   assert.equal((await boundReceipt.json()).origin_refresh_request_id,manyFailureRequestId);
+   assert.equal((await fixture({})).fetches,1);
+   await page.screenshot({path:'/tmp/fls-refresh-failure-page-'+viewport.width+'.png'});
    const setup=await page.request.post(base+'/api/fixture/refresh-retry',{headers,data:{}});
    assert.equal(setup.status(),200);
    const original=(await setup.json()).original;

@@ -1,7 +1,11 @@
 import re
 
 from ._common import *
-from ...online_scripts.constants import get_online_refresh_history
+from ...online_scripts.constants import (
+    get_online_refresh_history,
+    get_online_refresh_request,
+    get_online_refresh_task_link_failures,
+)
 
 
 @bp.route("/online-scripts")
@@ -74,7 +78,47 @@ def online_scripts_page():
         f"/online-scripts/refresh-log/{quote(refresh_request_id, safe='')}"
         if re.fullmatch(r"[a-f0-9]{32}", refresh_request_id) else ""
     )
-    refresh_task_link_failures = refresh_state.get("task_link_failures") or []
+    failure_request_id = selected_refresh_request or refresh_request_id
+    failure_snapshot = refresh_state
+    failure_detail_error = ""
+    if selected_refresh_request:
+        try:
+            failure_snapshot = get_online_refresh_request(selected_refresh_request) or {}
+        except Exception as exc:
+            failure_snapshot = {}
+            failure_detail_error = f"原刷新失败源状态无法读取：{exc}"
+    try:
+        failure_offset = int(request.args.get("failure_offset", "0") or 0)
+    except (TypeError, ValueError):
+        return layout("刷新失败源", "online_scripts", page_header_card(
+            "失败源分页参数无效", help_html="请重新选择失败源分页。",
+            actions_html='<a class="btn btn-gray" href="/online-scripts#online-status">返回刷新状态</a>',
+        )), 400
+    if not 0 <= failure_offset <= 5000:
+        return layout("刷新失败源", "online_scripts", page_header_card(
+            "失败源分页参数超出范围", help_html="请重新选择失败源分页。",
+            actions_html='<a class="btn btn-gray" href="/online-scripts#online-status">返回刷新状态</a>',
+        )), 400
+    try:
+        failure_count = int(failure_snapshot.get("task_link_failure_count") or len(failure_snapshot.get("task_link_failures") or []))
+    except (TypeError, ValueError):
+        failure_count = 0
+    if failure_count and failure_offset >= failure_count:
+        failure_offset = ((failure_count - 1) // 100) * 100
+    if re.fullmatch(r"[a-f0-9]{32}", failure_request_id or ""):
+        try:
+            failure_page = get_online_refresh_task_link_failures(
+                failure_request_id, offset=failure_offset, limit=100,
+            )
+            refresh_task_link_failures = failure_page["items"]
+            failure_count = failure_page["total"]
+        except Exception as exc:
+            refresh_task_link_failures = (failure_snapshot.get("task_link_failures") or []) if failure_offset == 0 else []
+            failure_detail_error = failure_detail_error or f"原刷新失败源明细无法读取，未清除已知首屏：{exc}"
+    else:
+        refresh_task_link_failures = failure_snapshot.get("task_link_failures") or []
+        failure_count = len(refresh_task_link_failures)
+        failure_offset = 0
     refresh_persistence_html = ""
     if refresh_state.get("persistence_error") and re.fullmatch(r"[a-f0-9]{32}", refresh_request_id):
         persistence_diagnosis = "<br>".join(
@@ -100,17 +144,26 @@ def online_scripts_page():
                 f'<a class="btn btn-gray" href="/online-scripts/refresh-log/{quote(request_id, safe="")}">'
                 f'查看 {status} 刷新（{updated_at}）</a>'
             )
+            try:
+                failure_count = int(item.get("task_link_failure_count") or 0)
+            except (TypeError, ValueError):
+                failure_count = 0
+            failure_link = (
+                f'<a class="btn btn-orange" href="/online-scripts?refresh_request_id={quote(request_id, safe="")}&failure_offset=0#online-status">'
+                f'查看 {failure_count} 个失败源</a>'
+                if failure_count else ""
+            )
             if item.get("status") in ("失败", "部分完成", "结果未知", "启动失败"):
                 rows.append(
                     f'<div class="fls-online-refresh-history-row" data-refresh-retry-of="{h(request_id)}">'
-                    f'{log_link}<form class="inline-form fls-online-refresh-retry-form" method="post" '
+                    f'{log_link}{failure_link}<form class="inline-form fls-online-refresh-retry-form" method="post" '
                     f'action="/online-scripts/refresh-retry/{h(request_id)}" data-refresh-retry-of="{h(request_id)}">'
                     f'<input type="hidden" name="retry_request_id" value="{uuid.uuid4().hex}">'
                     f'<input type="hidden" name="proxy_id" value="{h(item.get("proxy_id") or "")}">'
                     '<button class="btn btn-orange" type="submit">明确重新同步</button></form></div>'
                 )
             else:
-                rows.append(log_link)
+                rows.append(log_link + failure_link)
             if item.get("status") == "结果未知" and not item.get("confirmation"):
                 rows.append(
                     f'<form class="inline-form fls-online-refresh-confirm-form" method="post" '
@@ -119,27 +172,55 @@ def online_scripts_page():
                 )
         return "".join(rows) or '<span class="help">暂无可查询的刷新历史</span>'
 
-    def refresh_task_link_actions(failures):
-        if not failures:
+    def refresh_task_link_actions(failures, failure_request_id, failure_count, failure_offset):
+        if not failures and not failure_count:
             return ""
         rows = []
         for failure in failures:
             script_id = str(failure.get("script_id") or "").strip()
             if not script_id:
                 continue
-            action = url_for("online_scripts.online_scripts_pull_task_link", script_id=script_id)
+            bound = bool(re.fullmatch(r"[a-f0-9]{32}", failure_request_id or ""))
+            if bound:
+                action = url_for(
+                    "online_scripts.online_scripts_pull_refresh_task_link",
+                    refresh_request_id=failure_request_id,
+                    script_id=script_id,
+                )
+                api_action = url_for(
+                    "online_scripts.api_online_scripts_pull_refresh_task_link",
+                    refresh_request_id=failure_request_id,
+                    script_id=script_id,
+                )
+                origin_input = f'<input type="hidden" name="origin_refresh_request_id" value="{h(failure_request_id)}">'
+            else:
+                action = url_for("online_scripts.online_scripts_pull_task_link", script_id=script_id)
+                api_action = url_for("online_scripts.api_online_scripts_pull_task_link", script_id=script_id)
+                origin_input = ""
             label = h(failure.get("name") or script_id)
             detail = h(failure.get("error") or "外部任务源加载失败")
             proxy_id = h(failure.get("proxy_id") or "")
             rows.append(
                 f'<div class="help" style="margin-top:6px;">{label}：{detail} '
-                f'<form class="inline-form fls-online-task-link-form" data-script-id="{h(script_id)}" method="post" action="{h(action)}">'
+                f'<form class="inline-form fls-online-task-link-form" data-script-id="{h(script_id)}" '
+                f'data-api-action="{h(api_action)}" method="post" action="{h(action)}">'
                 f'<input type="hidden" name="request_id" value="{uuid.uuid4().hex}">'
+                f'{origin_input}'
                 f'<input type="hidden" name="proxy_id" value="{proxy_id}">'
                 '<button class="btn btn-orange" type="submit">重新同步外部任务源</button>'
                 '</form></div>'
             )
-        return "".join(rows)
+        end = min(failure_count, failure_offset + len(failures))
+        summary = f'<div class="help">失败源 {failure_offset + 1 if failures else 0}-{end} / {failure_count}</div>'
+        page_links = []
+        base = f"/online-scripts?refresh_request_id={quote(failure_request_id, safe='')}"
+        if failure_offset > 0:
+            previous = max(0, failure_offset - 100)
+            page_links.append(f'<a class="btn btn-gray" href="{base}&failure_offset={previous}#online-status">上一页</a>')
+        if failure_offset + len(failures) < failure_count:
+            page_links.append(f'<a class="btn btn-gray" href="{base}&failure_offset={failure_offset + len(failures)}#online-status">下一页</a>')
+        controls = f'<div class="action-row">{"".join(page_links)}</div>' if page_links else ""
+        return summary + "".join(rows) + controls
 
     proxy_options = proxy_select_options("")
 
@@ -240,7 +321,7 @@ def online_scripts_page():
         更新时间：{h(refresh_updated_at or "-")}<br>
         日志：{h(refresh_log or "-")} {f'<a class="btn btn-blue" href="{h(refresh_log_href)}">查看刷新日志</a>' if refresh_log_href else ''}
     </div>
-    <div id="onlineRefreshTaskLinkFailures">{refresh_task_link_actions(refresh_task_link_failures)}</div>
+    <div id="onlineRefreshTaskLinkFailures">{h(failure_detail_error)}{refresh_task_link_actions(refresh_task_link_failures, failure_request_id, failure_count, failure_offset)}</div>
     <a id="onlineRefreshLogLink" class="btn btn-blue" href="{h(refresh_log_href)}"{' hidden' if not refresh_log_href else ''}>查看刷新日志</a>
     <a id="onlineRefreshLogin" class="btn btn-gray" href="/login?next=%2Fonline-scripts" hidden>重新登录</a>
     <button id="onlineRefreshQuery" class="btn btn-primary" type="button" hidden>重新查询同步状态</button>
@@ -365,7 +446,11 @@ async function updateOnlineRefreshHistory(){{
             const status = escapeHtml(item.status || "-");
             const updatedAt = escapeHtml(item.updated_at || "-");
             const link = "<a class='btn btn-gray' href='/online-scripts/refresh-log/" + encodeURIComponent(requestId) + "'>查看 " + status + " 刷新（" + updatedAt + "）</a>";
-            let actions = link;
+            const failureCount = Number(item.task_link_failure_count || 0);
+            const failureLink = failureCount > 0
+                ? " <a class='btn btn-orange' href='/online-scripts?refresh_request_id=" + encodeURIComponent(requestId) + "&failure_offset=0#online-status'>查看 " + failureCount + " 个失败源</a>"
+                : "";
+            let actions = link + failureLink;
             if(String(item.status || "") === "结果未知" && !item.confirmation){{
                 actions += "<" + "form class='inline-form fls-online-refresh-confirm-form' method='post' action='/online-scripts/refresh-confirm/" + requestId + "' data-refresh-confirm-id='" + requestId + "'>" +
                     "<" + "button class='btn btn-gray' type='submit'>检查当前缓存结果</button><" + "/form>";
@@ -557,25 +642,38 @@ async function updateOnlineRefreshStatus(){{
         }}
 
         const taskFailures = Array.isArray(json.task_link_failures) ? json.task_link_failures : [];
-        if(failures) {{
+        if(failures && !{json.dumps(bool(selected_refresh_request))} && {failure_offset} === 0) {{
+            const totalFailures = Number(json.task_link_failure_count || taskFailures.length);
+            const failureRequestId = String(json.request_id || "");
             failures.innerHTML = taskFailures.map(function(item) {{
                 const id = String(item && item.script_id || "").trim();
                 if(!id) return "";
                 const name = escapeHtml(item.name || id);
                 const detail = escapeHtml(item.error || "外部任务源加载失败");
-                const href = "/online-scripts/task-link/" + encodeURIComponent(id);
+                const bound = /^[a-f0-9]{{32}}$/.test(failureRequestId);
+                const href = bound
+                    ? "/online-scripts/refresh-task-link/" + encodeURIComponent(failureRequestId) + "/task-link/" + encodeURIComponent(id)
+                    : "/online-scripts/task-link/" + encodeURIComponent(id);
+                const apiHref = bound
+                    ? "/api/online-scripts/refresh-task-link/" + encodeURIComponent(failureRequestId) + "/task-link/" + encodeURIComponent(id)
+                    : "/api/online-scripts/task-link/" + encodeURIComponent(id);
                 const proxy = escapeHtml(item.proxy_id || "");
                 const csrf = typeof flsGetCsrfToken === "function" ? escapeHtml(flsGetCsrfToken()) : "";
                 const requestId = (typeof crypto !== "undefined" && crypto.getRandomValues)
                     ? Array.from(crypto.getRandomValues(new Uint8Array(16)), function(value){{return value.toString(16).padStart(2, "0");}}).join("")
                     : Array.from({{length:32}}, function(){{return Math.floor(Math.random() * 16).toString(16);}}).join("");
                 return "<div class='help' style='margin-top:6px;'>" + name + "：" + detail +
-                    " <" + "form class='inline-form fls-online-task-link-form' data-script-id='" + escapeHtml(id) + "' method='post' action='" + escapeHtml(href) + "'>" +
+                    " <" + "form class='inline-form fls-online-task-link-form' data-script-id='" + escapeHtml(id) + "' data-api-action='" + escapeHtml(apiHref) + "' method='post' action='" + escapeHtml(href) + "'>" +
                     "<input type='hidden' name='csrf_token' value='" + csrf + "'>" +
                     "<input type='hidden' name='request_id' value='" + requestId + "'>" +
+                    (bound ? "<input type='hidden' name='origin_refresh_request_id' value='" + failureRequestId + "'>" : "") +
                     "<input type='hidden' name='proxy_id' value='" + proxy + "'>" +
                     "<button class='btn btn-orange' type='submit'>重新同步外部任务源</button></form></div>";
-            }}).join("");
+            }}).join("") +
+                "<div class='help'>失败源 1-" + Math.min(taskFailures.length, totalFailures) + " / " + totalFailures + "</div>" +
+                (failureRequestId && totalFailures > taskFailures.length
+                    ? "<div class='action-row'><a class='btn btn-gray' href='/online-scripts?refresh_request_id=" + encodeURIComponent(failureRequestId) + "&failure_offset=" + taskFailures.length + "#online-status'>下一页</a></div>"
+                    : "");
             if(window.__FLS_BIND_ONLINE_TASK_LINK_FORMS__){{
                 window.__FLS_BIND_ONLINE_TASK_LINK_FORMS__(failures);
             }}
@@ -821,13 +919,27 @@ function writeMessage(text, denied, pending, allowContinue, allowConfirm, histor
         const form = document.createElement("form");
         form.className = "fls-online-task-link-form inline-form";
         form.method = "post";
-        form.action = "/online-scripts/task-link/" + encodeURIComponent(pending.script_id);
+        const originRefreshId = String(pending.origin_refresh_request_id || "");
+        const hasRefreshOrigin = /^[a-f0-9]{{32}}$/.test(originRefreshId);
+        form.action = hasRefreshOrigin
+            ? "/online-scripts/refresh-task-link/" + encodeURIComponent(originRefreshId) + "/task-link/" + encodeURIComponent(pending.script_id)
+            : "/online-scripts/task-link/" + encodeURIComponent(pending.script_id);
+        form.dataset.apiAction = hasRefreshOrigin
+            ? "/api/online-scripts/refresh-task-link/" + encodeURIComponent(originRefreshId) + "/task-link/" + encodeURIComponent(pending.script_id)
+            : "/api/online-scripts/task-link/" + encodeURIComponent(pending.script_id);
         form.setAttribute("data-script-id", pending.script_id);
         const requestInput = document.createElement("input");
         requestInput.type = "hidden";
         requestInput.name = "request_id";
         requestInput.value = pending.request_id;
         form.appendChild(requestInput);
+        if(hasRefreshOrigin){{
+            const originInput = document.createElement("input");
+            originInput.type = "hidden";
+            originInput.name = "origin_refresh_request_id";
+            originInput.value = originRefreshId;
+            form.appendChild(originInput);
+        }}
         const proxyInput = document.createElement("input");
         proxyInput.type = "hidden";
         proxyInput.name = "proxy_id";
@@ -911,9 +1023,11 @@ async function submitTaskLinkForm(form, event){{
         const button = form.querySelector('button[type="submit"]');
         const requestId = requestInput && requestInput.value || "";
         const scriptId = form.getAttribute("data-script-id") || "";
+        const originInput = form.querySelector('[name="origin_refresh_request_id"]');
+        const originRefreshRequestId = originInput && originInput.value || "";
         const proxyInput = form.querySelector('[name="proxy_id"]');
         const proxyId = proxyInput && proxyInput.value || "";
-        const pending = {{request_id: requestId, script_id: scriptId, proxy_id: proxyId}};
+        const pending = {{request_id: requestId, script_id: scriptId, proxy_id: proxyId, origin_refresh_request_id: originRefreshRequestId}};
         if(!/^[a-f0-9]{{32}}$/.test(requestId) || !scriptId){{
             writeMessage("同步请求标识无效，请刷新页面后重试", false, pending);
             return;
@@ -925,7 +1039,8 @@ async function submitTaskLinkForm(form, event){{
             const headers = {{"X-Requested-With":"XMLHttpRequest"}};
             const csrf = typeof flsGetCsrfToken === "function" ? flsGetCsrfToken() : "";
             if(csrf) headers["X-CSRF-Token"] = csrf;
-            const response = await fetch(form.action.replace("/online-scripts/task-link/", "/api/online-scripts/task-link/"), {{method:"POST", body:new FormData(form), headers, credentials:"same-origin"}});
+            const apiAction = form.dataset.apiAction || form.action.replace("/online-scripts/task-link/", "/api/online-scripts/task-link/");
+            const response = await fetch(apiAction, {{method:"POST", body:new FormData(form), headers, credentials:"same-origin"}});
             const json = await flsReadJsonResponse(response);
             if(!json || json.ok !== true || json.request_id !== requestId) throw Object.assign(new Error(json && json.msg || "同步响应无效，请查询原请求"), {{status: response.status}});
             sessionStorage.removeItem(storageKey);
