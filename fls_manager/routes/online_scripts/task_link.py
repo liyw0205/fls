@@ -121,6 +121,37 @@ def _task_link_receipt_matches(expected, actual):
         return False
 
 
+def _refresh_task_link_recovery_matches(refresh_request_id, script_id, proxy_id, added, total, actual):
+    if not isinstance(actual, dict):
+        return False
+    return (
+        actual.get("request_id") == online_refresh_task_link_request_id(refresh_request_id, script_id)
+        and actual.get("state") == "completed"
+        and actual.get("proxy_id", "") == str(proxy_id or "")
+        and type(actual.get("added")) is int
+        and actual.get("added") == added
+        and type(actual.get("total")) is int
+        and actual.get("total") == total
+    )
+
+
+def _persist_refresh_task_link_recovery(refresh_request_id, script_id, proxy_id, added, total):
+    try:
+        persist_online_refresh_task_link_recovery(
+            refresh_request_id, script_id, proxy_id=proxy_id, added=added, total=total,
+        )
+    except Exception as exc:
+        try:
+            actual = get_online_refresh_task_link_recovery(refresh_request_id, script_id)
+        except Exception as read_exc:
+            return False, f"{exc}；恢复回执复核失败：{read_exc}"
+        if not _refresh_task_link_recovery_matches(
+            refresh_request_id, script_id, proxy_id, added, total, actual,
+        ):
+            return False, f"{exc}；磁盘恢复回执与本次结果不一致"
+    return True, ""
+
+
 def _refresh_task_link_recovery_result(request_id, script_id, origin_refresh_request_id, recovery):
     if (request_id != recovery.get("request_id")
             or request_id != online_refresh_task_link_request_id(origin_refresh_request_id, script_id)):
@@ -391,14 +422,12 @@ def _submit_task_link(script_id, proxy_id, raw_request_id, origin_refresh_reques
         _record_update(record, "completed", added=added, total=total)
         record["published_tasks_fingerprint"] = published_tasks_fingerprint
         if origin_refresh_request_id:
-            try:
-                persist_online_refresh_task_link_recovery(
-                    origin_refresh_request_id, script_id, proxy_id=proxy_id,
-                    added=added, total=total,
-                )
-            except Exception as exc:
+            recovery_confirmed, recovery_error = _persist_refresh_task_link_recovery(
+                origin_refresh_request_id, script_id, proxy_id, added, total,
+            )
+            if not recovery_confirmed:
                 _record_update(
-                    record, "unknown", error=f"任务已合并但刷新失败项恢复回执无法保存：{exc}",
+                    record, "unknown", error=f"任务已合并但刷新失败项恢复回执无法确认：{recovery_error}",
                     added=added, total=total,
                 )
                 record["published_tasks_fingerprint"] = published_tasks_fingerprint
@@ -408,7 +437,10 @@ def _submit_task_link(script_id, proxy_id, raw_request_id, origin_refresh_reques
                     pass
                 return {
                     "ok": False, "request_id": request_id,
-                    "msg": f"任务已可能合并，但恢复结果无法持久确认：{exc}；请查询原同步请求。",
+                    "state": "unknown", "receipt_confirmation_required": True,
+                    "state_url": f"/api/online-scripts/task-link-status/{request_id}",
+                    "status_url": f"/online-scripts/task-link-status/{request_id}",
+                    "msg": f"任务已可能合并，但恢复结果无法持久确认：{recovery_error}；请查询原同步请求。",
                     "retry_allowed": False, "resolved": False,
                 }, 503
         try:
@@ -565,16 +597,17 @@ def _confirm_task_link_locked(request_id):
         record["confirmation_fingerprint"] = current_fingerprint
         record["error"] = ""
         if record.get("origin_refresh_request_id"):
-            try:
-                persist_online_refresh_task_link_recovery(
-                    record["origin_refresh_request_id"], record["script_id"],
-                    proxy_id=record.get("proxy_id", ""), added=record.get("added", 0),
-                    total=record.get("total", 0),
-                )
-            except Exception as exc:
+            recovery_confirmed, recovery_error = _persist_refresh_task_link_recovery(
+                record["origin_refresh_request_id"], record["script_id"],
+                record.get("proxy_id", ""), record.get("added", 0), record.get("total", 0),
+            )
+            if not recovery_confirmed:
                 return {
                     "ok": False, "request_id": request_id,
-                    "msg": f"任务已确认合并，但刷新失败项恢复回执无法保存：{exc}；请查询原同步请求。",
+                    "state": "unknown", "receipt_confirmation_required": True,
+                    "state_url": f"/api/online-scripts/task-link-status/{request_id}",
+                    "status_url": f"/online-scripts/task-link-status/{request_id}",
+                    "msg": f"任务已确认合并，但刷新失败项恢复回执无法确认：{recovery_error}；请查询原同步请求。",
                     "retry_allowed": False,
                 }, 503
         msg = "已确认外部任务源已合并，未重复抓取或追加任务"

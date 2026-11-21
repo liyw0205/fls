@@ -37,9 +37,11 @@ def main():
         fault = {"fail": True, "fetches": 0, "refreshes": 0, "fail_history_publication": False,
                  "fail_retry_start": False, "fail_retry_receipt": False,
                  "confirmation_failure_request": "", "confirmation_failure_mode": "",
-                 "confirmation_failure_remaining": 0}
+                 "confirmation_failure_remaining": 0,
+                 "refresh_recovery_failure_request": "", "refresh_recovery_failure_remaining": 0}
         real_fetch = task_link.fetch_task_link_tasks
         real_persist = task_link.persist_task_link_request
+        real_persist_refresh_recovery = task_link.persist_online_refresh_task_link_recovery
         real_refresh_start = refresh.start_refresh_thread
 
         def start_refresh(refresh_id, _proxy_id, log_file):
@@ -92,7 +94,16 @@ def main():
                 raise OSError("browser task confirmation receipt lost after replace")
             return real_persist(record)
 
+        def persist_refresh_recovery(refresh_request_id, script_id, **kwargs):
+            result = real_persist_refresh_recovery(refresh_request_id, script_id, **kwargs)
+            if (refresh_request_id == fault["refresh_recovery_failure_request"]
+                    and fault["refresh_recovery_failure_remaining"]):
+                fault["refresh_recovery_failure_remaining"] = 0
+                raise OSError("browser refresh recovery receipt lost after replace")
+            return result
+
         task_link.persist_task_link_request = persist
+        task_link.persist_online_refresh_task_link_recovery = persist_refresh_recovery
         app = create_app()
         app_module.dispatch_frontend_open_event = lambda: None
 
@@ -131,12 +142,18 @@ def main():
                         confirmation_failure_mode=data.get("confirmation_failure_mode", "after"),
                         confirmation_failure_remaining=1,
                     )
+                if "refresh_recovery_failure_request" in data:
+                    fault.update(
+                        refresh_recovery_failure_request=data["refresh_recovery_failure_request"],
+                        refresh_recovery_failure_remaining=1,
+                    )
                 if "startup_failure" in data:
                     fault["startup_failure"] = data["startup_failure"]
                 if data.get("reset"):
                     fault["fetches"] = 0
                     fault.update(confirmation_failure_request="", confirmation_failure_mode="",
-                                 confirmation_failure_remaining=0)
+                                 confirmation_failure_remaining=0, refresh_recovery_failure_request="",
+                                 refresh_recovery_failure_remaining=0)
                     source.save_online_script_cache([item])
             cached = source.load_online_script_cache()
             return jsonify(fail=fault["fail"], fetches=fault["fetches"], refreshes=fault["refreshes"], cached=cached)
@@ -478,6 +495,7 @@ def main():
         finally:
             task_link.fetch_task_link_tasks = real_fetch
             task_link.persist_task_link_request = real_persist
+            task_link.persist_online_refresh_task_link_recovery = real_persist_refresh_recovery
             refresh.start_refresh_thread = real_refresh_start
             server.shutdown()
             server.server_close()
@@ -542,6 +560,31 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    assert.equal((await recoveredStatus.json()).items[4].recovery.state,'completed');
    assert.equal((await fixture({})).fetches,1);
    await page.screenshot({path:'/tmp/fls-refresh-failure-page-'+viewport.width+'.png'});
+   await fixture({reset:true,fail:false});
+   const crossRefreshRequest=('a'+viewport.width.toString(16)).padEnd(32,'a');
+   const crossRefreshId=('b'+viewport.width.toString(16)).padEnd(32,'b');
+   const crossRefreshSetup=await page.request.post(base+'/api/fixture/online-refresh',{headers,data:{
+     request_id:crossRefreshRequest,refresh_id:crossRefreshId,
+   }});
+   assert.equal(crossRefreshSetup.status(),200);
+   await page.goto(base+'/online-scripts?refresh_request_id='+crossRefreshRequest);
+   const crossRecoveryForm=page.locator('#onlineRefreshTaskLinkFailures form[data-script-id="browser-link"]');
+   await crossRecoveryForm.waitFor();
+   const crossTaskRequest=await crossRecoveryForm.locator('[name="request_id"]').inputValue();
+   await fixture({refresh_recovery_failure_request:crossRefreshRequest,fail:false});
+   const [crossRecoveryResponse]=await Promise.all([
+     page.waitForResponse(response=>response.url().includes('/api/online-scripts/refresh-task-link/'+crossRefreshRequest+'/task-link/browser-link')&&response.request().method()==='POST'),
+     crossRecoveryForm.locator('button[type="submit"]').click(),
+   ]);
+   assert.equal(crossRecoveryResponse.status(),200);
+   await page.waitForURL(url=>url.pathname==='/online-scripts'&&(url.searchParams.get('msg')||'').includes('外部任务源同步完成'));
+   const crossRecoveryStatus=await page.request.get(base+'/api/online-scripts/refresh-task-link-failures/'+crossRefreshRequest+'?offset=0',{headers});
+   assert.equal(crossRecoveryStatus.status(),200);
+   assert.equal((await crossRecoveryStatus.json()).items[0].recovery.request_id,crossTaskRequest);
+   assert.equal((await crossRecoveryStatus.json()).items[0].recovery.state,'completed');
+   const crossCache=await fixture({});
+   assert.equal(crossCache.fetches,1);
+   assert.equal(crossCache.cached[0].task_cron.length,1);
    if(process.env.FLS_REFRESH_RECOVERY_ONLY==='1'){
      assert.deepEqual(errors,[]);
      console.log('online refresh failure recovery passed '+viewport.width);

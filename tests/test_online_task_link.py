@@ -1279,6 +1279,60 @@ class OnlineTaskLinkTests(unittest.TestCase):
                     status = client.get(response.json["state_url"], headers={"X-Token": TOKEN})
                     self.assertEqual(status.status_code, 500)
 
+    def test_confirmation_recovers_published_refresh_recovery_receipt_after_exception(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import constants, source
+            from fls_manager.routes.online_scripts import task_link
+
+            refresh_request_id = "6" * 32
+            item = self.item(tasks=[self.task("published")])
+            source.save_online_script_cache([item])
+            constants.update_online_refresh_state(
+                id="5" * 32, request_id=refresh_request_id, proxy_id="", running=False,
+                status="部分完成", message="1 个任务源失败", error="", cache_published=True,
+                task_link_failures=[{
+                    "script_id": "demo", "name": "Demo", "task_link": item["task_link"],
+                    "error": "upstream timeout", "proxy_id": "",
+                }], updated_at="2026-11-21 12:30:00", log_file="",
+            )
+            request_id = constants.online_refresh_task_link_request_id(refresh_request_id, "demo")
+            record = self._unknown_record(
+                source, request_id, item,
+                published=source.online_script_task_fingerprint(item),
+            )
+            record["origin_refresh_request_id"] = refresh_request_id
+            source.persist_task_link_request(record)
+            real_persist = constants.persist_online_refresh_task_link_recovery
+
+            def publish_then_raise(*args, **kwargs):
+                receipt = real_persist(*args, **kwargs)
+                raise OSError("refresh recovery receipt acknowledgement lost after replace")
+
+            client = app.test_client()
+            with patch.object(task_link, "fetch_task_link_tasks") as fetch, patch.object(
+                task_link, "merge_task_link_tasks",
+            ) as merge, patch.object(
+                task_link, "persist_online_refresh_task_link_recovery", side_effect=publish_then_raise,
+            ):
+                response = client.post(
+                    "/api/online-scripts/task-link-confirm/" + request_id,
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json["confirmation"], "merged")
+                repeated = client.post(
+                    "/api/online-scripts/task-link-confirm/" + request_id,
+                    headers={"X-Token": TOKEN},
+                )
+            self.assertTrue(repeated.json["replayed"])
+            fetch.assert_not_called()
+            merge.assert_not_called()
+            self.assertEqual(source.get_task_link_request(request_id)["state"], "completed")
+            self.assertEqual(
+                constants.get_online_refresh_task_link_recovery(refresh_request_id, "demo")["request_id"],
+                request_id,
+            )
+
     def test_confirmation_form_session_and_concurrent_replay_preserve_permission_boundaries(self):
         with isolated_app() as (app, _base_dir):
             from fls_manager.online_scripts import source

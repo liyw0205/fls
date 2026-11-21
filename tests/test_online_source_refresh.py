@@ -580,6 +580,63 @@ class OnlineSourceRefreshTests(unittest.TestCase):
             recovery = constants.get_online_refresh_task_link_recovery(refresh_request_id, "demo")
             self.assertEqual(recovery["state"], "completed")
 
+    def test_refresh_failure_recovery_publish_then_error_confirms_same_task_link_request(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import constants, source
+            from fls_manager.routes.online_scripts import task_link
+
+            refresh_request_id = "2" * 32
+            item = {
+                "id": "demo", "name": "Demo", "type": "raw", "link": "demo.sh",
+                "task_link": "https://example.invalid/demo-tasks.json", "task_cron": [],
+            }
+            source.save_online_script_cache([item])
+            constants.update_online_refresh_state(
+                id="3" * 32, request_id=refresh_request_id, proxy_id="", running=False,
+                status="部分完成", message="1 个任务源失败", error="", cache_published=True,
+                task_link_failures=[{
+                    "script_id": "demo", "name": "Demo", "task_link": item["task_link"],
+                    "error": "upstream timeout", "proxy_id": "",
+                }], updated_at="2026-11-21 12:30:00", log_file="",
+            )
+            task_request_id = constants.online_refresh_task_link_request_id(refresh_request_id, "demo")
+            endpoint = f"/api/online-scripts/refresh-task-link/{refresh_request_id}/task-link/demo"
+            client = app.test_client()
+            with client.session_transaction() as session:
+                session.update(token=TOKEN, token_expire_at=4102444800, security_verified=True, csrf_token="after-publish-csrf")
+            headers = {"X-CSRF-Token": "after-publish-csrf"}
+            real_persist = constants.persist_online_refresh_task_link_recovery
+
+            def publish_then_raise(*args, **kwargs):
+                receipt = real_persist(*args, **kwargs)
+                raise OSError("refresh recovery receipt acknowledgement lost after replace")
+
+            with patch.object(task_link, "fetch_task_link_tasks", return_value=[{
+                "name": "Recovered", "cron": "", "command": "run recovered.sh",
+            }]) as fetch, patch.object(
+                task_link, "persist_online_refresh_task_link_recovery", side_effect=publish_then_raise,
+            ):
+                submitted = client.post(
+                    endpoint,
+                    json={"request_id": task_request_id, "origin_refresh_request_id": refresh_request_id},
+                    headers=headers,
+                )
+                self.assertEqual(submitted.status_code, 200)
+                self.assertEqual(submitted.json["request_id"], task_request_id)
+                replay = client.post(
+                    endpoint,
+                    json={"request_id": task_request_id, "origin_refresh_request_id": refresh_request_id},
+                    headers=headers,
+                )
+            self.assertTrue(replay.json["replayed"])
+            self.assertEqual(fetch.call_count, 1)
+            self.assertEqual(source.get_task_link_request(task_request_id)["state"], "completed")
+            self.assertEqual(
+                constants.get_online_refresh_task_link_recovery(refresh_request_id, "demo")["state"],
+                "completed",
+            )
+            self.assertEqual(len(source.load_online_script_cache()[0]["task_cron"]), 1)
+
     def test_refresh_failure_recovery_mirrors_and_repairs_single_damaged_copy(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.online_scripts import constants, source
