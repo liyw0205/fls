@@ -394,6 +394,13 @@ def _install_error(info):
 
 def _install_recovery(info):
     status = str((info or {}).get("status") or "")
+    if not (info or {}).get("running") and ((info or {}).get("task_recovery") or {}).get("pending"):
+        return {
+            "available": True,
+            "action": url_for("online_scripts.online_scripts_install_task_confirm", install_id=info.get("id")),
+            "api_action": url_for("online_scripts.api_online_scripts_install_task_confirm", install_id=info.get("id")),
+            "label": "核实任务导入结果",
+        }
     if not (info or {}).get("running") and (info or {}).get("scheduler_reload_pending"):
         return {
             "available": True,
@@ -813,6 +820,7 @@ let transientFailures = 0;
 let retryTimer = null;
 let pageHidden = false;
 let resumeOnPageshow = false;
+let pageGeneration = 0;
 let autoPollingPaused = false;
 let lastKnownRunning = {str(bool(info.get("running"))).lower()};
 const retryDelays = [2000, 4000, 8000, 16000, 30000];
@@ -991,6 +999,7 @@ async function loadLog(stateOnly = false){{
                             || document.getElementById("installPollError") !== pollError) return;
                         postingRecovery = true;
                         const recoveryGeneration = ++logRequestGeneration;
+                        const recoveryPageGeneration = pageGeneration;
                         pending = false;
                         clearLogTimers();
                         const button = recoveryForm.querySelector("button");
@@ -1016,11 +1025,11 @@ async function loadLog(stateOnly = false){{
                             if(pageHidden || recoveryGeneration !== logRequestGeneration
                                 || document.getElementById("installPollError") !== pollError) return;
                             const payload = error && error.payload || {{}};
-                            if(payload.scheduler_reload_required){{
-                                await loadLog();
+                            if(payload.scheduler_reload_required || payload.receipt_confirmation_required){{
+                                await loadLog(!!payload.receipt_confirmation_required);
                                 const currentForm = document.querySelector("#installRecoveryAction form[data-api-action]");
                                 const currentButton = currentForm && currentForm.querySelector("button");
-                                if(currentButton) currentButton.disabled = false;
+                                if(currentButton) currentButton.disabled = needsRecoveryQuery;
                                 return;
                             }}
                             const message = error && error.message ? error.message : String(error || "调度器恢复失败");
@@ -1037,7 +1046,7 @@ async function loadLog(stateOnly = false){{
                             }}
                         }}finally{{
                             postingRecovery = false;
-                            if(needsRecoveryQuery && !pageHidden && recoveryGeneration !== logRequestGeneration
+                            if(needsRecoveryQuery && !pageHidden && recoveryPageGeneration !== pageGeneration
                                 && document.getElementById("installPollError") === pollError) await loadLog(true);
                         }}
                     }});
@@ -1202,6 +1211,7 @@ if(retryAction) retryAction.onclick = () => {{
     return loadLog(needsStopQuery || needsRecoveryQuery);
 }};
 window.addEventListener("pagehide", function(){{
+    pageGeneration++;
     resumeOnPageshow = postingRecovery || (lastKnownRunning && !autoPollingPaused);
     if(postingRecovery) needsRecoveryQuery = true;
     pageHidden = true;
