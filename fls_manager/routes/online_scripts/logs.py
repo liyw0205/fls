@@ -472,22 +472,29 @@ def _install_history_filter_form(script_id="", status="", limit=50):
 
 @bp.route("/api/online-scripts/install-history")
 def api_online_install_history():
+    requested_snapshot = request.args.get("snapshot")
+    if requested_snapshot is not None and not re.fullmatch(r"[a-f0-9]{64}", requested_snapshot):
+        return jsonify(ok=False, msg="在线脚本安装历史快照无效"), 400
     try:
-        items, total = list_online_install_jobs(
+        items, total, snapshot = list_online_install_jobs(
             request.args.get("limit", 50),
             request.args.get("script_id", ""),
             request.args.get("status", ""),
             request.args.get("offset", 0),
+            include_snapshot=True,
         )
     except ValueError as exc:
         return jsonify(ok=False, msg=str(exc)), 400
     except Exception as exc:
         return jsonify(ok=False, msg=f"安装历史无法读取：{exc}"), 500
+    if requested_snapshot is not None and requested_snapshot != snapshot:
+        return jsonify(ok=False, msg="安装历史在分页期间发生变化，请重新读取完整历史"), 409
     limit = int(request.args.get("limit", 50))
     offset = int(request.args.get("offset", 0))
     return jsonify(
         ok=True, items=items, total=total, offset=offset, limit=limit,
         has_more=offset + len(items) < total,
+        snapshot=snapshot,
     )
 
 
@@ -906,8 +913,10 @@ async function loadLog(stateOnly = false){{
         const denied = e && (e.status === 401 || e.status === 403);
         const missing = e && e.status === 404;
         const payload = e && e.payload || {{}};
+        const startingLog = missing && payload.running === true && payload.log_status === 404;
         const next = denied ? "重新登录后继续读取" :
-            (missing ? "到日志管理检查已保留的安装日志" : "检查安装日志文件和服务状态，稍后会重新读取");
+            (startingLog ? "安装仍在运行，日志尚未生成；系统将继续轮询，可随时停止安装" :
+                (missing ? "到日志管理检查已保留的安装日志" : "检查安装日志文件和服务状态，稍后会重新读取"));
         if(pollError){{
             pollError.textContent = "日志读取失败：" + message + "。下一步：" + next;
             pollError.hidden = false;
@@ -919,12 +928,24 @@ async function loadLog(stateOnly = false){{
             }}
         }}
         if(logsAction){{
-            logsAction.hidden = !missing;
-            if(missing) logsAction.href = payload.recovery_url || "/logs";
+            logsAction.hidden = !missing || startingLog;
+            if(missing && !startingLog) logsAction.href = payload.recovery_url || "/logs";
         }}
-        if(retryAction) retryAction.hidden = missing;
+        if(retryAction) retryAction.hidden = missing && !startingLog;
         if(stopQueryAction) stopQueryAction.hidden = !needsStopQuery;
-        if(denied || missing){{
+        if(startingLog){{
+            const stopAction = document.getElementById("installStopAction");
+            const recoveryEl = document.getElementById("installRecoveryAction");
+            if(stopAction) stopAction.hidden = false;
+            if(recoveryEl) recoveryEl.hidden = true;
+            const statusEl = document.getElementById("installStatus");
+            const phaseEl = document.getElementById("installPhase");
+            if(statusEl) statusEl.textContent = payload.status || "运行中";
+            if(phaseEl) phaseEl.textContent = payload.phase || "running";
+            if(!window.__FLS_ACTIVE_LOG_INTERVAL__){{
+                window.__FLS_ACTIVE_LOG_INTERVAL__ = setInterval(loadLog, 2000);
+            }}
+        }}else if(denied || missing){{
             const stopAction = document.getElementById("installStopAction");
             const recoveryEl = document.getElementById("installRecoveryAction");
             if(stopAction) stopAction.hidden = true;

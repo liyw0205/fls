@@ -937,13 +937,16 @@ function setup(raw, response, writeFails=false, readMismatch=false){
       createElement:()=>({textContent:'',href:'',appendChild(){}})},sessionStorage:storage,
     FormData:class{constructor(){this.values={};}delete(){}set(){}},
     flsGetCsrfToken:()=> 'csrf',flsApplyExcludedToVisible(){},encodeURIComponent,
-    confirm:()=>true,fetch:async(url,options)=>{calls.push({url,options});return response;},setTimeout,
+    confirm:()=>true,fetch:async(url,options)=>{calls.push({url,options});return Array.isArray(response)?response.shift():response;},setTimeout,
     flsResponseErrorDiagnostic:(response,body)=>{let payload=null;try{payload=JSON.parse(body)}catch(_){};return {payload,message:payload&&payload.msg||''};}};
   vm.createContext(context);vm.runInContext(input.reader+input.script,context);
   return {context,elements,form,request,storage,calls,button,reloads:()=>reloads};
 }
 const item={id:'b'.repeat(32),script_id:'demo',status:'已完成',running:false,scheduler_reload_pending:false};
-const okHistory={ok:true,status:200,text:async()=>JSON.stringify({ok:true,items:[item],total:1,offset:0,limit:100,has_more:false})};
+const snapshot='f'.repeat(64);
+const historyResponse=(items,total,offset,has_more,revision=snapshot)=>({ok:true,status:200,
+  text:async()=>JSON.stringify({ok:true,items,total,offset,limit:100,has_more,snapshot:revision})});
+const okHistory=historyResponse([item],1,0,false);
 (async()=>{
   const storageFailure=setup(null,okHistory,true);
   await storageFailure.context.flsInstallSubmitApi('/online-scripts/install/demo',storageFailure.form,storageFailure.button);
@@ -964,6 +967,29 @@ const okHistory={ok:true,status:200,text:async()=>JSON.stringify({ok:true,items:
   assert.equal(safe.elements.onlineInstallRecoveryClear.hidden,false);
   await safe.elements.onlineInstallRecoveryClear.onclick();
   assert.equal(safe.storage.value,null);assert.equal(safe.reloads(),1);
+
+  const firstPage=Array.from({length:100},(_,index)=>({...item,id:'history-'+index}));
+  const lastPage={...item,id:'history-last'};
+  const paged=setup(corrupt,[historyResponse(firstPage,101,0,true),historyResponse([lastPage],101,100,false)]);
+  await paged.elements.onlineInstallRecoveryCheckHistory.onclick();
+  assert.equal(paged.calls.length,2);
+  assert.match(paged.calls[1].url,/offset=100/);
+  assert.match(paged.calls[1].url,new RegExp('snapshot='+snapshot));
+  assert.equal(paged.elements.onlineInstallRecoveryClear.hidden,false);
+  assert.match(paged.elements.onlineInstallRecoveryStatus.textContent,/完整安装历史均为已知终态/);
+
+  const changedSnapshot=setup(corrupt,[historyResponse(firstPage,101,0,true),
+    historyResponse([lastPage],101,100,false,'e'.repeat(64))]);
+  await changedSnapshot.elements.onlineInstallRecoveryCheckHistory.onclick();
+  assert.equal(changedSnapshot.elements.onlineInstallRecoveryClear.hidden,true);
+  assert.equal(changedSnapshot.storage.value,corrupt);
+  assert.match(changedSnapshot.elements.onlineInstallRecoveryStatus.textContent,/未能核实/);
+
+  const repeatedId=setup(corrupt,[historyResponse(firstPage,101,0,true),
+    historyResponse([{...item,id:'history-99'}],101,100,false)]);
+  await repeatedId.elements.onlineInstallRecoveryCheckHistory.onclick();
+  assert.equal(repeatedId.elements.onlineInstallRecoveryClear.hidden,true);
+  assert.equal(repeatedId.storage.value,corrupt);
 
   const active={...item,status:'运行中',running:true};
   const activeCase=setup(corrupt,{ok:true,status:200,text:async()=>JSON.stringify({ok:true,items:[active],total:1,offset:0,limit:100,has_more:false})});
