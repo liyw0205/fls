@@ -160,6 +160,8 @@ class OnlineInstallRecoveryTests(unittest.TestCase):
 
     def test_unknown_status_remains_visible_when_recovery_snapshot_cannot_be_saved(self):
         with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import _load_persisted_online_install
+
             self.prepare(base_dir, running=True, status="运行中")
             with patch("fls_manager.online_scripts.constants.persist_online_install", side_effect=OSError("disk full")):
                 payload = app.test_client().get(
@@ -168,6 +170,56 @@ class OnlineInstallRecoveryTests(unittest.TestCase):
             self.assertEqual(payload["status"], "结果未知")
             self.assertFalse(payload["running"])
             self.assertIn("disk full", payload["error"])
+            self.assertIn("回读状态与预期不一致", payload["error"])
+            self.assertTrue(payload["persistence_error"])
+            self.assertFalse(payload["recovery"]["available"])
+            persisted = _load_persisted_online_install("previous")
+            self.assertEqual(persisted["status"], "运行中")
+
+            recovered = app.test_client().get(
+                "/api/online-scripts/log/previous", headers={"X-Token": TOKEN},
+            ).get_json()
+            self.assertNotIn("persistence_error", recovered)
+            self.assertTrue(recovered["recovery"]["available"])
+            self.assertEqual(_load_persisted_online_install("previous")["status"], "结果未知")
+
+    def test_unknown_status_write_then_error_is_confirmed_by_persisted_snapshot(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import (
+                _load_persisted_online_install, persist_online_install,
+            )
+
+            self.prepare(base_dir, running=True, status="运行中")
+
+            def persist_then_raise(info):
+                persist_online_install(info)
+                raise OSError("write acknowledgement lost")
+
+            client = app.test_client()
+            with patch(
+                "fls_manager.online_scripts.constants.persist_online_install",
+                side_effect=persist_then_raise,
+            ) as persist:
+                payload = client.get(
+                    "/api/online-scripts/log/previous", headers={"X-Token": TOKEN},
+                ).get_json()
+                self.assertEqual(payload["status"], "结果未知")
+                self.assertFalse(payload["running"])
+                self.assertIn("面板重启后无法确认", payload["error"])
+                self.assertNotIn("保存恢复状态失败", payload["error"])
+                persist.assert_called_once()
+
+            stored = _load_persisted_online_install("previous")
+            self.assertEqual(stored["status"], "结果未知")
+            self.assertFalse(stored["running"])
+            self.assertIn("面板重启后无法确认", stored["error"])
+            self.assertNotIn("保存恢复状态失败", stored["error"])
+            self.assertIn("安装日志尚未生成", payload["error"])
+
+            page = client.get("/online-scripts/log/previous", headers={"X-Token": TOKEN})
+            self.assertEqual(page.status_code, 200)
+            self.assertIn("确认状态后再决定是否重试", page.get_data(as_text=True))
+            self.assertIn('action="/online-scripts/install-retry/previous"', page.get_data(as_text=True))
 
     def test_old_unreconciled_install_does_not_replace_newest_completed_attempt(self):
         with isolated_app() as (app, base_dir):

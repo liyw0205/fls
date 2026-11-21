@@ -640,7 +640,8 @@ def install_worker(
                         "安装副作用已执行，但终态尚未可靠保存，请查看日志后重试",
                     ))),
                 )
-                _persist_install_state(info)
+                if not _persist_install_state(info):
+                    info["recovery_persistence_error"] = info.get("persistence_error") or "安装恢复回执未能核对"
 
         append_log(log_file, "")
         result = (
@@ -688,7 +689,8 @@ def install_worker(
                         "安装结果已执行，但终态尚未可靠保存，请查看日志后重试",
                     ))),
                 )
-                _persist_install_state(info)
+                if not _persist_install_state(info):
+                    info["recovery_persistence_error"] = info.get("persistence_error") or "安装恢复回执未能核对"
 
         try:
             append_log(log_file, f"===== {info['status']}: {now_str()} =====")

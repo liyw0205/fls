@@ -30,7 +30,7 @@ def main():
         from fls_manager.models import TASK_FILE, load_tasks
         from fls_manager.online_scripts.constants import (
             ONLINE_INSTALL_JOBS_FILE, ONLINE_INSTALL_RETRYING, ONLINE_INSTALL_RUNNING,
-            persist_online_install,
+            _load_persisted_online_install, persist_online_install,
         )
         from fls_manager.online_scripts.install import capture_install_outputs
         from fls_manager.online_scripts.logs import online_install_log_file
@@ -66,6 +66,7 @@ def main():
         task_reload_state = {"failures": 0, "calls": 0}
         receipt_fault = {"install_id": "", "remaining": 0}
         scheduler_receipt_fault = {"install_id": "", "remaining": 0, "mode": "after"}
+        restart_receipt_fault = {"install_id": "", "remaining": 0, "mode": "after"}
         write = storage._write_json_unlocked
 
         def write_with_receipt_failure(path, data):
@@ -81,6 +82,13 @@ def main():
                 if scheduler_receipt_fault["mode"] == "after":
                     write(path, data)
                 raise PermissionError("browser scheduler receipt unavailable")
+            install_id = restart_receipt_fault["install_id"]
+            if (path == ONLINE_INSTALL_JOBS_FILE and restart_receipt_fault["remaining"]
+                    and data.get(install_id, {}).get("status") == "结果未知"):
+                restart_receipt_fault["remaining"] -= 1
+                if restart_receipt_fault["mode"] == "after":
+                    write(path, data)
+                raise PermissionError("browser restart receipt acknowledgement lost")
             return write(path, data)
 
         storage._write_json_unlocked = write_with_receipt_failure
@@ -190,6 +198,33 @@ def main():
             task_reload_state.update(failures=1, calls=0)
             return install_id
 
+        def seed_restart_receipt_recovery(width):
+            mode = "before" if fault.get("persist_mode") == "before" else "after"
+            prefix = ("g" if width == 390 else "h") if mode == "before" else ("e" if width == 390 else "f")
+            install_id = prefix * 32
+            log_file = online_install_log_file(install_id, item["name"])
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_file.write_text("installer started before panel restart\n", encoding="utf-8")
+            info = {
+                "id": install_id, "script_id": item["id"], "script_name": item["name"],
+                "log_file": str(log_file), "proxy_id": "", "import_task": False,
+                "enable_task": False, "selected_task_indexes": [], "selected_tasks": [],
+                "force": False, "retry_of": "", "retried_by": "", "running": True,
+                "status": "运行中", "phase": "installing", "target_path": "",
+                "start_time": 1, "returncode": None, "error": "",
+                "scheduler_reload_pending": False, "scheduler_reload_error": "",
+                "updated_at": "2026-11-21 00:00:00",
+            }
+            persist_online_install(info)
+            ONLINE_INSTALL_RUNNING.clear()
+            ONLINE_INSTALL_RETRYING.clear()
+            restart_receipt_fault.update(
+                install_id=install_id,
+                remaining=int(fault.get("persist_failures") or 1),
+                mode=mode,
+            )
+            return install_id
+
         def seed_delayed_online_log(width):
             install_id = ("c" if width == 390 else "d") * 32
             log_file = online_install_log_file(install_id, item["name"])
@@ -246,6 +281,8 @@ def main():
             if request.method == "POST":
                 data = request.get_json()
                 fault["status"] = int(data.get("status") or 0)
+                fault["persist_mode"] = data.get("persist_mode") or "after"
+                fault["persist_failures"] = int(data.get("persist_failures") or 1)
                 if data.get("seed_retry_chain"):
                     seed_retry_chain()
                 if data.get("seed_online_history"):
@@ -257,6 +294,8 @@ def main():
                         receipt_fault.update(install_id=install_id, remaining=1)
                     if data.get("fail_scheduler_receipt_after_commit"):
                         scheduler_receipt_fault.update(install_id=install_id, remaining=1, mode="after")
+                if data.get("seed_restart_receipt_recovery"):
+                    seed_restart_receipt_recovery(int(data["width"]))
                 if data.get("restart_task_install"):
                     ONLINE_INSTALL_RUNNING.clear()
                     ONLINE_INSTALL_RETRYING.clear()
@@ -341,6 +380,14 @@ def main():
                 task_imports=task_imports,
                 tasks_fingerprint=hashlib.sha256(TASK_FILE.read_bytes()).hexdigest() if TASK_FILE.exists() else "",
                 online=[{"id": job_id, "running": info.get("running")} for job_id, info in ONLINE_INSTALL_RUNNING.items()],
+                restart_receipt_status=(
+                    _load_persisted_online_install(restart_receipt_fault["install_id"]).get("status")
+                    if restart_receipt_fault["install_id"] else ""
+                ),
+                restart_receipt_error=(
+                    _load_persisted_online_install(restart_receipt_fault["install_id"]).get("error")
+                    if restart_receipt_fault["install_id"] else ""
+                ),
                 deps_running=bool(DEPS_RUNNING.get("browser-deps", {}).get("process") and
                                   DEPS_RUNNING["browser-deps"]["process"].poll() is None),
             )
@@ -386,6 +433,56 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
      await page.waitForLoadState('domcontentloaded');
     }
    };
+   if(process.env.FLS_INSTALL_LOG_ONLY==='restart-receipt'){
+    await page.goto(base+'/login');await login();
+    await fixture({seed_restart_receipt_recovery:true,width:viewport.width});
+    const installId=(viewport.width===390?'e':'f').repeat(32);
+    const seeded=await state();assert.equal(seeded.restart_receipt_status,'运行中');
+    await page.goto(base+'/online-scripts/log/'+installId);
+    await page.waitForFunction(()=>document.querySelector('#installStatus').textContent==='结果未知'
+      &&document.querySelector('#installError').textContent.includes('面板重启后无法确认'));
+    await page.waitForFunction(()=>document.querySelector('#log').textContent.includes('installer started before panel restart'));
+    const diagnosis=await page.locator('#installError').textContent();
+    assert.equal(diagnosis.includes('保存恢复状态失败'),false);
+    assert.equal(await page.locator('#installRecoveryAction').getByRole('button',{name:'重试安装',exact:true}).count(),1);
+    const saved=await state();
+    assert.equal(saved.restart_receipt_status,'结果未知');
+    assert.match(saved.restart_receipt_error,/面板重启后无法确认/);
+    assert.equal(saved.restart_receipt_error.includes('保存恢复状态失败'),false);
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true);
+    await page.screenshot({path:'/tmp/fls-install-restart-receipt-'+viewport.width+'.png',fullPage:true});
+    await page.reload();
+    await page.waitForFunction(()=>document.querySelector('#installStatus').textContent==='结果未知'
+      &&document.querySelector('#installError').textContent.includes('面板重启后无法确认'));
+    assert.equal((await state()).restart_receipt_status,'结果未知');
+
+    await fixture({seed_restart_receipt_recovery:true,width:viewport.width,persist_mode:'before',persist_failures:2});
+    const blockedId=(viewport.width===390?'g':'h').repeat(32);
+    const beforeBlocked=await state();
+    await page.goto(base+'/online-scripts/log/'+blockedId);
+    await page.waitForFunction(()=>document.querySelector('#installPollError').textContent.includes('已禁用重试'));
+    assert.equal(await page.locator('#installRecoveryAction button').count(),0);
+    assert.equal(await page.locator('#installStateQuery').isVisible(),true);
+    assert.equal(await page.locator('#log').textContent().then(text=>text.includes('installer started before panel restart')),true);
+    await page.route('**/api/online-scripts/log/'+blockedId+'?state_only=1',route=>route.fulfill({
+     status:503,contentType:'text/plain',body:'temporary install state outage'}),{times:1});
+    await page.locator('#installStateQuery').click();
+    await page.waitForFunction(()=>document.querySelector('#installPollError').textContent.includes('temporary install state outage'));
+    assert.equal(await page.locator('#installRecoveryAction button').count(),0);
+    assert.equal(await page.locator('#installStateQuery').isVisible(),true);
+    assert.equal((await state()).restart_receipt_status,'运行中');
+    await page.locator('#installStateQuery').click();
+    await page.waitForFunction(()=>document.querySelector('#installPollError').textContent.includes('原安装状态已确认'));
+    await page.locator('#installRecoveryAction').getByRole('button',{name:'重试安装',exact:true}).waitFor();
+    const recoveredState=await state();
+    assert.equal(recoveredState.restart_receipt_status,'结果未知');
+    assert.equal(recoveredState.restart_receipt_error.includes('保存恢复状态失败'),false);
+    assert.equal(recoveredState.downloads,beforeBlocked.downloads);
+    assert.equal(await page.locator('#log').textContent().then(text=>text.includes('installer started before panel restart')),true);
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true);
+    assert.deepEqual(errors,[]);await context.close();console.log('restart install receipt recovery passed '+viewport.width);
+    continue;
+   }
    if(process.env.FLS_INSTALL_LOG_ONLY==='task-receipt'){
     await page.goto(base+'/login');await login();
     await fixture({seed_task_retry_recovery:true,width:viewport.width,missing_log:true,fail_task_receipt:true});

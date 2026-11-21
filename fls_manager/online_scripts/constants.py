@@ -1813,6 +1813,22 @@ def get_online_install_job(install_id):
     with ONLINE_INSTALL_LOCK:
         info = ONLINE_INSTALL_RUNNING.get(install_id)
         if isinstance(info, dict):
+            if info.get("recovery_persistence_error"):
+                recovery_error = info.pop("recovery_persistence_error")
+                try:
+                    persist_online_install(info)
+                except Exception:
+                    try:
+                        persisted = _load_persisted_online_install(install_id)
+                        verified = (
+                            bool(persisted)
+                            and not persisted.get("recovery_persistence_error")
+                            and _install_snapshot(persisted) == _install_snapshot(info)
+                        )
+                    except Exception:
+                        verified = False
+                    if not verified:
+                        info["recovery_persistence_error"] = recovery_error
             return dict(info)
 
         info = _load_persisted_online_install(install_id)
@@ -1831,8 +1847,20 @@ def get_online_install_job(install_id):
             info["updated_at"] = now_str()
             try:
                 persist_online_install(info)
-            except Exception as e:
-                info["error"] += f"；保存恢复状态失败：{e}，请修复文件权限或磁盘空间后重试。"
+            except Exception as exc:
+                try:
+                    persisted = _load_persisted_online_install(install_id)
+                    verified = bool(persisted) and _install_snapshot(persisted) == _install_snapshot(info)
+                    verify_error = "" if verified else "回读状态与预期不一致"
+                except Exception as read_error:
+                    verified = False
+                    verify_error = f"回读核验失败：{read_error}"
+                if not verified:
+                    info["recovery_persistence_error"] = verify_error or "安装恢复回执未能核对"
+                    info["error"] += (
+                        f"；保存恢复状态失败：{exc}；{verify_error}，"
+                        "请修复文件权限或磁盘空间后重试。"
+                    )
 
         return info
 

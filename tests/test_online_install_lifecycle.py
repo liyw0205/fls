@@ -574,6 +574,58 @@ class OnlineInstallLifecycleTests(unittest.TestCase):
             self.assertEqual(payload["status"], "结果未知")
             self.assertTrue(payload["recovery"]["available"])
 
+    def test_unknown_recovery_receipt_write_failure_disables_retry_until_query_recovers(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import install
+            from fls_manager.online_scripts import constants
+            from fls_manager.online_scripts.constants import persist_online_install
+            from fls_manager.online_scripts.source import save_online_script_cache
+
+            info = self.register(base_dir)
+            save_online_script_cache([self.item()])
+            target = base_dir / "scripts" / "demo.sh"
+            real_persist = persist_online_install
+
+            def fail_both_terminal_receipts(value):
+                if not value.get("running") and value.get("status") in ("已完成", "结果未知"):
+                    raise OSError("terminal receipt unavailable")
+                return real_persist(value)
+
+            with patch.object(constants, "persist_online_install", side_effect=fail_both_terminal_receipts), patch.object(
+                install, "persist_online_install", side_effect=fail_both_terminal_receipts,
+            ), patch.object(
+                install, "download_online_script_logged", return_value=target,
+            ) as download:
+                install.install_worker("install", self.item())
+                payload = app.test_client().get(
+                    "/api/online-scripts/log/install", headers={"X-Token": TOKEN},
+                ).get_json()
+                self.assertEqual(payload["install_id"], "install")
+                self.assertEqual(payload["status"], "结果未知")
+                self.assertTrue(payload["persistence_error"])
+                self.assertFalse(payload["recovery"]["available"])
+                self.assertTrue(os.path.isfile(info["log_file"]))
+                self.assertEqual(self.snapshot()["status"], "运行中")
+                download.assert_called_once()
+
+            recovered = app.test_client().get(
+                "/api/online-scripts/log/install", headers={"X-Token": TOKEN},
+            ).get_json()
+            self.assertEqual(recovered["status"], "结果未知")
+            self.assertNotIn("persistence_error", recovered)
+            self.assertTrue(recovered["recovery"]["available"])
+            self.assertEqual(self.snapshot()["status"], "结果未知")
+            persisted = constants._load_persisted_online_install("install")
+            self.assertNotIn("recovery_persistence_error", persisted)
+            constants.ONLINE_INSTALL_RUNNING.clear()
+            after_restart = app.test_client().get(
+                "/api/online-scripts/log/install", headers={"X-Token": TOKEN},
+            ).get_json()
+            self.assertEqual(after_restart["status"], "结果未知")
+            self.assertNotIn("persistence_error", after_restart)
+            self.assertTrue(after_restart["recovery"]["available"])
+            download.assert_called_once()
+
     def test_unknown_is_idempotent_preserves_error_and_differs_from_missing(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING, persist_online_install
