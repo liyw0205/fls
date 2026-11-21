@@ -166,6 +166,25 @@ def main():
             task_reload_state.update(failures=1, calls=0)
             return install_id
 
+        def seed_delayed_online_log(width):
+            install_id = ("c" if width == 390 else "d") * 32
+            log_file = online_install_log_file(install_id, item["name"])
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_file.unlink(missing_ok=True)
+            info = {
+                "id": install_id, "script_id": item["id"], "script_name": item["name"],
+                "log_file": str(log_file), "proxy_id": "", "import_task": False,
+                "enable_task": False, "selected_task_indexes": [], "selected_tasks": [],
+                "force": False, "retry_of": "", "retried_by": "", "running": True,
+                "status": "运行中", "phase": "downloading", "target_path": "",
+                "start_time": 1, "returncode": None, "error": "",
+                "scheduler_reload_pending": False, "scheduler_reload_error": "",
+                "updated_at": "2026-11-21 00:00:00",
+            }
+            ONLINE_INSTALL_RUNNING[install_id] = info
+            persist_online_install(info)
+            return install_id
+
         app_module.dispatch_frontend_open_event = lambda: None
         fault = {"status": 0}
         dependency_processes = []
@@ -209,6 +228,21 @@ def main():
                     seed_online_history()
                 if data.get("seed_task_retry_recovery"):
                     seed_task_retry_recovery(int(data["width"]))
+                if data.get("seed_delayed_online_log"):
+                    seed_delayed_online_log(int(data["width"]))
+                if data.get("publish_delayed_online_log"):
+                    install_id = "c" * 32 if int(data["width"]) == 390 else "d" * 32
+                    job = ONLINE_INSTALL_RUNNING[install_id]
+                    Path(job["log_file"]).write_text("installer log became available\n", encoding="utf-8")
+                if data.get("complete_delayed_online_log"):
+                    install_id = "c" * 32 if int(data["width"]) == 390 else "d" * 32
+                    job = ONLINE_INSTALL_RUNNING[install_id]
+                    job.update(
+                        running=False, status="已完成", phase="completed", returncode=0,
+                        error="", updated_at="2026-11-21 00:00:01",
+                    )
+                    persist_online_install(job)
+                    ONLINE_INSTALL_RUNNING.pop(install_id, None)
                 if data.get("remove_online_target"):
                     (base_dir / "scripts" / "demo.py").unlink(missing_ok=True)
                 if data.get("remove_release"):
@@ -322,6 +356,23 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    if(process.env.FLS_INSTALL_LOG_ONLY!=='online-stop'){
    await fixture({seed_retry_chain:true});await fixture({reset:true});
    await page.goto(base+'/login');await login();
+   await fixture({seed_delayed_online_log:true,width:viewport.width});
+   const delayedLogId=viewport.width===390?'c'.repeat(32):'d'.repeat(32);
+   await page.goto(base+'/online-scripts/log/'+delayedLogId);
+   await page.waitForFunction(()=>document.querySelector('#installPollError').textContent.includes('日志尚未生成'));
+   assert.equal(await page.locator('#installStatus').textContent(),'运行中');
+   assert.equal(await page.locator('#installStopAction').isVisible(),true);
+   assert.equal(await page.locator('#installPollLogs').isVisible(),false);
+   assert.equal(await page.locator('#installPollRetry').isVisible(),true);
+   assert.ok(await page.evaluate(()=>window.__FLS_ACTIVE_LOG_INTERVAL__));
+   await fixture({publish_delayed_online_log:true,width:viewport.width});
+   await page.waitForFunction(()=>document.querySelector('#installPollError').hidden
+     &&document.querySelector('#log').textContent.includes('installer log became available'));
+   assert.equal(await page.locator('#installStopAction').isVisible(),true);
+   await fixture({complete_delayed_online_log:true,width:viewport.width});
+   await page.waitForFunction(()=>document.querySelector('#installStatus').textContent==='已完成');
+   assert.equal(await page.evaluate(()=>window.__FLS_ACTIVE_LOG_INTERVAL__),null);
+   assert.equal(await page.locator('#installStopAction').isVisible(),false);
    await page.goto(base+'/deps/install-history?kind=dependency');
    const retryParent=page.locator('tr').filter({hasText:'browser-retry-parent'});
    assert.equal((await retryParent.locator('td').nth(7).textContent()).trim(),'1');

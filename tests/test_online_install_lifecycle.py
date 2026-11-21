@@ -788,6 +788,63 @@ class OnlineInstallLifecycleTests(unittest.TestCase):
             self.assertEqual(set(snapshots), {"install-1", "install-2", "install-3"})
 
     @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise the polling script")
+    def test_missing_log_while_install_running_keeps_stop_and_resumes_polling(self):
+        with isolated_app() as (app, base_dir):
+            info = self.register(base_dir)
+            client = app.test_client()
+            response = client.get("/api/online-scripts/log/install", headers={"X-Token": TOKEN})
+            self.assertEqual(response.status_code, 200)
+            self.assertFalse(response.json["ok"])
+            self.assertTrue(response.json["running"])
+            self.assertEqual(response.json["log_status"], 404)
+            self.assertEqual(response.json["status"], "准备中")
+
+            page = client.get("/online-scripts/log/install", headers={"X-Token": TOKEN})
+            html = page.get_data(as_text=True)
+            script = next(
+                value for value in re.findall(r"<script>(.*?)</script>", html, re.S)
+                if "async function loadLog(" in value
+            )
+            result = subprocess.run(
+                ["node", "-e", r"""
+const vm=require('node:vm'),assert=require('node:assert/strict');
+const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const names=['installStatus','installPhase','installError','installReturncode','installStopAction',
+  'installRecoveryAction','installPollError','installPollLogin','installPollLogs','installPollRetry',
+  'installStopQuery','log','flsLogNewTip'];
+const elements=Object.fromEntries(names.map(id=>[id,{hidden:id!=='installStopAction',textContent:'',style:{},dataset:{},innerHTML:'',addEventListener(){}}]));
+let intervalCalls=0,clearCalls=0;
+const context={window:{innerHeight:800,scrollY:0,addEventListener(){},scrollTo(){}},
+  document:{documentElement:{scrollHeight:800},getElementById:id=>elements[id],querySelector:()=>null},
+  flsReadJsonResponse:async response=>response.json(),
+  fetch:async()=>({ok:true,status:200,json:async()=>input.payload}),
+  setInterval:()=>{intervalCalls++;return 37;},clearInterval:()=>{clearCalls++;},
+};
+vm.createContext(context);vm.runInContext(input.script,context);
+setImmediate(()=>{
+  assert.equal(elements.installStatus.textContent,'运行中');
+  assert.equal(elements.installPhase.textContent,'downloading');
+  assert.equal(elements.installStopAction.hidden,false);
+  assert.equal(elements.installRecoveryAction.hidden,true);
+  assert.equal(elements.installPollLogs.hidden,true);
+  assert.equal(elements.installPollRetry.hidden,false);
+  assert.match(elements.installPollError.textContent,/日志尚未生成/);
+  assert.equal(intervalCalls,1);
+  assert.equal(context.window.__FLS_ACTIVE_LOG_INTERVAL__,37);
+  assert.equal(clearCalls,0);
+  console.log('running install with delayed log keeps stop and polling');
+});
+"""],
+                input=json.dumps({"script": script, "payload": {
+                    "ok": False, "running": True, "status": "运行中", "phase": "downloading",
+                    "log_status": 404, "error": "安装日志尚未生成。", "log": "", "recovery_url": "/logs",
+                }}),
+                capture_output=True, text=True, timeout=5,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue(info["running"])
+
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise the polling script")
     def test_log_polling_keeps_terminal_error_and_exit_code_visible(self):
         with isolated_app() as (app, base_dir):
             self.register(base_dir)
