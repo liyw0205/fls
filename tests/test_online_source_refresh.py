@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 import json
 import os
 import re
@@ -12,7 +13,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from tests.test_ui_route_components import ROOT, TOKEN, isolated_app
+from tests.test_ui_route_components import ROOT, TOKEN, isolated_app as _isolated_app
+
+
+@contextmanager
+def isolated_app():
+    with _isolated_app() as fixture:
+        with patch("fls_manager.app.dispatch_frontend_open_event"):
+            yield fixture
 
 
 class OnlineSourceRefreshTests(unittest.TestCase):
