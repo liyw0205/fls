@@ -661,6 +661,59 @@ class OnlineTaskLinkTests(unittest.TestCase):
             self.assertEqual(source.get_task_link_request(request_id)["state"], "completed")
             self.assertEqual([task["name"] for task in source.load_online_script_cache()[0]["task_cron"]], ["recovered"])
 
+    def test_failed_receipt_write_rejection_requires_unknown_confirmation_before_same_id_retry(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import source
+            from fls_manager.routes.online_scripts import task_link
+
+            source.save_online_script_cache([self.item()])
+            request_id = "8" * 32
+            real_persist = source.persist_task_link_request
+            failure_pending = {"value": True}
+
+            def reject_failure_receipt(record):
+                if record["state"] == "failed" and failure_pending["value"]:
+                    failure_pending["value"] = False
+                    raise OSError("failed receipt storage temporarily read-only")
+                return real_persist(record)
+
+            client = app.test_client()
+            with patch.object(task_link, "persist_task_link_request", side_effect=reject_failure_receipt), patch.object(
+                task_link, "fetch_task_link_tasks", side_effect=[
+                    RuntimeError("upstream timeout"), [self.task("recovered")],
+                ],
+            ) as fetch:
+                failed = client.post(
+                    "/api/online-scripts/task-link/demo",
+                    json={"request_id": request_id},
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(failed.status_code, 503)
+                self.assertFalse(failed.json["retry_allowed"])
+                self.assertTrue(failed.json["receipt_confirmation_required"])
+                self.assertEqual(failed.json["status_url"], "/online-scripts/task-link-status/" + request_id)
+                status = client.get(
+                    "/api/online-scripts/task-link-status/" + request_id,
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(status.json["state"], "unknown")
+                self.assertFalse(status.json["retry_allowed"])
+                confirmed = client.post(
+                    "/api/online-scripts/task-link-confirm/" + request_id,
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(confirmed.status_code, 200)
+                self.assertEqual(confirmed.json["confirmation"], "not_merged")
+                retry = client.post(
+                    "/api/online-scripts/task-link/demo",
+                    json={"request_id": request_id},
+                    headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(retry.status_code, 200)
+            self.assertEqual(fetch.call_count, 2)
+            self.assertEqual(source.get_task_link_request(request_id)["state"], "completed")
+            self.assertEqual([task["name"] for task in source.load_online_script_cache()[0]["task_cron"]], ["recovered"])
+
     def test_failed_receipt_still_owned_by_finishing_request_cannot_be_reclaimed(self):
         with isolated_app() as (app, _base_dir):
             from fls_manager.online_scripts import source
