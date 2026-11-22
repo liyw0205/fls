@@ -1013,7 +1013,7 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
     !document.querySelector('#installStopAction button').disabled);
    assert.equal(await page.locator('#installStatus').textContent(),'运行中');
    assert.equal(stopPosts,1);
-   if(viewport.width===390) await fixture({stop_log_failure:1});
+   await fixture({stop_log_failure:1});
    await page.locator('#installStopAction button').click();
    if(viewport.width===390){
     await page.waitForFunction(()=>document.querySelector('#installStatus').textContent==='已停止');
@@ -1030,6 +1030,7 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    }
    await page.locator('#installStopQuery').click();
    await page.waitForFunction(()=>document.querySelector('#installStatus').textContent==='已停止');
+   assert.match(await page.locator('#installPollError').textContent(),/原安装状态已确认：已停止.*停止请求日志写入失败：browser stop log unavailable/);
    assert.ok((await page.locator('#log').textContent()).includes('live installer output'));
    const stopVisibility=await page.locator('#installStopAction').evaluate(el=>({
     hidden:el.hidden,display:getComputedStyle(el).display,html:el.outerHTML,

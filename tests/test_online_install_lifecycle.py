@@ -307,7 +307,7 @@ class OnlineInstallLifecycleTests(unittest.TestCase):
 
     def test_stop_log_failure_keeps_committed_stop_request_and_recovers_without_download(self):
         with isolated_app() as (app, base_dir):
-            from fls_manager.online_scripts.constants import ONLINE_INSTALL_STOPPING
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING, ONLINE_INSTALL_STOPPING
             from fls_manager.online_scripts.install import install_worker
 
             client = app.test_client()
@@ -324,6 +324,7 @@ class OnlineInstallLifecycleTests(unittest.TestCase):
             self.assertEqual(response.json["warning"], "停止请求日志写入失败：log read only")
             self.assertIn("api-stop", ONLINE_INSTALL_STOPPING)
             self.assertEqual(self.snapshot("api-stop")["status"], "停止中")
+            self.assertEqual(self.snapshot("api-stop")["stop_warning"], "停止请求日志写入失败：log read only")
 
             with client.session_transaction() as session:
                 session.update(token=TOKEN, token_expire_at=int(time.time()) + 3600,
@@ -341,6 +342,7 @@ class OnlineInstallLifecycleTests(unittest.TestCase):
             self.assertIn("查询原安装状态", page)
             self.assertIn("online-scripts/log/html-stop", page)
             self.assertEqual(self.snapshot("html-stop")["status"], "停止中")
+            self.assertEqual(self.snapshot("html-stop")["stop_warning"], "停止请求日志写入失败：log read only")
             self.assertEqual(html_info["status"], "停止中")
 
             for install_id, info in (("api-stop", api_info), ("html-stop", html_info)):
@@ -351,11 +353,57 @@ class OnlineInstallLifecycleTests(unittest.TestCase):
                     self.assertEqual(state.status_code, 200)
                     self.assertEqual(state.json["install_id"], install_id)
                     self.assertEqual(state.json["status"], "停止中")
+                    self.assertEqual(state.json["stop_warning"], "停止请求日志写入失败：log read only")
                     with patch("fls_manager.online_scripts.install.download_online_script_logged") as download:
                         install_worker(install_id, self.item())
                     download.assert_not_called()
                     self.assertEqual(info["status"], "已停止")
                     self.assertNotIn(install_id, ONLINE_INSTALL_STOPPING)
+
+            for install_id in ("api-stop", "html-stop"):
+                with self.subTest(reloaded=install_id):
+                    ONLINE_INSTALL_RUNNING.pop(install_id, None)
+                    state = client.get(
+                        f"/api/online-scripts/log/{install_id}?state_only=1", headers={"X-Token": TOKEN},
+                    )
+                    self.assertEqual(state.status_code, 200)
+                    self.assertEqual(state.json["status"], "已停止")
+                    self.assertEqual(state.json["stop_warning"], "停止请求日志写入失败：log read only")
+
+    def test_stop_log_warning_receipt_failure_does_not_undo_stop(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import install
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_STOPPING
+
+            info = self.register(base_dir, "warning-receipt")
+            client = app.test_client()
+            persist = install.persist_online_install
+            calls = {"count": 0}
+
+            def fail_warning_receipt(value):
+                calls["count"] += 1
+                if calls["count"] == 2:
+                    raise OSError("warning receipt read only")
+                return persist(value)
+
+            with patch.object(install, "append_log", side_effect=PermissionError("log read only")), patch.object(
+                install, "persist_online_install", side_effect=fail_warning_receipt,
+            ):
+                response = client.post(
+                    "/api/online-scripts/install-stop/warning-receipt", headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(calls["count"], 2)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(info["status"], "停止中")
+            self.assertIn("warning-receipt", ONLINE_INSTALL_STOPPING)
+            self.assertIn("停止请求日志写入失败：log read only", response.json["warning"])
+            self.assertIn("停止诊断回执保存失败：warning receipt read only", response.json["warning"])
+            state = client.get(
+                "/api/online-scripts/log/warning-receipt?state_only=1", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(state.status_code, 200)
+            self.assertIn("停止诊断回执保存失败：warning receipt read only", state.json["stop_warning"])
 
     def test_stop_html_failure_keeps_log_query_and_history_back_context(self):
         with isolated_app() as (app, _base_dir):

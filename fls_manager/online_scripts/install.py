@@ -270,7 +270,17 @@ def request_stop_online_install(install_id):
             append_log(log_file, "")
             append_log(log_file, f"===== 用户请求停止安装: {now_str()} =====")
         except Exception as e:
-            log_error = f"停止请求日志写入失败：{e}"
+            detail = str(e).replace("\x00", "")[:500]
+            log_error = f"停止请求日志写入失败：{detail}"
+            with ONLINE_INSTALL_LOCK:
+                info["stop_warning"] = log_error
+                info["updated_at"] = now_str()
+                try:
+                    persist_online_install(info)
+                except Exception as persist_error:
+                    receipt_detail = str(persist_error).replace("\x00", "")[:300]
+                    log_error += f"；停止诊断回执保存失败：{receipt_detail}"
+                    info["stop_warning"] = log_error[:1000]
 
     if proc:
         ok, detail = _interrupt_install_command(install_id, proc, "stop", retry=True)

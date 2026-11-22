@@ -646,6 +646,8 @@ def api_online_install_log(install_id):
     }
     if info.get("recovery_persistence_error"):
         payload["persistence_error"] = True
+    if isinstance(info.get("stop_warning"), str) and info["stop_warning"]:
+        payload["stop_warning"] = info["stop_warning"]
     payload.update(online_install_retry_relation(info))
     if info.get("scheduler_reload_pending"):
         payload["scheduler_reload_pending"] = True
@@ -897,6 +899,7 @@ async function loadLog(stateOnly = false){{
             invalid.status = res.status;
             throw invalid;
         }}
+        if(typeof json.stop_warning === "string" && json.stop_warning) stopWarning = json.stop_warning;
         let logFailure = null;
         if(json.ok === false){{
             const missingError = new Error(json.error || "安装日志暂不可读");

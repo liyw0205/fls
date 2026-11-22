@@ -1526,6 +1526,7 @@ def _install_snapshot(info):
         "start_time",
         "returncode",
         "error",
+        "stop_warning",
         "scheduler_reload_pending",
         "scheduler_reload_error",
         "task_recovery",
