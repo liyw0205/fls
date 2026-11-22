@@ -611,12 +611,14 @@ def api_online_install_log(install_id):
     except Exception as exc:
         return jsonify({
             "ok": False,
+            "install_id": install_id,
             "running": False,
             "status": "记录不可读",
             "returncode": None,
             "error": f"在线脚本安装记录无法读取，未覆盖原文件：{exc}",
             "log_file": "",
             "log": "安装记录无法读取。请修复记录文件后重新读取。",
+            "state_url": url_for("online_scripts.api_online_install_log", install_id=install_id, state_only="1"),
             "recovery_url": "/logs",
         }), 500
 

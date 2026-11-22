@@ -1578,6 +1578,112 @@ const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
             self.assertIn('offset=25">重新读取', html)
             self.assertEqual(ONLINE_INSTALL_JOBS_FILE.read_bytes(), original)
 
+    def test_malformed_task_recovery_receipt_keeps_install_queries_controlled_and_read_only(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import (
+                ONLINE_INSTALL_JOBS_FILE, ONLINE_INSTALL_RUNNING,
+                get_online_install_job, persist_online_install,
+            )
+
+            install_id = "a" * 32
+            ONLINE_INSTALL_JOBS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            record = {
+                "id": install_id,
+                "script_id": "demo",
+                "script_name": "Demo",
+                "log_file": str(base_dir / "log" / f"{install_id}.log"),
+                "running": False,
+                "status": "失败",
+                "phase": "importing_tasks",
+                "import_task": True,
+                "selected_task_indexes": ["1"],
+                "selected_tasks": [{"name": "Daily", "command": "task demo.sh"}],
+                "task_recovery": "truncated-receipt",
+            }
+            ONLINE_INSTALL_JOBS_FILE.write_text(json.dumps({install_id: record}), encoding="utf-8")
+            original = ONLINE_INSTALL_JOBS_FILE.read_bytes()
+            client = app.test_client()
+
+            state = client.get(
+                f"/api/online-scripts/log/{install_id}?state_only=1", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(state.status_code, 500)
+            self.assertEqual(state.json["install_id"], install_id)
+            self.assertIn("任务恢复回执", state.json["error"])
+
+            page = client.get(f"/online-scripts/log/{install_id}", headers={"X-Token": TOKEN})
+            self.assertEqual(page.status_code, 500)
+            self.assertIn(f"/online-scripts/log/{install_id}", page.get_data(as_text=True))
+
+            retry = client.post(
+                f"/api/online-scripts/install-task-retry/{install_id}", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(retry.status_code, 500)
+            self.assertEqual(retry.json["request_id"], install_id)
+            self.assertIn("任务恢复回执", retry.json["msg"])
+
+            denied = client.post(
+                f"/online-scripts/install-task-retry/{install_id}", data={"csrf_token": "wrong"},
+            )
+            self.assertEqual(denied.status_code, 400)
+            with client.session_transaction() as session:
+                session.update(
+                    token=TOKEN, token_expire_at=int(time.time()) + 3600,
+                    security_verified=True, csrf_token="install-recovery-csrf",
+                )
+            form_retry = client.post(
+                f"/online-scripts/install-task-retry/{install_id}",
+                data={"csrf_token": "install-recovery-csrf"},
+            )
+            self.assertEqual(form_retry.status_code, 500)
+            self.assertIn(f"/online-scripts/log/{install_id}", form_retry.get_data(as_text=True))
+
+            with self.assertRaisesRegex(RuntimeError, "任务恢复回执"):
+                persist_online_install({"id": "b" * 32, "script_id": "other"})
+            self.assertEqual(ONLINE_INSTALL_JOBS_FILE.read_bytes(), original)
+
+            runtime_record = {
+                "id": install_id,
+                "script_id": "demo",
+                "script_name": "Demo",
+                "log_file": str(base_dir / "log" / f"{install_id}.log"),
+                "running": True,
+                "status": "运行中",
+                "task_recovery": "truncated-receipt",
+            }
+            ONLINE_INSTALL_RUNNING[install_id] = runtime_record
+            runtime_before = dict(runtime_record)
+            runtime_state = client.get(
+                f"/api/online-scripts/log/{install_id}?state_only=1", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(runtime_state.status_code, 500)
+            self.assertEqual(runtime_state.json["install_id"], install_id)
+            self.assertIn("任务恢复回执", runtime_state.json["error"])
+            runtime_page = client.get(f"/online-scripts/log/{install_id}", headers={"X-Token": TOKEN})
+            self.assertEqual(runtime_page.status_code, 500)
+            self.assertIn(f"/online-scripts/log/{install_id}", runtime_page.get_data(as_text=True))
+            runtime_retry = client.post(
+                f"/api/online-scripts/install-task-retry/{install_id}", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(runtime_retry.status_code, 500)
+            self.assertEqual(runtime_retry.json["request_id"], install_id)
+            self.assertEqual(runtime_record, runtime_before)
+            self.assertEqual(ONLINE_INSTALL_JOBS_FILE.read_bytes(), original)
+            ONLINE_INSTALL_RUNNING.pop(install_id, None)
+
+            for invalid_recovery in (
+                {"pending": "false"},
+                {"pending": True, "publication": []},
+                {"pending": True, "publication": {"keys": [], "task_ids": [], "single_task": False}},
+            ):
+                with self.subTest(task_recovery=invalid_recovery):
+                    record["task_recovery"] = invalid_recovery
+                    ONLINE_INSTALL_JOBS_FILE.write_text(json.dumps({install_id: record}), encoding="utf-8")
+                    invalid_bytes = ONLINE_INSTALL_JOBS_FILE.read_bytes()
+                    with self.assertRaisesRegex(RuntimeError, "任务(恢复|发布).*回执"):
+                        get_online_install_job(install_id)
+                    self.assertEqual(ONLINE_INSTALL_JOBS_FILE.read_bytes(), invalid_bytes)
+
     def test_install_history_clips_whole_retry_chains_and_exposes_recursive_recovery_navigation(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.online_scripts.constants import (

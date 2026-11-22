@@ -312,6 +312,25 @@ def main():
                 if data.get("restart_task_install"):
                     ONLINE_INSTALL_RUNNING.clear()
                     ONLINE_INSTALL_RETRYING.clear()
+                if data.get("seed_malformed_task_recovery"):
+                    install_id = ("i" if int(data["width"]) == 390 else "j") * 32
+                    jobs = json.loads(ONLINE_INSTALL_JOBS_FILE.read_text(encoding="utf-8")) if ONLINE_INSTALL_JOBS_FILE.exists() else {}
+                    jobs[install_id] = {
+                        "id": install_id, "script_id": "demo", "script_name": "Malformed recovery",
+                        "log_file": str(base_dir / "log" / f"{install_id}.log"),
+                        "running": False, "status": "失败", "task_recovery": "truncated-receipt",
+                    }
+                    ONLINE_INSTALL_JOBS_FILE.write_text(json.dumps(jobs), encoding="utf-8")
+                if data.get("seed_malformed_task_recovery_memory"):
+                    install_id = ("k" if int(data["width"]) == 390 else "l") * 32
+                    ONLINE_INSTALL_RUNNING[install_id] = {
+                        "id": install_id, "script_id": "demo", "script_name": "Malformed live recovery",
+                        "log_file": str(base_dir / "log" / f"{install_id}.log"),
+                        "running": True, "status": "运行中", "task_recovery": "truncated-receipt",
+                    }
+                if data.get("clear_malformed_task_recovery_memory"):
+                    install_id = ("k" if int(data["width"]) == 390 else "l") * 32
+                    ONLINE_INSTALL_RUNNING.pop(install_id, None)
                 if data.get("seed_delayed_online_log"):
                     seed_delayed_online_log(int(data["width"]))
                 if data.get("publish_delayed_online_log"):
@@ -413,6 +432,8 @@ def main():
             subprocess.run(["node", "-e", SCRIPT], env=env, check=True, timeout=240)
         finally:
             release.write_text("0", encoding="ascii")
+            for malformed_id in ("k" * 32, "l" * 32):
+                ONLINE_INSTALL_RUNNING.pop(malformed_id, None)
             for proc in dependency_processes:
                 if proc.poll() is None:
                     proc.terminate()
@@ -496,6 +517,38 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
     assert.equal(await page.locator('#log').textContent().then(text=>text.includes('installer started before panel restart')),true);
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true);
     assert.deepEqual(errors,[]);await context.close();console.log('restart install receipt recovery passed '+viewport.width);
+    continue;
+   }
+   if(process.env.FLS_INSTALL_LOG_ONLY==='malformed-recovery'){
+    await page.goto(base+'/login');await login();
+    await fixture({seed_malformed_task_recovery:true,width:viewport.width});
+    const persistedId=(viewport.width===390?'i':'j').repeat(32);
+    let response=await page.goto(base+'/online-scripts/log/'+persistedId);
+    assert.equal(response.status(),500);
+    await page.getByRole('heading',{name:'在线脚本安装记录无法读取',exact:true}).waitFor();
+    assert.ok((await page.locator('body').innerText()).includes('任务恢复回执必须是对象'));
+    assert.equal(await page.getByRole('link',{name:'重新读取安装记录'}).getAttribute('href'),
+      '/online-scripts/log/'+persistedId);
+    let state=await page.request.get(base+'/api/online-scripts/log/'+persistedId+'?state_only=1',{headers});
+    assert.equal(state.status(),500);
+    let payload=await state.json();assert.equal(payload.install_id,persistedId);
+    assert.equal(payload.state_url,'/api/online-scripts/log/'+persistedId+'?state_only=1');
+    assert.ok(payload.error.includes('任务恢复回执'));
+
+    await fixture({seed_malformed_task_recovery_memory:true,width:viewport.width});
+    const liveId=(viewport.width===390?'k':'l').repeat(32);
+    response=await page.goto(base+'/online-scripts/log/'+liveId);
+    assert.equal(response.status(),500);
+    await page.getByRole('heading',{name:'在线脚本安装记录无法读取',exact:true}).waitFor();
+    assert.ok((await page.locator('body').innerText()).includes('任务恢复回执必须是对象'));
+    state=await page.request.get(base+'/api/online-scripts/log/'+liveId+'?state_only=1',{headers});
+    assert.equal(state.status(),500);
+    payload=await state.json();assert.equal(payload.install_id,liveId);
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true);
+    assert.deepEqual(errors,[]);
+    await page.screenshot({path:'/tmp/fls-install-malformed-recovery-'+viewport.width+'.png',fullPage:true});
+    await fixture({clear_malformed_task_recovery_memory:true,width:viewport.width});
+    await context.close();console.log('malformed install recovery receipts passed '+viewport.width);
     continue;
    }
    if(process.env.FLS_INSTALL_LOG_ONLY==='task-receipt'){
