@@ -37,6 +37,7 @@ def main():
         from fls_manager.online_scripts.logs import online_install_log_file
         from fls_manager.routes.online_scripts import install as install_routes
         from fls_manager.routes import deps as deps_routes
+        from fls_manager.routes import runtime as runtime_routes
         from fls_manager.state import DEPS_RUNNING
 
         base_dir = Path(temp)
@@ -447,8 +448,9 @@ def main():
                         error="browser terminal install receipt unavailable",
                     )
                 if data.get("start_running_dependency_receipt"):
+                    restart_kind = str(data.get("restart_install_kind") or "dependency")
                     install_id = (
-                        "restart-confirm-receipt-" + str(data.get("width") or 390)
+                        "restart-confirm-" + restart_kind + "-" + str(data.get("width") or 390)
                         if data.get("restart_confirmation_flow")
                         else "running-receipt-" + str(data.get("width") or 390)
                     )
@@ -480,12 +482,15 @@ def main():
                         kwargs["stdout"].flush()
                         return RunningInstallProcess()
 
-                    deps_routes.subprocess = SimpleNamespace(
+                    deps_subprocess = SimpleNamespace(
                         Popen=start_fixture_process, STDOUT=subprocess.STDOUT,
                         PIPE=subprocess.PIPE, TimeoutExpired=subprocess.TimeoutExpired,
                         run=subprocess.run,
                     )
+                    deps_routes.subprocess = deps_subprocess
                     if data.get("restart_confirmation_flow"):
+                        runtime_routes.subprocess = deps_subprocess
+                        runtime_routes.runtime_install_command = lambda _runtime: "echo runtime"
                         dependency_restart_process.update(install_id=install_id, process=None)
 
                         original_start = deps_routes.subprocess.Popen
@@ -644,10 +649,14 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    }
    if(process.env.FLS_INSTALL_LOG_ONLY==='running-deps-restart-confirmation'){
     await page.goto(base+'/login');await login();
-    await fixture({start_running_dependency_receipt:true,restart_confirmation_flow:true,width:viewport.width});
-    const installId='restart-confirm-receipt-'+viewport.width;
-    const started=await page.request.post(base+'/api/deps/install',{
-     headers,data:{name:'demo',request_id:installId},
+    const installKind=viewport.width===390?'runtime':'dependency';
+    await fixture({start_running_dependency_receipt:true,restart_confirmation_flow:true,
+     restart_install_kind:installKind,width:viewport.width});
+    const installId='restart-confirm-'+installKind+'-'+viewport.width;
+    const startUrl=installKind==='runtime'?base+'/api/install/runtime/node':base+'/api/deps/install';
+    const startData=installKind==='runtime'?{request_id:installId}:{name:'demo',request_id:installId};
+    const started=await page.request.post(startUrl,{
+     headers,data:startData,
     });
     assert.equal(started.status(),503);
     const startedJson=await started.json();
@@ -672,7 +681,7 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
     await confirmButton.waitFor();
     assert.equal(await page.locator('.install-retry-form').count(),0);
     assert.equal((await state()).dependency_retry_confirmation_required,true);
-    const history=await page.request.get(base+'/api/deps/install-history?kind=dependency',{headers});
+    const history=await page.request.get(base+'/api/deps/install-history?kind='+installKind,{headers});
     assert.equal(history.status(),200);
     const historyItem=(await history.json()).items.find(item=>item.id===installId);
     assert.equal(historyItem.retry_confirmation_required,true);
@@ -690,9 +699,10 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
     assert.equal(new URL(page.url()).pathname,'/deps/install-log/'+installId);
     assert.equal(await page.locator('.install-recovery-confirm-form').count(),0);
     const retryForm=page.locator('.install-retry-form');
-    await retryForm.getByRole('button',{name:'重试安装依赖'}).waitFor();
+    const retryLabel=installKind==='runtime'?'重试安装运行器':'重试安装依赖';
+    await retryForm.getByRole('button',{name:retryLabel}).waitFor();
     assert.equal((await state()).dependency_retry_confirmation_required,false);
-    await retryForm.getByRole('button',{name:'重试安装依赖'}).click();
+    await retryForm.getByRole('button',{name:retryLabel}).click();
     await page.waitForFunction(originalId=>location.pathname.startsWith('/deps/install-log/')
       &&location.pathname!==('/deps/install-log/'+originalId),installId);
     const retriedId=new URL(page.url()).pathname.split('/').pop();
