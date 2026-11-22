@@ -676,16 +676,28 @@ start_fls() {
   sleep 2
 
   if is_running_pid "$pid"; then
-    port_show="${TEMP_PORT:-$(read_config_value port "$DEFAULT_PORT")}"
+    port_show="$TEMP_PORT"
+    [ -n "$port_show" ] || port_show="$(read_config_value port "$DEFAULT_PORT")"
     say "启动成功，PID: $pid"
     say "访问地址：http://服务器IP:$port_show"
     say "如首次使用，请访问面板完成 Token 设置"
     module_status_update
   else
-    err "启动失败，请查看日志：$DAEMON_LOG"
-    tail -n 100 "$DAEMON_LOG" 2>/dev/null || true
-    module_status_update
-    exit 1
+    running_pids="$(find_running_pids)"
+    if [ -n "$running_pids" ]; then
+      running_pid="$(printf '%s\n' "$running_pids" | head -n 1)"
+      printf '%s\n' "$running_pid" > "$PID_FILE" 2>/dev/null || true
+      port_show="$TEMP_PORT"
+      [ -n "$port_show" ] || port_show="$(read_config_value port "$DEFAULT_PORT")"
+      say "FLS Manager 已在运行，PID: $running_pid"
+      say "访问地址：http://服务器IP:$port_show"
+      module_status_update
+    else
+      err "启动失败，请查看日志：$DAEMON_LOG"
+      tail -n 100 "$DAEMON_LOG" 2>/dev/null || true
+      module_status_update
+      exit 1
+    fi
   fi
 }
 

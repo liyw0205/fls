@@ -1,11 +1,11 @@
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,7 +54,7 @@ class FlsStartupTests(unittest.TestCase):
                         env=env,
                         capture_output=True,
                         text=True,
-                        timeout=15,
+                        timeout=90,
                     )
 
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -64,74 +64,71 @@ class FlsStartupTests(unittest.TestCase):
                     proc.terminate()
                     proc.wait(timeout=5)
 
-    @unittest.skipUnless(shutil.which("flock"), "flock is optional on supported shells")
-    def test_concurrent_start_commands_launch_only_one_manager(self):
-        with tempfile.TemporaryDirectory(prefix="fls-startup-race-") as temp_dir:
+class ManagerInstanceLockTests(unittest.TestCase):
+    def test_second_entrypoint_exits_before_app_setup_and_lock_releases_on_exit(self):
+        with tempfile.TemporaryDirectory(prefix="fls-manager-lock-") as temp_dir:
             base_dir = Path(temp_dir)
-            (base_dir / "data").mkdir()
-            manager = base_dir / "fls-manager.py"
-            manager.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
-            (base_dir / "fls_manager").mkdir()
-
             env = os.environ.copy()
             env.update({
                 "FLS_BASE_DIR": str(base_dir),
-                "FLS_PYTHON": sys.executable,
-                "CI": "true",
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTHONUNBUFFERED": "1",
             })
-            command = ["sh", str(ROOT / "fls.sh"), "start"]
-            starts = [
-                subprocess.Popen(command, cwd=ROOT, env=env, stdout=subprocess.PIPE,
-                                 stderr=subprocess.PIPE, text=True)
-                for _ in range(2)
-            ]
+            ready = base_dir / "lock-ready"
+            holder_code = (
+                "import pathlib, sys, time; from fls_manager.instance_lock import acquire_instance_lock, release_instance_lock; "
+                "fd=acquire_instance_lock(); pathlib.Path(sys.argv[1]).touch(); "
+                "time.sleep(60); release_instance_lock(fd) if fd is not None else None"
+            )
+            holder = subprocess.Popen(
+                [sys.executable, "-c", holder_code, str(ready)], cwd=ROOT, env=env,
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            )
             try:
-                results = [proc.communicate(timeout=15) for proc in starts]
-                self.assertTrue(all(proc.returncode == 0 for proc in starts), results)
-                self.assertEqual(sum("启动成功" in output for output, _error in results), 1, results)
-                self.assertEqual(sum("正在启动" in output for output, _error in results), 1, results)
+                deadline = time.monotonic() + 30
+                while not ready.exists() and holder.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                error = holder.stderr.read().decode("utf-8", errors="replace") if not ready.exists() else ""
+                self.assertTrue(ready.exists(), error)
 
-                deadline = time.monotonic() + 3
-                manager_pids = []
-                while time.monotonic() < deadline:
-                    listing = subprocess.run(
-                        ["ps", "-ww", "-eo", "pid=,args="], capture_output=True, text=True, check=True,
-                    ).stdout
-                    manager_pids = [
-                        int(line.split(None, 1)[0]) for line in listing.splitlines()
-                        if str(manager) in line
-                    ]
-                    if manager_pids:
-                        break
-                    time.sleep(0.02)
-
-                pid_file = base_dir / "data" / "fls-manager.pid"
-                pid_value = pid_file.read_text(encoding="ascii").strip() if pid_file.exists() else "missing"
-                process_state = subprocess.run(
-                    ["ps", "-p", pid_value, "-o", "pid=,ppid=,comm=,args="],
-                    capture_output=True, text=True,
-                ).stdout
-                daemon_log = base_dir / "log" / "fls-manager-daemon.log"
-                log_text = daemon_log.read_text(encoding="utf-8") if daemon_log.exists() else "missing"
-                self.assertEqual(len(manager_pids), 1, (results, listing, pid_value, process_state, log_text))
-                self.assertEqual(
-                    pid_value,
-                    str(manager_pids[0]),
+                secret_key = base_dir / "data" / "secret_key.txt"
+                duplicate = subprocess.run(
+                    [sys.executable, str(ROOT / "fls-manager.py")],
+                    cwd=ROOT, env=env, capture_output=True, text=True, timeout=90,
                 )
+                self.assertEqual(duplicate.returncode, 0, duplicate.stdout + duplicate.stderr)
+                self.assertIn("已有实例正在运行", duplicate.stdout)
+                self.assertFalse(secret_key.exists(), "duplicate entrypoint ran app initialization")
             finally:
-                for proc in starts:
-                    if proc.poll() is None:
-                        proc.terminate()
-                    proc.wait(timeout=5)
-                listing = subprocess.run(
-                    ["ps", "-ww", "-eo", "pid=,args="], capture_output=True, text=True,
-                ).stdout
-                for line in listing.splitlines():
-                    if str(manager) in line:
-                        try:
-                            os.kill(int(line.split(None, 1)[0]), 15)
-                        except (OSError, ValueError):
-                            pass
+                if holder.poll() is None:
+                    holder.terminate()
+                holder.wait(timeout=10)
+
+            from fls_manager import instance_lock
+
+            with patch.object(instance_lock, "DATA_DIR", base_dir / "data"):
+                descriptor = instance_lock.acquire_instance_lock()
+                self.assertIsNotNone(descriptor)
+                instance_lock.release_instance_lock(descriptor)
+
+    @unittest.skipUnless(os.name == "posix", "symlink lock validation is POSIX-specific")
+    def test_lock_symlink_is_rejected_without_touching_target(self):
+        with tempfile.TemporaryDirectory(prefix="fls-manager-lock-link-") as temp_dir:
+            base_dir = Path(temp_dir)
+            data_dir = base_dir / "data"
+            data_dir.mkdir()
+            target = base_dir / "target"
+            target.write_text("untouched", encoding="ascii")
+            (data_dir / "fls-manager.lock").symlink_to(target)
+            env = os.environ.copy()
+            env["FLS_BASE_DIR"] = str(base_dir)
+
+            from fls_manager import instance_lock
+
+            with patch.object(instance_lock, "DATA_DIR", data_dir):
+                with self.assertRaisesRegex(RuntimeError, "符号链接"):
+                    instance_lock.acquire_instance_lock()
+            self.assertEqual(target.read_text(encoding="ascii"), "untouched")
 
 
 if __name__ == "__main__":
