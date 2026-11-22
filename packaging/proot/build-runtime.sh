@@ -72,7 +72,7 @@ docker run --rm --platform "$PLATFORM" \
         fi
         python3 -m venv /opt/fls-venv
         /opt/fls-venv/bin/python -m pip install --no-cache-dir --disable-pip-version-check \
-            Flask requests APScheduler PySocks
+            Flask requests APScheduler PySocks qrcode
         rm -rf /var/lib/apt/lists/* /root/.cache /tmp/*
         # Docker may expose /etc/hostname as a read-only mount; it is harmless in the archive.
         rm -f /etc/hostname 2>/dev/null || true

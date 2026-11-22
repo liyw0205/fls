@@ -244,7 +244,7 @@ function Install-BasicDeps($PySpec) {
     try {
         Run-PythonSpec $PySpec @(
             "-c",
-            "import importlib.util;mods=['flask','requests','apscheduler','socks'];raise SystemExit(0 if all(importlib.util.find_spec(m) for m in mods) else 1)"
+            "import importlib.util;mods=['flask','requests','apscheduler','socks','qrcode'];raise SystemExit(0 if all(importlib.util.find_spec(m) for m in mods) else 1)"
         ) | Out-Null
 
         if ($LASTEXITCODE -eq 0) {
@@ -257,7 +257,7 @@ function Install-BasicDeps($PySpec) {
     try {
         Run-PythonSpec $PySpec @(
             "-m", "pip", "install",
-            "flask", "requests", "apscheduler", "PySocks", "tzdata", "setproctitle"
+            "flask", "requests", "apscheduler", "PySocks", "tzdata", "setproctitle", "qrcode"
         ) | Out-Null
     } catch {}
 }

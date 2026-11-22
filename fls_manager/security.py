@@ -203,14 +203,22 @@ def totp_otpauth_uri(secret, account="FLS Panel", issuer="FLS"):
 
 def totp_qr_url(secret, account="FLS Panel", issuer="FLS"):
     """
-    二维码图片地址。
-
-    这里使用在线二维码服务生成二维码。
-    如果你不想依赖外网，可以只显示 otpauth 链接和密钥。
+    生成不依赖外部服务的二维码图片 data URI。
     """
-    uri = totp_otpauth_uri(secret, account=account, issuer=issuer)
+    try:
+        import qrcode
+        from qrcode.image.svg import SvgPathImage
+    except ImportError:
+        return ""
 
-    return (
-        "https://api.qrserver.com/v1/create-qr-code/"
-        "?size=220x220&data=" + urllib.parse.quote(uri)
+    qr = qrcode.QRCode(
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=5,
+        border=4,
     )
+    qr.add_data(totp_otpauth_uri(secret, account=account, issuer=issuer))
+    qr.make(fit=True)
+    svg = qr.make_image(image_factory=SvgPathImage).to_string()
+    if isinstance(svg, str):
+        svg = svg.encode("utf-8")
+    return "data:image/svg+xml;base64," + base64.b64encode(svg).decode("ascii")

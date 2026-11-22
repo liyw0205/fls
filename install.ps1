@@ -125,7 +125,7 @@ function Ensure-PythonEnv($Spec) {
     }
 
     $dependencyCheck = @(
-        "import importlib.util; mods=['flask','requests','apscheduler','socks'];"
+        "import importlib.util; mods=['flask','requests','apscheduler','socks','qrcode'];"
         "raise SystemExit(0 if all(importlib.util.find_spec(m) for m in mods) else 1)"
     ) -join ""
 
@@ -136,7 +136,7 @@ function Ensure-PythonEnv($Spec) {
         if ($LASTEXITCODE -ne 0) {
             throw "pip 更新失败"
         }
-        & $venvPython -m pip install Flask requests APScheduler PySocks tzdata setproctitle
+        & $venvPython -m pip install Flask requests APScheduler PySocks tzdata setproctitle qrcode
         if ($LASTEXITCODE -ne 0) {
             throw "FLS Python 依赖安装失败"
         }

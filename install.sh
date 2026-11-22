@@ -153,10 +153,10 @@ venv_path_tmp="$venv_path_file.tmp.$$"
 printf '%s\n%s\n' "$FLS_VENV_PATH" "$VENV_PATH_SOURCE" > "$venv_path_tmp" || die "无法保存 Python 环境路径"
 mv -f "$venv_path_tmp" "$venv_path_file" || die "无法保存 Python 环境路径"
 
-if ! "$VENV_PYTHON" -c 'import flask, requests, apscheduler, socks' >/dev/null 2>&1; then
+if ! "$VENV_PYTHON" -c 'import flask, requests, apscheduler, socks, qrcode' >/dev/null 2>&1; then
     say "安装 FLS Python 依赖"
     "$VENV_PYTHON" -m pip install --upgrade pip
-    "$VENV_PYTHON" -m pip install Flask requests APScheduler PySocks tzdata setproctitle
+    "$VENV_PYTHON" -m pip install Flask requests APScheduler PySocks tzdata setproctitle qrcode
 fi
 
 chmod 755 "$INSTALL_DIR/fls.sh" 2>/dev/null || true

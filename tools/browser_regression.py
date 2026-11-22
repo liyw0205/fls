@@ -313,10 +313,11 @@ async function mockHttp(page, responses, callback) {
       postData: request.postData() || "",
       status: match.status || 200
     });
+    const body = typeof match.body === "function" ? match.body(request) : match.body;
     await route.fulfill({
       status: match.status || 200,
       contentType: match.contentType || "text/html",
-      body: match.body || "<!doctype html><html><head><title>fixture</title></head><body class='page-fixture'><div class='title'>fixture</div><nav class='nav'></nav><div class='content'></div></body></html>"
+      body: body || "<!doctype html><html><head><title>fixture</title></head><body class='page-fixture'><div class='title'>fixture</div><nav class='nav'></nav><div class='content'></div></body></html>"
     });
   };
 
@@ -371,9 +372,9 @@ function auditFormCalls(result, label, audit, expectedMethod="POST") {
   });
 }
 
-async function submitForm(page, prefix, selector, label, audit, method="POST", submitterSelector="") {
+async function submitForm(page, prefix, selector, label, audit, method="POST", submitterSelector="", responseOptions={}) {
   const result = await mockHttp(page, [
-    {prefix, method}
+    {prefix, method, ...responseOptions}
   ], async () => {
     const state = await page.evaluate(({selector, submitterSelector}) => {
       const form = document.querySelector(selector);
@@ -383,6 +384,10 @@ async function submitForm(page, prefix, selector, label, audit, method="POST", s
       else form.requestSubmit();
       return {missing: false};
     }, {selector, submitterSelector});
+    if (responseOptions.expectUrl) {
+      await page.waitForURL(url => url.pathname.startsWith(responseOptions.expectUrl), {timeout: 3000});
+      state.url = await page.evaluate(() => location.pathname);
+    }
     await page.waitForTimeout(120);
     return state;
   });
@@ -448,8 +453,15 @@ async function runActionAudit(page, audit) {
     waitUntil: "domcontentloaded", timeout: 8000
   });
   await submitForm(
-    page, "/online-scripts/import-tasks/", "#onlineInstallSelectForm",
-    "online script import", audit, "POST", 'button[formaction*="/online-scripts/import-tasks/"]'
+    page, "/api/online-scripts/import-tasks/", "#onlineInstallSelectForm",
+    "online script import", audit, "POST", 'button[formaction*="/online-scripts/import-tasks/"]', {
+      contentType: "application/json",
+      body: request => {
+        const match = (request.postData() || "").match(/name="request_id"\r\n\r\n([a-f0-9]{32})/);
+        return JSON.stringify({ok: true, request_id: match && match[1] || ""});
+      },
+      expectUrl: "/online-scripts/import-tasks-status/"
+    }
   );
 
   await page.goto(process.env.FLS_BASE_URL + "/deps", {
