@@ -1411,7 +1411,10 @@ class TaskRuntimeTests(unittest.TestCase):
             ), mock.patch.object(
                 task_runner,
                 "send_by_ids",
-                return_value=[{"name": "One", "ok": True, "msg": "ok"}],
+                return_value=[
+                    {"name": "One", "ok": True, "msg": "ok"},
+                    {"name": "Disabled", "ok": False, "status": "not_sent", "msg": "通知已停用，未发送"},
+                ],
             ) as send_by_ids:
                 task_runner.task_finish_watcher(
                     "t1",
@@ -1430,7 +1433,9 @@ class TaskRuntimeTests(unittest.TestCase):
 
             self.assertNotIn("t1", task_runner.RUNNING)
             send_by_ids.assert_called_once_with("Demo", "script output", ["n1"])
-            self.assertIn("通知结果", log_file.read_text(encoding="utf-8"))
+            logged = log_file.read_text(encoding="utf-8")
+            self.assertIn("通知结果", logged)
+            self.assertIn("Disabled: 失败 - 通知已停用，未发送", logged)
 
     def test_finish_watcher_records_failed_history_and_notifies_without_retry(self):
         with isolated_fls_modules():
@@ -1951,16 +1956,8 @@ class NotifyRuntimeTests(unittest.TestCase):
                 {"id": "n2", "name": "Two", "enabled": True},
             ]
 
-            with mock.patch.object(notify, "enabled_notify_items", return_value=items), \
-                    mock.patch.object(notify, "default_notify_ids", return_value=["n2", "n1"]), \
+            with mock.patch.object(notify, "notify_items", return_value=items), \
                     mock.patch.object(
-                        notify,
-                        "get_notify_item",
-                        side_effect=lambda item_id: next(
-                            (item for item in items if item["id"] == item_id),
-                            None,
-                        ),
-                    ), mock.patch.object(
                         notify,
                         "send_one",
                         return_value=(True, "ok"),
@@ -1970,6 +1967,14 @@ class NotifyRuntimeTests(unittest.TestCase):
             self.assertEqual([result["id"] for result in results], ["n1"])
             self.assertEqual(results[0]["name"], "One")
             send_one.assert_called_once_with(items[0], "Title", "content")
+
+            with mock.patch.object(notify, "notify_items", return_value=items), \
+                    mock.patch.object(notify, "get_config", return_value={"notify_default_ids": ["n2", "n1"]}), \
+                    mock.patch.object(notify, "send_one", return_value=(True, "ok")) as send_one, \
+                    mock.patch("builtins.print"):
+                defaults = notify.send_by_ids("Title", "content", ["__default__"])
+            self.assertEqual([result["id"] for result in defaults], ["n2", "n1"])
+            self.assertEqual([call.args[0] for call in send_one.call_args_list], [items[1], items[0]])
 
             with mock.patch.object(notify, "enabled_notify_items", return_value=items), \
                     mock.patch.object(notify, "send_one") as send_one:
@@ -1986,15 +1991,8 @@ class NotifyRuntimeTests(unittest.TestCase):
             ]
             content = ("a" * 2000) + ("b" * 1000) + ("c" * 1500)
 
-            with mock.patch.object(notify, "enabled_notify_items", return_value=items), \
+            with mock.patch.object(notify, "notify_items", return_value=items), \
                     mock.patch.object(
-                        notify,
-                        "get_notify_item",
-                        side_effect=lambda item_id: next(
-                            (item for item in items if item["id"] == item_id),
-                            None,
-                        ),
-                    ), mock.patch.object(
                         notify,
                         "send_one",
                         return_value=(True, "ok"),

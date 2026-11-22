@@ -27,6 +27,8 @@ def notify_test_result(data, payload, status, prefix=""):
             except Exception:
                 body += '<p>投递记录暂不可读取，请修复后查看记录再重试。</p>'
         body += '<a class="btn btn-blue" href="/notify/history">查看投递记录</a>'
+    elif payload.get("delivery_status") == "not_started":
+        body += '<a class="btn btn-blue" href="/notify/history">核对待处理投递</a>'
     if not payload.get("resolved"):
         if payload.get("confirm_required"):
             data["confirm_retry"] = "1"

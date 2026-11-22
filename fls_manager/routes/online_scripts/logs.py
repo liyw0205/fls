@@ -394,6 +394,11 @@ def _install_error(info):
 
 def _install_recovery(info):
     status = str((info or {}).get("status") or "")
+    if (info or {}).get("recovery_persistence_error"):
+        return {
+            "available": False,
+            "reason": "安装结果未知回执尚未确认保存，已禁用重试；请仅查询原安装状态。",
+        }
     if not (info or {}).get("running") and ((info or {}).get("task_recovery") or {}).get("pending"):
         return {
             "available": True,
@@ -639,6 +644,10 @@ def api_online_install_log(install_id):
         "install_error": _install_error(info),
         "state_url": url_for("online_scripts.api_online_install_log", install_id=install_id, state_only="1"),
     }
+    if info.get("recovery_persistence_error"):
+        payload["persistence_error"] = True
+    if isinstance(info.get("stop_warning"), str) and info["stop_warning"]:
+        payload["stop_warning"] = info["stop_warning"]
     payload.update(online_install_retry_relation(info))
     if info.get("scheduler_reload_pending"):
         payload["scheduler_reload_pending"] = True
@@ -788,11 +797,11 @@ def online_install_log(install_id):
 </style>
 {header_card}
 {log_notice}
-<div class="notice red" id="installPollError" role="status" hidden></div>
+<div class="notice red" id="installPollError" role="status"{' hidden' if not info.get('persistence_error') else ''}>{'安装结果回执尚未确认保存，已禁用重试；请仅查询原安装状态。' if info.get('persistence_error') else ''}</div>
 <a id="installPollLogin" class="btn btn-primary" hidden>重新登录</a>
 <a id="installPollLogs" class="btn btn-orange" href="/logs" hidden>查看日志管理</a>
 <button id="installPollRetry" class="btn btn-primary" type="button" hidden>重新读取安装状态</button>
-<button id="installStateQuery" class="btn btn-gray" type="button" hidden>仅查询安装结果</button>
+<button id="installStateQuery" class="btn btn-gray" type="button"{' hidden' if not info.get('persistence_error') else ''}>仅查询安装结果</button>
 <button id="installStopQuery" class="btn btn-gray" type="button" hidden>查询停止结果</button>
 <pre class="log" id="log">{"暂无日志" if log_failure else "加载中..."}</pre>
 {log_controls()}
@@ -812,6 +821,7 @@ const logUrl = "/api/online-scripts/log/" + encodeURIComponent(installId);
 let pending = false;
 let postingStop = false;
 let postingRecovery = false;
+let stopWarning = "";
 let needsRecoveryQuery = false;
 let lastLogFailure = null;
 let needsStopQuery = false;
@@ -822,6 +832,7 @@ let pageHidden = false;
 let resumeOnPageshow = false;
 let pageGeneration = 0;
 let autoPollingPaused = false;
+let initialLogLoaded = false;
 let lastKnownRunning = {str(bool(info.get("running"))).lower()};
 const retryDelays = [2000, 4000, 8000, 16000, 30000];
 window.__FLS_LOG_LAST_TEXT__ = "";
@@ -888,6 +899,7 @@ async function loadLog(stateOnly = false){{
             invalid.status = res.status;
             throw invalid;
         }}
+        if(typeof json.stop_warning === "string" && json.stop_warning) stopWarning = json.stop_warning;
         let logFailure = null;
         if(json.ok === false){{
             const missingError = new Error(json.error || "安装日志暂不可读");
@@ -900,24 +912,29 @@ async function loadLog(stateOnly = false){{
         if(!logFailure) transientFailures = 0;
         autoPollingPaused = false;
         lastKnownRunning = json.running;
-        needsRecoveryQuery = false;
+        needsRecoveryQuery = !!json.persistence_error;
         if(!stateOnly) lastLogFailure = logFailure;
         if(stateOnly){{
             needsStopQuery = false;
             if(pollError){{
-                pollError.textContent = "原安装状态已确认：" + (json.status || "-")
-                    + (lastLogFailure ? "。日志读取仍失败：" + lastLogFailure.message : "");
+                pollError.textContent = json.persistence_error
+                    ? "原安装状态仍无法确认持久化，已禁用重试；可修复存储后再次查询。"
+                    : "原安装状态已确认：" + (json.status || "-")
+                        + (lastLogFailure ? "。日志读取仍失败：" + lastLogFailure.message : "")
+                        + (stopWarning ? "；" + stopWarning : "");
                 pollError.hidden = false;
             }}
         }}
         if(pollError && !stateOnly){{
-            pollError.hidden = true;
-            pollError.textContent = "";
+            pollError.hidden = !json.persistence_error && !stopWarning;
+            pollError.textContent = json.persistence_error
+                ? "安装结果回执尚未确认保存，已禁用重试；请仅查询原安装状态。"
+                : (stopWarning ? "原安装状态已确认：" + (json.status || "-") + "；" + stopWarning : "");
         }}
         if(loginAction) loginAction.hidden = true;
         if(logsAction) logsAction.hidden = !lastLogFailure;
         if(retryAction) retryAction.hidden = !lastLogFailure;
-        if(stateQueryAction) stateQueryAction.hidden = !lastLogFailure;
+        if(stateQueryAction) stateQueryAction.hidden = !lastLogFailure && !json.persistence_error;
         if(stopQueryAction) stopQueryAction.hidden = true;
 
         document.getElementById("installStatus").textContent = json.status || "-";
@@ -946,7 +963,7 @@ async function loadLog(stateOnly = false){{
 
         window.__FLS_LOG_LAST_TEXT__ = text;
 
-        if(changed){{
+        if(changed && initialLogLoaded){{
             if(wasNearBottom || window.__FLS_LOG_NEAR_BOTTOM__){{
                 const tip = document.getElementById("flsLogNewTip");
                 if(tip) tip.style.display = "none";
@@ -958,6 +975,7 @@ async function loadLog(stateOnly = false){{
                 if(tip) tip.style.display = "block";
             }}
         }}
+        initialLogLoaded = true;
 
         }}
         const stopAction = document.getElementById("installStopAction");
@@ -1176,6 +1194,7 @@ async function requestStop(event){{
         const result = await flsReadJsonResponse(response);
         if(!result || result.ok !== true || result.install_id !== installId) throw new Error("停止响应格式无效");
         if(document.getElementById("installPollError") !== pollError) return;
+        stopWarning = result.warning || "";
         if(pollError) pollError.textContent = result.msg || "停止请求已提交";
     }}catch(error){{
         if(document.getElementById("installPollError") !== pollError) return;

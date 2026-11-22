@@ -499,25 +499,46 @@ module_status_update() {
 }
 
 find_running_pids() {
-  if command -v pgrep >/dev/null 2>&1; then
-    pgrep -x "fls-manager" 2>/dev/null || true
-    return 0
-  fi
-
-  ps -eo pid=,comm=,args= 2>/dev/null | awk -v target="$MANAGER_FILE" '
+  candidates="$(
     {
-      pid = $1
-      comm = $2
-      line = $0
-      sub(/^[[:space:]]*[0-9]+[[:space:]]+[^[:space:]]+[[:space:]]+/, "", line)
+      if command -v pgrep >/dev/null 2>&1; then
+        pgrep -x "fls-manager" 2>/dev/null || true
+      fi
 
-      if (comm == "fls-manager") {
-        print pid
-      } else if (comm ~ /^python([0-9.]*)?$/ && index(line, target)) {
-        print pid
-      }
-    }
-  ' | sort -u || true
+      ps -ww -eo pid=,comm=,args= 2>/dev/null | awk -v target="$MANAGER_FILE" '
+        {
+          pid = $1
+          comm = $2
+          line = $0
+          sub(/^[[:space:]]*[0-9]+[[:space:]]+[^[:space:]]+[[:space:]]+/, "", line)
+
+          if (comm == "fls-manager") {
+            print pid
+          } else if (comm ~ /^python([0-9.]*)?$/ && index(line, target)) {
+            print pid
+          }
+        }
+      '
+    } | sort -nu
+  )"
+
+  for pid in $candidates; do
+    process_base=""
+    if [ -r "/proc/$pid/environ" ]; then
+      process_base="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | sed -n 's/^FLS_BASE_DIR=//p' | head -n 1)"
+    fi
+    process_cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null || true)"
+    process_args="$(ps -ww -p "$pid" -o args= 2>/dev/null || true)"
+
+    if [ "$process_base" = "$BASE_DIR" ] || [ "$process_cwd" = "$BASE_DIR" ]; then
+      printf '%s\n' "$pid"
+      continue
+    fi
+
+    case " $process_args " in
+      *" $MANAGER_FILE"*|*" $MANAGER_FILE "*) printf '%s\n' "$pid" ;;
+    esac
+  done
 }
 
 parse_start_opts() {
@@ -586,9 +607,32 @@ start_fls() {
 
   ensure_repo
 
-  old_pid="$(get_pid)"
-  if is_running_pid "$old_pid"; then
-    say "FLS Manager 已在运行，PID: $old_pid"
+  if command -v flock >/dev/null 2>&1; then
+    mkdir -p "$DATA_DIR" 2>/dev/null || true
+    exec 9>>"$DATA_DIR/fls-manager-start.lock" || {
+      err "无法打开启动锁，未启动新实例"
+      return 1
+    }
+    if ! flock -n 9; then
+      running_pids="$(find_running_pids)"
+      if [ -n "$running_pids" ]; then
+        running_pid="$(printf '%s\n' "$running_pids" | head -n 1)"
+        printf '%s\n' "$running_pid" > "$PID_FILE" 2>/dev/null || true
+        say "FLS Manager 已在运行，PID: $running_pid"
+      else
+        say "FLS Manager 正在启动，忽略重复启动请求"
+      fi
+      module_status_update
+      return 0
+    fi
+  fi
+
+  running_pids="$(find_running_pids)"
+  if [ -n "$running_pids" ]; then
+    running_pid="$(printf '%s\n' "$running_pids" | head -n 1)"
+    mkdir -p "$DATA_DIR" 2>/dev/null || true
+    printf '%s\n' "$running_pid" > "$PID_FILE" 2>/dev/null || true
+    say "FLS Manager 已在运行，PID: $running_pid"
     say "如需应用新的临时端口/Token，请执行：sh fls.sh restart -p 端口 -t Token"
     module_status_update
     return 0
@@ -632,16 +676,28 @@ start_fls() {
   sleep 2
 
   if is_running_pid "$pid"; then
-    port_show="${TEMP_PORT:-$(read_config_value port "$DEFAULT_PORT")}"
+    port_show="$TEMP_PORT"
+    [ -n "$port_show" ] || port_show="$(read_config_value port "$DEFAULT_PORT")"
     say "启动成功，PID: $pid"
     say "访问地址：http://服务器IP:$port_show"
     say "如首次使用，请访问面板完成 Token 设置"
     module_status_update
   else
-    err "启动失败，请查看日志：$DAEMON_LOG"
-    tail -n 100 "$DAEMON_LOG" 2>/dev/null || true
-    module_status_update
-    exit 1
+    running_pids="$(find_running_pids)"
+    if [ -n "$running_pids" ]; then
+      running_pid="$(printf '%s\n' "$running_pids" | head -n 1)"
+      printf '%s\n' "$running_pid" > "$PID_FILE" 2>/dev/null || true
+      port_show="$TEMP_PORT"
+      [ -n "$port_show" ] || port_show="$(read_config_value port "$DEFAULT_PORT")"
+      say "FLS Manager 已在运行，PID: $running_pid"
+      say "访问地址：http://服务器IP:$port_show"
+      module_status_update
+    else
+      err "启动失败，请查看日志：$DAEMON_LOG"
+      tail -n 100 "$DAEMON_LOG" 2>/dev/null || true
+      module_status_update
+      exit 1
+    fi
   fi
 }
 

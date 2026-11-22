@@ -35,6 +35,7 @@ NOTIFY_HISTORY_STATUSES = (
     "failed",
     "unknown",
 )
+NOTIFY_RECOVERABLE_STATUSES = frozenset(("running", "unknown"))
 NOTIFY_HISTORY_LOCK = threading.RLock()
 NOTIFY_ACTIVE_DELIVERIES = set()
 _NOTIFY_HISTORY_CACHE = None
@@ -44,6 +45,24 @@ def _notify_text(value, default=""):
     if value is None:
         return default
     return str(value)
+
+
+def _trim_notify_history_rows(rows):
+    protected = [row for row in rows if row.get("status") in NOTIFY_RECOVERABLE_STATUSES]
+    if len(protected) > NOTIFY_HISTORY_LIMIT:
+        raise RuntimeError("通知投递历史中的待核对记录超过安全容量，未覆盖原文件")
+
+    protected_ids = {row["id"] for row in protected}
+    terminal_slots = NOTIFY_HISTORY_LIMIT - len(protected)
+    retained_terminal_ids = set()
+    for row in rows:
+        if row["id"] in protected_ids:
+            continue
+        if len(retained_terminal_ids) >= terminal_slots:
+            break
+        retained_terminal_ids.add(row["id"])
+
+    return [row for row in rows if row["id"] in protected_ids or row["id"] in retained_terminal_ids]
 
 
 def _notify_history_rows(raw):
@@ -110,7 +129,7 @@ def _notify_history_rows(raw):
             changed = True
         normalized.append(normalized_row)
 
-    limited = normalized[:NOTIFY_HISTORY_LIMIT]
+    limited = _trim_notify_history_rows(normalized)
     if limited != normalized:
         changed = True
 
@@ -223,8 +242,14 @@ def create_notify_delivery(item, title, content, source="manual", retry_of="", *
         rows, _changed = _notify_history_rows(raw)
         if any(existing["id"] == row["id"] for existing in rows):
             raise ValueError("通知投递标识已存在")
+        recoverable_count = sum(
+            existing.get("status") in NOTIFY_RECOVERABLE_STATUSES for existing in rows
+        )
+        if recoverable_count >= NOTIFY_HISTORY_LIMIT:
+            raise ValueError("待核对通知记录达到上限，未开始新投递")
         rows.insert(0, row)
-        write_json(NOTIFY_HISTORY_FILE, rows[:NOTIFY_HISTORY_LIMIT])
+        rows = _trim_notify_history_rows(rows)
+        write_json(NOTIFY_HISTORY_FILE, rows)
         NOTIFY_ACTIVE_DELIVERIES.add(row["id"])
         _invalidate_notify_history_cache()
 
@@ -1000,42 +1025,89 @@ def send_one(item, title, content):
 def send_by_ids(title, content, ids=None, source="task"):
     if isinstance(ids, str):
         ids = [ids]
+    elif ids is None:
+        ids = []
+    elif isinstance(ids, tuple):
+        ids = list(ids)
+    elif not isinstance(ids, list):
+        return [{"id": "", "name": "通知选择", "ok": False, "status": "not_sent",
+                 "msg": "通知选择格式无效，未发送"}]
 
-    ids = ids or []
-
-    if "__none__" in ids:
+    if not ids or any(item_id == "__none__" for item_id in ids):
         return []
 
-    enabled_ids = {x.get("id") for x in enabled_notify_items()}
+    from .notify_actions import notification_config
+    try:
+        notification_config(allow_legacy=True)
+    except RuntimeError as exc:
+        return [{"id": "", "name": "通知配置", "ok": False, "status": "not_sent", "msg": str(exc)}]
+    except PermissionError:
+        return [{"id": "", "name": "通知配置", "ok": False, "status": "not_sent",
+                 "msg": "通知配置不可读取，请检查文件权限；未发送"}]
+    except Exception:
+        return [{"id": "", "name": "通知配置", "ok": False, "status": "not_sent",
+                 "msg": "通知配置 JSON 无效或不可读取；未发送"}]
 
+    try:
+        items = {item.get("id"): item for item in notify_items() if item.get("id")}
+    except Exception:
+        return [{"id": "", "name": "通知配置", "ok": False, "status": "not_sent",
+                 "msg": "通知配置无法读取或迁移；未发送"}]
+    results = []
     real_ids = []
+    seen = set()
     for item_id in ids:
-        if item_id in enabled_ids and item_id not in real_ids:
+        if item_id in ("__default__", "__none__"):
+            continue
+        if not isinstance(item_id, str) or not item_id:
+            results.append({"id": "", "name": "通知选择", "ok": False, "status": "not_sent",
+                            "msg": "通知选择无效，未发送"})
+            continue
+        if item_id in seen:
+            continue
+        seen.add(item_id)
+        item = items.get(item_id)
+        if item is None:
+            results.append({"id": item_id, "name": item_id, "ok": False, "status": "not_sent",
+                            "msg": "通知不存在或已删除，未发送"})
+        elif not item.get("enabled", True):
+            results.append({"id": item_id, "name": item.get("name") or item_id, "ok": False,
+                            "status": "not_sent", "msg": "通知已停用，未发送"})
+        else:
             real_ids.append(item_id)
 
     if not real_ids and "__default__" in ids:
-        for item_id in default_notify_ids():
-            if item_id in enabled_ids and item_id not in real_ids:
+        configured_defaults = get_config().get("notify_default_ids", [])
+        if not isinstance(configured_defaults, list):
+            results.append({"id": "", "name": "默认通知", "ok": False, "status": "not_sent",
+                            "msg": "默认通知选择无效，未发送"})
+            configured_defaults = []
+        seen_defaults = set()
+        for item_id in configured_defaults:
+            if not isinstance(item_id, str) or not item_id:
+                results.append({"id": "", "name": "默认通知", "ok": False, "status": "not_sent",
+                                "msg": "默认通知选择无效，未发送"})
+                continue
+            if item_id in seen_defaults:
+                continue
+            seen_defaults.add(item_id)
+            item = items.get(item_id)
+            if item is None:
+                results.append({"id": item_id, "name": item_id, "ok": False, "status": "not_sent",
+                                "msg": "默认通知不存在或已删除，未发送"})
+            elif not item.get("enabled", True):
+                results.append({"id": item_id, "name": item.get("name") or item_id, "ok": False,
+                                "status": "not_sent", "msg": "默认通知已停用，未发送"})
+            else:
                 real_ids.append(item_id)
 
     if not real_ids:
-        return []
+        return results
 
-    results = []
     plans = []
 
     for item_id in real_ids:
-        item = get_notify_item(item_id)
-
-        if not item:
-            results.append({
-                "id": item_id,
-                "name": item_id,
-                "ok": False,
-                "msg": "通知不存在",
-            })
-            continue
-
+        item = items[item_id]
         plans.append((item_id, item, notify_content_chunks(item, content)))
 
     # Keep normal notifications in their existing part-by-part send order.

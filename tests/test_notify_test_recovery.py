@@ -1,4 +1,5 @@
 import importlib
+import json
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -123,6 +124,54 @@ class NotifyTestRecoveryTests(unittest.TestCase):
                 self.assertEqual(app.test_client().post("/notify/retry/" + delivery_id, headers={"X-Token": TOKEN}).status_code, 409)
                 send.assert_called_once()
             self.assertEqual(notify.get_notify_delivery(delivery_id)["attempt"], 2)
+
+    def test_full_recoverable_history_reports_not_sent_and_resumes_same_test_request(self):
+        with isolated_app() as (app, base):
+            from fls_manager import notify, paths
+            from fls_manager.storage import write_json
+
+            self.seed()
+            notify.NOTIFY_HISTORY_LIMIT = 1
+            write_json(paths.NOTIFY_HISTORY_FILE, [{"id": "pending", "status": "unknown"}])
+            original_history = paths.NOTIFY_HISTORY_FILE.read_bytes()
+            data = self.values()
+
+            with patch.object(notify, "send_one", return_value=(True, "accepted")) as send, \
+                 patch("fls_manager.routes.notify.test.send_one", return_value=(True, "accepted")) as html_send:
+                client = app.test_client()
+                blocked = self.post(client, data)
+                self.assertEqual(blocked.status_code, 409)
+                self.assertFalse(blocked.json["sent"])
+                self.assertEqual(blocked.json["delivery_status"], "not_started")
+                self.assertTrue(blocked.json["confirm_required"])
+                self.assertFalse(blocked.json["resolved"])
+                send.assert_not_called()
+                self.assertEqual(paths.NOTIFY_HISTORY_FILE.read_bytes(), original_history)
+
+                form = self.form(client.get("/notify", headers={"X-Token": TOKEN}), "/notify/test/n")
+                page = client.post(form["action"], data=form["fields"], headers={"X-Token": TOKEN})
+                self.assertEqual(page.status_code, 409)
+                self.assertIn("测试未发送", page.get_data(as_text=True))
+                self.assertIn("确认后继续测试", page.get_data(as_text=True))
+                self.assertIn('href="/notify/history"', page.get_data(as_text=True))
+                send.assert_not_called()
+
+                write_json(paths.NOTIFY_HISTORY_FILE, [{"id": "pending", "status": "succeeded"}])
+                retry_form = self.form(page, "/notify/test/n")
+                resumed_page = client.post(retry_form["action"], data=retry_form["fields"], headers={"X-Token": TOKEN})
+                self.assertEqual(resumed_page.status_code, 200)
+                self.assertIn("测试通知已发送", resumed_page.get_data(as_text=True))
+                self.assertEqual(retry_form["fields"]["request_id"], form["fields"]["request_id"])
+                html_send.assert_called_once()
+                resumed = self.post(client, dict(data, confirm_retry=True))
+
+            self.assertEqual(resumed.status_code, 200)
+            self.assertEqual(resumed.json["delivery_status"], "succeeded")
+            send.assert_called_once()
+            html_send.assert_called_once()
+            for request_id in (data["request_id"], form["fields"]["request_id"]):
+                receipt = base / "data/notify_test_requests" / (request_id + ".json")
+                self.assertEqual(json.loads(receipt.read_text())["state"], "completed")
 
     def test_concurrent_replay_does_not_hold_storage_or_history_during_network(self):
         with isolated_app() as (app, _):

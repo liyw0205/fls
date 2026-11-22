@@ -85,6 +85,61 @@ class NotificationDeliveryRecoveryTests(unittest.TestCase):
             self.assertEqual(history[0]["message"], "remote rejected")
             self.assertEqual(history[1]["content"], "output")
 
+    def test_send_by_ids_reports_deleted_and_disabled_task_channels(self):
+        with isolated_modules():
+            from fls_manager import notify, paths
+            from fls_manager.storage import write_json
+
+            write_json(
+                paths.CONFIG_FILE,
+                {
+                    "notify_items": [
+                        {"id": "enabled", "name": "Enabled", "channel": "bark", "enabled": True, "config": {}},
+                        {"id": "disabled", "name": "Disabled", "channel": "bark", "enabled": False, "config": {}},
+                    ],
+                    "notify_default_ids": ["deleted", "disabled"],
+                },
+            )
+            with patch.object(notify, "send_one", return_value=(True, "accepted")) as sender:
+                unavailable = notify.send_by_ids("Task", "Body", ["deleted", "disabled"])
+                self.assertEqual([row["status"] for row in unavailable], ["not_sent", "not_sent"])
+                self.assertIn("不存在", unavailable[0]["msg"])
+                self.assertIn("停用", unavailable[1]["msg"])
+                sender.assert_not_called()
+
+                mixed = notify.send_by_ids("Task", "Body", ["enabled", "deleted", "disabled"])
+                defaults = notify.send_by_ids("Task", "Body", ["__default__"])
+
+            self.assertEqual(sender.call_count, 1)
+            self.assertEqual([row["id"] for row in mixed], ["deleted", "disabled", "enabled"])
+            self.assertEqual([row["status"] for row in mixed], ["not_sent", "not_sent", "succeeded"])
+            self.assertEqual([row["status"] for row in defaults], ["not_sent", "not_sent"])
+
+    def test_send_by_ids_rejects_corrupt_config_without_rewriting_or_sending(self):
+        corrupt_configs = (
+            b'{"notify_items":[{"id":"n1","channel":"webhook","config":{"TOKEN":"private-secret"}}',
+            b"[]",
+            b'{"notify_items":[{"id":"n1","channel":"invalid","config":{}}]}',
+            b'{"notify_items":[{"id":"n1","channel":"bark"},{"id":"n1","channel":"bark"}]}'
+        )
+        for corrupt in corrupt_configs:
+            with self.subTest(corrupt=corrupt[:20]), isolated_modules():
+                from fls_manager import notify, paths
+
+                paths.CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+                paths.CONFIG_FILE.write_bytes(corrupt)
+
+                with patch.object(notify, "send_one") as sender:
+                    result = notify.send_by_ids("Task", "Body", ["n1"])
+
+                self.assertEqual(len(result), 1)
+                self.assertFalse(result[0]["ok"])
+                self.assertEqual(result[0]["status"], "not_sent")
+                self.assertIn("配置", result[0]["msg"])
+                self.assertNotIn("private-secret", result[0]["msg"])
+                sender.assert_not_called()
+                self.assertEqual(paths.CONFIG_FILE.read_bytes(), corrupt)
+
     def test_send_success_is_unknown_when_terminal_history_write_fails(self):
         with isolated_modules() as base_dir:
             from fls_manager import notify, paths
@@ -250,6 +305,60 @@ class NotificationDeliveryRecoveryTests(unittest.TestCase):
             self.assertEqual(recovered[0]["status"], "unknown")
             self.assertIn("无法确认", recovered[0]["message"])
             self.assertEqual(read_json(base_dir / "data" / "notify_history.json")[0]["status"], "unknown")
+
+    def test_new_delivery_retains_running_and_unknown_rows_when_pruning_history(self):
+        with isolated_modules() as base_dir:
+            from fls_manager import notify, paths
+            from fls_manager.storage import write_json
+
+            notify.NOTIFY_HISTORY_LIMIT = 4
+            rows = [
+                {"id": "done-new", "status": "succeeded"},
+                {"id": "done-middle", "status": "failed"},
+                {"id": "delivery-unknown", "status": "unknown"},
+                {"id": "delivery-running", "status": "running"},
+            ]
+            write_json(paths.NOTIFY_HISTORY_FILE, rows)
+            notify.NOTIFY_ACTIVE_DELIVERIES.add("delivery-running")
+
+            notify.create_notify_delivery(
+                {"id": "n1", "name": "One", "channel": "bark"}, "Title", "Body"
+            )
+
+            persisted = read_json(base_dir / "data" / "notify_history.json")
+            persisted_ids = {row["id"] for row in persisted}
+            self.assertEqual(len(persisted), notify.NOTIFY_HISTORY_LIMIT)
+            self.assertIn("delivery-unknown", persisted_ids)
+            self.assertIn("delivery-running", persisted_ids)
+            self.assertEqual(sum(row["status"] == "running" for row in persisted), 2)
+
+    def test_full_recoverable_history_rejects_delivery_before_external_send(self):
+        with isolated_modules() as base_dir:
+            from fls_manager import notify, paths
+            from fls_manager.storage import write_json
+
+            notify.NOTIFY_HISTORY_LIMIT = 2
+            write_json(
+                paths.CONFIG_FILE,
+                {"notify_items": [{"id": "n1", "name": "One", "channel": "bark",
+                                   "enabled": True, "config": {}}]},
+            )
+            history = [
+                {"id": "delivery-unknown", "status": "unknown"},
+                {"id": "delivery-running", "status": "running"},
+            ]
+            write_json(paths.NOTIFY_HISTORY_FILE, history)
+            notify.NOTIFY_ACTIVE_DELIVERIES.add("delivery-running")
+            original = paths.NOTIFY_HISTORY_FILE.read_bytes()
+
+            with patch.object(notify, "send_one", return_value=(True, "sent")) as sender:
+                result = notify.send_by_ids("Task", "Body", ["n1"])
+
+            self.assertEqual(len(result), 1)
+            self.assertFalse(result[0]["ok"])
+            self.assertIn("待核对通知记录达到上限", result[0]["msg"])
+            sender.assert_not_called()
+            self.assertEqual(paths.NOTIFY_HISTORY_FILE.read_bytes(), original)
 
     def test_concurrent_retry_allows_one_claim(self):
         with isolated_modules():

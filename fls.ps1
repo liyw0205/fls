@@ -394,21 +394,17 @@ function Is-RunningPid($PidValue) {
 
 function Find-FlsProcesses {
     $result = @()
+    $managerPath = [System.IO.Path]::GetFullPath($ManagerFile)
 
     try {
         $currentPid = $PID
 
         $procs = Get-CimInstance Win32_Process | Where-Object {
             $cmdLine = $_.CommandLine
-            $name = $_.Name
             $pidValue = $_.ProcessId
 
             if (-not $cmdLine) {
                 $cmdLine = ""
-            }
-
-            if (-not $name) {
-                $name = ""
             }
 
             if ($pidValue -eq $currentPid) {
@@ -423,15 +419,7 @@ function Find-FlsProcesses {
                 return $false
             }
 
-            if ($cmdLine -like "*fls-manager.py*") {
-                return $true
-            }
-
-            if ($cmdLine -like "*fls-manager*") {
-                return $true
-            }
-
-            if ($name -like "fls-manager*") {
+            if ($cmdLine.IndexOf($managerPath, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
                 return $true
             }
 
@@ -457,13 +445,6 @@ function Start-Fls([string[]]$ArgsList) {
     }
 
     Ensure-Repo
-
-    $oldPid = Get-PidFromFile
-    if (Is-RunningPid $oldPid) {
-        Say "FLS Manager 已在运行，PID: $oldPid"
-        Say "如需应用新的临时端口/Token，请执行：.\fls.ps1 restart -p 端口 -t Token"
-        return
-    }
 
     $found = @(Find-FlsProcesses)
     if ($found.Count -gt 0) {

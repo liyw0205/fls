@@ -14,6 +14,7 @@ from ...online_scripts.source import (
     load_online_script_cache,
     list_task_link_requests,
     persist_task_link_request,
+    _task_link_request_snapshot,
 )
 from ...online_scripts.constants import (
     ONLINE_TASK_LINK_ACTIVE,
@@ -95,12 +96,29 @@ def _persist_failure(record, message, status_code, *, retry=True, state="failed"
     try:
         persist_task_link_request(record)
     except Exception as exc:
+        try:
+            actual = get_task_link_request(record["request_id"])
+        except Exception as read_exc:
+            receipt_error = f"{exc}；回执复核失败：{read_exc}"
+        else:
+            if _task_link_receipt_matches(record, actual):
+                return {
+                    "ok": False,
+                    "request_id": record["request_id"],
+                    "msg": message,
+                    "retry_allowed": retry,
+                    "resolved": True,
+                }, status_code
+            receipt_error = f"{exc}；磁盘回执与本次失败结果不一致"
         return {
             "ok": False,
             "request_id": record["request_id"],
-            "msg": f"{message}；同步结果回执无法保存，请查询原请求后再重试：{exc}",
+            "msg": f"{message}；同步结果回执无法确认：{receipt_error}，请查询原请求后再决定是否重试。",
             "retry_allowed": False,
             "resolved": False,
+            "receipt_confirmation_required": True,
+            "state_url": f"/api/online-scripts/task-link-status/{record['request_id']}",
+            "status_url": f"/online-scripts/task-link-status/{record['request_id']}",
         }, 503
     return {
         "ok": False,
@@ -109,6 +127,46 @@ def _persist_failure(record, message, status_code, *, retry=True, state="failed"
         "retry_allowed": retry,
         "resolved": True,
     }, status_code
+
+
+def _task_link_receipt_matches(expected, actual):
+    if not isinstance(actual, dict):
+        return False
+    try:
+        return _task_link_request_snapshot(expected) == _task_link_request_snapshot(actual)
+    except Exception:
+        return False
+
+
+def _refresh_task_link_recovery_matches(refresh_request_id, script_id, proxy_id, added, total, actual):
+    if not isinstance(actual, dict):
+        return False
+    return (
+        actual.get("request_id") == online_refresh_task_link_request_id(refresh_request_id, script_id)
+        and actual.get("state") == "completed"
+        and actual.get("proxy_id", "") == str(proxy_id or "")
+        and type(actual.get("added")) is int
+        and actual.get("added") == added
+        and type(actual.get("total")) is int
+        and actual.get("total") == total
+    )
+
+
+def _persist_refresh_task_link_recovery(refresh_request_id, script_id, proxy_id, added, total):
+    try:
+        persist_online_refresh_task_link_recovery(
+            refresh_request_id, script_id, proxy_id=proxy_id, added=added, total=total,
+        )
+    except Exception as exc:
+        try:
+            actual = get_online_refresh_task_link_recovery(refresh_request_id, script_id)
+        except Exception as read_exc:
+            return False, f"{exc}；恢复回执复核失败：{read_exc}"
+        if not _refresh_task_link_recovery_matches(
+            refresh_request_id, script_id, proxy_id, added, total, actual,
+        ):
+            return False, f"{exc}；磁盘恢复回执与本次结果不一致"
+    return True, ""
 
 
 def _refresh_task_link_recovery_result(request_id, script_id, origin_refresh_request_id, recovery):
@@ -320,6 +378,8 @@ def _submit_task_link(script_id, proxy_id, raw_request_id, origin_refresh_reques
         "error": "",
         "updated_at": now_str(),
         "expected_tasks_fingerprint": expected_tasks_fingerprint,
+        "publication_base_fingerprint": "",
+        "publication_target_fingerprint": "",
         "published_tasks_fingerprint": "",
         "confirmation": "",
         "confirmation_fingerprint": "",
@@ -363,8 +423,27 @@ def _submit_task_link(script_id, proxy_id, raw_request_id, origin_refresh_reques
                 422,
             )
 
+        def persist_publication_intent(base_fingerprint, target_fingerprint, added, total):
+            _record_update(record, "running", added=added, total=total)
+            record["publication_base_fingerprint"] = base_fingerprint
+            record["publication_target_fingerprint"] = target_fingerprint
+            expected_receipt = _task_link_request_snapshot(record)
+            try:
+                persist_task_link_request(record)
+            except Exception as exc:
+                try:
+                    actual = get_task_link_request(request_id)
+                except Exception as read_exc:
+                    raise RuntimeError(
+                        f"任务发布意图回执无法确认：{exc}；回执复核失败：{read_exc}"
+                    ) from exc
+                if not _task_link_receipt_matches(expected_receipt, actual):
+                    raise RuntimeError(f"任务发布意图回执无法确认：{exc}；磁盘状态不一致") from exc
+
         try:
-            added, total = merge_task_link_tasks(item, linked_tasks)
+            added, total = merge_task_link_tasks(
+                item, linked_tasks, before_publish=persist_publication_intent,
+            )
         except OnlineScriptCacheConflict as exc:
             return _persist_failure(record, str(exc), 409, retry=False)
         except Exception as exc:
@@ -381,14 +460,12 @@ def _submit_task_link(script_id, proxy_id, raw_request_id, origin_refresh_reques
         _record_update(record, "completed", added=added, total=total)
         record["published_tasks_fingerprint"] = published_tasks_fingerprint
         if origin_refresh_request_id:
-            try:
-                persist_online_refresh_task_link_recovery(
-                    origin_refresh_request_id, script_id, proxy_id=proxy_id,
-                    added=added, total=total,
-                )
-            except Exception as exc:
+            recovery_confirmed, recovery_error = _persist_refresh_task_link_recovery(
+                origin_refresh_request_id, script_id, proxy_id, added, total,
+            )
+            if not recovery_confirmed:
                 _record_update(
-                    record, "unknown", error=f"任务已合并但刷新失败项恢复回执无法保存：{exc}",
+                    record, "unknown", error=f"任务已合并但刷新失败项恢复回执无法确认：{recovery_error}",
                     added=added, total=total,
                 )
                 record["published_tasks_fingerprint"] = published_tasks_fingerprint
@@ -398,7 +475,10 @@ def _submit_task_link(script_id, proxy_id, raw_request_id, origin_refresh_reques
                     pass
                 return {
                     "ok": False, "request_id": request_id,
-                    "msg": f"任务已可能合并，但恢复结果无法持久确认：{exc}；请查询原同步请求。",
+                    "state": "unknown", "receipt_confirmation_required": True,
+                    "state_url": f"/api/online-scripts/task-link-status/{request_id}",
+                    "status_url": f"/online-scripts/task-link-status/{request_id}",
+                    "msg": f"任务已可能合并，但恢复结果无法持久确认：{recovery_error}；请查询原同步请求。",
                     "retry_allowed": False, "resolved": False,
                 }, 503
         try:
@@ -547,7 +627,10 @@ def _confirm_task_link_locked(request_id):
 
     published = str(record.get("published_tasks_fingerprint") or "")
     expected = str(record.get("expected_tasks_fingerprint") or "")
-    if published and current_fingerprint == published:
+    publication_base = str(record.get("publication_base_fingerprint") or "")
+    publication_target = str(record.get("publication_target_fingerprint") or "")
+    if ((published and current_fingerprint == published)
+            or (publication_target and current_fingerprint == publication_target)):
         _record_update(
             record, "completed", added=record.get("added", 0), total=record.get("total", 0),
         )
@@ -555,21 +638,23 @@ def _confirm_task_link_locked(request_id):
         record["confirmation_fingerprint"] = current_fingerprint
         record["error"] = ""
         if record.get("origin_refresh_request_id"):
-            try:
-                persist_online_refresh_task_link_recovery(
-                    record["origin_refresh_request_id"], record["script_id"],
-                    proxy_id=record.get("proxy_id", ""), added=record.get("added", 0),
-                    total=record.get("total", 0),
-                )
-            except Exception as exc:
+            recovery_confirmed, recovery_error = _persist_refresh_task_link_recovery(
+                record["origin_refresh_request_id"], record["script_id"],
+                record.get("proxy_id", ""), record.get("added", 0), record.get("total", 0),
+            )
+            if not recovery_confirmed:
                 return {
                     "ok": False, "request_id": request_id,
-                    "msg": f"任务已确认合并，但刷新失败项恢复回执无法保存：{exc}；请查询原同步请求。",
+                    "state": "unknown", "receipt_confirmation_required": True,
+                    "state_url": f"/api/online-scripts/task-link-status/{request_id}",
+                    "status_url": f"/online-scripts/task-link-status/{request_id}",
+                    "msg": f"任务已确认合并，但刷新失败项恢复回执无法确认：{recovery_error}；请查询原同步请求。",
                     "retry_allowed": False,
                 }, 503
         msg = "已确认外部任务源已合并，未重复抓取或追加任务"
         retry_allowed = False
-    elif not published and expected and current_fingerprint == expected:
+    elif ((publication_base and current_fingerprint == publication_base)
+          or (not publication_base and not published and expected and current_fingerprint == expected)):
         _record_update(record, "failed")
         record["confirmation"] = "not_merged"
         record["confirmation_fingerprint"] = current_fingerprint
@@ -582,13 +667,30 @@ def _confirm_task_link_locked(request_id):
             "msg": "当前任务指纹与预期结果不一致，无法安全确认；未修改任务。",
         }, 409
 
+    expected_receipt = _task_link_request_snapshot(record)
+    receipt_recovered = False
     try:
         persist_task_link_request(record)
     except Exception as exc:
-        return {
-            "ok": False, "request_id": request_id,
-            "msg": f"确认结果无法保存：{exc}；未改变任务内容。",
-        }, 503
+        try:
+            actual = get_task_link_request(request_id)
+        except Exception as read_exc:
+            return {
+                "ok": False, "request_id": request_id,
+                "msg": f"确认回执无法确认：{exc}；回执复核失败：{read_exc}。请查询原同步请求。",
+                "receipt_confirmation_required": True,
+                "state_url": f"/api/online-scripts/task-link-status/{request_id}",
+                "status_url": f"/online-scripts/task-link-status/{request_id}",
+            }, 503
+        receipt_recovered = _task_link_receipt_matches(expected_receipt, actual)
+        if not receipt_recovered:
+            return {
+                "ok": False, "request_id": request_id,
+                "msg": f"确认回执无法确认：{exc}；磁盘状态与本次确认结果不一致，请查询原同步请求。",
+                "receipt_confirmation_required": True,
+                "state_url": f"/api/online-scripts/task-link-status/{request_id}",
+                "status_url": f"/online-scripts/task-link-status/{request_id}",
+            }, 503
     return {
         "ok": True,
         "request_id": request_id,
@@ -596,6 +698,8 @@ def _confirm_task_link_locked(request_id):
         "confirmation": record["confirmation"],
         "confirmation_fingerprint": record["confirmation_fingerprint"],
         "retry_allowed": retry_allowed,
+        "receipt_confirmed": True,
+        "receipt_recovered": receipt_recovered,
         "msg": msg,
     }, 200
 

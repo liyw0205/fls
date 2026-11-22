@@ -616,6 +616,104 @@ class OnlineTaskLinkTests(unittest.TestCase):
                 fetch.assert_called_once()
             self.assertFalse(source.get_task_link_request(request_id)["active"])
 
+    def test_failed_receipt_published_then_error_preserves_upstream_status_and_same_id_retry(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import source
+            from fls_manager.routes.online_scripts import task_link
+
+            source.save_online_script_cache([self.item()])
+            request_id = "7" * 32
+            real_persist = source.persist_task_link_request
+
+            def publish_failure_then_raise(record):
+                real_persist(record)
+                if record["state"] == "failed":
+                    raise OSError("failed receipt acknowledgement lost after replace")
+
+            client = app.test_client()
+            with patch.object(task_link, "persist_task_link_request", side_effect=publish_failure_then_raise), patch.object(
+                task_link, "fetch_task_link_tasks", side_effect=[
+                    RuntimeError("upstream timeout"), [self.task("recovered")],
+                ],
+            ) as fetch:
+                failed = client.post(
+                    "/api/online-scripts/task-link/demo",
+                    json={"request_id": request_id},
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(failed.status_code, 502)
+                self.assertTrue(failed.json["resolved"])
+                self.assertTrue(failed.json["retry_allowed"])
+                self.assertIn("upstream timeout", failed.json["msg"])
+                status = client.get(
+                    "/api/online-scripts/task-link-status/" + request_id,
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(status.json["state"], "failed")
+                self.assertTrue(status.json["retry_allowed"])
+                retried = client.post(
+                    "/api/online-scripts/task-link/demo",
+                    json={"request_id": request_id},
+                    headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(retried.status_code, 200)
+            self.assertEqual(fetch.call_count, 2)
+            self.assertEqual(source.get_task_link_request(request_id)["state"], "completed")
+            self.assertEqual([task["name"] for task in source.load_online_script_cache()[0]["task_cron"]], ["recovered"])
+
+    def test_failed_receipt_write_rejection_requires_unknown_confirmation_before_same_id_retry(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import source
+            from fls_manager.routes.online_scripts import task_link
+
+            source.save_online_script_cache([self.item()])
+            request_id = "8" * 32
+            real_persist = source.persist_task_link_request
+            failure_pending = {"value": True}
+
+            def reject_failure_receipt(record):
+                if record["state"] == "failed" and failure_pending["value"]:
+                    failure_pending["value"] = False
+                    raise OSError("failed receipt storage temporarily read-only")
+                return real_persist(record)
+
+            client = app.test_client()
+            with patch.object(task_link, "persist_task_link_request", side_effect=reject_failure_receipt), patch.object(
+                task_link, "fetch_task_link_tasks", side_effect=[
+                    RuntimeError("upstream timeout"), [self.task("recovered")],
+                ],
+            ) as fetch:
+                failed = client.post(
+                    "/api/online-scripts/task-link/demo",
+                    json={"request_id": request_id},
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(failed.status_code, 503)
+                self.assertFalse(failed.json["retry_allowed"])
+                self.assertTrue(failed.json["receipt_confirmation_required"])
+                self.assertEqual(failed.json["status_url"], "/online-scripts/task-link-status/" + request_id)
+                status = client.get(
+                    "/api/online-scripts/task-link-status/" + request_id,
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(status.json["state"], "unknown")
+                self.assertFalse(status.json["retry_allowed"])
+                confirmed = client.post(
+                    "/api/online-scripts/task-link-confirm/" + request_id,
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(confirmed.status_code, 200)
+                self.assertEqual(confirmed.json["confirmation"], "not_merged")
+                retry = client.post(
+                    "/api/online-scripts/task-link/demo",
+                    json={"request_id": request_id},
+                    headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(retry.status_code, 200)
+            self.assertEqual(fetch.call_count, 2)
+            self.assertEqual(source.get_task_link_request(request_id)["state"], "completed")
+            self.assertEqual([task["name"] for task in source.load_online_script_cache()[0]["task_cron"]], ["recovered"])
+
     def test_failed_receipt_still_owned_by_finishing_request_cannot_be_reclaimed(self):
         with isolated_app() as (app, _base_dir):
             from fls_manager.online_scripts import source
@@ -1015,6 +1113,113 @@ class OnlineTaskLinkTests(unittest.TestCase):
             self.assertIn("action=\"/online-scripts/task-link-confirm/" + request_id + "\"", html)
             self.assertNotIn("继续原同步请求", html)
 
+    def test_process_exit_after_task_cache_publish_is_confirmed_without_refetch(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import source
+
+            source.save_online_script_cache([self.item()])
+            request_id = "d" * 32
+            real_merge = source.merge_task_link_tasks
+            client = app.test_client()
+
+            def merge_then_exit(item, linked_tasks, **kwargs):
+                real_merge(item, linked_tasks, **kwargs)
+                raise SystemExit("simulated process exit after cache publication")
+
+            with patch("fls_manager.routes.online_scripts.task_link.fetch_task_link_tasks", return_value=[
+                self.task("new"),
+            ]) as fetch, patch(
+                "fls_manager.routes.online_scripts.task_link.merge_task_link_tasks",
+                side_effect=merge_then_exit,
+            ):
+                with self.assertRaisesRegex(SystemExit, "simulated process exit"):
+                    client.post(
+                        "/api/online-scripts/task-link/demo",
+                        json={"request_id": request_id},
+                        headers={"X-Token": TOKEN},
+                    )
+
+                status = client.get(
+                    "/api/online-scripts/task-link-status/" + request_id,
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(status.status_code, 200)
+                self.assertEqual(status.json["state"], "unknown")
+                confirmed = client.post(
+                    "/api/online-scripts/task-link-confirm/" + request_id,
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(confirmed.status_code, 200)
+            self.assertEqual(confirmed.json["confirmation"], "merged")
+            self.assertEqual(confirmed.json["state"], "completed")
+            fetch.assert_called_once()
+            self.assertEqual([task["name"] for task in source.load_online_script_cache()[0]["task_cron"]], ["new"])
+
+    def test_publish_intent_distinguishes_prepublication_failure_and_allows_same_id_retry(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import source
+
+            source.save_online_script_cache([self.item()])
+            request_id = "e" * 32
+            client = app.test_client()
+            real_save = source.save_online_script_cache
+            fetch_count = 0
+            fail_publish = True
+
+            def fetch(*_args, **_kwargs):
+                nonlocal fetch_count
+                fetch_count += 1
+                if fetch_count == 1:
+                    real_save([self.item(tasks=[self.task("manual")])])
+                return [self.task("remote")]
+
+            def save_once(items):
+                nonlocal fail_publish
+                if fail_publish:
+                    fail_publish = False
+                    raise OSError("cache replacement rejected before publication")
+                return real_save(items)
+
+            with patch("fls_manager.routes.online_scripts.task_link.fetch_task_link_tasks", side_effect=fetch) as fetch_mock, patch(
+                "fls_manager.online_scripts.source.save_online_script_cache", side_effect=save_once,
+            ):
+                first = client.post(
+                    "/api/online-scripts/task-link/demo",
+                    json={"request_id": request_id},
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(first.status_code, 503)
+                unknown = client.get(
+                    "/api/online-scripts/task-link-status/" + request_id,
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(unknown.json["state"], "unknown")
+                self.assertTrue(unknown.json["publication_base_fingerprint"])
+                self.assertTrue(unknown.json["publication_target_fingerprint"])
+                self.assertFalse(unknown.json["published_tasks_fingerprint"])
+                confirmed = client.post(
+                    "/api/online-scripts/task-link-confirm/" + request_id,
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(confirmed.status_code, 200)
+                self.assertEqual(confirmed.json["confirmation"], "not_merged")
+                self.assertTrue(confirmed.json["retry_allowed"])
+                retried = client.post(
+                    "/api/online-scripts/task-link/demo",
+                    json={"request_id": request_id},
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(retried.status_code, 200)
+            self.assertEqual(retried.json["added"], 1)
+            self.assertEqual(fetch_mock.call_count, 2)
+            self.assertEqual(fetch_count, 2)
+            self.assertEqual(
+                [task["name"] for task in source.load_online_script_cache()[0]["task_cron"]],
+                ["manual", "remote"],
+            )
+
     def _unknown_record(self, source, request_id, item, *, published="", state="unknown"):
         normalized = source.normalize_online_scripts([item])[0]
         return {
@@ -1209,8 +1414,15 @@ class OnlineTaskLinkTests(unittest.TestCase):
                         task_link, "fetch_task_link_tasks",
                     ) as fetch, patch.object(task_link, "merge_task_link_tasks") as merge:
                         failed = client.post("/api/online-scripts/task-link-confirm/" + request_id, headers={"X-Token": TOKEN})
-                        self.assertEqual(failed.status_code, 503)
-                        self.assertIn("confirmation acknowledgement unavailable", failed.json["msg"])
+                        self.assertEqual(failed.status_code, 200 if after_write else 503)
+                        if after_write:
+                            self.assertTrue(failed.json["receipt_confirmed"])
+                            self.assertTrue(failed.json["receipt_recovered"])
+                            self.assertEqual(failed.json["confirmation"], "merged" if merged else "not_merged")
+                        else:
+                            self.assertIn("confirmation acknowledgement unavailable", failed.json["msg"])
+                            self.assertTrue(failed.json["receipt_confirmation_required"])
+                            self.assertEqual(failed.json["state_url"], "/api/online-scripts/task-link-status/" + request_id)
                         actual = client.get("/api/online-scripts/task-link-status/" + request_id, headers={"X-Token": TOKEN})
                         expected_state = ("completed" if merged else "failed") if after_write else "unknown"
                         self.assertEqual(actual.json["state"], expected_state)
@@ -1223,6 +1435,108 @@ class OnlineTaskLinkTests(unittest.TestCase):
                     self.assertEqual(recovered.json["confirmation"], "merged" if merged else "not_merged")
                     self.assertEqual(recovered.json.get("replayed", False), after_write)
                     self.assertEqual(source.ONLINE_SCRIPT_CACHE_FILE.read_bytes(), cache_before)
+
+    def test_confirmation_post_write_conflict_or_corrupt_receipt_stays_queryable_without_merge(self):
+        for failure in ("conflict", "corrupt"):
+            with self.subTest(failure=failure), isolated_app() as (app, _base_dir):
+                from fls_manager.online_scripts import source
+                from fls_manager.routes.online_scripts import task_link
+
+                item = self.item(tasks=[self.task("published")])
+                source.save_online_script_cache([item])
+                request_id = "7" * 32
+                source.persist_task_link_request(self._unknown_record(
+                    source, request_id, item,
+                    published=source.online_script_task_fingerprint(item),
+                ))
+                real = source.persist_task_link_request
+
+                def conflicting_persist(record):
+                    if failure == "conflict":
+                        actual = dict(record, confirmation_fingerprint="f" * 64)
+                        real(actual)
+                    else:
+                        real(record)
+                        source.ONLINE_TASK_LINK_REQUESTS_FILE.write_text("{broken", encoding="utf-8")
+                    raise OSError("confirmation receipt publication interrupted")
+
+                client = app.test_client()
+                with patch.object(task_link, "persist_task_link_request", side_effect=conflicting_persist), patch.object(
+                    task_link, "fetch_task_link_tasks",
+                ) as fetch, patch.object(task_link, "merge_task_link_tasks") as merge:
+                    response = client.post(
+                        "/api/online-scripts/task-link-confirm/" + request_id,
+                        headers={"X-Token": TOKEN},
+                    )
+                self.assertEqual(response.status_code, 503)
+                self.assertFalse(response.json["ok"])
+                self.assertTrue(response.json["receipt_confirmation_required"])
+                self.assertEqual(response.json["state_url"], "/api/online-scripts/task-link-status/" + request_id)
+                self.assertIn("confirmation receipt publication interrupted", response.json["msg"])
+                fetch.assert_not_called()
+                merge.assert_not_called()
+                if failure == "conflict":
+                    status = client.get(response.json["state_url"], headers={"X-Token": TOKEN})
+                    self.assertEqual(status.status_code, 200)
+                    self.assertEqual(status.json["confirmation_fingerprint"], "f" * 64)
+                else:
+                    self.assertEqual(source.ONLINE_TASK_LINK_REQUESTS_FILE.read_text(encoding="utf-8"), "{broken")
+                    status = client.get(response.json["state_url"], headers={"X-Token": TOKEN})
+                    self.assertEqual(status.status_code, 500)
+
+    def test_confirmation_recovers_published_refresh_recovery_receipt_after_exception(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import constants, source
+            from fls_manager.routes.online_scripts import task_link
+
+            refresh_request_id = "6" * 32
+            item = self.item(tasks=[self.task("published")])
+            source.save_online_script_cache([item])
+            constants.update_online_refresh_state(
+                id="5" * 32, request_id=refresh_request_id, proxy_id="", running=False,
+                status="部分完成", message="1 个任务源失败", error="", cache_published=True,
+                task_link_failures=[{
+                    "script_id": "demo", "name": "Demo", "task_link": item["task_link"],
+                    "error": "upstream timeout", "proxy_id": "",
+                }], updated_at="2026-11-21 12:30:00", log_file="",
+            )
+            request_id = constants.online_refresh_task_link_request_id(refresh_request_id, "demo")
+            record = self._unknown_record(
+                source, request_id, item,
+                published=source.online_script_task_fingerprint(item),
+            )
+            record["origin_refresh_request_id"] = refresh_request_id
+            source.persist_task_link_request(record)
+            real_persist = constants.persist_online_refresh_task_link_recovery
+
+            def publish_then_raise(*args, **kwargs):
+                receipt = real_persist(*args, **kwargs)
+                raise OSError("refresh recovery receipt acknowledgement lost after replace")
+
+            client = app.test_client()
+            with patch.object(task_link, "fetch_task_link_tasks") as fetch, patch.object(
+                task_link, "merge_task_link_tasks",
+            ) as merge, patch.object(
+                task_link, "persist_online_refresh_task_link_recovery", side_effect=publish_then_raise,
+            ):
+                response = client.post(
+                    "/api/online-scripts/task-link-confirm/" + request_id,
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json["confirmation"], "merged")
+                repeated = client.post(
+                    "/api/online-scripts/task-link-confirm/" + request_id,
+                    headers={"X-Token": TOKEN},
+                )
+            self.assertTrue(repeated.json["replayed"])
+            fetch.assert_not_called()
+            merge.assert_not_called()
+            self.assertEqual(source.get_task_link_request(request_id)["state"], "completed")
+            self.assertEqual(
+                constants.get_online_refresh_task_link_recovery(refresh_request_id, "demo")["request_id"],
+                request_id,
+            )
 
     def test_confirmation_form_session_and_concurrent_replay_preserve_permission_boundaries(self):
         with isolated_app() as (app, _base_dir):
@@ -1238,7 +1552,14 @@ class OnlineTaskLinkTests(unittest.TestCase):
             with client.session_transaction() as session:
                 session.update(token=TOKEN, token_expire_at=int(time.time()) + 3600,
                                security_verified=True, csrf_token="confirm-csrf")
-            with patch.object(task_link, "persist_task_link_request", wraps=source.persist_task_link_request) as persist, patch.object(
+            real_persist = source.persist_task_link_request
+
+            def persist_then_raise(record):
+                real_persist(record)
+                if record.get("confirmation"):
+                    raise OSError("confirmation form acknowledgement lost after replace")
+
+            with patch.object(task_link, "persist_task_link_request", side_effect=persist_then_raise) as persist, patch.object(
                 task_link, "fetch_task_link_tasks",
             ) as fetch:
                 invalid_api = client.post(
@@ -1267,6 +1588,8 @@ class OnlineTaskLinkTests(unittest.TestCase):
                 self.assertTrue(form.location.endswith("/online-scripts/task-link-status/" + request_id))
                 persist.assert_called_once()
                 fetch.assert_not_called()
+            confirmed = source.get_task_link_request(request_id)
+            self.assertEqual(confirmed["confirmation"], "not_merged")
 
             barrier = threading.Barrier(2)
 
@@ -1282,6 +1605,35 @@ class OnlineTaskLinkTests(unittest.TestCase):
             self.assertTrue(all(response.json["replayed"] for response in responses))
             persist.assert_not_called()
             self.assertEqual(source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes(), confirmed_bytes)
+
+    def test_concurrent_first_confirmations_publish_once_and_replay_same_result(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts import source
+            from fls_manager.routes.online_scripts import task_link
+
+            item = self.item(tasks=[self.task("published")])
+            source.save_online_script_cache([item])
+            request_id = "8" * 32
+            source.persist_task_link_request(self._unknown_record(
+                source, request_id, item,
+                published=source.online_script_task_fingerprint(item),
+            ))
+            barrier = threading.Barrier(2)
+
+            def confirm():
+                barrier.wait(3)
+                return app.test_client().post(
+                    "/api/online-scripts/task-link-confirm/" + request_id,
+                    headers={"X-Token": TOKEN},
+                )
+
+            with patch.object(task_link, "persist_task_link_request", wraps=source.persist_task_link_request) as persist, ThreadPoolExecutor(max_workers=2) as pool:
+                responses = [future.result(timeout=5) for future in (pool.submit(confirm), pool.submit(confirm))]
+            self.assertEqual([response.status_code for response in responses], [200, 200])
+            self.assertEqual(sorted(response.json.get("replayed", False) for response in responses), [False, True])
+            self.assertEqual([response.json["confirmation"] for response in responses], ["merged", "merged"])
+            persist.assert_called_once()
+            self.assertEqual(source.get_task_link_request(request_id)["state"], "completed")
 
     def test_retry_claim_rechecks_not_merged_fingerprint_after_cache_read(self):
         with isolated_app() as (app, _base_dir):

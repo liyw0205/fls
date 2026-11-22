@@ -264,16 +264,30 @@ def request_stop_online_install(install_id):
         proc = info.get("process")
         log_file = info.get("log_file")
 
+    log_error = ""
     if log_file:
-        append_log(log_file, "")
-        append_log(log_file, f"===== 用户请求停止安装: {now_str()} =====")
+        try:
+            append_log(log_file, "")
+            append_log(log_file, f"===== 用户请求停止安装: {now_str()} =====")
+        except Exception as e:
+            detail = str(e).replace("\x00", "")[:500]
+            log_error = f"停止请求日志写入失败：{detail}"
+            with ONLINE_INSTALL_LOCK:
+                info["stop_warning"] = log_error
+                info["updated_at"] = now_str()
+                try:
+                    persist_online_install(info)
+                except Exception as persist_error:
+                    receipt_detail = str(persist_error).replace("\x00", "")[:300]
+                    log_error += f"；停止诊断回执保存失败：{receipt_detail}"
+                    info["stop_warning"] = log_error[:1000]
 
     if proc:
         ok, detail = _interrupt_install_command(install_id, proc, "stop", retry=True)
         if not ok and proc.poll() is None:
-            return False, f"停止失败：{detail}"
+            return False, "；".join(filter(None, (f"停止失败：{detail}", log_error)))
 
-    return True, "已请求停止安装"
+    return True, "；".join(filter(None, ("已请求停止安装", log_error)))
 
 
 def online_script_target(item):
@@ -640,7 +654,8 @@ def install_worker(
                         "安装副作用已执行，但终态尚未可靠保存，请查看日志后重试",
                     ))),
                 )
-                _persist_install_state(info)
+                if not _persist_install_state(info):
+                    info["recovery_persistence_error"] = info.get("persistence_error") or "安装恢复回执未能核对"
 
         append_log(log_file, "")
         result = (
@@ -688,7 +703,8 @@ def install_worker(
                         "安装结果已执行，但终态尚未可靠保存，请查看日志后重试",
                     ))),
                 )
-                _persist_install_state(info)
+                if not _persist_install_state(info):
+                    info["recovery_persistence_error"] = info.get("persistence_error") or "安装恢复回执未能核对"
 
         try:
             append_log(log_file, f"===== {info['status']}: {now_str()} =====")
