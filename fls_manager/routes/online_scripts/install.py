@@ -289,7 +289,46 @@ def _start_install_job(
             try:
                 persist_online_install(info)
             except Exception as storage_error:
-                info["error"] += f"；保存安装状态失败：{storage_error}"
+                try:
+                    persisted_failure = _load_persisted_online_install(install_id)
+                    failure_receipt_published = (
+                        bool(persisted_failure)
+                        and _install_snapshot(persisted_failure) == _install_snapshot(info)
+                    )
+                except Exception:
+                    failure_receipt_published = False
+                if not failure_receipt_published:
+                    info.update(
+                        phase="startup_receipt_failed",
+                        error=(
+                            f"启动安装线程失败：{e}；保存启动失败状态失败：{storage_error}。"
+                            "安装进程未启动，修复存储后可沿原请求重试。"
+                        ),
+                        updated_at=now_str(),
+                    )
+                    try:
+                        persist_online_install(info)
+                    except Exception as receipt_error:
+                        try:
+                            persisted_failure = _load_persisted_online_install(install_id)
+                            failure_receipt_published = (
+                                bool(persisted_failure)
+                                and _install_snapshot(persisted_failure) == _install_snapshot(info)
+                            )
+                        except Exception:
+                            failure_receipt_published = False
+                        if not failure_receipt_published:
+                            info["_startup_receipt_confirmed"] = False
+                            info["error"] += f"；启动失败回执未能确认保存：{receipt_error}"
+            if info.get("phase") == "startup_receipt_failed":
+                return _install_start_error(
+                    install_id,
+                    info["error"],
+                    recovery_action=url_for(
+                        "online_scripts.online_scripts_install_start_retry", install_id=install_id,
+                    ),
+                    log_available=info.get("_startup_receipt_confirmed") is not False,
+                )
         return _install_start_error(install_id, info["error"])
 
     return redirect(
