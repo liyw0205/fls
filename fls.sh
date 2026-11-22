@@ -528,7 +528,7 @@ find_running_pids() {
       process_base="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | sed -n 's/^FLS_BASE_DIR=//p' | head -n 1)"
     fi
     process_cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null || true)"
-    process_args="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+    process_args="$(ps -ww -p "$pid" -o args= 2>/dev/null || true)"
 
     if [ "$process_base" = "$BASE_DIR" ] || [ "$process_cwd" = "$BASE_DIR" ]; then
       printf '%s\n' "$pid"
