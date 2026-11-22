@@ -111,6 +111,16 @@ def main():
             session["token_expire_at"] = 1
             return jsonify(ok=True)
 
+        @app.route("/api/fixture/clear-online-script-cache", methods=["POST"])
+        def clear_online_script_cache():
+            source.save_online_script_cache([])
+            return jsonify(ok=True)
+
+        @app.route("/api/fixture/restore-online-script-cache", methods=["POST"])
+        def restore_online_script_cache():
+            source.save_online_script_cache([item])
+            return jsonify(ok=True)
+
         server = make_server("127.0.0.1", 0, app, threaded=True)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         try:
@@ -228,6 +238,8 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    });
    const nextRequestId=await page.locator('#onlineInstallSelectForm [name="request_id"]').inputValue();
    assert.notEqual(nextRequestId,requestId);
+   const cleared=await page.request.post(base+'/api/fixture/clear-online-script-cache',{headers});
+   assert.equal(cleared.status(),200);
    const csrf=await page.evaluate(()=>flsGetCsrfToken());
    const replay=await page.request.post(acceptedPost,{headers:{...headers,'X-CSRF-Token':csrf},data:{
      request_id:requestId,proxy_id:'',import_task:'1',select_mode:'all',excluded_task_indexes:'2',
@@ -238,6 +250,8 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    const restoredState=await restored.json();
    assert.equal(restoredState.job.status,'已完成');
    assert.deepEqual(restoredState.starts,[...initialState.starts,requestId]);
+   const restoredCache=await page.request.post(base+'/api/fixture/restore-online-script-cache',{headers});
+   assert.equal(restoredCache.status(),200);
    assert.deepEqual(errors,[]);
    await page.screenshot({path:'/tmp/fls-install-rejection-'+viewport.width+'.png'});
    console.log('pre-acceptance rejection and accepted HTTP 502 recovery passed '+viewport.width);
