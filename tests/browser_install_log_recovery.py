@@ -91,15 +91,17 @@ def main():
         persist_dependency_job = deps_routes.persist_install_job
 
         def persist_online_install_with_startup_fault(info):
-            if (
-                startup_receipt_fault["remaining"]
-                and info.get("phase") == "prepared"
-                and info.get("id") == startup_receipt_fault.get("install_id")
-            ):
-                startup_receipt_fault["remaining"] -= 1
-                if startup_receipt_fault["mode"] == "after":
-                    persist_online_install(info)
-                raise PermissionError("browser install startup receipt unavailable")
+            if startup_receipt_fault["enabled"] and info.get("id") == startup_receipt_fault.get("install_id"):
+                if startup_receipt_fault["remaining"] and info.get("phase") == "prepared":
+                    startup_receipt_fault["remaining"] -= 1
+                    if startup_receipt_fault["mode"] == "after":
+                        persist_online_install(info)
+                    raise PermissionError("browser install startup receipt unavailable")
+                if (
+                    startup_receipt_fault["mode"] == "unpersisted"
+                    and info.get("phase") == "startup_receipt_failed"
+                ):
+                    raise PermissionError("browser startup failure receipt unavailable")
             return persist_online_install(info)
 
         def start_online_install_thread(*args, **kwargs):
@@ -395,6 +397,11 @@ def main():
                         install_id=str(data.get("install_id") or ""),
                         starts=[],
                     )
+                if data.get("restart_startup_install"):
+                    ONLINE_INSTALL_RUNNING.clear()
+                    ONLINE_INSTALL_RETRYING.clear()
+                if data.get("repair_startup_receipt_storage"):
+                    startup_receipt_fault.update(remaining=0, mode="repaired", enabled=True)
                 if data.get("clear_malformed_task_recovery_memory"):
                     install_id = ("k" if int(data["width"]) == 390 else "l") * 32
                     ONLINE_INSTALL_RUNNING.pop(install_id, None)
@@ -639,6 +646,46 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
      await page.waitForLoadState('domcontentloaded');
     }
    };
+   if(process.env.FLS_INSTALL_LOG_ONLY==='startup-receipt-unpersisted'){
+    await page.goto(base+'/login');await login();
+    const installId=(viewport.width===390?'c':'d').repeat(32);
+    const scriptId='browser-startup-recovery';
+    await fixture({startup_receipt_mode:'unpersisted',install_id:installId});
+    const body={request_id:installId,force:false,import_task:true,enable_task:false,
+     select_mode:'all',excluded_task_indexes:''};
+    let submitPayload=null,installPosts=0;
+    await page.route('**/api/online-scripts/install/'+scriptId,async route=>{
+     installPosts++;
+     const response=await route.fetch();const responseBody=await response.body();
+     submitPayload=JSON.parse(responseBody.toString());
+     await route.fulfill({response,body:responseBody});
+    });
+    await page.goto(base+'/online-scripts/install-select/'+scriptId);
+    await page.locator('#onlineInstallSelectForm [name="request_id"]').evaluate((input,value)=>input.value=value,installId);
+    const submit=page.locator('#onlineInstallSelectForm button[type="submit"]').first();
+    await submit.click();
+    await page.waitForFunction(()=>!document.querySelector('#onlineInstallApiError').hidden);
+    assert.equal(submitPayload.accepted,false);assert.equal(submitPayload.retry_allowed,true);
+    assert.equal(submitPayload.phase,'startup_receipt_failed');assert.equal(submitPayload.request_id,installId);
+    assert.equal(Object.hasOwn(submitPayload,'log_url'),false);
+    assert.equal(await page.locator('#onlineInstallSelectForm').evaluate(form=>!!form.__flsInstallRecoveryLocked),false);
+    assert.equal(await submit.isEnabled(),true);
+    assert.match(await page.locator('#onlineInstallApiError').textContent(),/安装未启动/);
+    assert.deepEqual((await state()).startup_install_starts,[]);
+
+    await fixture({restart_startup_install:true,repair_startup_receipt_storage:true});
+    await submit.click();
+    await page.waitForURL('**/online-scripts/log/'+installId);
+    assert.equal(installPosts,2);
+    const observed=await state();assert.deepEqual(observed.startup_install_starts,[installId]);
+    const replay=await page.request.post(base+'/api/online-scripts/install/'+scriptId,{headers,data:body});
+    const replayPayload=await replay.json();assert.equal(replay.status(),200);assert.equal(replayPayload.replayed,true);
+    assert.deepEqual((await state()).startup_install_starts,[installId]);
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true);
+    assert.deepEqual(errors,[]);
+    await context.close();console.log('online install unpersisted startup recovery passed '+viewport.width);
+    continue;
+   }
    if(process.env.FLS_INSTALL_LOG_ONLY==='startup-receipt-recovery'){
     await page.goto(base+'/login');await login();
     const installId=(viewport.width===390?'a':'b').repeat(32);
