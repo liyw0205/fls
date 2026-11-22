@@ -1566,6 +1566,113 @@ vm.runInContext(input.reader + input.script, context);
             self.assertIn("thread quota exhausted", result.json["error"])
             self.assertEqual(app.test_client().get("/api/online-scripts/refresh-status", headers={"X-Token": TOKEN}).json["status"], "启动失败")
 
+    def test_start_failure_receipt_recovery_allows_same_request_retry_once(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import constants, source
+            from fls_manager.online_scripts.constants import ONLINE_REFRESH_HISTORY_FILE, ONLINE_REFRESH_STATE_FILE
+            from fls_manager.models import save_proxies
+            import fls_manager.routes.online_scripts.refresh as refresh
+
+            request_id = "a" * 32
+            client = app.test_client()
+            csrf = "refresh-start-recovery-csrf"
+            with client.session_transaction() as session:
+                session.update(
+                    token=TOKEN,
+                    token_expire_at=int(time.time()) + 3600,
+                    security_verified=True,
+                    csrf_token=csrf,
+                )
+            cache = base_dir / "data" / "online_scripts_cache.json"
+            source.save_online_script_cache([
+                {"id": "stable", "name": "Stable", "type": "raw", "link": "stable.sh"},
+            ])
+            cache_before = cache.read_bytes()
+            save_proxies([{"id": "chosen", "name": "Chosen", "type": "http",
+                           "host": "127.0.0.1", "port": "8080", "enabled": True}])
+            persist = constants.persist_online_refresh
+            fail_startup_receipt = True
+
+            def reject_startup_receipt_once(info):
+                nonlocal fail_startup_receipt
+                if (
+                    info.get("request_id") == request_id
+                    and info.get("status") == "启动失败"
+                    and fail_startup_receipt
+                ):
+                    fail_startup_receipt = False
+                    raise OSError("startup receipt disk full")
+                return persist(info)
+
+            endpoint = "/api/online-scripts/refresh"
+            headers = {"X-Requested-With": "XMLHttpRequest"}
+            with patch.object(constants, "persist_online_refresh", side_effect=reject_startup_receipt_once), patch.object(
+                refresh, "start_refresh_thread", side_effect=RuntimeError("thread quota exhausted"),
+            ) as first_start:
+                failed = client.post(
+                    endpoint,
+                    json={"request_id": request_id, "proxy_id": "chosen"},
+                    headers={**headers, "X-CSRF-Token": csrf},
+                )
+                self.assertEqual(failed.status_code, 500)
+                self.assertIn("thread quota exhausted", failed.json["error"])
+                self.assertIn("startup receipt disk full", failed.json["error"])
+                first_start.assert_called_once()
+
+            state_url = f"/api/online-scripts/refresh-status/{request_id}"
+            observed = client.get(state_url, headers={"X-Requested-With": "XMLHttpRequest"})
+            self.assertEqual(observed.status_code, 200)
+            self.assertEqual(observed.json["status"], "启动失败")
+            self.assertFalse(observed.json["running"])
+            self.assertEqual(
+                observed.json["persistence_recovery"]["api_action"],
+                f"/api/online-scripts/refresh-recover/{request_id}",
+            )
+            history_before_recovery = ONLINE_REFRESH_HISTORY_FILE.read_bytes()
+            state_before_recovery = ONLINE_REFRESH_STATE_FILE.read_bytes()
+
+            recovery_url = f"/api/online-scripts/refresh-recover/{request_id}"
+            csrf_denied = client.post(recovery_url, headers=headers)
+            self.assertEqual(csrf_denied.status_code, 400)
+            self.assertEqual(ONLINE_REFRESH_HISTORY_FILE.read_bytes(), history_before_recovery)
+            self.assertEqual(ONLINE_REFRESH_STATE_FILE.read_bytes(), state_before_recovery)
+
+            repaired = client.post(
+                recovery_url,
+                headers={**headers, "X-CSRF-Token": csrf},
+            )
+            self.assertEqual(repaired.status_code, 200)
+            self.assertTrue(repaired.json["ok"])
+            self.assertEqual(repaired.json["request_id"], request_id)
+            self.assertEqual(repaired.json["status"], "启动失败")
+            self.assertFalse(repaired.json["running"])
+            state_receipt = json.loads(ONLINE_REFRESH_STATE_FILE.read_text(encoding="utf-8"))
+            history_receipt = json.loads(ONLINE_REFRESH_HISTORY_FILE.read_text(encoding="utf-8"))[request_id]
+            self.assertEqual(state_receipt, history_receipt)
+            self.assertEqual(state_receipt["status"], "启动失败")
+            self.assertEqual(state_receipt["error"], failed.json["error"])
+            self.assertNotIn("persistence_recovery", repaired.json)
+            self.assertEqual(cache.read_bytes(), cache_before)
+
+            with patch.object(refresh, "start_refresh_thread") as retry_start:
+                retried = client.post(
+                    endpoint,
+                    json={"request_id": request_id, "proxy_id": "chosen"},
+                    headers={**headers, "X-CSRF-Token": csrf},
+                )
+                duplicate = client.post(
+                    endpoint,
+                    json={"request_id": request_id, "proxy_id": "chosen"},
+                    headers={**headers, "X-CSRF-Token": csrf},
+                )
+
+            self.assertEqual(retried.status_code, 202)
+            self.assertEqual(retried.json["request_id"], request_id)
+            self.assertEqual(duplicate.status_code, 409)
+            self.assertEqual(duplicate.json["request_id"], request_id)
+            retry_start.assert_called_once()
+            self.assertEqual(cache.read_bytes(), cache_before)
+
     def test_refresh_request_id_replays_terminal_job_and_queries_original_state(self):
         with isolated_app() as (app, _base_dir):
             import fls_manager.routes.online_scripts.refresh as refresh

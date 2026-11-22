@@ -241,6 +241,12 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    const cleared=await page.request.post(base+'/api/fixture/clear-online-script-cache',{headers});
    assert.equal(cleared.status(),200);
    const csrf=await page.evaluate(()=>flsGetCsrfToken());
+   const formReplay=await page.request.post(base+'/online-scripts/install/browser-install',{
+     maxRedirects:0,form:{request_id:requestId,proxy_id:'',import_task:'1',enable_task:'',force:'0',
+       select_mode:'all',excluded_task_indexes:'2',csrf_token:csrf}
+   });
+   assert.equal(formReplay.status(),302);
+   assert.equal(new URL(formReplay.headers().location,base).pathname,'/online-scripts/log/'+requestId);
    const replay=await page.request.post(acceptedPost,{headers:{...headers,'X-CSRF-Token':csrf},data:{
      request_id:requestId,proxy_id:'',import_task:'1',select_mode:'all',excluded_task_indexes:'2',
    }});
