@@ -55,6 +55,13 @@ def main():
             "link": "https://fixture.invalid/demo.py", "link_name": "demo.py",
             "install": shlex.join([sys.executable, "-u", "-c", command]),
         }
+        startup_item = {
+            **item,
+            "id": "browser-startup-recovery",
+            "name": "Startup receipt recovery",
+            "link_name": "startup-recovery.py",
+            "task_cron": [{"name": "Startup recovery task", "command": "task startup-recovery.py"}],
+        }
         task_items = {
             width: {
                 "id": f"browser-task-recovery-{width}", "name": f"Task recovery {width}",
@@ -64,7 +71,7 @@ def main():
             }
             for width in (390, 1280)
         }
-        source.save_online_script_cache([item, *task_items.values()])
+        source.save_online_script_cache([item, startup_item, *task_items.values()])
         downloads = []
         task_reload_state = {"failures": 0, "calls": 0}
         receipt_fault = {"install_id": "", "remaining": 0}
@@ -78,7 +85,33 @@ def main():
         dependency_receipt_process = {"polls": 0}
         dependency_start_count = {"calls": 0}
         dependency_restart_process = {"install_id": "", "process": None}
+        startup_receipt_fault = {"remaining": 0, "mode": "", "enabled": False, "starts": []}
+        persist_online_install = install_routes.persist_online_install
+        start_online_install_thread = install_routes.start_install_thread
         persist_dependency_job = deps_routes.persist_install_job
+
+        def persist_online_install_with_startup_fault(info):
+            if (
+                startup_receipt_fault["remaining"]
+                and info.get("phase") == "prepared"
+                and info.get("id") == startup_receipt_fault.get("install_id")
+            ):
+                startup_receipt_fault["remaining"] -= 1
+                if startup_receipt_fault["mode"] == "after":
+                    persist_online_install(info)
+                raise PermissionError("browser install startup receipt unavailable")
+            return persist_online_install(info)
+
+        def start_online_install_thread(*args, **kwargs):
+            if startup_receipt_fault["enabled"]:
+                startup_receipt_fault["starts"].append(
+                    str(kwargs.get("install_id") or (args[0] if args else ""))
+                )
+                return None
+            return start_online_install_thread(*args, **kwargs)
+
+        install_routes.persist_online_install = persist_online_install_with_startup_fault
+        install_routes.start_install_thread = start_online_install_thread
 
         def persist_dependency_with_failure(info):
             expected_status = dependency_receipt_fault["status"]
@@ -352,6 +385,16 @@ def main():
                         "log_file": str(base_dir / "log" / f"{install_id}.log"),
                         "running": True, "status": "运行中", "task_recovery": "truncated-receipt",
                     }
+                if data.get("startup_receipt_mode"):
+                    ONLINE_INSTALL_RUNNING.clear()
+                    ONLINE_INSTALL_RETRYING.clear()
+                    startup_receipt_fault.update(
+                        remaining=1,
+                        mode=str(data["startup_receipt_mode"]),
+                        enabled=True,
+                        install_id=str(data.get("install_id") or ""),
+                        starts=[],
+                    )
                 if data.get("clear_malformed_task_recovery_memory"):
                     install_id = ("k" if int(data["width"]) == 390 else "l") * 32
                     ONLINE_INSTALL_RUNNING.pop(install_id, None)
@@ -548,6 +591,7 @@ def main():
                     .get(dependency_receipt_fault["install_id"], {}).get("retried_by", "")
                     if dependency_receipt_fault["install_id"] else ""
                 ),
+                startup_install_starts=list(startup_receipt_fault["starts"]),
                 deps_running=bool(DEPS_RUNNING.get("browser-deps", {}).get("process") and
                                   DEPS_RUNNING["browser-deps"]["process"].poll() is None),
             )
@@ -595,6 +639,63 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
      await page.waitForLoadState('domcontentloaded');
     }
    };
+   if(process.env.FLS_INSTALL_LOG_ONLY==='startup-receipt-recovery'){
+    await page.goto(base+'/login');await login();
+    const installId=(viewport.width===390?'a':'b').repeat(32);
+    const mode=viewport.width===390?'before':'after';
+    const scriptId='browser-startup-recovery';
+    await fixture({startup_receipt_mode:mode,install_id:installId});
+    const body={request_id:installId,force:false,import_task:true,enable_task:false,
+     select_mode:'all',excluded_task_indexes:''};
+    let submitPayload=null;
+    await page.route('**/api/online-scripts/install/'+scriptId,async route=>{
+     const response=await route.fetch();
+     const responseBody=await response.body();
+     submitPayload=JSON.parse(responseBody.toString());
+     await route.fulfill({response,body:responseBody});
+    });
+    await page.goto(base+'/online-scripts/install-select/'+scriptId);
+    await page.locator('#onlineInstallSelectForm [name="request_id"]').evaluate((input,value)=>input.value=value,installId);
+    const submit=page.locator('#onlineInstallSelectForm button[type="submit"]').first();
+    await submit.click();
+    if(mode==='before'){
+     await page.waitForFunction(()=>!document.querySelector('#onlineInstallApiError').hidden);
+     assert.equal(submitPayload.phase,'startup_receipt_failed');
+     assert.equal(submitPayload.status,'启动失败');assert.equal(submitPayload.running,false);
+     assert.equal(submitPayload.request_id,installId);
+     const logLink=page.locator('#onlineInstallRecoveryLog');
+     await logLink.waitFor({state:'visible'});
+     assert.equal(new URL(await logLink.getAttribute('href'),base).pathname,'/online-scripts/log/'+installId);
+     assert.equal((await state()).startup_install_starts.length,0);
+     const failedState=await page.request.get(base+'/api/online-scripts/log/'+installId+'?state_only=1',{headers});
+     assert.equal(failedState.status(),200);
+     assert.equal((await failedState.json()).phase,'startup_receipt_failed');
+     await Promise.all([page.waitForNavigation(),logLink.click()]);
+     const retryForm=page.locator('#installRecoveryAction form');
+     await retryForm.getByRole('button',{name:'沿原请求重试启动',exact:true}).waitFor();
+     assert.equal(await retryForm.getAttribute('action'),'/online-scripts/install-start-retry/'+installId);
+     await Promise.all([page.waitForNavigation(),retryForm.evaluate(form=>form.submit())]);
+     assert.equal(new URL(page.url()).pathname,'/online-scripts/log/'+installId);
+    }else{
+     await page.waitForURL('**/online-scripts/log/'+installId);
+     assert.equal(submitPayload.request_id,installId);assert.equal(submitPayload.running,true);
+     assert.equal(submitPayload.phase,'prepared');
+    }
+    let observed=await state();assert.deepEqual(observed.startup_install_starts,[installId]);
+    const response=await page.request.post(base+'/api/online-scripts/install/'+scriptId,{headers,data:body});
+    const payload=await response.json();assert.equal(response.status(),200);assert.equal(payload.replayed,true);
+    observed=await state();assert.deepEqual(observed.startup_install_starts,[installId]);
+    const recovered=await page.request.get(base+'/api/online-scripts/log/'+installId+'?state_only=1',{headers});
+    assert.equal(recovered.status(),200);
+    const recoveredPayload=await recovered.json();
+    assert.equal(recoveredPayload.install_id,installId);assert.equal(recoveredPayload.running,true);
+    assert.equal(recoveredPayload.phase,'prepared');
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true);
+    assert.deepEqual(errors,[]);
+    await page.screenshot({path:'/tmp/fls-install-start-receipt-'+viewport.width+'.png',fullPage:true});
+    await context.close();console.log('online install startup receipt recovery passed '+viewport.width);
+    continue;
+   }
    if(process.env.FLS_INSTALL_LOG_ONLY==='restart-receipt'){
     await page.goto(base+'/login');await login();
     await fixture({seed_restart_receipt_recovery:true,width:viewport.width});

@@ -399,6 +399,16 @@ def _install_recovery(info):
             "available": False,
             "reason": "安装结果未知回执尚未确认保存，已禁用重试；请仅查询原安装状态。",
         }
+    if (
+        not (info or {}).get("running")
+        and status == "启动失败"
+        and (info or {}).get("phase") == "startup_receipt_failed"
+    ):
+        return {
+            "available": True,
+            "action": url_for("online_scripts.online_scripts_install_start_retry", install_id=info.get("id")),
+            "label": "沿原请求重试启动",
+        }
     if not (info or {}).get("running") and ((info or {}).get("task_recovery") or {}).get("pending"):
         return {
             "available": True,
@@ -1003,14 +1013,16 @@ async function loadLog(stateOnly = false){{
                 if(historyBack === "/online-scripts/install-history" || historyBack.startsWith("/online-scripts/install-history?")){{
                     recoveryAction += (recoveryAction.includes("?") ? "&" : "?") + "back=" + encodeURIComponent(historyBack);
                 }}
+                const apiActionAttribute = recovery.api_action
+                    ? " data-api-action='" + escapeHtml(recovery.api_action) + "'" : "";
                 recoveryEl.innerHTML =
-                    "<" + "form class='inline-form' method='post' action='" + escapeHtml(recoveryAction) + "' data-api-action='" + escapeHtml(recovery.api_action || "") + "'>" +
+                    "<" + "form class='inline-form' method='post' action='" + escapeHtml(recoveryAction) + "'" + apiActionAttribute + ">" +
                     csrfInput +
                     "<button class='btn btn-primary' type='submit'>" +
                     escapeHtml(recovery.label || "重试安装") + "</button><" + "/form>";
                 recoveryEl.dataset.ready = "1";
                 const recoveryForm = typeof recoveryEl.querySelector === "function"
-                    ? recoveryEl.querySelector("form[data-api-action]") : null;
+                    ? recoveryEl.querySelector("form") : null;
                 if(recoveryForm && recovery.api_action){{
                     recoveryForm.addEventListener("submit", async function(event){{
                         event.preventDefault();

@@ -1,4 +1,6 @@
 from ._common import *
+import hashlib
+import json
 import re
 
 from ...utils import now_str
@@ -38,6 +40,22 @@ def _install_request_matches(info, script_id, proxy_id, import_task, enable_task
         and bool(info.get("enable_task")) == bool(enable_task)
         and bool(info.get("force")) == bool(force)
         and list(info.get("selected_task_indexes") or []) == list(selected_task_indexes or [])
+    )
+
+
+def _online_install_script_fingerprint(item):
+    payload = json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _install_start_receipt_retryable(info):
+    return bool(
+        isinstance(info, dict)
+        and not info.get("running")
+        and info.get("status") == "启动失败"
+        and info.get("phase") == "startup_receipt_failed"
+        and not info.get("retry_of")
+        and re.fullmatch(r"[a-f0-9]{64}", str(info.get("script_fingerprint") or ""))
     )
 
 
@@ -84,6 +102,15 @@ def _start_install_job(
     )
     selected_task_indexes = list(selected_task_indexes or [])
     task_crons = online_script_task_crons(item)
+    try:
+        script_fingerprint = _online_install_script_fingerprint(item)
+    except (TypeError, ValueError) as exc:
+        return _install_retry_error(
+            retry_of or request_id or script_id,
+            "在线脚本无法安全启动",
+            f"脚本内容无法核验：{exc}",
+            400,
+        )
 
     with ONLINE_INSTALL_LOCK:
         if not retry_of and request_id:
@@ -100,7 +127,16 @@ def _start_install_job(
                     return _install_retry_error(
                         request_id, "在线安装请求冲突", "该请求标识已绑定其他安装选项，请重新打开任务选择页。", 409,
                     )
-                return redirect(url_for("online_scripts.online_install_log", install_id=request_id, back="/online-scripts"))
+                if not _install_start_receipt_retryable(previous):
+                    return redirect(url_for("online_scripts.online_install_log", install_id=request_id, back="/online-scripts"))
+                if previous.get("script_fingerprint") != script_fingerprint:
+                    return _install_retry_error(
+                        request_id,
+                        "原在线安装内容已变化",
+                        "脚本源内容已变化，未沿原请求启动新内容；请重新选择安装选项。",
+                        409,
+                        actions_html=f'<a class="btn btn-orange" href="/online-scripts/install-select/{h(script_id)}">重新选择安装选项</a>',
+                    )
         if retry_of:
             try:
                 previous = get_online_install_job(retry_of)
@@ -145,6 +181,7 @@ def _start_install_job(
                 task_crons[int(index) - 1]
                 for index in selected_task_indexes
             ] if import_task else [],
+            "script_fingerprint": script_fingerprint,
             "force": bool(force),
             "retry_of": retry_of,
             "running": True,
@@ -186,14 +223,30 @@ def _start_install_job(
             )
             return layout("在线脚本安装未启动", "online_scripts", body), 409
         except Exception as e:
-            info.update(
-                running=False,
-                status="启动失败",
-                phase="startup_failed",
-                error=f"保存安装状态失败：{e}",
-                updated_at=now_str(),
-            )
-            return _install_start_error(install_id, info["error"])
+            try:
+                persisted = _load_persisted_online_install(install_id)
+                published = bool(persisted) and _install_snapshot(persisted) == _install_snapshot(info)
+            except Exception:
+                published = False
+            if not published:
+                info.update(
+                    running=False,
+                    status="启动失败",
+                    phase="startup_receipt_failed",
+                    error=(
+                        f"保存安装启动回执失败：{e}。安装进程未启动；修复存储后可沿原请求重试。"
+                    ),
+                    updated_at=now_str(),
+                )
+                try:
+                    persist_online_install(info)
+                except Exception as storage_error:
+                    info["error"] += f"；启动失败回执也未能保存：{storage_error}"
+                return _install_start_error(
+                    install_id,
+                    info["error"],
+                    recovery_action=url_for("online_scripts.online_scripts_install_start_retry", install_id=install_id),
+                )
 
     try:
         start_install_thread(
@@ -304,7 +357,8 @@ def online_scripts_install(script_id):
                 return _install_retry_error(
                     request_id, "在线安装请求冲突", "该请求标识已绑定其他安装选项，请重新打开任务选择页。", 409,
                 )
-            return redirect(url_for("online_scripts.online_install_log", install_id=request_id, back="/online-scripts"))
+            if not _install_start_receipt_retryable(previous):
+                return redirect(url_for("online_scripts.online_install_log", install_id=request_id, back="/online-scripts"))
 
     with ONLINE_INSTALL_LOCK:
         active_id, _ = active_online_install_for_script(script_id)
@@ -385,6 +439,7 @@ def _api_install_start_result(result, install_id):
             ok=False,
             request_id=install_id,
             install_id=install_id,
+            log_url=url_for("online_scripts.api_online_install_log", install_id=install_id),
             status=info.get("status") or "启动失败",
             phase=info.get("phase") or "unknown",
             running=bool(info.get("running")),
@@ -496,11 +551,12 @@ def api_online_scripts_install(script_id):
         ):
             return jsonify(ok=False, request_id=request_id,
                            msg="安装请求已绑定其他选项，请重新打开安装页面"), 409
-        return jsonify(ok=True, request_id=request_id, install_id=request_id,
-                       status=previous.get("status"), phase=previous.get("phase") or "unknown",
-                       running=bool(previous.get("running")),
-                       replayed=True,
-                       log_url=url_for("online_scripts.api_online_install_log", install_id=request_id)), 200
+        if not _install_start_receipt_retryable(previous):
+            return jsonify(ok=True, request_id=request_id, install_id=request_id,
+                           status=previous.get("status"), phase=previous.get("phase") or "unknown",
+                           running=bool(previous.get("running")),
+                           replayed=True,
+                           log_url=url_for("online_scripts.api_online_install_log", install_id=request_id)), 200
 
     try:
         target = online_script_target(item)
@@ -538,6 +594,70 @@ def api_online_scripts_install(script_id):
                    status=info.get("status", "准备中"), running=bool(info.get("running")),
                    phase=info.get("phase") or "unknown",
                    log_url=url_for("online_scripts.api_online_install_log", install_id=request_id)), 200
+
+
+def _retry_unstarted_install_receipt(install_id):
+    try:
+        info = get_online_install_job(install_id)
+    except Exception as exc:
+        return _install_retry_error(
+            install_id, "无法恢复在线安装", f"安装记录无法读取：{exc}", 500,
+        )
+    if not info:
+        return _install_retry_error(install_id, "无法恢复在线安装", "安装记录不存在。", 404)
+    if not _install_start_receipt_retryable(info):
+        return _install_retry_error(
+            install_id, "无法恢复在线安装", "该安装不是尚未启动的回执故障，请查询原安装状态。", 409,
+        )
+
+    script_id = str(info.get("script_id") or "").strip()
+    try:
+        item = get_online_script(script_id)
+    except Exception as exc:
+        return _install_retry_error(
+            install_id, "无法恢复在线安装", f"在线脚本缓存无法读取：{exc}", 500,
+        )
+    if not item:
+        return _install_retry_error(
+            install_id, "无法恢复在线安装", "脚本已不在缓存中，请同步脚本源后重新选择。", 409,
+        )
+
+    try:
+        proxy_id = str(info.get("proxy_id") or "")
+        validate_proxy_id(proxy_id)
+        selected = validated_install_retry_task_indexes(item, info) if info.get("import_task") else []
+        if info.get("import_task"):
+            validate_online_task_import(item, selected)
+    except Exception as exc:
+        return _install_retry_error(
+            install_id, "无法恢复在线安装", f"原安装选项已失效：{exc}", 409,
+        )
+    try:
+        target = online_script_target(item)
+    except Exception as exc:
+        return _install_retry_error(
+            install_id, "无法恢复在线安装", f"脚本目标路径非法：{exc}", 400,
+        )
+    if target.exists() and not info.get("force"):
+        return _install_confirmation(
+            script_id, item, target, proxy_id, bool(info.get("import_task")),
+            bool(info.get("enable_task")), selected, request_id=install_id,
+        )
+    return _start_install_job(
+        script_id=script_id,
+        item=item,
+        proxy_id=proxy_id,
+        import_task=bool(info.get("import_task")),
+        force=bool(info.get("force")),
+        enable_task=bool(info.get("enable_task")),
+        selected_task_indexes=selected,
+        request_id=install_id,
+    )
+
+
+@bp.route("/online-scripts/install-start-retry/<install_id>", methods=["POST"])
+def online_scripts_install_start_retry(install_id):
+    return _retry_unstarted_install_receipt(install_id)
 
 
 def _install_confirmation(
@@ -628,11 +748,21 @@ def _install_confirmation(
     return layout("目标已存在", "online_scripts", body)
 
 
-def _install_start_error(install_id, error):
+def _install_start_error(install_id, error, recovery_action=""):
+    recovery_form = ""
+    if recovery_action:
+        recovery_form = (
+            '<form class="inline-form" method="post" '
+            f'action="{h(recovery_action)}">'
+            '<button class="btn btn-primary" type="submit">沿原请求重试启动</button></form>'
+        )
     body = page_header_card(
         "在线脚本安装启动失败",
         help_html=h(error),
-        actions_html=f'<a class="btn btn-gray" href="/online-scripts/log/{h(install_id)}">查看安装记录</a>',
+        actions_html=(
+            recovery_form
+            + f'<a class="btn btn-gray" href="/online-scripts/log/{h(install_id)}">查看安装记录</a>'
+        ),
     )
     return layout("在线脚本安装失败", "online_scripts", body), 500
 

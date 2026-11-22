@@ -1513,6 +1513,7 @@ def _install_snapshot(info):
         "enable_task",
         "selected_task_indexes",
         "selected_tasks",
+        "script_fingerprint",
         "force",
         "retry_of",
         "retried_by",
@@ -1575,6 +1576,7 @@ def _bounded_online_install_jobs(data):
         if any(
             job.get("running")
             or job.get("status") in ("准备中", "运行中", "停止中")
+            or job.get("phase") == "startup_receipt_failed"
             or bool(job.get("scheduler_reload_pending"))
             or bool((job.get("task_recovery") or {}).get("pending"))
             for job in jobs
