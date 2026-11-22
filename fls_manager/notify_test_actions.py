@@ -93,10 +93,19 @@ def submit_notification_test(data, *, sender=None):
             notify.create_notify_delivery(item, title, content, source="test", delivery_id=delivery_id)
             record["state"] = "sending"
             write_json(path, record)
-        except Exception:
+        except Exception as exc:
             if creating:
                 notify.NOTIFY_ACTIVE_DELIVERIES.discard(delivery_id)
                 notify._invalidate_notify_history_cache()
+            if isinstance(exc, ValueError) and str(exc) == "待核对通知记录达到上限，未开始新投递":
+                return result(
+                    "待核对通知记录已达到历史上限，测试未发送；请先处理运行中或结果未知的投递，再确认继续原测试",
+                    409,
+                    resolved=False,
+                    confirm_required=True,
+                    delivery_status="not_started",
+                    sent=False,
+                )
             return result("测试请求或投递记录无法确认，请修复存储后查询原提交", 500,
                           resolved=False, sent=None)
 

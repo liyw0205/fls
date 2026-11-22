@@ -251,6 +251,60 @@ class NotificationDeliveryRecoveryTests(unittest.TestCase):
             self.assertIn("无法确认", recovered[0]["message"])
             self.assertEqual(read_json(base_dir / "data" / "notify_history.json")[0]["status"], "unknown")
 
+    def test_new_delivery_retains_running_and_unknown_rows_when_pruning_history(self):
+        with isolated_modules() as base_dir:
+            from fls_manager import notify, paths
+            from fls_manager.storage import write_json
+
+            notify.NOTIFY_HISTORY_LIMIT = 4
+            rows = [
+                {"id": "done-new", "status": "succeeded"},
+                {"id": "done-middle", "status": "failed"},
+                {"id": "delivery-unknown", "status": "unknown"},
+                {"id": "delivery-running", "status": "running"},
+            ]
+            write_json(paths.NOTIFY_HISTORY_FILE, rows)
+            notify.NOTIFY_ACTIVE_DELIVERIES.add("delivery-running")
+
+            notify.create_notify_delivery(
+                {"id": "n1", "name": "One", "channel": "bark"}, "Title", "Body"
+            )
+
+            persisted = read_json(base_dir / "data" / "notify_history.json")
+            persisted_ids = {row["id"] for row in persisted}
+            self.assertEqual(len(persisted), notify.NOTIFY_HISTORY_LIMIT)
+            self.assertIn("delivery-unknown", persisted_ids)
+            self.assertIn("delivery-running", persisted_ids)
+            self.assertEqual(sum(row["status"] == "running" for row in persisted), 2)
+
+    def test_full_recoverable_history_rejects_delivery_before_external_send(self):
+        with isolated_modules() as base_dir:
+            from fls_manager import notify, paths
+            from fls_manager.storage import write_json
+
+            notify.NOTIFY_HISTORY_LIMIT = 2
+            write_json(
+                paths.CONFIG_FILE,
+                {"notify_items": [{"id": "n1", "name": "One", "channel": "bark",
+                                   "enabled": True, "config": {}}]},
+            )
+            history = [
+                {"id": "delivery-unknown", "status": "unknown"},
+                {"id": "delivery-running", "status": "running"},
+            ]
+            write_json(paths.NOTIFY_HISTORY_FILE, history)
+            notify.NOTIFY_ACTIVE_DELIVERIES.add("delivery-running")
+            original = paths.NOTIFY_HISTORY_FILE.read_bytes()
+
+            with patch.object(notify, "send_one", return_value=(True, "sent")) as sender:
+                result = notify.send_by_ids("Task", "Body", ["n1"])
+
+            self.assertEqual(len(result), 1)
+            self.assertFalse(result[0]["ok"])
+            self.assertIn("待核对通知记录达到上限", result[0]["msg"])
+            sender.assert_not_called()
+            self.assertEqual(paths.NOTIFY_HISTORY_FILE.read_bytes(), original)
+
     def test_concurrent_retry_allows_one_claim(self):
         with isolated_modules():
             from fls_manager import notify, paths

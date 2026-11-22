@@ -35,6 +35,7 @@ NOTIFY_HISTORY_STATUSES = (
     "failed",
     "unknown",
 )
+NOTIFY_RECOVERABLE_STATUSES = frozenset(("running", "unknown"))
 NOTIFY_HISTORY_LOCK = threading.RLock()
 NOTIFY_ACTIVE_DELIVERIES = set()
 _NOTIFY_HISTORY_CACHE = None
@@ -44,6 +45,24 @@ def _notify_text(value, default=""):
     if value is None:
         return default
     return str(value)
+
+
+def _trim_notify_history_rows(rows):
+    protected = [row for row in rows if row.get("status") in NOTIFY_RECOVERABLE_STATUSES]
+    if len(protected) > NOTIFY_HISTORY_LIMIT:
+        raise RuntimeError("通知投递历史中的待核对记录超过安全容量，未覆盖原文件")
+
+    protected_ids = {row["id"] for row in protected}
+    terminal_slots = NOTIFY_HISTORY_LIMIT - len(protected)
+    retained_terminal_ids = set()
+    for row in rows:
+        if row["id"] in protected_ids:
+            continue
+        if len(retained_terminal_ids) >= terminal_slots:
+            break
+        retained_terminal_ids.add(row["id"])
+
+    return [row for row in rows if row["id"] in protected_ids or row["id"] in retained_terminal_ids]
 
 
 def _notify_history_rows(raw):
@@ -110,7 +129,7 @@ def _notify_history_rows(raw):
             changed = True
         normalized.append(normalized_row)
 
-    limited = normalized[:NOTIFY_HISTORY_LIMIT]
+    limited = _trim_notify_history_rows(normalized)
     if limited != normalized:
         changed = True
 
@@ -223,8 +242,14 @@ def create_notify_delivery(item, title, content, source="manual", retry_of="", *
         rows, _changed = _notify_history_rows(raw)
         if any(existing["id"] == row["id"] for existing in rows):
             raise ValueError("通知投递标识已存在")
+        recoverable_count = sum(
+            existing.get("status") in NOTIFY_RECOVERABLE_STATUSES for existing in rows
+        )
+        if recoverable_count >= NOTIFY_HISTORY_LIMIT:
+            raise ValueError("待核对通知记录达到上限，未开始新投递")
         rows.insert(0, row)
-        write_json(NOTIFY_HISTORY_FILE, rows[:NOTIFY_HISTORY_LIMIT])
+        rows = _trim_notify_history_rows(rows)
+        write_json(NOTIFY_HISTORY_FILE, rows)
         NOTIFY_ACTIVE_DELIVERIES.add(row["id"])
         _invalidate_notify_history_cache()
 
