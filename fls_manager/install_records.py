@@ -19,6 +19,10 @@ class InstallHistoryLimitError(RuntimeError):
     pass
 
 
+class InstallRetryConfirmationRequired(RuntimeError):
+    pass
+
+
 def _snapshot(info):
     install_id = str(info.get("id") or info.get("request_id") or "")
     return {
@@ -35,6 +39,7 @@ def _snapshot(info):
         "updated_at": str(info.get("updated_at") or now_str()),
         "retry_of": str(info.get("retry_of") or ""),
         "retried_by": str(info.get("retried_by") or ""),
+        "retry_confirmation_required": bool(info.get("retry_confirmation_required", False)),
         "cancel_request_id": str(info.get("cancel_request_id") or ""),
         "cancel_status": str(info.get("cancel_status") or ""),
         "cancel_error": str(info.get("cancel_error") or ""),
@@ -59,6 +64,7 @@ def _validate(info):
         or not isinstance(info.get("cancel_error", ""), str)
         or (info.get("retry_of") and not INSTALL_ID_RE.fullmatch(info["retry_of"]))
         or (info.get("retried_by") and not INSTALL_ID_RE.fullmatch(info["retried_by"]))
+        or ("retry_confirmation_required" in info and type(info["retry_confirmation_required"]) is not bool)
     ):
         raise RuntimeError("依赖安装回执损坏，未覆盖原文件")
 
@@ -219,6 +225,8 @@ def claim_install_retry(info):
             parent = data.get(snapshot["retry_of"])
             if not isinstance(parent, dict):
                 raise LookupError("原依赖安装回执不存在，未启动重试")
+            if parent.get("retry_confirmation_required", False):
+                raise InstallRetryConfirmationRequired("面板重启后需先确认原安装进程已停止，未启动重试")
             existing_child_id = str(parent.get("retried_by") or "")
             if existing_child_id:
                 existing_child = data.get(existing_child_id)
@@ -253,6 +261,57 @@ def claim_install_retry(info):
         if result["job"] is None:
             raise RuntimeError("无法确认依赖安装重试回执")
         return result
+
+
+def confirm_install_retry_not_running(install_id):
+    """Clear a restart safety hold only after an explicit, identity-bound confirmation."""
+    install_id = str(install_id or "")
+    if not INSTALL_ID_RE.fullmatch(install_id):
+        raise ValueError("安装请求标识无效")
+    with INSTALL_JOBS_LOCK:
+        if INSTALL_JOBS_FILE.is_symlink():
+            raise RuntimeError("依赖安装回执不能是符号链接，未读取外部文件")
+        result = {"job": None, "changed": False}
+
+        def update(data):
+            if not isinstance(data, dict):
+                raise RuntimeError("依赖安装回执损坏，未覆盖原文件")
+            for key, value in data.items():
+                if not isinstance(key, str) or not isinstance(value, dict) or value.get("id") != key:
+                    raise RuntimeError("依赖安装回执标识损坏，未覆盖原文件")
+                _validate(value)
+            info = data.get(install_id)
+            if not isinstance(info, dict):
+                raise LookupError("安装记录不存在")
+            if info.get("running") or info.get("status") in ("prepared", "running"):
+                raise RuntimeError("原安装仍在运行或状态未收敛，不能确认重试安全")
+            if info.get("status") not in ("failed", "unknown", "cancelled"):
+                raise RuntimeError("当前安装状态不允许确认重试")
+            if not info.get("retry_confirmation_required", False):
+                result["job"] = dict(info)
+                return None
+            updated = dict(info)
+            updated["retry_confirmation_required"] = False
+            updated["updated_at"] = now_str()
+            data[install_id] = updated
+            result["job"] = dict(updated)
+            result["changed"] = True
+            return data
+
+        try:
+            mutate_json(INSTALL_JOBS_FILE, {}, update, strict=True)
+        except Exception:
+            if result["changed"]:
+                try:
+                    published = _read_jobs().get(install_id)
+                except Exception:
+                    published = None
+                if published == result["job"]:
+                    return dict(published)
+            raise
+        if result["job"] is None:
+            raise RuntimeError("无法确认安装恢复回执")
+        return dict(result["job"])
 
 
 def claim_install_cancel(install_id, request_id):
@@ -318,6 +377,7 @@ def get_install_job(install_id, live_jobs=None):
             info["running"] = False
             info["status"] = "unknown"
             info["returncode"] = None
+            info["retry_confirmation_required"] = True
             info["error"] = "；".join(filter(None, (
                 info.get("error"),
                 "面板重启后无法确认安装进程结果，请查看安装日志后再决定是否重试。",
