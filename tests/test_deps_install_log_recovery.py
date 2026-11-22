@@ -1141,6 +1141,180 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
             self.assertFalse(disk[install_id]["running"])
             self.assertEqual(disk[install_id]["cancel_request_id"], "cancel-after-receipt-repair")
 
+    def test_restart_unknown_install_requires_confirmation_before_retry(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.install_records import INSTALL_JOBS_FILE, persist_install_job
+            from fls_manager.state import DEPS_RUNNING
+
+            install_id = "restart-running-receipt"
+            original_process = SimpleNamespace(poll=lambda: None)
+            retry_process = SimpleNamespace(poll=lambda: None)
+            attempts = {"remaining": 1}
+
+            def fail_running_receipt(job):
+                if job["id"] == install_id and job["status"] == "running" and attempts["remaining"]:
+                    attempts["remaining"] -= 1
+                    raise OSError("running install receipt unavailable")
+                return persist_install_job(job)
+
+            client = app.test_client()
+            with patch("fls_manager.routes.deps.persist_install_job", side_effect=fail_running_receipt), patch(
+                "fls_manager.routes.deps.subprocess.Popen",
+                side_effect=[original_process, retry_process],
+            ) as popen:
+                started = client.post(
+                    "/api/deps/install", json={"name": "demo", "request_id": install_id},
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(started.status_code, 503)
+                self.assertEqual(popen.call_count, 1)
+
+                orphan = DEPS_RUNNING.pop(install_id)
+                orphan["log_fp"].close()
+                original_process.poll = lambda: 1
+
+                page = client.get(
+                    f"/deps/install-log/{install_id}?back=%2Fdeps", headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(page.status_code, 200)
+                body = page.get_data(as_text=True)
+                self.assertIn("面板重启后无法从原进程句柄确认", body)
+                self.assertIn("install-recovery-confirm-form", body)
+                self.assertNotIn('class="inline-form install-retry-form"', body)
+                csrf = re.search(r'name="csrf_token" value="([^"]+)"', body).group(1)
+                unauthorized = client.post(
+                    f"/api/deps/install-recovery-confirm/{install_id}",
+                    json={"request_id": install_id, "confirm_not_running": True},
+                    headers={"X-CSRF-Token": csrf},
+                )
+                self.assertEqual(unauthorized.status_code, 401)
+
+                invalid_confirmation = client.post(
+                    f"/deps/install-recovery-confirm/{install_id}",
+                    data={"request_id": install_id, "confirm_not_running": "true", "csrf_token": "wrong"},
+                )
+                self.assertEqual(invalid_confirmation.status_code, 400)
+                invalid_choice = client.post(
+                    f"/api/deps/install-recovery-confirm/{install_id}",
+                    json={"request_id": install_id, "confirm_not_running": False},
+                    headers={"X-Token": TOKEN},
+                )
+                wrong_identity = client.post(
+                    f"/api/deps/install-recovery-confirm/{install_id}",
+                    json={"request_id": "different-install", "confirm_not_running": True},
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(invalid_choice.status_code, 400)
+                self.assertEqual(wrong_identity.status_code, 400)
+                with client.session_transaction() as session:
+                    session.update(
+                        token=TOKEN, token_expire_at=9999999999,
+                        security_verified=True, csrf_token=csrf,
+                    )
+
+                history = client.get(
+                    "/api/deps/install-history?kind=dependency", headers={"X-Token": TOKEN},
+                )
+                item = next(item for item in history.json["items"] if item["id"] == install_id)
+                self.assertEqual(item["status"], "unknown")
+                self.assertTrue(item["retry_confirmation_required"])
+                self.assertFalse(item["recovery_available"])
+                persisted = json.loads(INSTALL_JOBS_FILE.read_text(encoding="utf-8"))
+                self.assertTrue(persisted[install_id]["retry_confirmation_required"])
+
+                blocked = client.post(
+                    f"/api/deps/install-retry/{install_id}",
+                    json={"request_id": "retry-before-confirmation"}, headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(blocked.status_code, 409)
+                self.assertTrue(blocked.json["confirmation_required"])
+                from fls_manager.install_records import get_install_job
+                with patch(
+                    "fls_manager.routes.deps.get_install_job",
+                    return_value={**get_install_job(install_id), "retry_confirmation_required": False},
+                ):
+                    raced = client.post(
+                        f"/api/deps/install-retry/{install_id}",
+                        json={"request_id": "retry-racing-confirmation"}, headers={"X-Token": TOKEN},
+                    )
+                self.assertEqual(raced.status_code, 409)
+                self.assertTrue(raced.json["confirmation_required"])
+                popen.assert_called_once()
+
+                confirmed = client.post(
+                    f"/deps/install-recovery-confirm/{install_id}",
+                    data={"request_id": install_id, "confirm_not_running": "true", "csrf_token": csrf},
+                )
+                self.assertEqual(confirmed.status_code, 302)
+                repeated = client.post(
+                    f"/api/deps/install-recovery-confirm/{install_id}",
+                    json={"request_id": install_id, "confirm_not_running": True},
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(repeated.status_code, 200)
+                self.assertFalse(repeated.json["retry_confirmation_required"])
+
+                retried = client.post(
+                    f"/api/deps/install-retry/{install_id}",
+                    json={"request_id": "retry-after-confirmation"}, headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(retried.status_code, 200)
+                self.assertEqual(retried.json["install_id"], "retry-after-confirmation")
+                self.assertEqual(popen.call_count, 2)
+                disk = json.loads(INSTALL_JOBS_FILE.read_text(encoding="utf-8"))
+                self.assertTrue(disk[install_id]["retried_by"])
+
+    def test_retry_confirmation_write_failure_stays_blocked_and_published_error_recovers(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.install_records import (
+                INSTALL_JOBS_FILE, get_install_job, persist_install_job,
+            )
+            install_id = "confirm-write-recovery"
+            log_file = base_dir / "log" / f"deps-install-demo-{install_id}.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            persist_install_job({
+                "id": install_id, "request_id": install_id, "kind": "dependency",
+                "package": "demo", "log_file": str(log_file), "running": True,
+                "finished": False, "status": "running", "returncode": None,
+                "error": "", "start_time": 1, "updated_at": "2026-11-18 19:01:00",
+            })
+            recovered = get_install_job(install_id)
+            self.assertEqual(recovered["status"], "unknown")
+            self.assertTrue(recovered["retry_confirmation_required"])
+            client = app.test_client()
+            confirm_url = f"/api/deps/install-recovery-confirm/{install_id}"
+            confirm_payload = {"request_id": install_id, "confirm_not_running": True}
+            with patch("fls_manager.install_records.mutate_json", side_effect=OSError("disk busy")), patch(
+                "fls_manager.routes.deps.subprocess.Popen"
+            ) as popen:
+                failed = client.post(confirm_url, json=confirm_payload, headers={"X-Token": TOKEN})
+                blocked = client.post(
+                    f"/api/deps/install-retry/{install_id}",
+                    json={"request_id": "retry-confirm-save-failed"}, headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(failed.status_code, 503)
+            self.assertTrue(failed.json["retry_confirmation_required"])
+            self.assertEqual(blocked.status_code, 409)
+            popen.assert_not_called()
+            persisted = json.loads(INSTALL_JOBS_FILE.read_text(encoding="utf-8"))
+            self.assertTrue(persisted[install_id]["retry_confirmation_required"])
+
+            from fls_manager import install_records
+            mutate_json = install_records.mutate_json
+
+            def publish_then_raise(*args, **kwargs):
+                mutate_json(*args, **kwargs)
+                raise OSError("confirmation acknowledgement lost")
+
+            with patch("fls_manager.install_records.mutate_json", side_effect=publish_then_raise):
+                recovered_confirmation = client.post(confirm_url, json=confirm_payload, headers={"X-Token": TOKEN})
+            self.assertEqual(recovered_confirmation.status_code, 200)
+            self.assertFalse(recovered_confirmation.json["retry_confirmation_required"])
+            repeated = client.post(confirm_url, json=confirm_payload, headers={"X-Token": TOKEN})
+            self.assertEqual(repeated.status_code, 200)
+            self.assertFalse(repeated.json["retry_confirmation_required"])
+            self.assertFalse(json.loads(INSTALL_JOBS_FILE.read_text(encoding="utf-8"))[install_id]["retry_confirmation_required"])
+
     def test_terminal_install_receipt_failure_is_retryable_without_reinstalling(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.install_records import INSTALL_JOBS_FILE, persist_install_job

@@ -18,8 +18,10 @@ from ..logs import tail_file
 from ..install_records import (
     INSTALL_JOBS_LOCK,
     InstallHistoryLimitError,
+    InstallRetryConfirmationRequired,
     claim_install_cancel,
     claim_install_retry,
+    confirm_install_retry_not_running,
     get_install_job,
     install_job_is_persisted,
     list_install_jobs,
@@ -562,6 +564,12 @@ def _retry_install_lookup(install_id, retry_id):
                 "ok": True, "request_id": retry_id, "original_id": install_id,
                 "status": "original_running", "running": True, "retry_available": False,
             }, 200
+        if original.get("retry_confirmation_required"):
+            return {
+                "ok": True, "request_id": retry_id, "original_id": install_id,
+                "status": "unknown", "running": False,
+                "retry_confirmation_required": True, "retry_available": False,
+            }, 200
         return {
             "ok": True, "request_id": retry_id, "original_id": install_id,
             "status": "not_started", "running": False,
@@ -621,6 +629,12 @@ def _retry_install_start(install_id, retry_id):
     error = _pending_install_receipt(install_id)
     if error:
         return {"ok": False, "request_id": retry_id, "msg": error, "receipt_pending": True}, 503
+    if original.get("retry_confirmation_required"):
+        return {
+            "ok": False, "request_id": retry_id, "original_id": install_id,
+            "msg": "面板重启后需先确认原安装进程已停止，未启动重试。",
+            "confirmation_required": True, "retry_available": False,
+        }, 409
     linked = str(original.get("retried_by") or "")
     if linked:
         child = get_install_job(linked, DEPS_RUNNING)
@@ -651,6 +665,11 @@ def _retry_install_start(install_id, retry_id):
         return {"ok": False, "request_id": retry_id, "msg": str(exc)}, 404
     except InstallHistoryLimitError as exc:
         return {"ok": False, "request_id": retry_id, "msg": str(exc)}, 409
+    except InstallRetryConfirmationRequired as exc:
+        return {
+            "ok": False, "request_id": retry_id, "original_id": install_id,
+            "msg": str(exc), "confirmation_required": True, "retry_available": False,
+        }, 409
     except Exception as exc:
         return {"ok": False, "request_id": retry_id, "msg": f"重试回执无法保存，未启动安装：{exc}"}, 500
 
@@ -726,6 +745,58 @@ def _retry_install_start(install_id, retry_id):
         )
         _persist_dependency_state(info)
     return _retry_install_response(retry_id)
+
+
+def _confirm_install_retry_safety(install_id, data):
+    try:
+        install_id = install_request_id(install_id)
+        request_id = install_request_id(data.get("request_id") if hasattr(data, "get") else "")
+    except ValueError as exc:
+        return {"ok": False, "request_id": "", "msg": str(exc)}, 400
+    confirmed = data.get("confirm_not_running") if hasattr(data, "get") else None
+    if request_id != install_id or (confirmed is not True and confirmed != "true"):
+        return {
+            "ok": False, "request_id": request_id,
+            "msg": "确认请求必须绑定原安装 ID，并明确确认安装进程已停止。",
+        }, 400
+
+    live = DEPS_RUNNING.get(install_id)
+    if isinstance(live, dict) and live.get("running"):
+        process = live.get("process")
+        try:
+            if process is None or process.poll() is None:
+                return {
+                    "ok": False, "request_id": request_id, "install_id": install_id,
+                    "msg": "原安装进程仍在运行或无法查询，暂不能确认重试。",
+                    "retry_confirmation_required": True,
+                }, 409
+            deps_install_result(install_id)
+        except Exception as exc:
+            return {
+                "ok": False, "request_id": request_id, "install_id": install_id,
+                "msg": f"原安装进程状态无法确认：{exc}", "retry_confirmation_required": True,
+            }, 503
+
+    try:
+        info = confirm_install_retry_not_running(install_id)
+    except LookupError as exc:
+        return {"ok": False, "request_id": request_id, "msg": str(exc)}, 404
+    except ValueError as exc:
+        return {"ok": False, "request_id": request_id, "msg": str(exc)}, 400
+    except Exception as exc:
+        return {
+            "ok": False, "request_id": request_id, "install_id": install_id,
+            "msg": f"重试安全确认无法保存：{exc}", "retry_confirmation_required": True,
+        }, 503
+    live = DEPS_RUNNING.get(install_id)
+    if isinstance(live, dict):
+        live["retry_confirmation_required"] = False
+    return {
+        "ok": True, "request_id": request_id, "install_id": install_id,
+        "status": info.get("status", "unknown"), "running": bool(info.get("running")),
+        "retry_confirmation_required": False,
+        "retry_available": not bool(info.get("retried_by")),
+    }, 200
 
 
 def is_deps_install_running(install_id):
@@ -813,6 +884,7 @@ def deps_install_result(install_id, *, recover_receipt=False):
             "status_label": "安装中，状态回执待保存" if pending_running else "结果待保存",
             "returncode": info.get("returncode") if not pending_running else None,
             "error": info["receipt_error"], "receipt_pending": True,
+            "retry_confirmation_required": bool(info.get("retry_confirmation_required")),
         }
     if not info:
         context = find_install_log_context(install_id)
@@ -854,6 +926,7 @@ def deps_install_result(install_id, *, recover_receipt=False):
         "status_label": label,
         "returncode": returncode,
         "error": error,
+        "retry_confirmation_required": bool((info or {}).get("retry_confirmation_required")),
     }
 
 
@@ -1155,6 +1228,29 @@ def deps_install_retry(install_id):
     return layout("安装重试失败", "deps", body), status
 
 
+@bp.route("/deps/install-recovery-confirm/<install_id>", methods=["POST"])
+def deps_install_recovery_confirm(install_id):
+    payload, status = _confirm_install_retry_safety(install_id, request.form)
+    if payload.get("ok"):
+        return redirect(url_for("deps.deps_install_log", install_id=install_id, back="/deps"))
+    body = page_header_card(
+        "安装恢复确认未完成",
+        help_html=h(payload.get("msg") or "请查询原安装状态后重试。"),
+        actions_html=(
+            f'<a class="btn btn-blue" href="/deps/install-log/{h(install_id)}?back=%2Fdeps">查询原安装</a>'
+            '<a class="btn btn-gray" href="/deps/install-history">返回安装历史</a>'
+        ),
+    )
+    return layout("安装恢复确认未完成", "deps", body), status
+
+
+@bp.route("/api/deps/install-recovery-confirm/<install_id>", methods=["POST"])
+def api_deps_install_recovery_confirm(install_id):
+    data = request.get_json(silent=True) if request.is_json else request.form
+    payload, status = _confirm_install_retry_safety(install_id, data)
+    return jsonify(payload), status
+
+
 @bp.route("/api/deps/install-retry/<install_id>", methods=["POST"])
 def api_deps_install_retry(install_id):
     try:
@@ -1223,10 +1319,25 @@ def deps_install_log(install_id):
                 recovery_diagnostic = _retry_parent_diagnostic(info)
         if not recovery_diagnostic:
             if not recovery_action:
-                recovery_action = install_recovery_action(
-                    recovery_context
-                    or {"kind": info.get("kind", "dependency") if info else "", "package": package}
-                )
+                if info and info.get("retry_confirmation_required"):
+                    recovery_diagnostic = (
+                        "面板重启后无法从原进程句柄确认安装是否仍在运行。"
+                        "请先在主机上确认该安装进程已停止，再提交确认；确认前不会显示重试入口。"
+                    )
+                    recovery_action = (
+                        f'<form class="inline-form install-recovery-confirm-form" method="post" '
+                        f'action="/deps/install-recovery-confirm/{h(install_id)}" '
+                        f'data-api-action="/api/deps/install-recovery-confirm/{h(install_id)}">'
+                        f'<input type="hidden" name="request_id" value="{h(install_id)}">'
+                        '<input type="hidden" name="confirm_not_running" value="true">'
+                        '<button class="btn btn-orange" type="submit">确认原安装进程已停止</button>'
+                        '</form>'
+                    )
+                else:
+                    recovery_action = install_recovery_action(
+                        recovery_context
+                        or {"kind": info.get("kind", "dependency") if info else "", "package": package}
+                    )
     cancel_action = ""
     if info and info.get("cancel_request_id"):
         cancel_action = (
@@ -1737,6 +1848,7 @@ def _install_history_payload(info, history_by_id):
     retry_available = (
         not info.get("running")
         and not info.get("receipt_pending")
+        and not info.get("retry_confirmation_required")
         and status in ("failed", "unknown", "cancelled")
         and not info.get("retried_by")
     )
