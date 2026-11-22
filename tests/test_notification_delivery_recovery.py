@@ -85,6 +85,36 @@ class NotificationDeliveryRecoveryTests(unittest.TestCase):
             self.assertEqual(history[0]["message"], "remote rejected")
             self.assertEqual(history[1]["content"], "output")
 
+    def test_send_by_ids_reports_deleted_and_disabled_task_channels(self):
+        with isolated_modules():
+            from fls_manager import notify, paths
+            from fls_manager.storage import write_json
+
+            write_json(
+                paths.CONFIG_FILE,
+                {
+                    "notify_items": [
+                        {"id": "enabled", "name": "Enabled", "channel": "bark", "enabled": True, "config": {}},
+                        {"id": "disabled", "name": "Disabled", "channel": "bark", "enabled": False, "config": {}},
+                    ],
+                    "notify_default_ids": ["deleted", "disabled"],
+                },
+            )
+            with patch.object(notify, "send_one", return_value=(True, "accepted")) as sender:
+                unavailable = notify.send_by_ids("Task", "Body", ["deleted", "disabled"])
+                self.assertEqual([row["status"] for row in unavailable], ["not_sent", "not_sent"])
+                self.assertIn("不存在", unavailable[0]["msg"])
+                self.assertIn("停用", unavailable[1]["msg"])
+                sender.assert_not_called()
+
+                mixed = notify.send_by_ids("Task", "Body", ["enabled", "deleted", "disabled"])
+                defaults = notify.send_by_ids("Task", "Body", ["__default__"])
+
+            self.assertEqual(sender.call_count, 1)
+            self.assertEqual([row["id"] for row in mixed], ["deleted", "disabled", "enabled"])
+            self.assertEqual([row["status"] for row in mixed], ["not_sent", "not_sent", "succeeded"])
+            self.assertEqual([row["status"] for row in defaults], ["not_sent", "not_sent"])
+
     def test_send_success_is_unknown_when_terminal_history_write_fails(self):
         with isolated_modules() as base_dir:
             from fls_manager import notify, paths

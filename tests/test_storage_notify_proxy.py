@@ -552,10 +552,7 @@ class NotifyChannelTests(unittest.TestCase):
                 {"id": "n1", "name": "One", "enabled": True},
                 {"id": "n2", "name": "Two", "enabled": True},
             ]
-            by_id = {item["id"]: item for item in items}
-
-            with mock.patch.object(notify, "enabled_notify_items", return_value=items), \
-                    mock.patch.object(notify, "get_notify_item", side_effect=by_id.get), \
+            with mock.patch.object(notify, "notify_items", return_value=items), \
                     mock.patch.object(notify, "split_content", return_value=["part1", "part2"]), \
                     mock.patch.object(
                         notify,

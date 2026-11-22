@@ -1951,16 +1951,8 @@ class NotifyRuntimeTests(unittest.TestCase):
                 {"id": "n2", "name": "Two", "enabled": True},
             ]
 
-            with mock.patch.object(notify, "enabled_notify_items", return_value=items), \
-                    mock.patch.object(notify, "default_notify_ids", return_value=["n2", "n1"]), \
+            with mock.patch.object(notify, "notify_items", return_value=items), \
                     mock.patch.object(
-                        notify,
-                        "get_notify_item",
-                        side_effect=lambda item_id: next(
-                            (item for item in items if item["id"] == item_id),
-                            None,
-                        ),
-                    ), mock.patch.object(
                         notify,
                         "send_one",
                         return_value=(True, "ok"),
@@ -1970,6 +1962,14 @@ class NotifyRuntimeTests(unittest.TestCase):
             self.assertEqual([result["id"] for result in results], ["n1"])
             self.assertEqual(results[0]["name"], "One")
             send_one.assert_called_once_with(items[0], "Title", "content")
+
+            with mock.patch.object(notify, "notify_items", return_value=items), \
+                    mock.patch.object(notify, "get_config", return_value={"notify_default_ids": ["n2", "n1"]}), \
+                    mock.patch.object(notify, "send_one", return_value=(True, "ok")) as send_one, \
+                    mock.patch("builtins.print"):
+                defaults = notify.send_by_ids("Title", "content", ["__default__"])
+            self.assertEqual([result["id"] for result in defaults], ["n2", "n1"])
+            self.assertEqual([call.args[0] for call in send_one.call_args_list], [items[1], items[0]])
 
             with mock.patch.object(notify, "enabled_notify_items", return_value=items), \
                     mock.patch.object(notify, "send_one") as send_one:
@@ -1986,15 +1986,8 @@ class NotifyRuntimeTests(unittest.TestCase):
             ]
             content = ("a" * 2000) + ("b" * 1000) + ("c" * 1500)
 
-            with mock.patch.object(notify, "enabled_notify_items", return_value=items), \
+            with mock.patch.object(notify, "notify_items", return_value=items), \
                     mock.patch.object(
-                        notify,
-                        "get_notify_item",
-                        side_effect=lambda item_id: next(
-                            (item for item in items if item["id"] == item_id),
-                            None,
-                        ),
-                    ), mock.patch.object(
                         notify,
                         "send_one",
                         return_value=(True, "ok"),

@@ -1025,42 +1025,73 @@ def send_one(item, title, content):
 def send_by_ids(title, content, ids=None, source="task"):
     if isinstance(ids, str):
         ids = [ids]
+    elif ids is None:
+        ids = []
+    elif isinstance(ids, tuple):
+        ids = list(ids)
+    elif not isinstance(ids, list):
+        return [{"id": "", "name": "通知选择", "ok": False, "status": "not_sent",
+                 "msg": "通知选择格式无效，未发送"}]
 
-    ids = ids or []
-
-    if "__none__" in ids:
+    if any(item_id == "__none__" for item_id in ids):
         return []
 
-    enabled_ids = {x.get("id") for x in enabled_notify_items()}
-
+    items = {item.get("id"): item for item in notify_items() if item.get("id")}
+    results = []
     real_ids = []
+    seen = set()
     for item_id in ids:
-        if item_id in enabled_ids and item_id not in real_ids:
+        if item_id in ("__default__", "__none__"):
+            continue
+        if not isinstance(item_id, str) or not item_id:
+            results.append({"id": "", "name": "通知选择", "ok": False, "status": "not_sent",
+                            "msg": "通知选择无效，未发送"})
+            continue
+        if item_id in seen:
+            continue
+        seen.add(item_id)
+        item = items.get(item_id)
+        if item is None:
+            results.append({"id": item_id, "name": item_id, "ok": False, "status": "not_sent",
+                            "msg": "通知不存在或已删除，未发送"})
+        elif not item.get("enabled", True):
+            results.append({"id": item_id, "name": item.get("name") or item_id, "ok": False,
+                            "status": "not_sent", "msg": "通知已停用，未发送"})
+        else:
             real_ids.append(item_id)
 
     if not real_ids and "__default__" in ids:
-        for item_id in default_notify_ids():
-            if item_id in enabled_ids and item_id not in real_ids:
+        configured_defaults = get_config().get("notify_default_ids", [])
+        if not isinstance(configured_defaults, list):
+            results.append({"id": "", "name": "默认通知", "ok": False, "status": "not_sent",
+                            "msg": "默认通知选择无效，未发送"})
+            configured_defaults = []
+        seen_defaults = set()
+        for item_id in configured_defaults:
+            if not isinstance(item_id, str) or not item_id:
+                results.append({"id": "", "name": "默认通知", "ok": False, "status": "not_sent",
+                                "msg": "默认通知选择无效，未发送"})
+                continue
+            if item_id in seen_defaults:
+                continue
+            seen_defaults.add(item_id)
+            item = items.get(item_id)
+            if item is None:
+                results.append({"id": item_id, "name": item_id, "ok": False, "status": "not_sent",
+                                "msg": "默认通知不存在或已删除，未发送"})
+            elif not item.get("enabled", True):
+                results.append({"id": item_id, "name": item.get("name") or item_id, "ok": False,
+                                "status": "not_sent", "msg": "默认通知已停用，未发送"})
+            else:
                 real_ids.append(item_id)
 
     if not real_ids:
-        return []
+        return results
 
-    results = []
     plans = []
 
     for item_id in real_ids:
-        item = get_notify_item(item_id)
-
-        if not item:
-            results.append({
-                "id": item_id,
-                "name": item_id,
-                "ok": False,
-                "msg": "通知不存在",
-            })
-            continue
-
+        item = items[item_id]
         plans.append((item_id, item, notify_content_chunks(item, content)))
 
     # Keep normal notifications in their existing part-by-part send order.
