@@ -35,6 +35,7 @@ def main():
         from fls_manager.online_scripts.install import capture_install_outputs
         from fls_manager.online_scripts.logs import online_install_log_file
         from fls_manager.routes.online_scripts import install as install_routes
+        from fls_manager.routes import deps as deps_routes
         from fls_manager.state import DEPS_RUNNING
 
         base_dir = Path(temp)
@@ -68,6 +69,17 @@ def main():
         scheduler_receipt_fault = {"install_id": "", "remaining": 0, "mode": "after"}
         restart_receipt_fault = {"install_id": "", "remaining": 0, "mode": "after"}
         stop_log_failure = {"remaining": 0}
+        dependency_receipt_fault = {"install_id": "", "remaining": 0}
+        dependency_receipt_process = {"polls": 0}
+        persist_dependency_job = deps_routes.persist_install_job
+
+        def persist_dependency_with_failure(info):
+            if info.get("id") == dependency_receipt_fault["install_id"] and dependency_receipt_fault["remaining"]:
+                dependency_receipt_fault["remaining"] -= 1
+                raise PermissionError("browser terminal install receipt unavailable")
+            return persist_dependency_job(info)
+
+        deps_routes.persist_install_job = persist_dependency_with_failure
         write = storage._write_json_unlocked
 
         def write_with_receipt_failure(path, data):
@@ -399,6 +411,27 @@ def main():
                     }
                     DEPS_RUNNING[cancel_id] = info
                     persist_install_job(info)
+                if data.get("seed_terminal_dependency_receipt"):
+                    install_id = "terminal-receipt-" + str(data.get("width") or 390)
+                    log_file = base_dir / "log" / f"deps-install-demo-{install_id}.log"
+                    log_file.parent.mkdir(parents=True, exist_ok=True)
+                    log_file.write_text("terminal receipt fixture output\n", encoding="utf-8")
+                    info = {
+                        "id": install_id, "request_id": install_id,
+                        "kind": "dependency", "package": "demo",
+                        "log_file": str(log_file), "log_fp": None,
+                        "process": type("ExitedProcess", (), {
+                            "poll": lambda _self: dependency_receipt_process.update(
+                                polls=dependency_receipt_process["polls"] + 1
+                            ) or 0,
+                        })(),
+                        "running": True, "finished": False, "status": "running",
+                        "returncode": None, "error": "", "start_time": 1,
+                    }
+                    DEPS_RUNNING[install_id] = info
+                    persist_install_job(info)
+                    dependency_receipt_process["polls"] = 0
+                    dependency_receipt_fault.update(install_id=install_id, remaining=2)
                 if "release" in data:
                     release.write_text(str(data["release"]), encoding="ascii")
             task_imports = {}
@@ -420,6 +453,13 @@ def main():
                     _load_persisted_online_install(restart_receipt_fault["install_id"]).get("error")
                     if restart_receipt_fault["install_id"] else ""
                 ),
+                dependency_receipt_status=(
+                    json.loads(INSTALL_JOBS_FILE.read_text(encoding="utf-8"))
+                    .get(dependency_receipt_fault["install_id"], {}).get("status")
+                    if dependency_receipt_fault["install_id"] else ""
+                ),
+                dependency_receipt_failures=dependency_receipt_fault["remaining"],
+                dependency_process_polls=dependency_receipt_process["polls"],
                 deps_running=bool(DEPS_RUNNING.get("browser-deps", {}).get("process") and
                                   DEPS_RUNNING["browser-deps"]["process"].poll() is None),
             )
@@ -517,6 +557,29 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
     assert.equal(await page.locator('#log').textContent().then(text=>text.includes('installer started before panel restart')),true);
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true);
     assert.deepEqual(errors,[]);await context.close();console.log('restart install receipt recovery passed '+viewport.width);
+    continue;
+   }
+   if(process.env.FLS_INSTALL_LOG_ONLY==='terminal-deps-receipt'){
+    await page.goto(base+'/login');await login();
+    await fixture({seed_terminal_dependency_receipt:true,width:viewport.width});
+    const installId='terminal-receipt-'+viewport.width;
+    await page.goto(base+'/deps/install-log/'+installId+'?back=%2Fdeps');
+    await page.waitForFunction(()=>document.querySelector('#installPollError').textContent.includes('browser terminal install receipt unavailable'));
+    assert.equal(await page.locator('.install-retry-form').count(),0);
+    assert.equal(await page.locator('#installPollRetry').isVisible(),true);
+    assert.match(await page.locator('#installError').textContent(),/browser terminal install receipt unavailable/);
+    await page.locator('#installPollRetry').click();
+    await page.waitForFunction(()=>document.querySelector('#installStatus').textContent==='安装成功'
+      &&document.querySelector('#installPollError').hidden);
+    assert.equal(await page.locator('#log').textContent().then(text=>text.includes('terminal receipt fixture output')),true);
+    assert.equal(await page.locator('.install-retry-form').count(),0);
+    const recovered=await state();
+    assert.equal(recovered.dependency_receipt_status,'succeeded');
+    assert.equal(recovered.dependency_receipt_failures,0);
+    assert.ok(recovered.dependency_process_polls>=1);
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true);
+    await page.screenshot({path:'/tmp/fls-terminal-deps-receipt-'+viewport.width+'.png',fullPage:true});
+    assert.deepEqual(errors,[]);await context.close();console.log('terminal dependency receipt recovery passed '+viewport.width);
     continue;
    }
    if(process.env.FLS_INSTALL_LOG_ONLY==='malformed-recovery'){

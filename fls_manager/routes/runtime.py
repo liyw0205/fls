@@ -10,9 +10,9 @@ from flask import Blueprint, redirect, request, url_for
 
 from ..paths import BASE_DIR, LOG_DIR
 from ..state import DEPS_RUNNING
-from ..utils import now_str, safe_name, prune_completed_records
+from ..utils import now_str, safe_name
 from ..install_records import get_install_job, persist_install_job
-from .deps import install_api_payload, install_request_id, _persist_dependency_state
+from .deps import install_api_payload, install_request_id, prune_install_results, _persist_dependency_state
 
 bp = Blueprint("runtime", __name__)
 
@@ -202,7 +202,7 @@ def install_runtime(runtime):
         DEPS_RUNNING[install_id] = info
         return redirect(url_for("deps.deps_install_log", install_id=install_id, back="/panel/status"))
 
-    prune_completed_records(DEPS_RUNNING, finished_key="finished")
+    prune_install_results()
     info = {
         "id": install_id,
         "request_id": install_id,
@@ -295,7 +295,8 @@ def api_install_runtime(runtime):
     if getattr(result, "status_code", 0) in (301, 302, 303, 307, 308):
         location = result.headers.get("Location", "")
         install_id = location.split("/deps/install-log/", 1)[-1].split("?", 1)[0]
-        return install_api_payload(install_id, location), 200
+        payload = install_api_payload(install_id, location)
+        return payload, 503 if payload.get("receipt_pending") else 200
     if isinstance(result, tuple):
         body, status = result
         return {"ok": False, "request_id": request_id, "msg": str(body)}, status

@@ -192,6 +192,12 @@ def persist_install_job(info):
     return dict(snapshot)
 
 
+def install_job_is_persisted(info):
+    with INSTALL_JOBS_LOCK:
+        snapshot = _snapshot(info)
+        return _read_jobs().get(snapshot["id"]) == snapshot
+
+
 def claim_install_retry(info):
     """Atomically bind one retry to its parent before any process is launched."""
     snapshot = _snapshot(info)

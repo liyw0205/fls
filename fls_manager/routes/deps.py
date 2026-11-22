@@ -16,10 +16,12 @@ from ..state import DEPS_RUNNING
 from ..utils import h, now_str, safe_name, get_back_url, prune_completed_records
 from ..logs import tail_file
 from ..install_records import (
+    INSTALL_JOBS_LOCK,
     InstallHistoryLimitError,
     claim_install_cancel,
     claim_install_retry,
     get_install_job,
+    install_job_is_persisted,
     list_install_jobs,
     persist_install_job,
 )
@@ -173,17 +175,31 @@ def install_request_id(raw):
 
 def _persist_dependency_state(info):
     if not info.get("id") or info.get("kind") not in ("dependency", "runtime"):
-        return
-    info["updated_at"] = now_str()
-    try:
-        persist_install_job(info)
-    except Exception as exc:
-        info["running"] = False
-        info["finished"] = True
-        info["status"] = "unknown"
-        info["error"] = "；".join(filter(None, (
-            info.get("error"), f"安装状态保存失败：{exc}",
-        )))
+        return True
+    with INSTALL_JOBS_LOCK:
+        if not info.get("receipt_error"):
+            info["updated_at"] = now_str()
+        try:
+            persist_install_job(info)
+        except Exception as exc:
+            try:
+                published = install_job_is_persisted(info)
+            except Exception:
+                published = False
+            if not published:
+                info["receipt_error"] = f"安装已结束，但结果回执保存失败：{exc}"
+                return False
+        info.pop("receipt_error", None)
+        return True
+
+
+def prune_install_results():
+    with INSTALL_JOBS_LOCK:
+        prune_completed_records(DEPS_RUNNING, finished_key="finished", retain_key="receipt_error")
+
+
+def _pending_install_receipt(install_id):
+    return DEPS_RUNNING.get(install_id, {}).get("receipt_error", "")
 
 
 def _install_cancel_payload(info):
@@ -215,7 +231,22 @@ def _install_cancel_payload(info):
     }
 
 
+def _cancel_receipt_response(info, cancel_id):
+    payload = _install_cancel_payload(info)
+    error = _pending_install_receipt(info["id"])
+    if error:
+        return payload | {
+            "ok": False, "request_id": cancel_id, "status": "unknown",
+            "status_label": "结果待保存", "returncode": None, "cancel_status": "unknown",
+            "cancel_status_label": "取消结果待保存", "error": error, "msg": error,
+            "cancel_error": error, "receipt_pending": True, "retry_available": False,
+        }, 503
+    return payload, 200
+
+
 def _finish_install_cancel(info, returncode, cancel_status, error=""):
+    if info.get("finished"):
+        return
     still_running = returncode is None and info.get("process") is not None and info["process"].poll() is None
     fp = info.get("log_fp")
     if fp and not still_running:
@@ -253,14 +284,7 @@ def _finish_install_cancel(info, returncode, cancel_status, error=""):
         error=error,
         updated_at=now_str(),
     )
-    try:
-        persist_install_job(info)
-        return True
-    except Exception as exc:
-        message = f"安装进程已结束，但取消回执保存失败：{exc}"
-        info["cancel_error"] = "；".join(filter(None, (info.get("cancel_error"), message)))
-        info["error"] = "；".join(filter(None, (info.get("error"), message)))
-        return False
+    _persist_dependency_state(info)
 
 
 def _cancel_install_job(install_id, cancel_id):
@@ -271,12 +295,14 @@ def _cancel_install_job(install_id, cancel_id):
     if not info:
         return {"ok": False, "request_id": cancel_id, "msg": "安装记录不存在。"}, 404
     previous_id = str(info.get("cancel_request_id") or "")
+    if _pending_install_receipt(install_id):
+        return _cancel_receipt_response(info, cancel_id)
     if previous_id:
         if previous_id == cancel_id:
             if install_id in DEPS_RUNNING and info.get("cancel_status") == "requested":
                 deps_install_result(install_id)
                 info = DEPS_RUNNING.get(install_id) or info
-            return _install_cancel_payload(info), 200
+            return _cancel_receipt_response(info, cancel_id)
         if info.get("cancel_status") not in ("failed", "unknown"):
             return {
                 **_install_cancel_payload(info), "ok": False, "request_id": cancel_id,
@@ -287,6 +313,8 @@ def _cancel_install_job(install_id, cancel_id):
     if install_id in DEPS_RUNNING:
         deps_install_result(install_id)
         info = DEPS_RUNNING.get(install_id) or info
+    if _pending_install_receipt(install_id):
+        return _cancel_receipt_response(info, cancel_id)
     if not info.get("running") or info.get("status") != "running":
         return {
             **_install_cancel_payload(info), "ok": False, "request_id": cancel_id,
@@ -324,7 +352,7 @@ def _cancel_install_job(install_id, cancel_id):
                 cancel_status=claimed_info.get("cancel_status", ""),
                 cancel_error=claimed_info.get("cancel_error", ""),
             )
-            return _install_cancel_payload(info), 200
+            return _cancel_receipt_response(info, cancel_id)
         return {
             **_install_cancel_payload(claimed_info), "ok": False, "request_id": cancel_id,
             "msg": "另一个取消请求已经认领该安装，未重复发送信号。",
@@ -343,13 +371,9 @@ def _cancel_install_job(install_id, cancel_id):
     except Exception as exc:
         returncode = process.poll()
         if returncode is not None:
-            state = "completed"
-            persisted = _finish_install_cancel(info, returncode, state)
-            payload = _install_cancel_payload(info)
-            if not persisted:
-                payload.update(ok=False, msg=info["cancel_error"])
-                return payload, 503
-            return payload, 200
+            with INSTALL_JOBS_LOCK:
+                _finish_install_cancel(info, returncode, "completed")
+                return _cancel_receipt_response(info, cancel_id)
         info.update(
             cancel_status="failed", cancel_error=f"终止安装进程失败：{exc}",
             error=f"终止安装进程失败：{exc}", updated_at=now_str(),
@@ -361,12 +385,9 @@ def _cancel_install_job(install_id, cancel_id):
         return _install_cancel_payload(info) | {"ok": False}, 503
 
     state = "completed" if returncode == 0 else "cancelled"
-    persisted = _finish_install_cancel(info, returncode, state)
-    payload = _install_cancel_payload(info)
-    if not persisted:
-        payload.update(ok=False, msg=info["cancel_error"])
-        return payload, 503
-    return payload, 200
+    with INSTALL_JOBS_LOCK:
+        _finish_install_cancel(info, returncode, state)
+        return _cancel_receipt_response(info, cancel_id)
 
 
 def _install_cancel_status(install_id, cancel_id):
@@ -393,9 +414,11 @@ def _install_cancel_status(install_id, cancel_id):
             **_install_cancel_payload(info), "ok": False, "request_id": cancel_id,
             "msg": "取消请求标识与安装记录不匹配。",
         }, 409
-    if install_id in DEPS_RUNNING and info.get("running"):
-        deps_install_result(install_id)
+    if install_id in DEPS_RUNNING:
+        deps_install_result(install_id, recover_receipt=True)
         info = DEPS_RUNNING.get(install_id) or info
+        if _pending_install_receipt(install_id):
+            return _cancel_receipt_response(info, cancel_id)
     if info.get("cancel_status") == "requested" and install_id not in DEPS_RUNNING:
         info.update(
             cancel_status="unknown",
@@ -522,6 +545,12 @@ def _retry_install_lookup(install_id, retry_id):
         return {"ok": False, "request_id": retry_id, "msg": "原安装记录不存在，未启动重试。"}, 404
     child_id = str(original.get("retried_by") or "")
     if not child_id:
+        error = _pending_install_receipt(install_id)
+        if error:
+            return {
+                "ok": False, "request_id": retry_id, "original_id": install_id,
+                "msg": error, "receipt_pending": True, "retry_available": False,
+            }, 503
         relation_error = _retry_parent_diagnostic(original)
         if relation_error:
             return {"ok": False, "request_id": retry_id, "msg": relation_error}, 409
@@ -543,26 +572,40 @@ def _retry_install_lookup(install_id, retry_id):
             "ok": False, "request_id": retry_id, "install_id": child_id,
             "msg": "请求标识与原重试作业不匹配，请查询原重试 ID。",
         }, 409
+    result = deps_install_result(child_id, recover_receipt=True)
+    if result.get("receipt_pending"):
+        return {
+            "ok": False, "request_id": retry_id, "install_id": child_id,
+            "original_id": install_id, "msg": result["error"],
+            "receipt_pending": True, "retry_available": False,
+        }, 503
     return {
         "ok": True,
         "request_id": retry_id,
         "install_id": child_id,
         "original_id": install_id,
         "log_url": url_for("deps.deps_install_log", install_id=child_id, back="/deps"),
-        "retry_available": not child.get("running") and child.get("status") in ("failed", "unknown", "start_failed", "cancelled"),
-        **deps_install_result(child_id),
+        "retry_available": not result.get("receipt_pending") and not result["running"]
+        and result["status"] in ("failed", "unknown", "start_failed", "cancelled"),
+        **result,
     }, 200
 
 
 def _retry_install_result(install_id, location=""):
-    result = deps_install_result(install_id)
+    result = deps_install_result(install_id, recover_receipt=True)
     return {
-        "ok": True,
+        "ok": not result.get("receipt_pending"),
         "request_id": install_id,
         "install_id": install_id,
         "log_url": location or url_for("deps.deps_install_log", install_id=install_id, back="/deps"),
         **result,
+        **({"msg": result["error"]} if result.get("receipt_pending") else {}),
     }
+
+
+def _retry_install_response(install_id):
+    payload = _retry_install_result(install_id)
+    return payload, 503 if payload.get("receipt_pending") else 200
 
 
 def _retry_install_start(install_id, retry_id):
@@ -572,11 +615,14 @@ def _retry_install_start(install_id, retry_id):
         return {"ok": False, "request_id": retry_id, "msg": f"安装记录无法读取，未启动重试：{exc}"}, 500
     if not original:
         return {"ok": False, "request_id": retry_id, "msg": "原安装记录不存在，未启动重试。"}, 404
+    error = _pending_install_receipt(install_id)
+    if error:
+        return {"ok": False, "request_id": retry_id, "msg": error, "receipt_pending": True}, 503
     linked = str(original.get("retried_by") or "")
     if linked:
         child = get_install_job(linked, DEPS_RUNNING)
         if _install_retry_pair_matches(original, child) and retry_id == linked:
-            return _retry_install_result(linked), 200
+            return _retry_install_response(linked)
         if child and child.get("retry_of") == install_id:
             return {
                 "ok": False, "request_id": retry_id, "install_id": linked,
@@ -617,7 +663,7 @@ def _retry_install_start(install_id, retry_id):
                 "ok": False, "request_id": retry_id, "install_id": child_id,
                 "msg": "原安装已经提交其他重试，请查询该重试记录。",
             }, 409
-        return _retry_install_result(child_id), 200
+        return _retry_install_response(child_id)
 
     live_parent = DEPS_RUNNING.get(install_id)
     if isinstance(live_parent, dict):
@@ -631,11 +677,11 @@ def _retry_install_start(install_id, retry_id):
             error=f"打开安装日志失败：{exc}", updated_at=now_str(),
         )
         _persist_dependency_state(info)
-        return _retry_install_result(retry_id), 200
+        return _retry_install_response(retry_id)
 
     fp = info.get("log_fp")
     if fp is None:
-        return _retry_install_result(retry_id), 200
+        return _retry_install_response(retry_id)
     package = info["package"]
     try:
         fp.write((
@@ -679,10 +725,15 @@ def _retry_install_start(install_id, retry_id):
             error=f"启动安装重试失败：{exc}", updated_at=now_str(),
         )
         _persist_dependency_state(info)
-    return _retry_install_result(retry_id), 200
+    return _retry_install_response(retry_id)
 
 
 def is_deps_install_running(install_id):
+    with INSTALL_JOBS_LOCK:
+        return _poll_install_process(install_id)
+
+
+def _poll_install_process(install_id):
     info = DEPS_RUNNING.get(install_id)
 
     if not info:
@@ -692,6 +743,8 @@ def is_deps_install_running(install_id):
         return False
 
     proc = info.get("process")
+    if proc is None and info.get("status") == "prepared":
+        return True
 
     returncode = proc.poll() if proc is not None else None
     if proc is not None and returncode is None:
@@ -738,14 +791,23 @@ def is_deps_install_running(install_id):
     return False
 
 
-def deps_install_result(install_id):
-    running = is_deps_install_running(install_id)
-    info = DEPS_RUNNING.get(install_id)
+def deps_install_result(install_id, *, recover_receipt=False):
+    with INSTALL_JOBS_LOCK:
+        info = DEPS_RUNNING.get(install_id)
+        if recover_receipt and info and info.get("receipt_error"):
+            _persist_dependency_state(info)
+        running = _poll_install_process(install_id)
+        info = dict(info) if info else None
     if not info:
         info = get_install_job(install_id)
     returncode = info.get("returncode") if info else None
     error = info.get("error", "") if info else ""
 
+    if info and info.get("receipt_error"):
+        return {
+            "running": False, "status": "unknown", "status_label": "结果待保存",
+            "returncode": None, "error": info["receipt_error"], "receipt_pending": True,
+        }
     if not info:
         context = find_install_log_context(install_id)
         if context:
@@ -766,6 +828,8 @@ def deps_install_result(install_id):
     elif info and info.get("status") == "failed" and returncode is not None:
         status, label = "failed", "安装失败"
         error = error or f"安装进程退出码为 {returncode}，请查看日志中的错误信息。"
+    elif info and info.get("status") == "succeeded":
+        status, label = "succeeded", "安装成功"
     elif error:
         status, label = "start_failed", "启动失败"
     elif returncode == 0:
@@ -790,11 +854,12 @@ def deps_install_result(install_id):
 def install_api_payload(install_id, log_url):
     result = deps_install_result(install_id)
     return {
-        "ok": True,
+        "ok": not result.get("receipt_pending"),
         "request_id": install_id,
         "install_id": install_id,
         "log_url": log_url,
         **result,
+        **({"msg": result["error"]} if result.get("receipt_pending") else {}),
     }
 
 
@@ -970,7 +1035,7 @@ def deps_install():
     )
     log_fp.write(header.encode("utf-8"))
 
-    prune_completed_records(DEPS_RUNNING, finished_key="finished")
+    prune_install_results()
     info = {
         "id": install_id,
         "request_id": install_id,
@@ -1045,7 +1110,8 @@ def api_deps_install():
     if getattr(result, "status_code", 0) in (301, 302, 303, 307, 308):
         location = result.headers.get("Location", "")
         install_id = location.split("/deps/install-log/", 1)[-1].split("?", 1)[0]
-        return jsonify(install_api_payload(install_id, location)), 200
+        payload = install_api_payload(install_id, location)
+        return jsonify(payload), 503 if payload.get("receipt_pending") else 200
     if isinstance(result, tuple):
         body, status = result
         return jsonify(ok=False, request_id=request_id, msg=str(body)), status
@@ -1128,7 +1194,7 @@ def deps_install_log(install_id):
     result = deps_install_result(install_id)
     recovery_action = ""
     recovery_diagnostic = ""
-    if not result.get("running") and result.get("status") in (
+    if not result.get("receipt_pending") and not result.get("running") and result.get("status") in (
         "unknown", "missing", "failed", "start_failed", "cancelled"
     ):
         recovery_context = dict(context or info or {})
@@ -1576,7 +1642,7 @@ def api_deps_install_log(install_id):
             "log": "",
         }), 400
 
-    result = deps_install_result(install_id)
+    result = deps_install_result(install_id, recover_receipt=True)
     log_file, log_failure = safe_install_log_file(info, install_id)
     if log_failure:
         _title, message, failure_status = log_failure
@@ -1601,10 +1667,13 @@ def api_deps_install_log(install_id):
             "recovery_url": "/deps/install-history",
         }), 500
 
-    return jsonify({
+    payload = {
         **result,
         "log": log,
-    })
+    }
+    if result.get("receipt_pending"):
+        return jsonify(payload | {"ok": False}), 503
+    return jsonify(payload)
 
 
 @bp.route("/api/deps/install-history")
@@ -1629,7 +1698,15 @@ def _list_install_history(limit, kind):
             deps_install_result(install_id)
         except Exception as exc:
             raise RuntimeError(f"安装 {install_id} 的进程状态无法确认：{exc}") from exc
-    return list_install_jobs(limit, kind, DEPS_RUNNING)
+    items = list_install_jobs(limit, kind, DEPS_RUNNING)
+    for info in items:
+        error = _pending_install_receipt(info["id"])
+        if error:
+            info.update(
+                status="unknown", cancel_status="unknown" if info.get("cancel_request_id") else "",
+                running=False, returncode=None, error=error, receipt_pending=True,
+            )
+    return items
 
 
 def _install_history_payload(info, history_by_id):
@@ -1648,6 +1725,7 @@ def _install_history_payload(info, history_by_id):
         }.get(cancel_status, "")
     retry_available = (
         not info.get("running")
+        and not info.get("receipt_pending")
         and status in ("failed", "unknown", "cancelled")
         and not info.get("retried_by")
     )
