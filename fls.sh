@@ -404,7 +404,7 @@ install_basic_deps() {
 
   "$py" - <<'PY' >/dev/null 2>&1
 import importlib.util
-mods = ["flask", "requests", "apscheduler", "socks"]
+mods = ["flask", "requests", "apscheduler", "socks", "qrcode"]
 raise SystemExit(0 if all(importlib.util.find_spec(m) for m in mods) else 1)
 PY
 
@@ -414,9 +414,9 @@ PY
 
   say "检测到基础 Python 依赖缺失，尝试安装..."
 
-  "$py" -m pip install flask requests apscheduler PySocks tzdata setproctitle >/dev/null 2>&1 || \
-  "$py" -m pip install --break-system-packages flask requests apscheduler PySocks tzdata setproctitle >/dev/null 2>&1 || \
-  "$py" -m pip install --user flask requests apscheduler PySocks tzdata setproctitle >/dev/null 2>&1 || true
+  "$py" -m pip install flask requests apscheduler PySocks tzdata setproctitle qrcode >/dev/null 2>&1 || \
+  "$py" -m pip install --break-system-packages flask requests apscheduler PySocks tzdata setproctitle qrcode >/dev/null 2>&1 || \
+  "$py" -m pip install --user flask requests apscheduler PySocks tzdata setproctitle qrcode >/dev/null 2>&1 || true
 }
 
 read_config_value() {

@@ -1,8 +1,11 @@
 import json
+import base64
 import os
+import re
 import threading
 import time
 import unittest
+import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
@@ -34,6 +37,53 @@ class ConfigApplyRecoveryTests(unittest.TestCase):
                 "type_py": "1", "type_sh": "1"}
         data.update(updates)
         return data
+
+    def test_totp_qr_is_local_svg_and_never_sends_secret_to_external_service(self):
+        import qrcode
+
+        from fls_manager.security import totp_otpauth_uri
+
+        with isolated_app() as (app, _base_dir):
+            encoded_payloads = []
+            original_add_data = qrcode.QRCode.add_data
+
+            def capture_payload(qr, payload, *args, **kwargs):
+                encoded_payloads.append(payload)
+                return original_add_data(qr, payload, *args, **kwargs)
+
+            with patch.object(qrcode.QRCode, "add_data", new=capture_payload):
+                response = app.test_client().get("/config", headers={"X-Token": TOKEN})
+            self.assertEqual(response.status_code, 200)
+            html = response.get_data(as_text=True)
+            self.assertNotIn("api.qrserver.com", html)
+            match = re.search(r'<img src="(data:image/svg\+xml;base64,[^"]+)"', html)
+            self.assertIsNotNone(match)
+            encoded = match.group(1).split(",", 1)[1]
+            svg = base64.b64decode(encoded, validate=True)
+            root = ET.fromstring(svg)
+            self.assertEqual(root.tag, "{http://www.w3.org/2000/svg}svg")
+            paths = root.findall("{http://www.w3.org/2000/svg}path")
+            self.assertEqual(len(paths), 1)
+            self.assertTrue(paths[0].get("d"))
+            self.assertNotIn(b"https://", svg)
+            secret_match = re.search(r'name="totp_secret" value="([A-Z2-7]+)"', html)
+            self.assertIsNotNone(secret_match)
+            secret = secret_match.group(1)
+            self.assertEqual(encoded_payloads, [totp_otpauth_uri(secret)])
+            self.assertIn("otpauth://totp/", html)
+            self.assertIn(secret, html)
+
+    def test_missing_local_totp_qr_component_keeps_manual_setup_without_empty_image(self):
+        with isolated_app() as (app, _base_dir), patch(
+            "fls_manager.routes.config.page.totp_qr_url", return_value="",
+        ):
+            response = app.test_client().get("/config", headers={"X-Token": TOKEN})
+            self.assertEqual(response.status_code, 200)
+            html = response.get_data(as_text=True)
+            self.assertIn("本地二维码组件不可用", html)
+            self.assertIn("otpauth://totp/", html)
+            self.assertNotIn('<img src=""', html)
+            self.assertNotIn("api.qrserver.com", html)
 
     def test_failed_save_keeps_config_session_and_draft_without_any_apply_side_effect(self):
         for ajax in (False, True):

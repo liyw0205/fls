@@ -144,7 +144,7 @@ class LazyModule:
         return dir(self._load())
 
 
-def prune_completed_records(records, max_completed=100, running_key="running", finished_key=None):
+def prune_completed_records(records, max_completed=100, running_key="running", finished_key=None, *, retain_key=None):
     """Keep active records and only the newest completed records in memory."""
     if not isinstance(records, dict):
         return 0
@@ -156,7 +156,7 @@ def prune_completed_records(records, max_completed=100, running_key="running", f
 
     completed = []
     for record_id, info in list(records.items()):
-        if not isinstance(info, dict):
+        if not isinstance(info, dict) or (retain_key and info.get(retain_key)):
             continue
 
         if running_key in info:

@@ -374,6 +374,12 @@ def _render_config_form(cfg, revision, message="", status=200, current_cfg=None)
 
     totp_uri = totp_otpauth_uri(totp_secret)
     totp_qr = totp_qr_url(totp_secret)
+    totp_qr_html = (
+        f'<img src="{h(totp_qr)}" alt="2FA TOTP 二维码" '
+        'style="width:220px;height:220px;border:1px solid #e5e7eb;border-radius:12px;background:#fff;">'
+        if totp_qr else
+        '<div class="help" role="status">本地二维码组件不可用；请使用下方 otpauth 链接或密钥手动添加。</div>'
+    )
 
     security_status_text = "已开启" if security_verify_enabled else "未开启"
 
@@ -514,10 +520,7 @@ def _render_config_form(cfg, revision, message="", status=200, current_cfg=None)
 
             <div style="display:flex;gap:18px;flex-wrap:wrap;align-items:flex-start;">
                 <div>
-                    <img
-                        src="{h(totp_qr)}"
-                        style="width:220px;height:220px;border:1px solid #e5e7eb;border-radius:12px;background:#fff;"
-                    >
+                    {totp_qr_html}
                     <div class="help" style="text-align:center;margin-top:6px;">
                         扫码添加到认证器
                     </div>
