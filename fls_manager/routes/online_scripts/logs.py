@@ -363,10 +363,7 @@ if({str(bool(payload.get("running"))).lower()}){{
     return layout("在线脚本源刷新日志", "online_scripts", body), 200
 
 
-def _install_phase(info):
-    phase = str((info or {}).get("phase") or "").strip()
-    if phase:
-        return phase
+def _install_status_phase(info):
     if (info or {}).get("scheduler_reload_pending"):
         return "scheduler_reload_pending"
     if (info or {}).get("running"):
@@ -384,11 +381,31 @@ def _install_phase(info):
     }.get(str((info or {}).get("status") or ""), "unknown")
 
 
+def _install_phase_warning(info):
+    info = info or {}
+    phase = str(info.get("phase") or "").strip()
+    if phase == "completed" and info.get("status") != "已完成":
+        return "安装阶段标记为 completed，但状态不是已完成；已按状态显示，原回执未修改。"
+    return ""
+
+
+def _install_phase(info):
+    phase = str((info or {}).get("phase") or "").strip()
+    if phase == "completed" and _install_phase_warning(info):
+        return _install_status_phase(info)
+    if phase:
+        return phase
+    return _install_status_phase(info)
+
+
 def _install_error(info):
-    errors = [info.get("error") or ""]
+    errors = [str(info.get("error") or "")]
     pending_error = info.get("scheduler_reload_error") or ""
     if pending_error and pending_error not in errors[0]:
         errors.append(pending_error)
+    phase_warning = _install_phase_warning(info)
+    if phase_warning and phase_warning not in errors[0]:
+        errors.append(phase_warning)
     return "；".join(filter(None, errors))
 
 

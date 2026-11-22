@@ -103,6 +103,80 @@ class OnlineInstallLifecycleTests(unittest.TestCase):
             self.assertEqual(persisted["phase"], "completed")
             self.assertEqual(info["status"], "已完成")
 
+    def test_install_log_does_not_report_completed_phase_for_noncompleted_status(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import (
+                _load_persisted_online_install, persist_online_install,
+            )
+
+            client = app.test_client()
+            for index, (status, expected_phase, stored_phase) in enumerate((
+                ("结果未知", "unknown", "completed"),
+                ("失败", "failed", " completed "),
+            )):
+                with self.subTest(status=status):
+                    install_id = f"{index + 1:032x}"
+                    log_file = base_dir / f"{install_id}.log"
+                    log_file.write_text("install output\n", encoding="utf-8")
+                    persist_online_install({
+                        "id": install_id,
+                        "script_id": "demo",
+                        "script_name": "Demo",
+                        "log_file": str(log_file),
+                        "running": False,
+                        "status": status,
+                        "phase": stored_phase,
+                        "returncode": None,
+                        "error": "receipt mismatch",
+                        "start_time": 1,
+                        "updated_at": "2026-11-23 00:00:00",
+                    })
+
+                    response = client.get(
+                        f"/api/online-scripts/log/{install_id}", headers={"X-Token": TOKEN},
+                    )
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.json["status"], status)
+                    self.assertEqual(response.json["phase"], expected_phase)
+                    self.assertIn("不是已完成", response.json["error"])
+                    self.assertIn("原回执未修改", response.json["error"])
+
+                    page = client.get(
+                        f"/online-scripts/log/{install_id}", headers={"X-Token": TOKEN},
+                    )
+                    html = page.get_data(as_text=True)
+                    self.assertEqual(page.status_code, 200)
+                    self.assertIn(f'id="installPhase">{expected_phase}</span>', html)
+                    self.assertIn("不是已完成", html)
+                    self.assertEqual(_load_persisted_online_install(install_id)["phase"], stored_phase)
+
+            for install_id, status, phase in (
+                ("3" * 32, "已完成", "completed"),
+                ("4" * 32, "结果未知", "installing"),
+            ):
+                log_file = base_dir / f"{install_id}.log"
+                log_file.write_text("install output\n", encoding="utf-8")
+                persist_online_install({
+                    "id": install_id,
+                    "script_id": "demo",
+                    "script_name": "Demo",
+                    "log_file": str(log_file),
+                    "running": False,
+                    "status": status,
+                    "phase": phase,
+                    "returncode": 0 if phase == "completed" else None,
+                    "error": "",
+                    "start_time": 1,
+                    "updated_at": "2026-11-23 00:00:00",
+                })
+                response = client.get(
+                    f"/api/online-scripts/log/{install_id}", headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json["phase"], phase)
+                if phase == "completed":
+                    self.assertNotIn("阶段与状态不一致", response.json["error"])
+
     def test_install_log_reports_later_target_and_imported_task_changes(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.models import load_tasks, save_tasks
