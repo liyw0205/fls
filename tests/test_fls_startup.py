@@ -1,3 +1,4 @@
+import errno
 import os
 import subprocess
 import sys
@@ -5,7 +6,8 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -129,6 +131,36 @@ class ManagerInstanceLockTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "符号链接"):
                     instance_lock.acquire_instance_lock()
             self.assertEqual(target.read_text(encoding="ascii"), "untouched")
+
+    def test_windows_lock_backend_acquires_releases_and_reports_contention(self):
+        from fls_manager import instance_lock
+
+        with tempfile.TemporaryDirectory(prefix="fls-manager-windows-lock-") as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            calls = []
+            windows_lock = SimpleNamespace(LK_NBLCK=1, LK_UNLCK=2)
+
+            def record_locking(fd, operation, length):
+                calls.append((os.lseek(fd, 0, os.SEEK_CUR), operation, length))
+
+            windows_lock.locking = Mock(side_effect=record_locking)
+            with patch.object(instance_lock, "DATA_DIR", data_dir), \
+                    patch.object(instance_lock.os, "name", "nt"), \
+                    patch.dict(sys.modules, {"msvcrt": windows_lock}):
+                descriptor = instance_lock.acquire_instance_lock()
+                self.assertIsNotNone(descriptor)
+                instance_lock.release_instance_lock(descriptor)
+
+            self.assertEqual((data_dir / "fls-manager.lock").read_bytes(), b"\0")
+            self.assertEqual(calls, [(0, 1, 1), (0, 2, 1)])
+
+            windows_lock.locking = Mock(side_effect=OSError(errno.EACCES, "locked"))
+            with patch.object(instance_lock, "DATA_DIR", data_dir), \
+                    patch.object(instance_lock.os, "name", "nt"), \
+                    patch.dict(sys.modules, {"msvcrt": windows_lock}), \
+                    patch.object(instance_lock.os, "close", wraps=os.close) as close:
+                self.assertIsNone(instance_lock.acquire_instance_lock())
+                close.assert_called_once()
 
 
 if __name__ == "__main__":
