@@ -1673,16 +1673,32 @@ const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
 
             for invalid_recovery in (
                 {"pending": "false"},
+                {"id": [], "pending": True},
+                {"id": "not-an-install-receipt", "pending": False},
+                {"id": "c" * 32, "pending": True, "task_baseline_captured": True},
+                {"id": "c" * 32, "pending": True, "task_baseline_captured": True, "task_baseline": "bad"},
+                {"id": "c" * 32, "pending": False, "confirmation": [], "confirmation_source": "d" * 64},
+                {"id": "c" * 32, "pending": False, "confirmation": "published", "confirmation_source": "d" * 64},
                 {"pending": True, "publication": []},
-                {"pending": True, "publication": {"keys": [], "task_ids": [], "single_task": False}},
+                {"id": "c" * 32, "pending": True, "publication": {
+                    "keys": ["demo:1:Daily"], "task_ids": ["task"], "single_task": True,
+                    "before": "bad", "after": "d" * 64, "before_source": "e" * 64,
+                }},
             ):
                 with self.subTest(task_recovery=invalid_recovery):
                     record["task_recovery"] = invalid_recovery
                     ONLINE_INSTALL_JOBS_FILE.write_text(json.dumps({install_id: record}), encoding="utf-8")
                     invalid_bytes = ONLINE_INSTALL_JOBS_FILE.read_bytes()
-                    with self.assertRaisesRegex(RuntimeError, "任务(恢复|发布).*回执"):
+                    with self.assertRaisesRegex(RuntimeError, "任务.*(回执|基线)"):
                         get_online_install_job(install_id)
                     self.assertEqual(ONLINE_INSTALL_JOBS_FILE.read_bytes(), invalid_bytes)
+
+            record["task_recovery"] = {
+                "id": "f" * 32, "pending": False, "task_baseline_captured": True,
+                "task_baseline": "", "confirmation": "not_published", "confirmation_source": "",
+            }
+            ONLINE_INSTALL_JOBS_FILE.write_text(json.dumps({install_id: record}), encoding="utf-8")
+            self.assertEqual(get_online_install_job(install_id)["task_recovery"], record["task_recovery"])
 
     def test_install_history_clips_whole_retry_chains_and_exposes_recursive_recovery_navigation(self):
         with isolated_app() as (app, base_dir):

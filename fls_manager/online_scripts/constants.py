@@ -1611,25 +1611,62 @@ def _validate_install_job_record(install_id, info):
         return
     if not isinstance(recovery, dict):
         raise RuntimeError("在线脚本安装记录损坏，未覆盖原文件：任务恢复回执必须是对象")
-    if "pending" in recovery and not isinstance(recovery["pending"], bool):
+    recovery_id = recovery.get("id")
+    if not isinstance(recovery_id, str) or not re.fullmatch(r"[a-f0-9]{32}", recovery_id):
+        raise RuntimeError("在线脚本安装记录损坏，未覆盖原文件：任务恢复回执标识无效")
+    if not isinstance(recovery.get("pending"), bool):
         raise RuntimeError("在线脚本安装记录损坏，未覆盖原文件：任务恢复回执状态无效")
     if "task_baseline_captured" in recovery and not isinstance(recovery["task_baseline_captured"], bool):
         raise RuntimeError("在线脚本安装记录损坏，未覆盖原文件：任务恢复基线标记无效")
+    task_baseline = recovery.get("task_baseline", "")
+    if (
+        not isinstance(task_baseline, str)
+        or (task_baseline and not re.fullmatch(r"[a-f0-9]{64}", task_baseline))
+        or (recovery.get("task_baseline_captured") and "task_baseline" not in recovery)
+    ):
+        raise RuntimeError("在线脚本安装记录损坏，未覆盖原文件：任务恢复基线无效")
+
+    confirmation = recovery.get("confirmation", "")
+    confirmation_source = recovery.get("confirmation_source", "")
+    if (
+        confirmation not in ("", "published", "not_published")
+        or not isinstance(confirmation_source, str)
+        or (confirmation_source and not re.fullmatch(r"[a-f0-9]{64}", confirmation_source))
+        or (not confirmation and confirmation_source)
+        or (confirmation and recovery["pending"])
+    ):
+        raise RuntimeError("在线脚本安装记录损坏，未覆盖原文件：任务确认回执无效")
 
     publication = recovery.get("publication")
-    if publication is None:
-        return
-    if not isinstance(publication, dict):
-        raise RuntimeError("在线脚本安装记录损坏，未覆盖原文件：任务发布回执必须是对象")
-    if publication and (
-        not isinstance(publication.get("keys"), list)
-        or any(not isinstance(value, str) for value in publication["keys"])
-        or not isinstance(publication.get("task_ids"), list)
-        or any(not isinstance(value, str) for value in publication["task_ids"])
-        or not isinstance(publication.get("single_task"), bool)
-        or any(not isinstance(publication.get(field), str) for field in ("before", "after", "before_source"))
-    ):
-        raise RuntimeError("在线脚本安装记录损坏，未覆盖原文件：任务发布回执结构无效")
+    if publication is not None:
+        if not isinstance(publication, dict):
+            raise RuntimeError("在线脚本安装记录损坏，未覆盖原文件：任务发布回执必须是对象")
+        if (
+            not isinstance(publication.get("keys"), list)
+            or not publication["keys"]
+            or any(not isinstance(value, str) or not value for value in publication["keys"])
+            or len(set(publication["keys"])) != len(publication["keys"])
+            or not isinstance(publication.get("task_ids"), list)
+            or not publication["task_ids"]
+            or any(not isinstance(value, str) or not value for value in publication["task_ids"])
+            or len(set(publication["task_ids"])) != len(publication["task_ids"])
+            or not isinstance(publication.get("single_task"), bool)
+            or any(
+                not isinstance(publication.get(field), str)
+                or not re.fullmatch(r"[a-f0-9]{64}", publication[field])
+                for field in ("before", "after")
+            )
+            or not isinstance(publication.get("before_source"), str)
+            or (publication["before_source"] and not re.fullmatch(r"[a-f0-9]{64}", publication["before_source"]))
+        ):
+            raise RuntimeError("在线脚本安装记录损坏，未覆盖原文件：任务发布回执结构无效")
+    if confirmation == "published" and (not confirmation_source or publication is None):
+        raise RuntimeError("在线脚本安装记录损坏，未覆盖原文件：任务恢复回执已发布确认缺少发布证据")
+    if confirmation == "not_published" and not confirmation_source:
+        has_empty_baseline = recovery.get("task_baseline_captured") and task_baseline == ""
+        has_missing_before_source = isinstance(publication, dict) and publication.get("before_source") == ""
+        if not (has_empty_baseline or has_missing_before_source):
+            raise RuntimeError("在线脚本安装记录损坏，未覆盖原文件：任务恢复回执未发布确认缺少基线证据")
 
 
 def _validate_install_jobs(data):
