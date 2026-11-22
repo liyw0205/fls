@@ -552,24 +552,29 @@ def _api_existing_install_request_matches(info, script_id, data):
 
 
 def _api_install_replay_response(install_id, info):
-    from .logs import _install_error, _install_phase
+    phase, message = _api_install_display_state(info)
 
     payload = {
         "ok": True,
         "request_id": install_id,
         "install_id": install_id,
         "status": info.get("status"),
-        "phase": _install_phase(info),
+        "phase": phase,
         "running": bool(info.get("running")),
         "replayed": True,
         "log_url": url_for("online_scripts.api_online_install_log", install_id=install_id),
     }
-    message = _install_error(info)
     if message:
         payload["msg"] = message
     if info.get("recovery_persistence_error"):
         payload["persistence_error"] = True
     return jsonify(payload), 200
+
+
+def _api_install_display_state(info):
+    from .logs import _install_error, _install_phase
+
+    return _install_phase(info), _install_error(info)
 
 
 def _api_install_request_conflict(install_id):
@@ -598,12 +603,13 @@ def _api_install_start_result(result, install_id):
                 msg=f"安装状态无法读取：{exc}",
                 retry_allowed=False,
             ), 500
-        message = info.get("error") or "在线脚本安装未启动，请查看安装记录后重试"
+        phase, message = _api_install_display_state(info)
+        message = message or "在线脚本安装未启动，请查看安装记录后重试"
         payload = dict(
             ok=False,
             request_id=install_id,
             status=info.get("status") or "启动失败",
-            phase=info.get("phase") or "unknown",
+            phase=phase,
             running=bool(info.get("running")),
             msg=message,
             retry_allowed=status >= 500,
@@ -751,11 +757,7 @@ def api_online_scripts_install(script_id):
             return jsonify(ok=False, request_id=request_id,
                            msg="安装请求已绑定其他选项，请重新打开安装页面"), 409
         if not _install_start_receipt_retryable(previous):
-            return jsonify(ok=True, request_id=request_id, install_id=request_id,
-                           status=previous.get("status"), phase=previous.get("phase") or "unknown",
-                           running=bool(previous.get("running")),
-                           replayed=True,
-                           log_url=url_for("online_scripts.api_online_install_log", install_id=request_id)), 200
+            return _api_install_replay_response(request_id, previous)
 
     try:
         target = online_script_target(item)
@@ -789,10 +791,19 @@ def api_online_scripts_install(script_id):
         return jsonify(ok=False, request_id=request_id, install_id=request_id,
                        msg="安装已提交但状态无法读取，请查询安装日志后重试",
                        retry_allowed=False), 500
-    return jsonify(ok=True, request_id=request_id, install_id=request_id,
-                   status=info.get("status", "准备中"), running=bool(info.get("running")),
-                   phase=info.get("phase") or "unknown",
-                   log_url=url_for("online_scripts.api_online_install_log", install_id=request_id)), 200
+    phase, message = _api_install_display_state(info)
+    payload = {
+        "ok": True,
+        "request_id": request_id,
+        "install_id": request_id,
+        "status": info.get("status", "准备中"),
+        "running": bool(info.get("running")),
+        "phase": phase,
+        "log_url": url_for("online_scripts.api_online_install_log", install_id=request_id),
+    }
+    if message:
+        payload["msg"] = message
+    return jsonify(payload), 200
 
 
 def _retry_unstarted_install_receipt(install_id):

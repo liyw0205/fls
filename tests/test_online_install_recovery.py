@@ -961,6 +961,40 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
             self.assertEqual(get_online_install_job(request_id)["selected_task_indexes"], ["2"])
             start.assert_called_once()
 
+    def test_api_install_replay_normalizes_phase_against_persisted_status(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import (
+                ONLINE_INSTALL_RUNNING, get_online_install_job, persist_online_install,
+            )
+
+            self.prepare(base_dir)
+            client = app.test_client()
+            request_id = "d" * 32
+            body = {"request_id": request_id, "force": True}
+            with patch("fls_manager.routes.online_scripts.install.start_install_thread") as start:
+                first = client.post(
+                    "/api/online-scripts/install/demo", json=body,
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(first.status_code, 200)
+                info = get_online_install_job(request_id)
+                info.update(running=False, status="结果未知", phase="completed", returncode=None)
+                ONLINE_INSTALL_RUNNING[request_id].update(info)
+                persist_online_install(info)
+
+                repeated = client.post(
+                    "/api/online-scripts/install/demo", json=body,
+                    headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(repeated.status_code, 200)
+            self.assertTrue(repeated.json["replayed"])
+            self.assertEqual(repeated.json["status"], "结果未知")
+            self.assertEqual(repeated.json["phase"], "unknown")
+            self.assertIn("原回执未修改", repeated.json["msg"])
+            self.assertEqual(get_online_install_job(request_id)["phase"], "completed")
+            start.assert_called_once()
+
     def test_api_install_option_conflict_and_invalid_selection_have_zero_side_effect(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.online_scripts.constants import get_online_install_job
