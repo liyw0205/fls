@@ -475,6 +475,113 @@ def _api_flag(data, key):
     raise ValueError(f"{key} 必须为布尔值")
 
 
+def _api_positive_install_index(raw):
+    value = str(raw).strip()
+    if not value.isdecimal():
+        return None
+    try:
+        index = int(value)
+    except (ValueError, OverflowError):
+        return None
+    return index if index > 0 else None
+
+
+def _api_existing_install_request_matches(info, script_id, data):
+    try:
+        proxy_id = str(data.get("proxy_id", "") or "").strip()
+        import_task = _api_flag(data, "import_task")
+        enable_task = _api_flag(data, "enable_task")
+        force = _api_flag(data, "force")
+    except ValueError:
+        return False
+
+    saved_indexes = info.get("selected_task_indexes") or []
+    if (
+        not isinstance(saved_indexes, list)
+        or any(
+            not isinstance(value, str)
+            or _api_positive_install_index(value) is None
+            or str(_api_positive_install_index(value)) != value
+            for value in saved_indexes
+        )
+        or len(set(saved_indexes)) != len(saved_indexes)
+    ):
+        return False
+
+    selected = []
+    if import_task:
+        select_mode = str(data.get("select_mode", "") or "").strip()
+        if select_mode == "all":
+            excluded = set()
+            for value in _api_values(data, "excluded_task_indexes"):
+                for raw in str(value or "").replace("，", ",").split(","):
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    index = _api_positive_install_index(raw)
+                    if index is None:
+                        return False
+                    excluded.add(index)
+            total = len(saved_indexes) + len(excluded)
+            if any(index > total for index in excluded):
+                return False
+            selected = [str(index) for index in range(1, total + 1) if index not in excluded]
+        elif select_mode:
+            return False
+        else:
+            for raw in _api_values(data, "task_indexes"):
+                index = _api_positive_install_index(raw)
+                if index is None:
+                    return False
+                normalized = str(index)
+                if normalized not in selected:
+                    selected.append(normalized)
+        if not selected:
+            return False
+    elif (
+        enable_task
+        or _api_values(data, "task_indexes")
+        or _api_values(data, "excluded_task_indexes")
+        or str(data.get("select_mode", "") or "").strip()
+    ):
+        return False
+
+    return _install_request_matches(
+        info, script_id, proxy_id, import_task, enable_task, force, selected,
+    )
+
+
+def _api_install_replay_response(install_id, info):
+    from .logs import _install_error, _install_phase
+
+    payload = {
+        "ok": True,
+        "request_id": install_id,
+        "install_id": install_id,
+        "status": info.get("status"),
+        "phase": _install_phase(info),
+        "running": bool(info.get("running")),
+        "replayed": True,
+        "log_url": url_for("online_scripts.api_online_install_log", install_id=install_id),
+    }
+    message = _install_error(info)
+    if message:
+        payload["msg"] = message
+    if info.get("recovery_persistence_error"):
+        payload["persistence_error"] = True
+    return jsonify(payload), 200
+
+
+def _api_install_request_conflict(install_id):
+    return jsonify(
+        ok=False,
+        request_id=install_id,
+        install_id=install_id,
+        msg="该请求标识已绑定其他安装选项，请查询原安装记录或重新选择。",
+        log_url=url_for("online_scripts.api_online_install_log", install_id=install_id),
+    ), 409
+
+
 def _api_install_start_result(result, install_id):
     """Turn the HTML launch helper's failure tuple into a stable JSON result."""
     if isinstance(result, tuple) and len(result) == 2:
@@ -548,12 +655,41 @@ def api_online_scripts_install(script_id):
     except ValueError as exc:
         return jsonify(ok=False, msg=str(exc), retry_allowed=False), 400
     try:
+        with ONLINE_INSTALL_LOCK:
+            live = ONLINE_INSTALL_RUNNING.get(request_id)
+            previous = dict(live) if isinstance(live, dict) else _load_persisted_online_install(request_id)
+    except Exception as exc:
+        return jsonify(ok=False, request_id=request_id, msg=f"安装记录无法读取：{exc}"), 500
+    if previous and not _install_start_receipt_retryable(previous):
+        if _api_existing_install_request_matches(previous, script_id, data):
+            try:
+                current = get_online_install_job(request_id)
+            except Exception as exc:
+                return jsonify(
+                    ok=False, request_id=request_id,
+                    msg=f"原安装状态无法核实：{exc}",
+                    log_url=url_for("online_scripts.api_online_install_log", install_id=request_id),
+                ), 500
+            if not current:
+                return jsonify(
+                    ok=False, request_id=request_id,
+                    msg="原安装记录已归档或不存在，不能复用该请求标识。",
+                ), 409
+            return _api_install_replay_response(request_id, current)
+        if previous.get("script_id") != script_id:
+            return _api_install_request_conflict(request_id)
+
+    try:
         item = get_online_script(script_id)
     except Exception as exc:
+        if previous and not _install_start_receipt_retryable(previous):
+            return _api_install_request_conflict(request_id)
         return _api_install_rejected(
             request_id, f"在线脚本源缓存无法读取，未覆盖原文件：{exc}", 500,
         )
     if not item:
+        if previous and not _install_start_receipt_retryable(previous):
+            return _api_install_request_conflict(request_id)
         return _api_install_rejected(
             request_id, "脚本已不在本地缓存中，请同步在线脚本源后重试", 404,
         )
