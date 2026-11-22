@@ -500,6 +500,272 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
             self.assertEqual(start.call_count, 1)
             self.assertEqual(get_online_install_job(request_id)["status"], "启动失败")
 
+    def test_api_install_retries_same_request_after_unpublished_start_receipt_failure(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import constants
+            from fls_manager.online_scripts.source import save_online_script_cache
+
+            item, _ = self.prepare(base_dir)
+            save_online_script_cache([item])
+            request_id = "7" * 32
+            client = app.test_client()
+            with patch(
+                "fls_manager.routes.online_scripts.install.persist_online_install",
+                side_effect=OSError("install receipt disk full"),
+            ), patch("fls_manager.routes.online_scripts.install.start_install_thread") as start:
+                failed = client.post(
+                    "/api/online-scripts/install/demo",
+                    json={"request_id": request_id, "force": True}, headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(failed.status_code, 500)
+            self.assertEqual(failed.json["status"], "启动失败")
+            self.assertFalse(failed.json["running"])
+            self.assertTrue(failed.json["retry_allowed"])
+            self.assertEqual(
+                failed.json["log_url"],
+                f"/api/online-scripts/log/{request_id}",
+            )
+            self.assertIsNone(constants._load_persisted_online_install(request_id))
+            start.assert_not_called()
+
+            with patch(
+                "fls_manager.routes.online_scripts.install.persist_online_install",
+                wraps=constants.persist_online_install,
+            ), patch("fls_manager.routes.online_scripts.install.start_install_thread") as start:
+                retried = client.post(
+                    "/api/online-scripts/install/demo",
+                    json={"request_id": request_id, "force": True}, headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(retried.status_code, 200)
+            self.assertFalse(retried.json.get("replayed", False))
+            self.assertEqual(retried.json["request_id"], request_id)
+            self.assertTrue(retried.json["running"])
+            self.assertEqual(start.call_count, 1)
+            self.assertTrue(constants._load_persisted_online_install(request_id)["running"])
+
+    def test_startup_receipt_retry_rejects_changed_script_contents(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import constants
+            from fls_manager.online_scripts.source import save_online_script_cache
+
+            item, _ = self.prepare(base_dir)
+            item["install"] = "original install command"
+            save_online_script_cache([item])
+            request_id = "6" * 32
+            persist = constants.persist_online_install
+            fail_prepared = True
+
+            def reject_first_prepared_receipt(info):
+                nonlocal fail_prepared
+                if info.get("id") == request_id and info.get("phase") == "prepared" and fail_prepared:
+                    fail_prepared = False
+                    raise OSError("install receipt disk full")
+                return persist(info)
+
+            client = app.test_client()
+            with patch(
+                "fls_manager.routes.online_scripts.install.persist_online_install",
+                side_effect=reject_first_prepared_receipt,
+            ), patch("fls_manager.routes.online_scripts.install.start_install_thread") as start:
+                failed = client.post(
+                    "/api/online-scripts/install/demo",
+                    json={"request_id": request_id, "force": True}, headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(failed.status_code, 500)
+                self.assertEqual(failed.json["phase"], "startup_receipt_failed")
+                self.assertFalse(failed.json["running"])
+                failed_receipt = constants._load_persisted_online_install(request_id)
+                self.assertEqual(failed_receipt["status"], "启动失败")
+                original_fingerprint = failed_receipt["script_fingerprint"]
+
+                item["install"] = "changed install command"
+                save_online_script_cache([item])
+                retry = client.post(
+                    f"/online-scripts/install-start-retry/{request_id}", headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(retry.status_code, 409)
+                self.assertIn("脚本源内容已变化", retry.get_data(as_text=True))
+                start.assert_not_called()
+                persisted = constants._load_persisted_online_install(request_id)
+                self.assertEqual(persisted["phase"], "startup_receipt_failed")
+                self.assertEqual(persisted["script_fingerprint"], original_fingerprint)
+
+    def test_startup_receipt_retry_requires_auth_and_csrf(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import constants
+
+            self.prepare(base_dir)
+            request_id = "5" * 32
+            persist = constants.persist_online_install
+            failed_prepared = False
+
+            def fail_prepared_once(info):
+                nonlocal failed_prepared
+                if info.get("id") == request_id and info.get("phase") == "prepared" and not failed_prepared:
+                    failed_prepared = True
+                    raise OSError("install receipt disk full")
+                return persist(info)
+
+            client = app.test_client()
+            with patch(
+                "fls_manager.routes.online_scripts.install.persist_online_install",
+                side_effect=fail_prepared_once,
+            ), patch("fls_manager.routes.online_scripts.install.start_install_thread") as start:
+                failed = client.post(
+                    "/api/online-scripts/install/demo",
+                    json={"request_id": request_id, "force": True}, headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(failed.status_code, 500)
+                action = f"/online-scripts/install-start-retry/{request_id}"
+                csrf = "startup-retry-csrf"
+                with client.session_transaction() as session:
+                    session["csrf_token"] = csrf
+                self.assertEqual(client.post(action, data={"csrf_token": "wrong"}).status_code, 400)
+                unauthenticated = client.post(action, data={"csrf_token": csrf})
+                self.assertEqual(unauthenticated.status_code, 302)
+                self.assertIn("/login?next=", unauthenticated.location)
+
+                with client.session_transaction() as session:
+                    session.update(
+                        token=TOKEN,
+                        token_expire_at=int(time.time()) + 3600,
+                        security_verified=True,
+                        csrf_token=csrf,
+                    )
+                self.assertEqual(client.post(action, data={"csrf_token": "wrong"}).status_code, 400)
+                self.assertEqual(constants._load_persisted_online_install(request_id)["phase"], "startup_receipt_failed")
+                start.assert_not_called()
+
+                restored = client.post(action, data={"csrf_token": csrf})
+                self.assertEqual(restored.status_code, 302)
+                self.assertEqual(restored.location.split("?", 1)[0], f"/online-scripts/log/{request_id}")
+                self.assertEqual(start.call_count, 1)
+                repeated = client.post(action, data={"csrf_token": csrf})
+                self.assertEqual(repeated.status_code, 409)
+                self.assertEqual(start.call_count, 1)
+
+    def test_startup_receipt_failure_is_protected_from_history_pruning(self):
+        with isolated_app() as (_app, _base_dir):
+            from fls_manager.online_scripts.constants import (
+                ONLINE_INSTALL_JOBS_FILE,
+                ONLINE_INSTALL_LIMIT,
+                persist_online_install,
+            )
+
+            for index in range(ONLINE_INSTALL_LIMIT):
+                install_id = f"{index + 1:032x}"
+                persist_online_install({
+                    "id": install_id,
+                    "script_id": "demo",
+                    "running": False,
+                    "status": "已完成",
+                    "phase": "completed",
+                    "updated_at": f"2026-11-23 00:{index:02d}:00",
+                })
+
+            retryable_id = "f" * 32
+            persist_online_install({
+                "id": retryable_id,
+                "script_id": "demo",
+                "running": False,
+                "status": "启动失败",
+                "phase": "startup_receipt_failed",
+                "script_fingerprint": "a" * 64,
+                "updated_at": "2026-11-22 00:00:00",
+            })
+
+            stored = json.loads(ONLINE_INSTALL_JOBS_FILE.read_text(encoding="utf-8"))
+            self.assertEqual(len(stored), ONLINE_INSTALL_LIMIT)
+            self.assertIn(retryable_id, stored)
+
+    def test_api_install_start_receipt_published_before_error_still_starts_once(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import constants
+            from fls_manager.online_scripts.source import save_online_script_cache
+
+            item, _ = self.prepare(base_dir)
+            save_online_script_cache([item])
+            request_id = "8" * 32
+            client = app.test_client()
+            persist = constants.persist_online_install
+            calls = 0
+
+            def publish_then_raise(info):
+                nonlocal calls
+                result = persist(info)
+                if info.get("id") == request_id and calls == 0:
+                    calls += 1
+                    raise OSError("install receipt acknowledgement lost")
+                return result
+
+            with patch(
+                "fls_manager.routes.online_scripts.install.persist_online_install",
+                side_effect=publish_then_raise,
+            ), patch("fls_manager.routes.online_scripts.install.start_install_thread") as start:
+                response = client.post(
+                    "/api/online-scripts/install/demo",
+                    json={"request_id": request_id, "force": True}, headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json["request_id"], request_id)
+            self.assertTrue(response.json["running"])
+            self.assertEqual(response.json["phase"], "prepared")
+            self.assertEqual(start.call_count, 1)
+            persisted = constants._load_persisted_online_install(request_id)
+            self.assertEqual(persisted["status"], "准备中")
+            self.assertEqual(persisted["phase"], "prepared")
+
+    def test_html_install_start_receipt_failure_has_same_request_recovery_form(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import constants
+            from fls_manager.online_scripts.source import save_online_script_cache
+
+            item, _ = self.prepare(base_dir)
+            save_online_script_cache([item])
+            request_id = "9" * 32
+            client = app.test_client()
+            with patch(
+                "fls_manager.routes.online_scripts.install.persist_online_install",
+                side_effect=OSError("install receipt disk full"),
+            ), patch("fls_manager.routes.online_scripts.install.start_install_thread") as start:
+                failed = client.post(
+                    "/online-scripts/install/demo",
+                    data={"request_id": request_id, "force": "1"}, headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(failed.status_code, 500)
+            self.assertIn(
+                f'action="/online-scripts/install-start-retry/{request_id}"',
+                failed.get_data(as_text=True),
+            )
+            start.assert_not_called()
+
+            log_page = client.get(f"/online-scripts/log/{request_id}", headers={"X-Token": TOKEN})
+            self.assertEqual(log_page.status_code, 200)
+            self.assertIn("沿原请求重试启动", log_page.get_data(as_text=True))
+            self.assertIn(
+                f'action="/online-scripts/install-start-retry/{request_id}"',
+                log_page.get_data(as_text=True),
+            )
+
+            with patch(
+                "fls_manager.routes.online_scripts.install.persist_online_install",
+                wraps=constants.persist_online_install,
+            ), patch("fls_manager.routes.online_scripts.install.start_install_thread") as start:
+                recovered = client.post(
+                    f"/online-scripts/install-start-retry/{request_id}", headers={"X-Token": TOKEN},
+                )
+                replay = client.post(
+                    "/api/online-scripts/install/demo",
+                    json={"request_id": request_id, "force": True}, headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(recovered.status_code, 302)
+            self.assertEqual(recovered.headers["Location"].split("?")[0], f"/online-scripts/log/{request_id}")
+            self.assertEqual(replay.status_code, 200)
+            self.assertTrue(replay.json["replayed"])
+            self.assertEqual(start.call_count, 1)
+            self.assertTrue(constants._load_persisted_online_install(request_id)["running"])
+
     def test_api_install_assigns_id_and_replays_without_starting_twice(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.online_scripts.constants import get_online_install_job

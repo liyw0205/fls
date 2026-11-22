@@ -1421,7 +1421,7 @@ const elements = Object.fromEntries(['installStatus', 'installError', 'installRe
  'installStopAction', 'installPollError', 'log', 'flsLogNewTip']
  .map(id => [id, {textContent: '', hidden: false, dataset: {}, style: {}}]));
 elements.installRecoveryAction = {textContent: '', hidden: false, dataset: {}, style: {}, innerHTML: '',
-  querySelector: selector => selector === 'form[data-api-action]' ? form : null};
+  querySelector: selector => selector === 'form' || selector === 'form[data-api-action]' ? form : null};
 let calls = [];
 let responses = [input.payload, {ok: true, request_id: input.payload.request_id, status: '已完成'},
   {running: false, status: '已完成', log: 'reloaded'}];
@@ -1496,7 +1496,7 @@ const recovery = {
       addEventListener(name, handler){this.listeners[name]=handler;}};
   },
   get innerHTML(){return this.html;},
-  querySelector: selector=>selector==='form[data-api-action]'?recovery.form:null,
+  querySelector: selector=>selector==='form'||selector==='form[data-api-action]'?recovery.form:null,
 };
 const elements = Object.fromEntries(['installStatus','installPhase','installError','installReturncode',
   'installStopAction','installPollError','installPollLogin','installPollLogs','installPollRetry','installStopQuery',
