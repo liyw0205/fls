@@ -1602,6 +1602,44 @@ def _bounded_online_install_jobs(data):
     return dict(ordered)
 
 
+def _validate_install_job_record(install_id, info):
+    if not isinstance(install_id, str) or not isinstance(info, dict) or info.get("id") != install_id:
+        raise RuntimeError("在线脚本安装记录损坏，未覆盖原文件：记录标识不一致")
+
+    recovery = info.get("task_recovery")
+    if recovery is None:
+        return
+    if not isinstance(recovery, dict):
+        raise RuntimeError("在线脚本安装记录损坏，未覆盖原文件：任务恢复回执必须是对象")
+    if "pending" in recovery and not isinstance(recovery["pending"], bool):
+        raise RuntimeError("在线脚本安装记录损坏，未覆盖原文件：任务恢复回执状态无效")
+    if "task_baseline_captured" in recovery and not isinstance(recovery["task_baseline_captured"], bool):
+        raise RuntimeError("在线脚本安装记录损坏，未覆盖原文件：任务恢复基线标记无效")
+
+    publication = recovery.get("publication")
+    if publication is None:
+        return
+    if not isinstance(publication, dict):
+        raise RuntimeError("在线脚本安装记录损坏，未覆盖原文件：任务发布回执必须是对象")
+    if publication and (
+        not isinstance(publication.get("keys"), list)
+        or any(not isinstance(value, str) for value in publication["keys"])
+        or not isinstance(publication.get("task_ids"), list)
+        or any(not isinstance(value, str) for value in publication["task_ids"])
+        or not isinstance(publication.get("single_task"), bool)
+        or any(not isinstance(publication.get(field), str) for field in ("before", "after", "before_source"))
+    ):
+        raise RuntimeError("在线脚本安装记录损坏，未覆盖原文件：任务发布回执结构无效")
+
+
+def _validate_install_jobs(data):
+    if not isinstance(data, dict):
+        raise RuntimeError("在线脚本安装记录损坏，未覆盖原文件：根节点必须是对象")
+    for install_id, info in data.items():
+        _validate_install_job_record(install_id, info)
+    return data
+
+
 def _read_install_jobs():
     """Read install history without treating corruption as an empty history."""
     with storage_transaction():
@@ -1615,12 +1653,7 @@ def _read_install_jobs():
             data = json.loads(raw)
         except (TypeError, ValueError) as exc:
             raise RuntimeError(f"在线脚本安装记录损坏，未覆盖原文件：{exc}") from exc
-        if not isinstance(data, dict):
-            raise RuntimeError("在线脚本安装记录损坏，未覆盖原文件：根节点必须是对象")
-        for key, value in data.items():
-            if not isinstance(key, str) or not isinstance(value, dict) or value.get("id") != key:
-                raise RuntimeError("在线脚本安装记录损坏，未覆盖原文件：记录标识不一致")
-        return data
+        return _validate_install_jobs(data)
 
 
 def persist_online_install(info):
@@ -1629,17 +1662,12 @@ def persist_online_install(info):
         install_id = str(snapshot.get("id") or "")
         if not install_id:
             return
+        _validate_install_job_record(install_id, snapshot)
         if ONLINE_INSTALL_JOBS_FILE.is_symlink():
             raise RuntimeError("在线脚本安装记录不能是符号链接，未覆盖外部文件")
 
         def update(data):
-            if not isinstance(data, dict):
-                raise RuntimeError("在线脚本安装记录损坏，未覆盖原文件：根节点必须是对象")
-            jobs = {}
-            for key, value in data.items():
-                if not isinstance(key, str) or not isinstance(value, dict) or value.get("id") != key:
-                    raise RuntimeError("在线脚本安装记录损坏，未覆盖原文件：记录标识不一致")
-                jobs[key] = value
+            jobs = dict(_validate_install_jobs(data))
             retry_of = str(snapshot.get("retry_of") or "")
             if retry_of == install_id:
                 raise RuntimeError("在线脚本安装重试记录不能引用自身，未覆盖原文件")
@@ -1814,6 +1842,7 @@ def get_online_install_job(install_id):
     with ONLINE_INSTALL_LOCK:
         info = ONLINE_INSTALL_RUNNING.get(install_id)
         if isinstance(info, dict):
+            _validate_install_job_record(install_id, info)
             if info.get("recovery_persistence_error"):
                 recovery_error = info.pop("recovery_persistence_error")
                 try:
