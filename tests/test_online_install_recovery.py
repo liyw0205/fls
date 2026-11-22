@@ -961,6 +961,124 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
             self.assertEqual(get_online_install_job(request_id)["selected_task_indexes"], ["2"])
             start.assert_called_once()
 
+    def test_html_install_replay_returns_original_job_when_script_cache_is_cleared(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING, get_online_install_job
+            from fls_manager.online_scripts.source import save_online_script_cache
+
+            self.prepare(base_dir)
+            client = app.test_client()
+            request_id = "a" * 32
+            body = {
+                "request_id": request_id,
+                "import_task": "1",
+                "select_mode": "all",
+                "excluded_task_indexes": "2",
+                "force": "1",
+            }
+            with patch("fls_manager.routes.online_scripts.install.start_install_thread") as start:
+                first = client.post(
+                    "/online-scripts/install/demo", data=body, headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(first.status_code, 302)
+                self.assertEqual(first.location.split("?", 1)[0], f"/online-scripts/log/{request_id}")
+
+                ONLINE_INSTALL_RUNNING.clear()
+                save_online_script_cache([])
+                csrf = "form-replay-csrf"
+                with client.session_transaction() as session:
+                    session["csrf_token"] = csrf
+                anonymous = client.post(
+                    "/online-scripts/install/demo", data={**body, "csrf_token": csrf},
+                )
+                with client.session_transaction() as session:
+                    session.update(
+                        token=TOKEN,
+                        token_expire_at=int(time.time()) + 3600,
+                        security_verified=True,
+                    )
+                csrf_rejected = client.post("/online-scripts/install/demo", data=body)
+                repeated = client.post(
+                    "/online-scripts/install/demo", data={**body, "csrf_token": csrf},
+                )
+                conflict = client.post(
+                    "/online-scripts/install/demo",
+                    data={**body, "excluded_task_indexes": "1"}, headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(anonymous.status_code, 302)
+            self.assertIn("/login?next=", anonymous.location)
+            self.assertEqual(csrf_rejected.status_code, 400)
+            self.assertEqual(repeated.status_code, 302)
+            self.assertEqual(repeated.location.split("?", 1)[0], f"/online-scripts/log/{request_id}")
+            self.assertEqual(conflict.status_code, 409)
+            self.assertIn(f"/online-scripts/log/{request_id}", conflict.get_data(as_text=True))
+            self.assertEqual(get_online_install_job(request_id)["selected_task_indexes"], ["1"])
+            start.assert_called_once()
+
+    def test_html_install_replay_survives_script_cache_read_error(self):
+        with isolated_app() as (app, base_dir):
+            self.prepare(base_dir)
+            client = app.test_client()
+            request_id = "b" * 32
+            body = {"request_id": request_id, "force": "1"}
+            with patch("fls_manager.routes.online_scripts.install.start_install_thread") as start:
+                first = client.post(
+                    "/online-scripts/install/demo", data=body, headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(first.status_code, 302)
+                with patch(
+                    "fls_manager.routes.online_scripts.install.get_online_script",
+                    side_effect=RuntimeError("script cache unreadable"),
+                ):
+                    repeated = client.post(
+                        "/online-scripts/install/demo", data=body, headers={"X-Token": TOKEN},
+                    )
+
+            self.assertEqual(repeated.status_code, 302)
+            self.assertEqual(repeated.location.split("?", 1)[0], f"/online-scripts/log/{request_id}")
+            start.assert_called_once()
+
+    def test_html_startup_receipt_retry_still_requires_current_script_cache(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import constants
+
+            self.prepare(base_dir)
+            request_id = "c" * 32
+            client = app.test_client()
+            persist = constants.persist_online_install
+            fail_prepared = True
+
+            def reject_prepared_once(info):
+                nonlocal fail_prepared
+                if info.get("id") == request_id and info.get("phase") == "prepared" and fail_prepared:
+                    fail_prepared = False
+                    raise OSError("install receipt disk full")
+                return persist(info)
+
+            with patch(
+                "fls_manager.routes.online_scripts.install.persist_online_install",
+                side_effect=reject_prepared_once,
+            ), patch("fls_manager.routes.online_scripts.install.start_install_thread") as start:
+                first = client.post(
+                    "/online-scripts/install/demo",
+                    data={"request_id": request_id, "force": "1"}, headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(first.status_code, 500)
+                with patch(
+                    "fls_manager.routes.online_scripts.install.get_online_script",
+                    side_effect=RuntimeError("script cache unreadable"),
+                ):
+                    retry = client.post(
+                        "/online-scripts/install/demo",
+                        data={"request_id": request_id, "force": "1"}, headers={"X-Token": TOKEN},
+                    )
+
+            self.assertEqual(retry.status_code, 500)
+            self.assertIn("script cache unreadable", retry.get_data(as_text=True))
+            self.assertEqual(constants._load_persisted_online_install(request_id)["phase"], "startup_receipt_failed")
+            start.assert_not_called()
+
     def test_api_install_replay_normalizes_phase_against_persisted_status(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.online_scripts.constants import (

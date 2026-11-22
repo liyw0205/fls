@@ -342,6 +342,34 @@ def _start_install_job(
 
 @bp.route("/online-scripts/install/<script_id>", methods=["POST"])
 def online_scripts_install(script_id):
+    raw_request_id = request.form.get("request_id", "")
+    try:
+        request_id = _install_request_id(raw_request_id) if str(raw_request_id).strip() else ""
+    except ValueError as exc:
+        return _install_retry_error(script_id, "在线脚本安装请求无效", str(exc), 400)
+
+    if request_id:
+        try:
+            with ONLINE_INSTALL_LOCK:
+                live = ONLINE_INSTALL_RUNNING.get(request_id)
+                previous = dict(live) if isinstance(live, dict) else _load_persisted_online_install(request_id)
+        except Exception as exc:
+            return _install_retry_error(request_id, "无法查询原在线安装", f"安装记录无法读取：{exc}", 500)
+        if previous and not _install_start_receipt_retryable(previous):
+            if not _api_existing_install_request_matches(previous, script_id, request.form):
+                return _install_retry_error(
+                    request_id, "在线安装请求冲突", "该请求标识已绑定其他安装选项，请重新打开任务选择页。", 409,
+                )
+            try:
+                current = get_online_install_job(request_id)
+            except Exception as exc:
+                return _install_retry_error(request_id, "无法查询原在线安装", f"安装状态无法核实：{exc}", 500)
+            if not current:
+                return _install_retry_error(
+                    request_id, "在线安装请求已归档", "原安装记录已归档或不存在，不能复用该请求标识。", 409,
+                )
+            return redirect(url_for("online_scripts.online_install_log", install_id=request_id, back="/online-scripts"))
+
     try:
         item = get_online_script(script_id)
     except Exception as exc:
@@ -349,12 +377,6 @@ def online_scripts_install(script_id):
 
     if not item:
         abort(404)
-
-    raw_request_id = request.form.get("request_id", "")
-    try:
-        request_id = _install_request_id(raw_request_id) if str(raw_request_id).strip() else ""
-    except ValueError as exc:
-        return _install_retry_error(script_id, "在线脚本安装请求无效", str(exc), 400)
 
     proxy_id = request.form.get("proxy_id", "").strip()
     try:
