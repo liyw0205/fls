@@ -819,6 +819,7 @@ const logUrl = "/api/online-scripts/log/" + encodeURIComponent(installId);
 let pending = false;
 let postingStop = false;
 let postingRecovery = false;
+let stopWarning = "";
 let needsRecoveryQuery = false;
 let lastLogFailure = null;
 let needsStopQuery = false;
@@ -916,14 +917,16 @@ async function loadLog(stateOnly = false){{
                 pollError.textContent = json.persistence_error
                     ? "原安装状态仍无法确认持久化，已禁用重试；可修复存储后再次查询。"
                     : "原安装状态已确认：" + (json.status || "-")
-                        + (lastLogFailure ? "。日志读取仍失败：" + lastLogFailure.message : "");
+                        + (lastLogFailure ? "。日志读取仍失败：" + lastLogFailure.message : "")
+                        + (stopWarning ? "；" + stopWarning : "");
                 pollError.hidden = false;
             }}
         }}
         if(pollError && !stateOnly){{
-            pollError.hidden = !json.persistence_error;
+            pollError.hidden = !json.persistence_error && !stopWarning;
             pollError.textContent = json.persistence_error
-                ? "安装结果回执尚未确认保存，已禁用重试；请仅查询原安装状态。" : "";
+                ? "安装结果回执尚未确认保存，已禁用重试；请仅查询原安装状态。"
+                : (stopWarning ? "原安装状态已确认：" + (json.status || "-") + "；" + stopWarning : "");
         }}
         if(loginAction) loginAction.hidden = true;
         if(logsAction) logsAction.hidden = !lastLogFailure;
@@ -1188,6 +1191,7 @@ async function requestStop(event){{
         const result = await flsReadJsonResponse(response);
         if(!result || result.ok !== true || result.install_id !== installId) throw new Error("停止响应格式无效");
         if(document.getElementById("installPollError") !== pollError) return;
+        stopWarning = result.warning || "";
         if(pollError) pollError.textContent = result.msg || "停止请求已提交";
     }}catch(error){{
         if(document.getElementById("installPollError") !== pollError) return;

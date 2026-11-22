@@ -264,16 +264,20 @@ def request_stop_online_install(install_id):
         proc = info.get("process")
         log_file = info.get("log_file")
 
+    log_error = ""
     if log_file:
-        append_log(log_file, "")
-        append_log(log_file, f"===== 用户请求停止安装: {now_str()} =====")
+        try:
+            append_log(log_file, "")
+            append_log(log_file, f"===== 用户请求停止安装: {now_str()} =====")
+        except Exception as e:
+            log_error = f"停止请求日志写入失败：{e}"
 
     if proc:
         ok, detail = _interrupt_install_command(install_id, proc, "stop", retry=True)
         if not ok and proc.poll() is None:
-            return False, f"停止失败：{detail}"
+            return False, "；".join(filter(None, (f"停止失败：{detail}", log_error)))
 
-    return True, "已请求停止安装"
+    return True, "；".join(filter(None, ("已请求停止安装", log_error)))
 
 
 def online_script_target(item):

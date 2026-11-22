@@ -67,6 +67,7 @@ def main():
         receipt_fault = {"install_id": "", "remaining": 0}
         scheduler_receipt_fault = {"install_id": "", "remaining": 0, "mode": "after"}
         restart_receipt_fault = {"install_id": "", "remaining": 0, "mode": "after"}
+        stop_log_failure = {"remaining": 0}
         write = storage._write_json_unlocked
 
         def write_with_receipt_failure(path, data):
@@ -104,6 +105,16 @@ def main():
 
         online_tasks.reload_scheduler = task_import_reload
         install_routes.reload_scheduler = recovered_task_reload
+
+        append_log = install.append_log
+
+        def append_log_with_stop_failure(log_file, message):
+            if stop_log_failure["remaining"] and str(message).startswith("===== 用户请求停止安装:"):
+                stop_log_failure["remaining"] -= 1
+                raise PermissionError("browser stop log unavailable")
+            return append_log(log_file, message)
+
+        install.append_log = append_log_with_stop_failure
 
         def download(**kwargs):
             downloads.append(kwargs["install_id"])
@@ -283,6 +294,8 @@ def main():
                 fault["status"] = int(data.get("status") or 0)
                 fault["persist_mode"] = data.get("persist_mode") or "after"
                 fault["persist_failures"] = int(data.get("persist_failures") or 1)
+                if "stop_log_failure" in data:
+                    stop_log_failure["remaining"] = int(data["stop_log_failure"] or 0)
                 if data.get("seed_retry_chain"):
                     seed_retry_chain()
                 if data.get("seed_online_history"):
@@ -974,9 +987,14 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
       await route.fulfill({status:503,contentType:'text/plain',body:'stop service unavailable before commit'});
       return;
      }
-     const committed=await route.fetch();
-     assert.equal(committed.status(),200);
-     await route.fulfill({status:502,contentType:'text/plain',body:'stop response lost after commit'});
+      const committed=await route.fetch();
+      assert.equal(committed.status(),200);
+      if(viewport.width===390){
+      const payload=await committed.json();assert.equal(payload.ok,true);
+      assert.match(payload.msg,/停止请求日志写入失败：browser stop log unavailable/);
+      assert.match(payload.warning,/停止请求日志写入失败：browser stop log unavailable/);
+      await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(payload)});
+     }else await route.fulfill({status:502,contentType:'text/plain',body:'stop response lost after commit'});
     }else await route.continue();
    });
    await page.locator('#installStopAction button').click();
@@ -995,10 +1013,21 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
     !document.querySelector('#installStopAction button').disabled);
    assert.equal(await page.locator('#installStatus').textContent(),'运行中');
    assert.equal(stopPosts,1);
+   if(viewport.width===390) await fixture({stop_log_failure:1});
    await page.locator('#installStopAction button').click();
-   await page.waitForFunction(()=>!document.querySelector('#installStopQuery').hidden);
+   if(viewport.width===390){
+    await page.waitForFunction(()=>document.querySelector('#installStatus').textContent==='已停止');
+   }else await page.waitForFunction(()=>!document.querySelector('#installStopQuery').hidden);
    assert.equal(stopPosts,2);
-   assert.equal(await page.locator('#log').textContent(),visibleLog);
+   assert.ok((await page.locator('#log').textContent()).includes('live installer output'));
+   if(viewport.width===390){
+    assert.match(await page.locator('#installPollError').textContent(),/原安装状态已确认：已停止.*停止请求日志写入失败：browser stop log unavailable/);
+    await page.screenshot({path:'/tmp/fls-online-install-stop-log-warning-'+viewport.width+'.png',fullPage:true});
+    await page.goto(base+'/online-scripts/install-history?script_id=browser-recovery');
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+    assert.deepEqual(errors,[]);await context.close();console.log('install stop log warning passed '+viewport.width);
+    continue;
+   }
    await page.locator('#installStopQuery').click();
    await page.waitForFunction(()=>document.querySelector('#installStatus').textContent==='已停止');
    assert.ok((await page.locator('#log').textContent()).includes('live installer output'));

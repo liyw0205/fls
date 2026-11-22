@@ -305,6 +305,58 @@ class OnlineInstallLifecycleTests(unittest.TestCase):
             self.assertNotIn("install", ONLINE_INSTALL_STOPPING)
             self.assertEqual(info["status"], "准备中")
 
+    def test_stop_log_failure_keeps_committed_stop_request_and_recovers_without_download(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_STOPPING
+            from fls_manager.online_scripts.install import install_worker
+
+            client = app.test_client()
+            api_info = self.register(base_dir, "api-stop")
+            with patch("fls_manager.online_scripts.install.append_log", side_effect=OSError("log read only")):
+                response = client.post(
+                    "/api/online-scripts/install-stop/api-stop", headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.json["ok"])
+            self.assertEqual(response.json["install_id"], "api-stop")
+            self.assertEqual(response.json["status"], "停止中")
+            self.assertIn("停止请求日志写入失败：log read only", response.json["msg"])
+            self.assertEqual(response.json["warning"], "停止请求日志写入失败：log read only")
+            self.assertIn("api-stop", ONLINE_INSTALL_STOPPING)
+            self.assertEqual(self.snapshot("api-stop")["status"], "停止中")
+
+            with client.session_transaction() as session:
+                session.update(token=TOKEN, token_expire_at=int(time.time()) + 3600,
+                               security_verified=True, csrf_token="stop-log-csrf")
+            html_info = self.register(base_dir, "html-stop")
+            with patch("fls_manager.online_scripts.install.append_log", side_effect=OSError("log read only")):
+                form = client.post(
+                    "/online-scripts/install-stop/html-stop?back=%2Fonline-scripts%2Finstall-history",
+                    data={"csrf_token": "stop-log-csrf"}, headers={"X-Token": TOKEN},
+                )
+            self.assertEqual(form.status_code, 200)
+            page = form.get_data(as_text=True)
+            self.assertIn("停止请求已提交", page)
+            self.assertIn("停止请求日志写入失败：log read only", page)
+            self.assertIn("查询原安装状态", page)
+            self.assertIn("online-scripts/log/html-stop", page)
+            self.assertEqual(self.snapshot("html-stop")["status"], "停止中")
+            self.assertEqual(html_info["status"], "停止中")
+
+            for install_id, info in (("api-stop", api_info), ("html-stop", html_info)):
+                with self.subTest(install_id=install_id):
+                    state = client.get(
+                        f"/api/online-scripts/log/{install_id}?state_only=1", headers={"X-Token": TOKEN},
+                    )
+                    self.assertEqual(state.status_code, 200)
+                    self.assertEqual(state.json["install_id"], install_id)
+                    self.assertEqual(state.json["status"], "停止中")
+                    with patch("fls_manager.online_scripts.install.download_online_script_logged") as download:
+                        install_worker(install_id, self.item())
+                    download.assert_not_called()
+                    self.assertEqual(info["status"], "已停止")
+                    self.assertNotIn(install_id, ONLINE_INSTALL_STOPPING)
+
     def test_stop_html_failure_keeps_log_query_and_history_back_context(self):
         with isolated_app() as (app, _base_dir):
             client = app.test_client()

@@ -1299,6 +1299,17 @@ def online_scripts_install_stop(install_id):
         )
         return layout("无法停止在线安装", "online_scripts", body), code
 
+    if "停止请求日志写入失败：" in msg:
+        body = page_header_card(
+            "停止请求已提交",
+            help_html=h(msg),
+            actions_html=(
+                f'<a class="btn btn-primary" href="{h(log_url)}">查询原安装状态</a>'
+                f'<a class="btn btn-gray" href="{h(back)}">返回</a>'
+            ),
+        )
+        return layout("停止请求已提交", "online_scripts", body), 200
+
     return redirect(log_url)
 
 
@@ -1309,9 +1320,13 @@ def api_online_scripts_install_stop(install_id):
         info = get_online_install_job(install_id)
     except Exception:
         info = None
-    return jsonify({
+    payload = {
         "ok": ok, "msg": msg, "install_id": install_id,
         "running": bool(info.get("running")) if info else None,
         "status": (info or {}).get("status") or ("记录不存在" if code == 404 else "记录不可读"),
         "state_url": url_for("online_scripts.api_online_install_log", install_id=install_id, state_only=1),
-    }), code
+    }
+    warning_marker = "停止请求日志写入失败："
+    if warning_marker in msg:
+        payload["warning"] = msg[msg.index(warning_marker):]
+    return jsonify(payload), code
