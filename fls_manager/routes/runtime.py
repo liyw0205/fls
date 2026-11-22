@@ -276,10 +276,7 @@ def install_runtime(runtime):
 
     if info.get("process") is not None:
         info["status"] = "running"
-        try:
-            persist_install_job(info)
-        except Exception as exc:
-            info["error"] = f"安装进程已启动但状态保存失败：{exc}"
+        _persist_dependency_state(info)
 
     return redirect(url_for("deps.deps_install_log", install_id=install_id, back="/panel/status"))
 

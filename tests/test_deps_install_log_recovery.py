@@ -970,6 +970,177 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
             persisted = json.loads(INSTALL_JOBS_FILE.read_text(encoding="utf-8"))
             self.assertTrue(persisted[info["id"]]["running"])
 
+    def test_running_receipt_failure_keeps_original_install_active_and_recoverable(self):
+        for runtime in (False, True):
+            with self.subTest(runtime=runtime), isolated_app() as (app, base_dir):
+                from fls_manager.install_records import INSTALL_JOBS_FILE, persist_install_job
+
+                install_id = "running-receipt-runtime" if runtime else "running-receipt-dependency"
+                process = SimpleNamespace(
+                    poll=lambda: None, terminate=unittest.mock.Mock(),
+                    wait=unittest.mock.Mock(return_value=-15), kill=unittest.mock.Mock(),
+                )
+                module = "runtime" if runtime else "deps"
+                popen_target = f"fls_manager.routes.{module}.subprocess.Popen"
+                endpoint = "/api/install/runtime/node" if runtime else "/api/deps/install"
+                payload = {"request_id": install_id}
+                if not runtime:
+                    payload["name"] = "demo"
+                attempts = {"remaining": 1}
+
+                def fail_running_receipt(job):
+                    if job["id"] == install_id and job["status"] == "running" and attempts["remaining"]:
+                        attempts["remaining"] -= 1
+                        raise OSError("running install receipt unavailable")
+                    return persist_install_job(job)
+
+                client = app.test_client()
+                with patch("fls_manager.routes.deps.persist_install_job", side_effect=fail_running_receipt), patch(
+                    popen_target, return_value=process,
+                ) as popen, patch(
+                    "fls_manager.routes.runtime.runtime_install_command", return_value="echo runtime",
+                ):
+                    started = client.post(endpoint, json=payload, headers={"X-Token": TOKEN})
+                    self.assertEqual(started.status_code, 503)
+                    self.assertFalse(started.json["ok"])
+                    self.assertTrue(started.json["receipt_pending"])
+                    self.assertTrue(started.json["running"])
+                    self.assertEqual(started.json["status"], "running")
+                    self.assertEqual(started.json["install_id"], install_id)
+
+                    replay = client.post(endpoint, json=payload, headers={"X-Token": TOKEN})
+                    self.assertEqual(replay.status_code, 503)
+                    self.assertEqual(replay.json["install_id"], install_id)
+                    self.assertTrue(replay.json["receipt_pending"])
+                    self.assertTrue(replay.json["running"])
+
+                    history = client.get(
+                        "/api/deps/install-history?kind=" + ("runtime" if runtime else "dependency"),
+                        headers={"X-Token": TOKEN},
+                    )
+                    self.assertEqual(history.status_code, 200)
+                    item = next(item for item in history.json["items"] if item["id"] == install_id)
+                    self.assertEqual(item["status"], "running")
+                    self.assertTrue(item["receipt_pending"])
+                    self.assertFalse(item["recovery_available"])
+
+                    page = client.get(
+                        f"/deps/install-log/{install_id}?back=%2Fdeps", headers={"X-Token": TOKEN},
+                    )
+                    self.assertEqual(page.status_code, 200)
+                    body = page.get_data(as_text=True)
+                    self.assertIn("安装中，状态回执待保存", body)
+                    self.assertIn("running install receipt unavailable", body)
+                    self.assertIn(f'data-api-action="/api/deps/install-cancel/{install_id}"', body)
+
+                    recovered = client.get(
+                        f"/api/deps/install-log/{install_id}", headers={"X-Token": TOKEN},
+                    )
+                    self.assertEqual(recovered.status_code, 200)
+                    self.assertTrue(recovered.json["running"])
+                    self.assertEqual(recovered.json["status"], "running")
+                    self.assertNotIn("receipt_pending", recovered.json)
+                    disk = json.loads(INSTALL_JOBS_FILE.read_text(encoding="utf-8"))
+                    self.assertEqual(disk[install_id]["status"], "running")
+                    self.assertTrue(disk[install_id]["running"])
+
+                    final_replay = client.post(endpoint, json=payload, headers={"X-Token": TOKEN})
+                    self.assertEqual(final_replay.status_code, 200)
+                    self.assertEqual(final_replay.json["install_id"], install_id)
+                    popen.assert_called_once()
+
+    def test_retry_child_running_receipt_failure_is_recovered_by_status_query(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.install_records import INSTALL_JOBS_FILE, persist_install_job
+
+            parent_id = "retry-running-receipt-parent"
+            child_id = "retry-running-receipt-child"
+            log_file = base_dir / "log" / f"deps-install-demo-{parent_id}.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            persist_install_job({
+                "id": parent_id, "request_id": parent_id, "kind": "dependency",
+                "package": "demo", "log_file": str(log_file), "running": False,
+                "finished": True, "status": "failed", "returncode": 1, "error": "failed",
+                "start_time": 1, "updated_at": "2026-11-23 01:00:00",
+            })
+            process = SimpleNamespace(poll=lambda: None)
+            attempts = {"remaining": 2}
+
+            def fail_child_running_receipt(job):
+                if job["id"] == child_id and job["status"] == "running" and attempts["remaining"]:
+                    attempts["remaining"] -= 1
+                    raise OSError("retry running receipt unavailable")
+                return persist_install_job(job)
+
+            client = app.test_client()
+            with patch("fls_manager.routes.deps.persist_install_job", side_effect=fail_child_running_receipt), patch(
+                "fls_manager.routes.deps.subprocess.Popen", return_value=process,
+            ) as popen:
+                started = client.post(
+                    f"/api/deps/install-retry/{parent_id}",
+                    json={"request_id": child_id}, headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(started.status_code, 503)
+                self.assertTrue(started.json["receipt_pending"])
+                self.assertEqual(started.json["install_id"], child_id)
+
+                replay = client.post(
+                    f"/api/deps/install-retry/{parent_id}",
+                    json={"request_id": child_id}, headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(replay.status_code, 200)
+                self.assertEqual(replay.json["install_id"], child_id)
+                self.assertTrue(replay.json["running"])
+                popen.assert_called_once()
+                disk = json.loads(INSTALL_JOBS_FILE.read_text(encoding="utf-8"))
+                self.assertEqual(disk[child_id]["status"], "running")
+                self.assertTrue(disk[child_id]["running"])
+
+    def test_cancel_repairs_running_receipt_before_signaling_original_process(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.install_records import INSTALL_JOBS_FILE, persist_install_job
+
+            install_id = "cancel-pending-running-receipt"
+            process = SimpleNamespace(
+                poll=lambda: None, terminate=unittest.mock.Mock(),
+                wait=unittest.mock.Mock(return_value=-15), kill=unittest.mock.Mock(),
+            )
+            attempts = {"remaining": 1}
+
+            def fail_running_receipt(job):
+                if job["id"] == install_id and job["status"] == "running" and attempts["remaining"]:
+                    attempts["remaining"] -= 1
+                    raise OSError("running install receipt unavailable")
+                return persist_install_job(job)
+
+            client = app.test_client()
+            with patch("fls_manager.routes.deps.persist_install_job", side_effect=fail_running_receipt), patch(
+                "fls_manager.routes.deps.subprocess.Popen", return_value=process,
+            ) as popen:
+                started = client.post(
+                    "/api/deps/install", json={"name": "demo", "request_id": install_id},
+                    headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(started.status_code, 503)
+                self.assertTrue(started.json["receipt_pending"])
+
+                cancelled = client.post(
+                    f"/api/deps/install-cancel/{install_id}",
+                    json={"request_id": "cancel-after-receipt-repair"}, headers={"X-Token": TOKEN},
+                )
+
+            self.assertEqual(cancelled.status_code, 200)
+            self.assertEqual(cancelled.json["status"], "cancelled")
+            self.assertEqual(cancelled.json["cancel_status"], "cancelled")
+            process.terminate.assert_called_once()
+            process.wait.assert_called_once_with(timeout=3)
+            process.kill.assert_not_called()
+            popen.assert_called_once()
+            disk = json.loads(INSTALL_JOBS_FILE.read_text(encoding="utf-8"))
+            self.assertEqual(disk[install_id]["status"], "cancelled")
+            self.assertFalse(disk[install_id]["running"])
+            self.assertEqual(disk[install_id]["cancel_request_id"], "cancel-after-receipt-repair")
+
     def test_terminal_install_receipt_failure_is_retryable_without_reinstalling(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.install_records import INSTALL_JOBS_FILE, persist_install_job
