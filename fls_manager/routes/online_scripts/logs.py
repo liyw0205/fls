@@ -829,6 +829,7 @@ let pageHidden = false;
 let resumeOnPageshow = false;
 let pageGeneration = 0;
 let autoPollingPaused = false;
+let initialLogLoaded = false;
 let lastKnownRunning = {str(bool(info.get("running"))).lower()};
 const retryDelays = [2000, 4000, 8000, 16000, 30000];
 window.__FLS_LOG_LAST_TEXT__ = "";
@@ -956,7 +957,7 @@ async function loadLog(stateOnly = false){{
 
         window.__FLS_LOG_LAST_TEXT__ = text;
 
-        if(changed){{
+        if(changed && initialLogLoaded){{
             if(wasNearBottom || window.__FLS_LOG_NEAR_BOTTOM__){{
                 const tip = document.getElementById("flsLogNewTip");
                 if(tip) tip.style.display = "none";
@@ -968,6 +969,7 @@ async function loadLog(stateOnly = false){{
                 if(tip) tip.style.display = "block";
             }}
         }}
+        initialLogLoaded = true;
 
         }}
         const stopAction = document.getElementById("installStopAction");

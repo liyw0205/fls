@@ -450,6 +450,8 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
     assert.match(saved.restart_receipt_error,/面板重启后无法确认/);
     assert.equal(saved.restart_receipt_error.includes('保存恢复状态失败'),false);
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true);
+    assert.ok(await page.evaluate(()=>window.scrollY<=1),
+     'initial log rendering scrolled the page away from its header');
     await page.screenshot({path:'/tmp/fls-install-restart-receipt-'+viewport.width+'.png',fullPage:true});
     await page.reload();
     await page.waitForFunction(()=>document.querySelector('#installStatus').textContent==='结果未知'
