@@ -186,14 +186,14 @@ def _validate_task_link_requests(data):
             raise RuntimeError("在线任务源同步回执标识不一致，未覆盖原文件")
         if value.get("state") not in ("prepared", "running", "failed", "unknown", "completed"):
             raise RuntimeError("在线任务源同步回执状态损坏，未覆盖原文件")
-        for field in ("script_id", "proxy_id", "expected_version", "error", "updated_at", "expected_tasks_fingerprint", "published_tasks_fingerprint", "confirmation", "confirmation_fingerprint", "origin_refresh_request_id"):
+        for field in ("script_id", "proxy_id", "expected_version", "error", "updated_at", "expected_tasks_fingerprint", "publication_base_fingerprint", "publication_target_fingerprint", "published_tasks_fingerprint", "confirmation", "confirmation_fingerprint", "origin_refresh_request_id"):
             if not isinstance(value.get(field, ""), str):
                 raise RuntimeError("在线任务源同步回执字段损坏，未覆盖原文件")
         if value.get("origin_refresh_request_id") and not re.fullmatch(r"[a-f0-9]{32}", value["origin_refresh_request_id"]):
             raise RuntimeError("在线任务源原刷新请求绑定损坏，未覆盖原文件")
         if any(
             value.get(field) and not re.fullmatch(r"[a-f0-9]{64}", value.get(field))
-            for field in ("expected_tasks_fingerprint", "published_tasks_fingerprint", "confirmation_fingerprint")
+            for field in ("expected_tasks_fingerprint", "publication_base_fingerprint", "publication_target_fingerprint", "published_tasks_fingerprint", "confirmation_fingerprint")
         ):
             raise RuntimeError("在线任务源同步任务指纹损坏，未覆盖原文件")
         if value.get("confirmation") not in ("", "merged", "not_merged"):
@@ -209,7 +209,8 @@ def _task_link_request_snapshot(info):
     fields = (
         "request_id", "script_id", "proxy_id", "expected_version", "state",
         "added", "total", "error", "updated_at", "expected_tasks_fingerprint",
-        "published_tasks_fingerprint", "confirmation", "confirmation_fingerprint",
+        "publication_base_fingerprint", "publication_target_fingerprint", "published_tasks_fingerprint",
+        "confirmation", "confirmation_fingerprint",
         "origin_refresh_request_id",
     )
     snapshot = {field: info.get(field, 0 if field in ("added", "total") else "") for field in fields}
@@ -217,7 +218,7 @@ def _task_link_request_snapshot(info):
     snapshot["archived_at"] = info.get("archived_at", "")
     if type(snapshot["added"]) is not int or type(snapshot["total"]) is not int:
         raise RuntimeError("在线任务源同步回执计数损坏，未覆盖原文件")
-    for field in ("expected_tasks_fingerprint", "published_tasks_fingerprint", "confirmation_fingerprint"):
+    for field in ("expected_tasks_fingerprint", "publication_base_fingerprint", "publication_target_fingerprint", "published_tasks_fingerprint", "confirmation_fingerprint"):
         if snapshot[field] and not re.fullmatch(r"[a-f0-9]{64}", snapshot[field]):
             raise RuntimeError("在线任务源同步任务指纹损坏，未覆盖原文件")
     if snapshot["confirmation"] not in ("", "merged", "not_merged"):
@@ -432,7 +433,7 @@ def claim_task_link_request(info):
     return observed.get("value")
 
 
-def merge_task_link_tasks(expected_item, linked_tasks):
+def merge_task_link_tasks(expected_item, linked_tasks, *, before_publish=None):
     # Fetch outside the storage lock, then merge into the latest cache snapshot.
     with storage_transaction():
         items = load_online_script_cache()
@@ -442,6 +443,7 @@ def merge_task_link_tasks(expected_item, linked_tasks):
             raise OnlineScriptCacheConflict("脚本源已更新或删除，请刷新列表后重新同步外部任务源")
 
         merged = online_script_task_crons(item)
+        base_fingerprint = online_script_task_fingerprint(item)
         existing_keys = {(task["name"], task["cron"], task["command"]) for task in merged}
         added = 0
         for task in normalize_online_task_crons(linked_tasks):
@@ -450,6 +452,15 @@ def merge_task_link_tasks(expected_item, linked_tasks):
                 existing_keys.add(key)
                 merged.append(task)
                 added += 1
+        if before_publish:
+            target_item = dict(item)
+            target_item["task_cron"] = merged
+            before_publish(
+                base_fingerprint,
+                online_script_task_fingerprint(target_item),
+                added,
+                len(merged),
+            )
         if added:
             item["task_cron"] = merged
             save_online_script_cache(items)

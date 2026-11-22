@@ -378,6 +378,8 @@ def _submit_task_link(script_id, proxy_id, raw_request_id, origin_refresh_reques
         "error": "",
         "updated_at": now_str(),
         "expected_tasks_fingerprint": expected_tasks_fingerprint,
+        "publication_base_fingerprint": "",
+        "publication_target_fingerprint": "",
         "published_tasks_fingerprint": "",
         "confirmation": "",
         "confirmation_fingerprint": "",
@@ -421,8 +423,27 @@ def _submit_task_link(script_id, proxy_id, raw_request_id, origin_refresh_reques
                 422,
             )
 
+        def persist_publication_intent(base_fingerprint, target_fingerprint, added, total):
+            _record_update(record, "running", added=added, total=total)
+            record["publication_base_fingerprint"] = base_fingerprint
+            record["publication_target_fingerprint"] = target_fingerprint
+            expected_receipt = _task_link_request_snapshot(record)
+            try:
+                persist_task_link_request(record)
+            except Exception as exc:
+                try:
+                    actual = get_task_link_request(request_id)
+                except Exception as read_exc:
+                    raise RuntimeError(
+                        f"任务发布意图回执无法确认：{exc}；回执复核失败：{read_exc}"
+                    ) from exc
+                if not _task_link_receipt_matches(expected_receipt, actual):
+                    raise RuntimeError(f"任务发布意图回执无法确认：{exc}；磁盘状态不一致") from exc
+
         try:
-            added, total = merge_task_link_tasks(item, linked_tasks)
+            added, total = merge_task_link_tasks(
+                item, linked_tasks, before_publish=persist_publication_intent,
+            )
         except OnlineScriptCacheConflict as exc:
             return _persist_failure(record, str(exc), 409, retry=False)
         except Exception as exc:
@@ -606,7 +627,10 @@ def _confirm_task_link_locked(request_id):
 
     published = str(record.get("published_tasks_fingerprint") or "")
     expected = str(record.get("expected_tasks_fingerprint") or "")
-    if published and current_fingerprint == published:
+    publication_base = str(record.get("publication_base_fingerprint") or "")
+    publication_target = str(record.get("publication_target_fingerprint") or "")
+    if ((published and current_fingerprint == published)
+            or (publication_target and current_fingerprint == publication_target)):
         _record_update(
             record, "completed", added=record.get("added", 0), total=record.get("total", 0),
         )
@@ -629,7 +653,8 @@ def _confirm_task_link_locked(request_id):
                 }, 503
         msg = "已确认外部任务源已合并，未重复抓取或追加任务"
         retry_allowed = False
-    elif not published and expected and current_fingerprint == expected:
+    elif ((publication_base and current_fingerprint == publication_base)
+          or (not publication_base and not published and expected and current_fingerprint == expected)):
         _record_update(record, "failed")
         record["confirmation"] = "not_merged"
         record["confirmation_fingerprint"] = current_fingerprint

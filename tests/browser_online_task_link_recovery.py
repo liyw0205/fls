@@ -36,12 +36,14 @@ def main():
         source.save_online_script_cache([item])
         fault = {"fail": True, "fetches": 0, "refreshes": 0, "fail_history_publication": False,
                  "fail_retry_start": False, "fail_retry_receipt": False,
+                 "post_publish_failure_request": "",
                  "confirmation_failure_request": "", "confirmation_failure_mode": "",
                  "confirmation_failure_remaining": 0,
                  "refresh_recovery_failure_request": "", "refresh_recovery_failure_remaining": 0,
                  "failure_receipt_request": "", "failure_receipt_mode": "after",
                  "failure_receipt_remaining": 0, "task_link_status_failure_request": ""}
         real_fetch = task_link.fetch_task_link_tasks
+        real_merge = task_link.merge_task_link_tasks
         real_persist = task_link.persist_task_link_request
         real_persist_refresh_recovery = task_link.persist_online_refresh_task_link_recovery
         real_refresh_start = refresh.start_refresh_thread
@@ -78,7 +80,15 @@ def main():
                 raise RuntimeError("fixture task source unavailable")
             return [{"name": "Browser task", "command": "echo browser", "cron": ""}]
 
+        def merge_then_fail_after_publish(expected_item, linked_tasks, **kwargs):
+            result = real_merge(expected_item, linked_tasks, **kwargs)
+            if fault["post_publish_failure_request"]:
+                fault["post_publish_failure_request"] = ""
+                raise RuntimeError("browser response failed after task cache publication")
+            return result
+
         task_link.fetch_task_link_tasks = fetch
+        task_link.merge_task_link_tasks = merge_then_fail_after_publish
 
         def persist(record):
             mode = fault.get("startup_failure")
@@ -179,6 +189,8 @@ def main():
                         failure_receipt_mode=data.get("failure_receipt_mode", "after"),
                         failure_receipt_remaining=1,
                     )
+                if "post_publish_failure_request" in data:
+                    fault["post_publish_failure_request"] = data["post_publish_failure_request"]
                 if "task_link_status_failure_request" in data:
                     fault["task_link_status_failure_request"] = data["task_link_status_failure_request"]
                 if "startup_failure" in data:
@@ -189,7 +201,8 @@ def main():
                                  confirmation_failure_remaining=0, refresh_recovery_failure_request="",
                                  refresh_recovery_failure_remaining=0, failure_receipt_request="",
                                  failure_receipt_mode="after",
-                                 failure_receipt_remaining=0, task_link_status_failure_request="")
+                                 failure_receipt_remaining=0, task_link_status_failure_request="",
+                                 post_publish_failure_request="")
                     source.save_online_script_cache([item])
             cached = source.load_online_script_cache()
             return jsonify(fail=fault["fail"], fetches=fault["fetches"], refreshes=fault["refreshes"], cached=cached)
@@ -536,6 +549,7 @@ def main():
                 print(result.stdout.strip())
         finally:
             task_link.fetch_task_link_tasks = real_fetch
+            task_link.merge_task_link_tasks = real_merge
             task_link.persist_task_link_request = real_persist
             task_link.persist_online_refresh_task_link_recovery = real_persist_refresh_recovery
             refresh.start_refresh_thread = real_refresh_start
@@ -563,6 +577,35 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    await page.goto(base+'/login');
    await page.locator('[name="token"]').fill(process.env.FLS_UI_TOKEN);
    await page.locator('button[type="submit"]').click();
+   if(process.env.FLS_TASK_LINK_PUBLICATION_RECOVERY_ONLY==='1'){
+     await fixture({reset:true,fail:false});
+     await page.goto(base+'/online-scripts',{waitUntil:'domcontentloaded'});
+     const crashForm=page.locator('#online-list form[action="/online-scripts/task-link/browser-link"]');
+     const crashId=await crashForm.locator('[name="request_id"]').inputValue();
+     await fixture({post_publish_failure_request:crashId});
+     await crashForm.locator('button[type="submit"]').click();
+     await page.waitForFunction(()=>document.querySelector('#onlineTaskLinkRecovery').textContent.includes('外部任务源同步失败'));
+     assert.equal(await page.evaluate(()=>JSON.parse(sessionStorage.getItem('fls-online-task-link-request')).request_id),crashId);
+     const crashedState=await fixture({});
+     assert.equal(crashedState.fetches,1);
+     assert.equal(crashedState.cached[0].task_cron.length,1);
+     const queryLink=page.getByRole('link',{name:'查询原同步请求',exact:true});
+     await queryLink.click();
+     await page.waitForURL(base+'/online-scripts/task-link-status/'+crashId);
+     await page.getByRole('heading',{name:'发布结果未知，请勿直接重发',exact:true}).waitFor();
+     assert.equal(await page.locator('form[action="/online-scripts/task-link/'+crashId+'"]').count(),0);
+     const confirmForm=page.locator('form[action="/online-scripts/task-link-confirm/'+crashId+'"]').last();
+     await confirmForm.getByRole('button',{name:'检查当前任务合并',exact:true}).click();
+     await page.getByRole('heading',{name:'同步已完成',exact:true}).waitFor();
+     const confirmedState=await fixture({});
+     assert.equal(confirmedState.fetches,1);
+     assert.deepEqual(confirmedState.cached[0].task_cron.map(task=>task.name),['Browser task']);
+     await page.screenshot({path:'/tmp/fls-task-link-publication-crash-'+viewport.width+'.png'});
+     assert.deepEqual(errors,[]);
+     console.log('task-link publication crash recovery passed '+viewport.width);
+     await context.close();
+     continue;
+   }
    const refreshRecoveryId=('c'+viewport.width.toString(16)).padEnd(32,'c');
    const refreshRecoveryRequest=('b'+viewport.width.toString(16)).padEnd(32,'b');
    await fixture({reset:true,fail:true});
