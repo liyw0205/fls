@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from types import SimpleNamespace
 
 from tools.browser_regression import TOKEN, find_chromium, find_playwright_core, seed_browser_fixture
 
@@ -69,14 +70,23 @@ def main():
         scheduler_receipt_fault = {"install_id": "", "remaining": 0, "mode": "after"}
         restart_receipt_fault = {"install_id": "", "remaining": 0, "mode": "after"}
         stop_log_failure = {"remaining": 0}
-        dependency_receipt_fault = {"install_id": "", "remaining": 0}
+        dependency_receipt_fault = {
+            "install_id": "", "remaining": 0, "status": "",
+            "error": "browser terminal install receipt unavailable",
+        }
         dependency_receipt_process = {"polls": 0}
+        dependency_start_count = {"calls": 0}
         persist_dependency_job = deps_routes.persist_install_job
 
         def persist_dependency_with_failure(info):
-            if info.get("id") == dependency_receipt_fault["install_id"] and dependency_receipt_fault["remaining"]:
+            expected_status = dependency_receipt_fault["status"]
+            if (
+                info.get("id") == dependency_receipt_fault["install_id"]
+                and dependency_receipt_fault["remaining"]
+                and (not expected_status or info.get("status") == expected_status)
+            ):
                 dependency_receipt_fault["remaining"] -= 1
-                raise PermissionError("browser terminal install receipt unavailable")
+                raise PermissionError(dependency_receipt_fault["error"])
             return persist_dependency_job(info)
 
         deps_routes.persist_install_job = persist_dependency_with_failure
@@ -431,7 +441,43 @@ def main():
                     DEPS_RUNNING[install_id] = info
                     persist_install_job(info)
                     dependency_receipt_process["polls"] = 0
-                    dependency_receipt_fault.update(install_id=install_id, remaining=2)
+                    dependency_receipt_fault.update(
+                        install_id=install_id, remaining=2, status="",
+                        error="browser terminal install receipt unavailable",
+                    )
+                if data.get("start_running_dependency_receipt"):
+                    install_id = "running-receipt-" + str(data.get("width") or 390)
+                    INSTALL_JOBS_FILE.write_text("{}", encoding="utf-8")
+                    dependency_start_count["calls"] = 0
+                    dependency_receipt_fault.update(
+                        install_id=install_id, remaining=1, status="running",
+                        error="browser running install receipt unavailable",
+                    )
+
+                    class RunningInstallProcess:
+                        def poll(self):
+                            return None
+
+                        def terminate(self):
+                            return None
+
+                        def wait(self, timeout=None):
+                            return -15
+
+                        def kill(self):
+                            return None
+
+                    def start_fixture_process(*_args, **kwargs):
+                        dependency_start_count["calls"] += 1
+                        kwargs["stdout"].write(b"browser running install fixture output\n")
+                        kwargs["stdout"].flush()
+                        return RunningInstallProcess()
+
+                    deps_routes.subprocess = SimpleNamespace(
+                        Popen=start_fixture_process, STDOUT=subprocess.STDOUT,
+                        PIPE=subprocess.PIPE, TimeoutExpired=subprocess.TimeoutExpired,
+                        run=subprocess.run,
+                    )
                 if "release" in data:
                     release.write_text(str(data["release"]), encoding="ascii")
             task_imports = {}
@@ -460,6 +506,7 @@ def main():
                 ),
                 dependency_receipt_failures=dependency_receipt_fault["remaining"],
                 dependency_process_polls=dependency_receipt_process["polls"],
+                dependency_start_count=dependency_start_count["calls"],
                 deps_running=bool(DEPS_RUNNING.get("browser-deps", {}).get("process") and
                                   DEPS_RUNNING["browser-deps"]["process"].poll() is None),
             )
@@ -557,6 +604,45 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
     assert.equal(await page.locator('#log').textContent().then(text=>text.includes('installer started before panel restart')),true);
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true);
     assert.deepEqual(errors,[]);await context.close();console.log('restart install receipt recovery passed '+viewport.width);
+    continue;
+   }
+   if(process.env.FLS_INSTALL_LOG_ONLY==='running-deps-receipt'){
+    await page.goto(base+'/login');await login();
+    await fixture({start_running_dependency_receipt:true,width:viewport.width});
+    const installId='running-receipt-'+viewport.width;
+    const submit=()=>page.request.post(base+'/api/deps/install',{headers,data:{name:'demo',request_id:installId}});
+    let response=await submit();assert.equal(response.status(),503);
+    let payload=await response.json();assert.equal(payload.install_id,installId);
+    assert.equal(payload.status,'running');assert.equal(payload.running,true);
+    assert.equal(payload.receipt_pending,true);
+    let before=await state();assert.equal(before.dependency_start_count,1);
+    assert.equal(before.dependency_receipt_status,'prepared');
+
+    response=await submit();assert.equal(response.status(),503);
+    payload=await response.json();assert.equal(payload.install_id,installId);
+    assert.equal(payload.running,true);assert.equal(payload.receipt_pending,true);
+    assert.equal((await state()).dependency_start_count,1);
+
+    await page.goto(base+'/deps/install-log/'+installId+'?back=%2Fdeps');
+    await page.waitForFunction(()=>document.querySelector('#log').textContent.includes('browser running install fixture output'));
+    await page.waitForFunction(()=>document.querySelector('#installStatus').textContent==='安装中'
+      &&document.querySelector('#installError').hidden);
+    let recovered=await state();assert.equal(recovered.dependency_receipt_status,'running');
+    assert.equal(recovered.dependency_receipt_failures,0);
+    assert.equal(recovered.dependency_start_count,1);
+    assert.equal(await page.locator('.install-retry-form').count(),0);
+    assert.equal(await page.locator('.install-cancel-form').count(),1);
+
+    response=await submit();assert.equal(response.status(),200);
+    payload=await response.json();assert.equal(payload.install_id,installId);
+    assert.equal(payload.status,'running');assert.equal(payload.running,true);
+    assert.equal((await state()).dependency_start_count,1);
+    await page.reload();
+    await page.waitForFunction(()=>document.querySelector('#installStatus').textContent==='安装中');
+    assert.equal((await state()).dependency_start_count,1);
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true);
+    await page.screenshot({path:'/tmp/fls-running-deps-receipt-'+viewport.width+'.png',fullPage:true});
+    assert.deepEqual(errors,[]);await context.close();console.log('running dependency receipt recovery passed '+viewport.width);
     continue;
    }
    if(process.env.FLS_INSTALL_LOG_ONLY==='terminal-deps-receipt'){
