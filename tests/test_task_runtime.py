@@ -1411,7 +1411,10 @@ class TaskRuntimeTests(unittest.TestCase):
             ), mock.patch.object(
                 task_runner,
                 "send_by_ids",
-                return_value=[{"name": "One", "ok": True, "msg": "ok"}],
+                return_value=[
+                    {"name": "One", "ok": True, "msg": "ok"},
+                    {"name": "Disabled", "ok": False, "status": "not_sent", "msg": "通知已停用，未发送"},
+                ],
             ) as send_by_ids:
                 task_runner.task_finish_watcher(
                     "t1",
@@ -1430,7 +1433,9 @@ class TaskRuntimeTests(unittest.TestCase):
 
             self.assertNotIn("t1", task_runner.RUNNING)
             send_by_ids.assert_called_once_with("Demo", "script output", ["n1"])
-            self.assertIn("通知结果", log_file.read_text(encoding="utf-8"))
+            logged = log_file.read_text(encoding="utf-8")
+            self.assertIn("通知结果", logged)
+            self.assertIn("Disabled: 失败 - 通知已停用，未发送", logged)
 
     def test_finish_watcher_records_failed_history_and_notifies_without_retry(self):
         with isolated_fls_modules():

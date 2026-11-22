@@ -115,6 +115,31 @@ class NotificationDeliveryRecoveryTests(unittest.TestCase):
             self.assertEqual([row["status"] for row in mixed], ["not_sent", "not_sent", "succeeded"])
             self.assertEqual([row["status"] for row in defaults], ["not_sent", "not_sent"])
 
+    def test_send_by_ids_rejects_corrupt_config_without_rewriting_or_sending(self):
+        corrupt_configs = (
+            b'{"notify_items":[{"id":"n1","channel":"webhook","config":{"TOKEN":"private-secret"}}',
+            b"[]",
+            b'{"notify_items":[{"id":"n1","channel":"invalid","config":{}}]}',
+            b'{"notify_items":[{"id":"n1","channel":"bark"},{"id":"n1","channel":"bark"}]}'
+        )
+        for corrupt in corrupt_configs:
+            with self.subTest(corrupt=corrupt[:20]), isolated_modules():
+                from fls_manager import notify, paths
+
+                paths.CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+                paths.CONFIG_FILE.write_bytes(corrupt)
+
+                with patch.object(notify, "send_one") as sender:
+                    result = notify.send_by_ids("Task", "Body", ["n1"])
+
+                self.assertEqual(len(result), 1)
+                self.assertFalse(result[0]["ok"])
+                self.assertEqual(result[0]["status"], "not_sent")
+                self.assertIn("配置", result[0]["msg"])
+                self.assertNotIn("private-secret", result[0]["msg"])
+                sender.assert_not_called()
+                self.assertEqual(paths.CONFIG_FILE.read_bytes(), corrupt)
+
     def test_send_success_is_unknown_when_terminal_history_write_fails(self):
         with isolated_modules() as base_dir:
             from fls_manager import notify, paths

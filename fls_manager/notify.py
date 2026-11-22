@@ -1033,10 +1033,26 @@ def send_by_ids(title, content, ids=None, source="task"):
         return [{"id": "", "name": "通知选择", "ok": False, "status": "not_sent",
                  "msg": "通知选择格式无效，未发送"}]
 
-    if any(item_id == "__none__" for item_id in ids):
+    if not ids or any(item_id == "__none__" for item_id in ids):
         return []
 
-    items = {item.get("id"): item for item in notify_items() if item.get("id")}
+    from .notify_actions import notification_config
+    try:
+        notification_config(allow_legacy=True)
+    except RuntimeError as exc:
+        return [{"id": "", "name": "通知配置", "ok": False, "status": "not_sent", "msg": str(exc)}]
+    except PermissionError:
+        return [{"id": "", "name": "通知配置", "ok": False, "status": "not_sent",
+                 "msg": "通知配置不可读取，请检查文件权限；未发送"}]
+    except Exception:
+        return [{"id": "", "name": "通知配置", "ok": False, "status": "not_sent",
+                 "msg": "通知配置 JSON 无效或不可读取；未发送"}]
+
+    try:
+        items = {item.get("id"): item for item in notify_items() if item.get("id")}
+    except Exception:
+        return [{"id": "", "name": "通知配置", "ok": False, "status": "not_sent",
+                 "msg": "通知配置无法读取或迁移；未发送"}]
     results = []
     real_ids = []
     seen = set()
