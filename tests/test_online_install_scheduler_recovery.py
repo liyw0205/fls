@@ -1080,10 +1080,10 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
 
             install_id = self.partial_install(app, base_dir)
             live = get_online_install_job(install_id)
-            live["task_recovery"] = {"id": "live-claim", "pending": False}
+            live["task_recovery"] = {"id": "1" * 32, "pending": False}
             persist_online_install(live)
             ONLINE_INSTALL_RUNNING[install_id] = dict(live)
-            persisted_claim = {"id": "persisted-claim", "pending": False}
+            persisted_claim = {"id": "2" * 32, "pending": False}
             storage.mutate_json(
                 ONLINE_INSTALL_JOBS_FILE, {},
                 lambda jobs: {**jobs, install_id: {**jobs[install_id], "task_recovery": persisted_claim}},
