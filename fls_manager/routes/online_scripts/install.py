@@ -234,14 +234,32 @@ def _start_install_job(
                     status="启动失败",
                     phase="startup_receipt_failed",
                     error=(
-                        f"保存安装启动回执失败：{e}。安装进程未启动；修复存储后可沿原请求重试。"
+                        f"保存安装状态失败（启动回执）：{e}。安装进程未启动；修复存储后可沿原请求重试。"
                     ),
                     updated_at=now_str(),
                 )
+                failure_receipt_published = True
                 try:
                     persist_online_install(info)
                 except Exception as storage_error:
-                    info["error"] += f"；启动失败回执也未能保存：{storage_error}"
+                    try:
+                        persisted_failure = _load_persisted_online_install(install_id)
+                        failure_receipt_published = (
+                            bool(persisted_failure)
+                            and _install_snapshot(persisted_failure) == _install_snapshot(info)
+                        )
+                    except Exception:
+                        failure_receipt_published = False
+                    if not failure_receipt_published:
+                        info["_startup_receipt_confirmed"] = False
+                        info["error"] += f"；启动失败回执未能确认保存：{storage_error}"
+                if not failure_receipt_published:
+                    return _install_start_error(
+                        install_id,
+                        info["error"],
+                        log_available=False,
+                        script_id=script_id,
+                    )
                 return _install_start_error(
                     install_id,
                     info["error"],
@@ -435,17 +453,23 @@ def _api_install_start_result(result, install_id):
                 retry_allowed=False,
             ), 500
         message = info.get("error") or "在线脚本安装未启动，请查看安装记录后重试"
-        return jsonify(
+        payload = dict(
             ok=False,
             request_id=install_id,
-            install_id=install_id,
-            log_url=url_for("online_scripts.api_online_install_log", install_id=install_id),
             status=info.get("status") or "启动失败",
             phase=info.get("phase") or "unknown",
             running=bool(info.get("running")),
             msg=message,
             retry_allowed=status >= 500,
-        ), status
+        )
+        if info.get("_startup_receipt_confirmed") is False:
+            payload.update(accepted=False, retry_allowed=True)
+        else:
+            payload.update(
+                install_id=install_id,
+                log_url=url_for("online_scripts.api_online_install_log", install_id=install_id),
+            )
+        return jsonify(payload), status
     return result
 
 
@@ -748,7 +772,7 @@ def _install_confirmation(
     return layout("目标已存在", "online_scripts", body)
 
 
-def _install_start_error(install_id, error, recovery_action=""):
+def _install_start_error(install_id, error, recovery_action="", *, log_available=True, script_id=""):
     recovery_form = ""
     if recovery_action:
         recovery_form = (
@@ -756,13 +780,18 @@ def _install_start_error(install_id, error, recovery_action=""):
             f'action="{h(recovery_action)}">'
             '<button class="btn btn-primary" type="submit">沿原请求重试启动</button></form>'
         )
+    log_link = (
+        f'<a class="btn btn-gray" href="/online-scripts/log/{h(install_id)}">查看安装记录</a>'
+        if log_available else ""
+    )
+    selection_link = (
+        f'<a class="btn btn-orange" href="/online-scripts/install-select/{h(script_id)}">重新选择安装选项</a>'
+        if script_id else ""
+    )
     body = page_header_card(
         "在线脚本安装启动失败",
         help_html=h(error),
-        actions_html=(
-            recovery_form
-            + f'<a class="btn btn-gray" href="/online-scripts/log/{h(install_id)}">查看安装记录</a>'
-        ),
+        actions_html=recovery_form + log_link + selection_link,
     )
     return layout("在线脚本安装失败", "online_scripts", body), 500
 

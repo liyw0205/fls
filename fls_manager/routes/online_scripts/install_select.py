@@ -1740,8 +1740,11 @@ async function flsInstallSubmitApi(action, form, submitter, allowOriginalRetry){
     }}catch(error){{
         const denied = error && (error.status === 401 || error.status === 403);
         const message = error && error.message ? error.message : String(error || "安装请求失败");
+        const knownRejected = error && error.payload && error.payload.accepted === false;
         if(errorEl){{
-            errorEl.textContent = "安装请求失败：" + message + (denied ? "。请重新登录后查询原安装请求。" : "。请保留当前请求标识后重试或查看安装日志。");
+            errorEl.textContent = knownRejected
+                ? "安装未启动：" + message + "。可保留当前请求标识与选择后重试。"
+                : "安装请求失败：" + message + (denied ? "。请重新登录后查询原安装请求。" : "。请保留当前请求标识后重试或查看安装日志。");
             errorEl.hidden = false;
         }}
         if(loginEl){{
