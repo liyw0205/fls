@@ -135,7 +135,7 @@ def config_page():
         draft = _config_draft(old_cfg)
         if request.form.get("config_revision") != revision:
             return _render_config_form(draft, revision, "配置已变更或编辑状态失效，未保存。请对照当前配置合并后重试。", 409, current_cfg=old_cfg)
-        theme = str(request.form.get("theme", "default") or "default").strip().lower()
+        theme = str(request.form.get("theme", DEFAULT_CONFIG["theme"]) or DEFAULT_CONFIG["theme"]).strip().lower()
         if theme not in THEME_OPTIONS:
             return _render_config_form(draft, revision, "主题选择无效，未保存。", 400)
         if request.form.get("security_verify_type", "code").strip() not in ("code", "totp"):
@@ -321,9 +321,9 @@ def _render_config_form(cfg, revision, message="", status=200, current_cfg=None)
     def checked(k):
         return "checked" if types.get(k) else ""
 
-    current_theme = str(cfg.get("theme", "default") or "default")
+    current_theme = str(cfg.get("theme", DEFAULT_CONFIG["theme"]) or DEFAULT_CONFIG["theme"])
     if current_theme not in THEME_OPTIONS:
-        current_theme = "default"
+        current_theme = DEFAULT_CONFIG["theme"]
 
     theme_options = "".join(
         f'<option value="{h(key)}"{" selected" if key == current_theme else ""}>'
@@ -451,7 +451,7 @@ def _render_config_form(cfg, revision, message="", status=200, current_cfg=None)
             {theme_options}
         </select>
         <div class="help">
-            默认主题保留当前的新拟物界面；编辑杂志风使用暖米色、衬线标题和细线排版；玻璃拟态使用深色毛玻璃层次。保存后刷新页面生效。
+            deepseek 使用蓝色强调与清晰的中性表面，并跟随系统暗色偏好；新拟物派保留柔和浮雕层次。编辑杂志风采用纸感排版，玻璃拟态使用深色半透明层次。保存后刷新页面生效。
         </div>
     </div>
 </section>

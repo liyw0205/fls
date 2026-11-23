@@ -543,6 +543,66 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
             self.assertEqual(start.call_count, 1)
             self.assertTrue(constants._load_persisted_online_install(request_id)["running"])
 
+    def test_api_install_status_read_failure_after_start_is_recoverable_without_duplicate_start(self):
+        with isolated_app() as (app, base_dir):
+            item, _ = self.prepare(base_dir)
+            from fls_manager.routes.online_scripts import install as install_route
+            from fls_manager.online_scripts.source import save_online_script_cache
+
+            save_online_script_cache([item])
+            request_id = "8" * 32
+            client = app.test_client()
+            real_get = install_route.get_online_install_job
+            started = False
+            read_failed = False
+
+            def start_thread(**_kwargs):
+                nonlocal started
+                started = True
+
+            def fail_first_read_after_start(install_id):
+                nonlocal read_failed
+                if started and not read_failed:
+                    read_failed = True
+                    raise OSError("temporary install state read failure")
+                return real_get(install_id)
+
+            with patch.object(install_route, "get_online_install_job", side_effect=fail_first_read_after_start), patch.object(
+                install_route, "start_install_thread", side_effect=start_thread,
+            ) as start:
+                first = client.post(
+                    "/api/online-scripts/install/demo",
+                    json={"request_id": request_id, "force": True}, headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(first.status_code, 503)
+                self.assertFalse(first.json["ok"])
+                self.assertTrue(first.json["accepted"])
+                self.assertFalse(first.json["retry_allowed"])
+                self.assertEqual(first.json["request_id"], request_id)
+                self.assertEqual(first.json["install_id"], request_id)
+                self.assertEqual(first.json["log_url"], f"/api/online-scripts/log/{request_id}")
+                self.assertEqual(
+                    first.json["state_url"],
+                    f"/api/online-scripts/log/{request_id}?state_only=1",
+                )
+                self.assertIn("安装已受理", first.json["msg"])
+
+                replay = client.post(
+                    "/api/online-scripts/install/demo",
+                    json={"request_id": request_id, "force": True}, headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(replay.status_code, 200)
+                self.assertTrue(replay.json["replayed"])
+                self.assertEqual(replay.json["request_id"], request_id)
+
+                state = client.get(
+                    first.json["state_url"], headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(state.status_code, 200)
+                self.assertTrue(state.json["running"])
+                self.assertEqual(state.json["install_id"], request_id)
+                start.assert_called_once()
+
     def test_api_startup_failure_receipt_write_then_error_is_recovered_from_disk(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.online_scripts import constants
@@ -1865,6 +1925,24 @@ const reply=(status,payload)=>({ok:status>=200&&status<300,status,body:JSON.stri
   assert.equal(denied.calls.length,1);
   assert.equal(denied.elements.onlineInstallApiLogin.hidden,false);
   assert.equal(denied.storage.value!==null,true);
+
+  const acceptedReadFailure=setup([
+    reply(503,{ok:false,accepted:true,request_id:id,install_id:id,retry_allowed:false,
+      log_url:'/api/online-scripts/log/'+id,state_url:'/api/online-scripts/log/'+id+'?state_only=1',
+      msg:'安装已受理，但当前状态读取失败'}),
+    reply(200,{ok:true,request_id:id,install_id:id,running:true,status:'运行中',phase:'downloading'})
+  ]);
+  await new Promise(resolve=>setImmediate(resolve));
+  await acceptedReadFailure.context.flsInstallSubmitApi(
+    '/online-scripts/install/demo',acceptedReadFailure.form,acceptedReadFailure.button);
+  assert.equal(acceptedReadFailure.calls.length,2,'accepted requests reconcile via GET, never repost');
+  assert.equal(acceptedReadFailure.calls[0].options.method,'POST');
+  assert.equal(acceptedReadFailure.calls[1].url,'/api/online-scripts/log/'+id+'?state_only=1');
+  assert.equal(acceptedReadFailure.calls[1].options.method,undefined);
+  assert.equal(acceptedReadFailure.storage.value!==null,true);
+  assert.equal(acceptedReadFailure.form.__flsInstallRecoveryLocked,true);
+  assert.equal(acceptedReadFailure.elements.onlineInstallRecoveryLog.href,'/online-scripts/log/'+id);
+  assert.match(acceptedReadFailure.elements.onlineInstallRecoveryStatus.textContent,/运行中/);
 
   const full=setup([reply(409,{ok:false,accepted:false,history_full:true,request_id:id,
     msg:'待核对在线安装占满历史容量',history_url:'/online-scripts/install-history',retry_allowed:false})]);
