@@ -225,7 +225,12 @@ class OnlineTaskImportRetentionTests(unittest.TestCase):
             self.assertIn("recovery=1", page)
             self.assertIn("script_id=demo", page)
             before = constants.ONLINE_TASK_IMPORT_REQUESTS_FILE.read_bytes()
-            for query in ("recovery=bad", "offset=-1", "offset=201", "offset=bad", "limit=0"):
+            invalid_queries = (
+                "recovery=bad", "offset=-1", "offset=201", "offset=bad", "limit=0",
+                "script_id=%01", "script_id=demo%0A", "script_id=%7f",
+                "script_id=" + ("x" * 201),
+            )
+            for query in invalid_queries:
                 for prefix in ("/api", ""):
                     self.assertEqual(client.get(prefix + "/online-scripts/import-tasks-history?" + query, headers=headers).status_code, 400)
                 self.assertEqual(constants.ONLINE_TASK_IMPORT_REQUESTS_FILE.read_bytes(), before)
