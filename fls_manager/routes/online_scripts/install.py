@@ -810,11 +810,30 @@ def api_online_scripts_install(script_id):
     result = _api_install_start_result(result, request_id)
     if isinstance(result, tuple):
         return result
-    info = get_online_install_job(request_id)
+    try:
+        info = get_online_install_job(request_id)
+    except Exception as exc:
+        return jsonify(
+            ok=False,
+            accepted=True,
+            request_id=request_id,
+            install_id=request_id,
+            msg=f"安装已受理，但当前状态读取失败：{exc}。请查询原安装状态，不要重新提交新请求。",
+            retry_allowed=False,
+            log_url=url_for("online_scripts.api_online_install_log", install_id=request_id),
+            state_url=url_for("online_scripts.api_online_install_log", install_id=request_id, state_only=1),
+        ), 503
     if not info:
-        return jsonify(ok=False, request_id=request_id, install_id=request_id,
-                       msg="安装已提交但状态无法读取，请查询安装日志后重试",
-                       retry_allowed=False), 500
+        return jsonify(
+            ok=False,
+            accepted=True,
+            request_id=request_id,
+            install_id=request_id,
+            msg="安装已受理，但当前状态记录暂不可见；请查询原安装状态，不要重新提交新请求。",
+            retry_allowed=False,
+            log_url=url_for("online_scripts.api_online_install_log", install_id=request_id),
+            state_url=url_for("online_scripts.api_online_install_log", install_id=request_id, state_only=1),
+        ), 503
     phase, message = _api_install_display_state(info)
     payload = {
         "ok": True,

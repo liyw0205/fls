@@ -34,6 +34,18 @@ def main():
         source.save_online_script_cache([item])
         starts = []
         thread_starts = []
+        arm_final_read_failure = False
+        fail_final_read = False
+        real_get_online_install_job = install_route.get_online_install_job
+
+        def flaky_get_online_install_job(install_id):
+            nonlocal fail_final_read
+            if fail_final_read:
+                fail_final_read = False
+                raise OSError("temporary install status read failure")
+            return real_get_online_install_job(install_id)
+
+        install_route.get_online_install_job = flaky_get_online_install_job
 
         def fake_install_start(*args, **kwargs):
             request_id = kwargs["request_id"]
@@ -95,10 +107,18 @@ def main():
             ONLINE_INSTALL_JOBS_FILE.write_text(json.dumps(history), encoding="utf-8")
             return {}
 
+        def fake_install_start_with_final_read_failure(*args, **kwargs):
+            nonlocal arm_final_read_failure, fail_final_read
+            result = fake_install_start(*args, **kwargs)
+            if arm_final_read_failure:
+                arm_final_read_failure = False
+                fail_final_read = True
+            return result
+
         real_start = install_route._start_install_job
         real_thread_start = install_route.start_install_thread
         original_history_limit = online_constants.ONLINE_INSTALL_LIMIT
-        install_route._start_install_job = fake_install_start
+        install_route._start_install_job = fake_install_start_with_final_read_failure
         install_route.start_install_thread = lambda *args, **kwargs: thread_starts.append(
             args[0] if args else kwargs.get("install_id")
         )
@@ -119,9 +139,16 @@ def main():
             if mode == "real":
                 install_route._start_install_job = real_start
             elif mode == "fake":
-                install_route._start_install_job = fake_install_start
+                install_route._start_install_job = fake_install_start_with_final_read_failure
             else:
                 return jsonify(ok=False), 400
+            return jsonify(ok=True)
+
+        @app.route("/api/fixture/fail-next-install-status-read", methods=["POST"])
+        def fail_next_install_status_read():
+            nonlocal arm_final_read_failure, fail_final_read
+            arm_final_read_failure = True
+            fail_final_read = False
             return jsonify(ok=True)
 
         @app.route("/api/fixture/fill-unknown-install-history", methods=["POST"])
@@ -143,9 +170,12 @@ def main():
 
         @app.route("/api/fixture/reset-online-install-history", methods=["POST"])
         def reset_online_install_history():
+            nonlocal arm_final_read_failure, fail_final_read
+            arm_final_read_failure = False
+            fail_final_read = False
             online_constants.ONLINE_INSTALL_LIMIT = original_history_limit
             ONLINE_INSTALL_JOBS_FILE.write_text("{}", encoding="utf-8")
-            install_route._start_install_job = fake_install_start
+            install_route._start_install_job = fake_install_start_with_final_read_failure
             return jsonify(ok=True)
 
         @app.route("/api/fixture/expire-session", methods=["POST"])
@@ -177,6 +207,7 @@ def main():
         finally:
             install_route._start_install_job = real_start
             install_route.start_install_thread = real_thread_start
+            install_route.get_online_install_job = real_get_online_install_job
             online_constants.ONLINE_INSTALL_LIMIT = original_history_limit
             server.shutdown()
             server.server_close()
@@ -304,6 +335,42 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    assert.deepEqual(restoredState.starts,[...initialState.starts,requestId]);
    const restoredCache=await page.request.post(base+'/api/fixture/restore-online-script-cache',{headers});
    assert.equal(restoredCache.status(),200);
+
+   await page.goto(base+'/online-scripts/install-select/browser-install');
+   const recoveredId=await page.locator('#onlineInstallSelectForm [name="request_id"]').inputValue();
+   const prior=await page.request.get(base+'/api/fixture/online-install/'+recoveredId,{headers});
+   const priorState=await prior.json();
+   const armFailure=await page.request.post(base+'/api/fixture/fail-next-install-status-read',{headers});
+   assert.equal(armFailure.status(),200);
+   const accepted=page.waitForResponse(response=>response.url()===acceptedPost
+     &&response.request().method()==='POST');
+   const stateRead=page.waitForResponse(response=>response.url()===base+'/api/online-scripts/log/'+recoveredId+'?state_only=1'
+     &&response.request().method()==='GET');
+   await page.getByRole('button',{name:'开始下载安装',exact:true}).click();
+   const acceptedResponse=await accepted,acceptedBody=await acceptedResponse.json();
+   assert.equal(acceptedResponse.status(),503);
+   assert.equal(acceptedBody.accepted,true);
+   assert.equal(acceptedBody.retry_allowed,false);
+   assert.equal(acceptedBody.request_id,recoveredId);
+   assert.equal((await stateRead).status(),200);
+   await page.waitForFunction(id=>{
+     const form=document.getElementById('onlineInstallSelectForm');
+     return form.__flsInstallRecoveryLocked===true
+       &&JSON.parse(sessionStorage.getItem('fls-online-install-request')).request_id===id
+       &&document.getElementById('onlineInstallRecoveryLog').href.endsWith('/online-scripts/log/'+id)
+       &&document.getElementById('onlineInstallRecoveryStatus').textContent.includes('已完成');
+   },recoveredId);
+   const recovered=await page.request.get(base+'/api/fixture/online-install/'+recoveredId,{headers});
+   const recoveredState=await recovered.json();
+   assert.deepEqual(recoveredState.starts,[...priorState.starts,recoveredId]);
+   await page.reload();
+   await page.waitForFunction(()=>document.getElementById('onlineInstallRecoveryStatus').textContent.includes('已完成'));
+   const afterReload=await page.request.get(base+'/api/fixture/online-install/'+recoveredId,{headers});
+   assert.deepEqual((await afterReload.json()).starts,recoveredState.starts);
+   page.once('dialog',dialog=>dialog.accept());
+   await page.locator('#onlineInstallRecoveryClear').click();
+   await page.waitForFunction(()=>sessionStorage.getItem('fls-online-install-request')===null
+     &&document.getElementById('onlineInstallSelectForm').__flsInstallRecoveryLocked===false);
 
    const capacity=await page.request.post(base+'/api/fixture/fill-unknown-install-history',{headers});
    assert.equal(capacity.status(),200);
