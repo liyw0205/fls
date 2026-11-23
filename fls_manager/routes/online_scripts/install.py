@@ -203,6 +203,8 @@ def _start_install_job(
             if request.path.startswith("/api/"):
                 return jsonify(
                     ok=False,
+                    accepted=False,
+                    history_full=True,
                     request_id=request_id or retry_of or install_id,
                     msg=str(e),
                     retry_allowed=False,

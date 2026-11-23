@@ -21,6 +21,7 @@ def main():
         from fls_manager.app import create_app
         import fls_manager.app as app_module
         from fls_manager.online_scripts import source
+        from fls_manager.online_scripts import constants as online_constants
         from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE
         from fls_manager.routes.online_scripts import install as install_route
 
@@ -32,6 +33,7 @@ def main():
         }
         source.save_online_script_cache([item])
         starts = []
+        thread_starts = []
 
         def fake_install_start(*args, **kwargs):
             request_id = kwargs["request_id"]
@@ -94,7 +96,12 @@ def main():
             return {}
 
         real_start = install_route._start_install_job
+        real_thread_start = install_route.start_install_thread
+        original_history_limit = online_constants.ONLINE_INSTALL_LIMIT
         install_route._start_install_job = fake_install_start
+        install_route.start_install_thread = lambda *args, **kwargs: thread_starts.append(
+            args[0] if args else kwargs.get("install_id")
+        )
         app = create_app()
         app_module.dispatch_frontend_open_event = lambda: None
 
@@ -103,8 +110,43 @@ def main():
             return jsonify(
                 ok=True,
                 starts=starts,
+                thread_starts=thread_starts,
                 job=install_route.get_online_install_job(request_id),
             )
+
+        @app.route("/api/fixture/online-install-start-mode/<mode>", methods=["POST"])
+        def set_install_start_mode(mode):
+            if mode == "real":
+                install_route._start_install_job = real_start
+            elif mode == "fake":
+                install_route._start_install_job = fake_install_start
+            else:
+                return jsonify(ok=False), 400
+            return jsonify(ok=True)
+
+        @app.route("/api/fixture/fill-unknown-install-history", methods=["POST"])
+        def fill_unknown_install_history():
+            online_constants.ONLINE_INSTALL_LIMIT = 50
+            jobs = {}
+            for index in range(50):
+                install_id = f"{index + 1:032x}"
+                jobs[install_id] = {
+                    "id": install_id,
+                    "script_id": item["id"],
+                    "running": False,
+                    "status": "结果未知",
+                    "phase": "unknown",
+                    "updated_at": f"2026-11-22 00:0{index}:00",
+                }
+            ONLINE_INSTALL_JOBS_FILE.write_text(json.dumps(jobs, ensure_ascii=False), encoding="utf-8")
+            return jsonify(ok=True, install_ids=list(jobs))
+
+        @app.route("/api/fixture/reset-online-install-history", methods=["POST"])
+        def reset_online_install_history():
+            online_constants.ONLINE_INSTALL_LIMIT = original_history_limit
+            ONLINE_INSTALL_JOBS_FILE.write_text("{}", encoding="utf-8")
+            install_route._start_install_job = fake_install_start
+            return jsonify(ok=True)
 
         @app.route("/api/fixture/expire-session", methods=["POST"])
         def expire_session():
@@ -134,6 +176,8 @@ def main():
             subprocess.run(["node", "-e", SCRIPT], env=env, check=True, timeout=120)
         finally:
             install_route._start_install_job = real_start
+            install_route.start_install_thread = real_thread_start
+            online_constants.ONLINE_INSTALL_LIMIT = original_history_limit
             server.shutdown()
             server.server_close()
 
@@ -155,6 +199,8 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    await page.goto(base+'/login');
    await page.locator('[name="token"]').fill(process.env.FLS_UI_TOKEN);
    await page.locator('button[type="submit"]').click();
+   const reset=await page.request.post(base+'/api/fixture/reset-online-install-history',{headers});
+   assert.equal(reset.status(),200);
    await page.goto(base+'/online-scripts/install-select/browser-install');
    await page.locator('.fls-install-task-checkbox[data-index="2"]').uncheck();
    await page.locator('[name="proxy_id"]').evaluate(select=>{
@@ -258,6 +304,47 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
    assert.deepEqual(restoredState.starts,[...initialState.starts,requestId]);
    const restoredCache=await page.request.post(base+'/api/fixture/restore-online-script-cache',{headers});
    assert.equal(restoredCache.status(),200);
+
+   const capacity=await page.request.post(base+'/api/fixture/fill-unknown-install-history',{headers});
+   assert.equal(capacity.status(),200);
+   const capacityBody=await capacity.json();
+   const beforeResponse=await page.request.get(base+'/api/fixture/online-install/'+requestId,{headers});
+   const beforeThreads=await beforeResponse.json();
+   const useRealStart=await page.request.post(base+'/api/fixture/online-install-start-mode/real',{headers});
+   assert.equal(useRealStart.status(),200);
+   const nextId=await page.locator('#onlineInstallSelectForm [name="request_id"]').inputValue();
+   const fullPost=page.waitForResponse(response=>response.url()===acceptedPost
+     &&response.request().method()==='POST');
+   await page.getByRole('button',{name:'开始下载安装',exact:true}).click();
+   const fullResponse=await fullPost,fullPayload=await fullResponse.json();
+   assert.equal(fullResponse.status(),409);
+   assert.equal(fullPayload.accepted,false);
+   assert.equal(fullPayload.history_full,true);
+   assert.equal(fullPayload.request_id,nextId);
+   await page.waitForFunction(()=>{
+     const form=document.getElementById('onlineInstallSelectForm');
+     return sessionStorage.getItem('fls-online-install-request')===null
+       &&form.__flsInstallRecoveryLocked===false
+       &&form.__flsInstallSubmitting===false
+       &&Array.from(form.querySelectorAll('button[type="submit"]')).every(button=>!button.disabled);
+   });
+   assert.equal(await page.locator('#onlineInstallRecoveryInstallHistory').isVisible(),true);
+   assert.equal(await page.locator('#onlineInstallRecoveryInstallHistory').getAttribute('href'),'/online-scripts/install-history');
+   assert.match(await page.locator('#onlineInstallApiError').textContent(),/安装未启动.*历史/);
+   assert.match(await page.locator('#onlineInstallRecoveryStatus').textContent(),/新请求未启动/);
+   const afterThreads=await page.request.get(base+'/api/fixture/online-install/'+nextId,{headers});
+   assert.equal(afterThreads.status(),200);
+   const afterThreadState=await afterThreads.json();
+   assert.deepEqual(afterThreadState.thread_starts,beforeThreads.thread_starts);
+   assert.equal(afterThreadState.job,null);
+   await page.locator('#onlineInstallRecoveryInstallHistory').click();
+   await page.waitForURL(/\/online-scripts\/install-history/);
+   const historyHtml=await page.locator('table tbody').textContent();
+   assert.match(historyHtml,/结果未知/);
+   for(const installId of capacityBody.install_ids){
+     assert.ok(await page.locator(`a[href="/online-scripts/log/${installId}?back=/online-scripts/install-history"]`).count()
+       || await page.locator(`a[href^="/online-scripts/log/${installId}"]`).count());
+   }
    assert.deepEqual(errors,[]);
    await page.screenshot({path:'/tmp/fls-install-rejection-'+viewport.width+'.png'});
    console.log('pre-acceptance rejection and accepted HTTP 502 recovery passed '+viewport.width);

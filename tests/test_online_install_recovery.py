@@ -736,6 +736,127 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
             self.assertEqual(len(stored), ONLINE_INSTALL_LIMIT)
             self.assertIn(retryable_id, stored)
 
+    def test_unknown_install_receipt_remains_queryable_after_history_pruning(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE, persist_online_install
+            from fls_manager.online_scripts.source import save_online_script_cache
+
+            save_online_script_cache([{
+                "id": "demo", "name": "Demo", "type": "raw",
+                "link": "https://example.invalid/demo.sh", "link_name": "demo.sh",
+            }])
+            unknown_id = "a" * 32
+            client = app.test_client()
+            with patch("fls_manager.online_scripts.constants.ONLINE_INSTALL_LIMIT", 3):
+                persist_online_install({
+                    "id": unknown_id, "script_id": "demo", "running": False,
+                    "status": "结果未知", "phase": "unknown",
+                    "updated_at": "2026-11-22 00:00:00",
+                })
+                for index in range(3):
+                    install_id = f"{index + 1:032x}"
+                    persist_online_install({
+                        "id": install_id, "script_id": "demo", "running": False,
+                        "status": "已完成", "phase": "completed",
+                        "updated_at": f"2026-11-23 00:0{index}:00",
+                    })
+
+            stored = json.loads(ONLINE_INSTALL_JOBS_FILE.read_text(encoding="utf-8"))
+            self.assertIn(unknown_id, stored)
+            state = client.get(
+                f"/api/online-scripts/log/{unknown_id}?state_only=1", headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(state.status_code, 200)
+            self.assertEqual(state.json["status"], "结果未知")
+            self.assertTrue(state.json["recovery"]["available"])
+            page = client.get(f"/online-scripts/log/{unknown_id}", headers={"X-Token": TOKEN})
+            self.assertEqual(page.status_code, 200)
+            self.assertIn(f"/online-scripts/install-retry/{unknown_id}", page.get_data(as_text=True))
+            with client.session_transaction() as session:
+                session.update(
+                    token=TOKEN, token_expire_at=int(time.time()) + 3600,
+                    security_verified=True, csrf_token="unknown-retry-csrf",
+                )
+            with patch("fls_manager.routes.online_scripts.install.start_install_thread") as start:
+                rejected = client.post(
+                    f"/online-scripts/install-retry/{unknown_id}", data={"csrf_token": "wrong"},
+                )
+                self.assertEqual(rejected.status_code, 400)
+                start.assert_not_called()
+                recovered = client.post(
+                    f"/online-scripts/install-retry/{unknown_id}",
+                    data={"csrf_token": "unknown-retry-csrf"},
+                )
+                self.assertEqual(recovered.status_code, 302)
+                start.assert_called_once()
+                retry_id = start.call_args.kwargs["install_id"]
+                self.assertIn(f"/online-scripts/log/{retry_id}", recovered.location)
+                stored = json.loads(ONLINE_INSTALL_JOBS_FILE.read_text(encoding="utf-8"))
+                self.assertEqual(stored[unknown_id]["retried_by"], retry_id)
+                self.assertEqual(stored[retry_id]["retry_of"], unknown_id)
+                replay = client.post(
+                    f"/online-scripts/install-retry/{unknown_id}",
+                    data={"csrf_token": "unknown-retry-csrf"},
+                )
+                self.assertEqual(replay.status_code, 409)
+                self.assertEqual(start.call_count, 1)
+
+    def test_unknown_install_claim_fails_closed_when_all_history_slots_are_unresolved(self):
+        with isolated_app() as (app, _base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE, persist_online_install
+            from fls_manager.online_scripts.source import save_online_script_cache
+
+            save_online_script_cache([{
+                "id": "demo", "name": "Demo", "type": "raw",
+                "link": "https://example.invalid/demo.sh", "link_name": "demo.sh",
+            }])
+            client = app.test_client()
+            unknown_ids = [f"{index + 1:032x}" for index in range(2)]
+            with patch("fls_manager.online_scripts.constants.ONLINE_INSTALL_LIMIT", 2):
+                for index, install_id in enumerate(unknown_ids):
+                    persist_online_install({
+                        "id": install_id, "script_id": "demo", "running": False,
+                        "status": "结果未知", "phase": "unknown",
+                        "updated_at": f"2026-11-22 00:0{index}:00",
+                    })
+                before = ONLINE_INSTALL_JOBS_FILE.read_bytes()
+
+                with patch("fls_manager.routes.online_scripts.install.start_install_thread") as start:
+                    response = client.post(
+                        "/api/online-scripts/install/demo",
+                        json={"request_id": "c" * 32, "force": True}, headers={"X-Token": TOKEN},
+                    )
+
+            self.assertEqual(response.status_code, 409)
+            self.assertFalse(response.json["retry_allowed"])
+            self.assertEqual(response.json["request_id"], "c" * 32)
+            start.assert_not_called()
+            stored = json.loads(ONLINE_INSTALL_JOBS_FILE.read_text(encoding="utf-8"))
+            self.assertEqual(set(stored), set(unknown_ids))
+            self.assertEqual(ONLINE_INSTALL_JOBS_FILE.read_bytes(), before)
+
+    def test_existing_running_install_can_reconcile_after_protected_history_overflow(self):
+        with isolated_app() as (_app, _base_dir):
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_JOBS_FILE, get_online_install_job, persist_online_install
+
+            install_ids = [f"{index + 1:032x}" for index in range(3)]
+            with patch("fls_manager.online_scripts.constants.ONLINE_INSTALL_LIMIT", 3):
+                for install_id in install_ids:
+                    persist_online_install({
+                        "id": install_id, "script_id": "demo", "running": True,
+                        "status": "运行中", "phase": "running_command",
+                        "updated_at": "2026-11-23 00:00:00",
+                    })
+
+            with patch("fls_manager.online_scripts.constants.ONLINE_INSTALL_LIMIT", 2):
+                reconciled = get_online_install_job(install_ids[0])
+
+            self.assertEqual(reconciled["status"], "结果未知")
+            self.assertNotIn("recovery_persistence_error", reconciled)
+            stored = json.loads(ONLINE_INSTALL_JOBS_FILE.read_text(encoding="utf-8"))
+            self.assertEqual(len(stored), 3)
+            self.assertEqual(stored[install_ids[0]]["status"], "结果未知")
+
     def test_api_install_start_receipt_published_before_error_still_starts_once(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.online_scripts import constants
@@ -1744,6 +1865,19 @@ const reply=(status,payload)=>({ok:status>=200&&status<300,status,body:JSON.stri
   assert.equal(denied.calls.length,1);
   assert.equal(denied.elements.onlineInstallApiLogin.hidden,false);
   assert.equal(denied.storage.value!==null,true);
+
+  const full=setup([reply(409,{ok:false,accepted:false,history_full:true,request_id:id,
+    msg:'待核对在线安装占满历史容量',history_url:'/online-scripts/install-history',retry_allowed:false})]);
+  await new Promise(resolve=>setImmediate(resolve));
+  await full.context.flsInstallSubmitApi('/online-scripts/install/demo',full.form,full.button);
+  assert.equal(full.calls.length,1,'a known rejected install must not query or repost');
+  assert.equal(full.storage.value,null,'the rejected request is not an accepted job');
+  assert.equal(full.form.__flsInstallRecoveryLocked,false);
+  assert.equal(full.button.disabled,false);
+  assert.equal(full.elements.onlineInstallRecoveryInstallHistory.hidden,false);
+  assert.equal(full.elements.onlineInstallRecoveryInstallHistory.href,'/online-scripts/install-history');
+  assert.match(full.elements.onlineInstallRecoveryStatus.textContent,/新请求未启动/);
+  assert.match(full.elements.onlineInstallApiError.textContent,/安装未启动/);
 })().catch(error=>{console.error(error);process.exitCode=1;});
 """], input=json.dumps({"script": script, "reader": reader}), capture_output=True, text=True, timeout=5)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
