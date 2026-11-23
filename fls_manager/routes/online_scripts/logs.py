@@ -673,8 +673,10 @@ def api_online_install_log(install_id):
         "install_error": _install_error(info),
         "state_url": url_for("online_scripts.api_online_install_log", install_id=install_id, state_only="1"),
     }
-    if info.get("recovery_persistence_error"):
+    if info.get("recovery_persistence_error") or info.get("stop_receipt_confirmation_required"):
         payload["persistence_error"] = True
+    if info.get("stop_receipt_confirmation_required"):
+        payload["stop_receipt_confirmation_required"] = True
     if isinstance(info.get("stop_warning"), str) and info["stop_warning"]:
         payload["stop_warning"] = info["stop_warning"]
     payload.update(online_install_retry_relation(info))
@@ -851,6 +853,7 @@ let pending = false;
 let postingStop = false;
 let postingRecovery = false;
 let stopWarning = "";
+let stopReceiptConfirmationRequired = false;
 let needsRecoveryQuery = false;
 let lastLogFailure = null;
 let needsStopQuery = false;
@@ -929,6 +932,7 @@ async function loadLog(stateOnly = false){{
             throw invalid;
         }}
         if(typeof json.stop_warning === "string" && json.stop_warning) stopWarning = json.stop_warning;
+        stopReceiptConfirmationRequired = !!json.stop_receipt_confirmation_required;
         let logFailure = null;
         if(json.ok === false){{
             const missingError = new Error(json.error || "安装日志暂不可读");
@@ -941,12 +945,14 @@ async function loadLog(stateOnly = false){{
         if(!logFailure) transientFailures = 0;
         autoPollingPaused = false;
         lastKnownRunning = json.running;
-        needsRecoveryQuery = !!json.persistence_error;
+        needsRecoveryQuery = !!json.persistence_error && !stopReceiptConfirmationRequired;
         if(!stateOnly) lastLogFailure = logFailure;
         if(stateOnly){{
             needsStopQuery = false;
             if(pollError){{
-                pollError.textContent = json.persistence_error
+                pollError.textContent = stopReceiptConfirmationRequired
+                    ? "停止失败状态尚未保存，已查询当前进程状态；修复存储后可再次提交停止请求。"
+                    : json.persistence_error
                     ? "原安装状态仍无法确认持久化，已禁用重试；可修复存储后再次查询。"
                     : "原安装状态已确认：" + (json.status || "-")
                         + (lastLogFailure ? "。日志读取仍失败：" + lastLogFailure.message : "")
@@ -956,7 +962,9 @@ async function loadLog(stateOnly = false){{
         }}
         if(pollError && !stateOnly){{
             pollError.hidden = !json.persistence_error && !stopWarning;
-            pollError.textContent = json.persistence_error
+            pollError.textContent = stopReceiptConfirmationRequired
+                ? "停止失败状态尚未保存，已查询当前进程状态；修复存储后可再次提交停止请求。"
+                : json.persistence_error
                 ? "安装结果回执尚未确认保存，已禁用重试；请仅查询原安装状态。"
                 : (stopWarning ? "原安装状态已确认：" + (json.status || "-") + "；" + stopWarning : "");
         }}
@@ -1209,8 +1217,11 @@ async function loadLog(stateOnly = false){{
 
 async function requestStop(event){{
     event.preventDefault();
-    if(postingStop || postingRecovery || needsStopQuery || needsRecoveryQuery || stopActionButton.disabled) return;
+    if(postingStop || postingRecovery || needsStopQuery
+        || (needsRecoveryQuery && !stopReceiptConfirmationRequired) || stopActionButton.disabled) return;
+    let queryAfterPost = true;
     postingStop = true;
+    stopReceiptConfirmationRequired = false;
     logRequestGeneration++;
     pending = false;
     if(typeof flsClearPageCache === "function") flsClearPageCache();
@@ -1231,18 +1242,19 @@ async function requestStop(event){{
         if(document.getElementById("installPollError") !== pollError) return;
         const message = error && error.message || String(error || "请求失败");
         const denied = error && (error.status === 401 || error.status === 403);
+        const payload = error && error.payload || {{}};
+        queryAfterPost = !!payload.stop_receipt_confirmation_required;
         if(pollError) pollError.textContent = "停止请求未确认：" + message + "。请查询原安装状态。";
         if(denied && loginAction){{
             loginAction.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
             loginAction.hidden = false;
         }}
-        return;
     }}finally{{
         postingStop = false;
         needsStopQuery = true;
         if(stopQueryAction) stopQueryAction.hidden = false;
     }}
-    await queryStop();
+    if(queryAfterPost) await queryStop();
 }}
 
 async function queryStop(){{

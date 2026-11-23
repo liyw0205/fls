@@ -78,6 +78,8 @@ def main():
         scheduler_receipt_fault = {"install_id": "", "remaining": 0, "mode": "after"}
         restart_receipt_fault = {"install_id": "", "remaining": 0, "mode": "after"}
         stop_log_failure = {"remaining": 0}
+        stop_receipt_fault = {"install_id": "", "remaining": 0}
+        stop_process_fault = {"remaining": 0}
         dependency_receipt_fault = {
             "install_id": "", "remaining": 0, "status": "",
             "error": "browser terminal install receipt unavailable",
@@ -90,7 +92,7 @@ def main():
             "start_failures": 0, "attempts": [],
         }
         persist_online_install = install_routes.persist_online_install
-        start_online_install_thread = install_routes.start_install_thread
+        original_start_online_install_thread = install_routes.start_install_thread
         persist_dependency_job = deps_routes.persist_install_job
 
         def persist_online_install_with_startup_fault(info):
@@ -121,7 +123,7 @@ def main():
                     raise RuntimeError("browser thread creation denied")
                 startup_receipt_fault["starts"].append(install_id)
                 return None
-            return start_online_install_thread(*args, **kwargs)
+            return original_start_online_install_thread(*args, **kwargs)
 
         install_routes.persist_online_install = persist_online_install_with_startup_fault
         install_routes.start_install_thread = start_online_install_thread
@@ -160,6 +162,11 @@ def main():
                 if restart_receipt_fault["mode"] == "after":
                     write(path, data)
                 raise PermissionError("browser restart receipt acknowledgement lost")
+            install_id = stop_receipt_fault["install_id"]
+            if (path == ONLINE_INSTALL_JOBS_FILE and stop_receipt_fault["remaining"]
+                    and data.get(install_id, {}).get("status") == "停止失败"):
+                stop_receipt_fault["remaining"] -= 1
+                raise PermissionError("browser stop failure receipt unavailable")
             return write(path, data)
 
         storage._write_json_unlocked = write_with_receipt_failure
@@ -185,6 +192,15 @@ def main():
             return append_log(log_file, message)
 
         install.append_log = append_log_with_stop_failure
+        terminate_install_process = install.terminate_install_process
+
+        def terminate_with_stop_failure(proc):
+            if stop_process_fault["remaining"]:
+                stop_process_fault["remaining"] -= 1
+                return False, "browser terminate denied"
+            return terminate_install_process(proc)
+
+        install.terminate_install_process = terminate_with_stop_failure
 
         def download(**kwargs):
             downloads.append(kwargs["install_id"])
@@ -366,6 +382,13 @@ def main():
                 fault["persist_failures"] = int(data.get("persist_failures") or 1)
                 if "stop_log_failure" in data:
                     stop_log_failure["remaining"] = int(data["stop_log_failure"] or 0)
+                if "stop_receipt_failures" in data:
+                    stop_receipt_fault.update(
+                        install_id=str(data.get("install_id") or ""),
+                        remaining=int(data["stop_receipt_failures"] or 0),
+                    )
+                if "stop_process_failures" in data:
+                    stop_process_fault["remaining"] = int(data["stop_process_failures"] or 0)
                 if data.get("seed_retry_chain"):
                     seed_retry_chain()
                 if data.get("seed_online_history"):
@@ -615,6 +638,8 @@ def main():
                 ),
                 startup_install_starts=list(startup_receipt_fault["starts"]),
                 startup_install_attempts=list(startup_receipt_fault["attempts"]),
+                stop_receipt_failures=stop_receipt_fault["remaining"],
+                stop_process_failures=stop_process_fault["remaining"],
                 deps_running=bool(DEPS_RUNNING.get("browser-deps", {}).get("process") and
                                   DEPS_RUNNING["browser-deps"]["process"].poll() is None),
             )
@@ -1515,6 +1540,16 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
       await route.fulfill({status:503,contentType:'text/plain',body:'stop service unavailable before commit'});
       return;
      }
+     if(stopPosts===2){
+      const response=await route.fetch();
+      const body=await response.body();
+      assert.equal(response.status(),503,body.toString());
+      const payload=JSON.parse(body.toString());
+      assert.equal(payload.stop_receipt_confirmation_required,true);
+      assert.equal(payload.status,'停止失败');
+      await route.fulfill({response,body});
+      return;
+     }
       const committed=await route.fetch();
       assert.equal(committed.status(),200);
       if(viewport.width===390){
@@ -1541,12 +1576,20 @@ const {chromium}=require(process.env.FLS_PLAYWRIGHT_CORE);
     !document.querySelector('#installStopAction button').disabled);
    assert.equal(await page.locator('#installStatus').textContent(),'运行中');
    assert.equal(stopPosts,1);
+   await fixture({
+    install_id:stopStarted.install_id,stop_receipt_failures:1,stop_process_failures:1,
+   });
+   await page.locator('#installStopAction button').click();
+   await page.waitForFunction(()=>document.querySelector('#installStatus').textContent==='停止失败');
+   assert.equal(stopPosts,2);
+   assert.match(await page.locator('#installPollError').textContent(),/修复存储后可再次提交停止请求/);
+   assert.equal(await page.locator('#installStopAction button').isEnabled(),true);
    await fixture({stop_log_failure:1});
    await page.locator('#installStopAction button').click();
    if(viewport.width===390){
     await page.waitForFunction(()=>document.querySelector('#installStatus').textContent==='已停止');
    }else await page.waitForFunction(()=>!document.querySelector('#installStopQuery').hidden);
-   assert.equal(stopPosts,2);
+   assert.equal(stopPosts,3);
    assert.ok((await page.locator('#log').textContent()).includes('live installer output'));
    if(viewport.width===390){
     assert.match(await page.locator('#installPollError').textContent(),/原安装状态已确认：已停止.*停止请求日志写入失败：browser stop log unavailable/);
