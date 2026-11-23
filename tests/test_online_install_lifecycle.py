@@ -424,6 +424,127 @@ class OnlineInstallLifecycleTests(unittest.TestCase):
             self.assertEqual(info["returncode"], -9)
             self.assertIn("kill denied", self.snapshot()["error"])
 
+    def test_stop_failure_receipt_write_failure_keeps_query_and_safe_stop_retry(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import install
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_STOPPING, persist_online_install
+
+            info = self.register(base_dir)
+            stopped = threading.Event()
+            process = SimpleNamespace(pid=4321, poll=lambda: 0 if stopped.is_set() else None)
+            info["process"] = process
+            original_persist = persist_online_install
+            fail_once = True
+            terminate_calls = 0
+
+            def persist_with_stop_failure(value):
+                nonlocal fail_once
+                if fail_once and value.get("status") == "停止失败":
+                    fail_once = False
+                    raise OSError("stop receipt disk full")
+                return original_persist(value)
+
+            def terminate(_process):
+                nonlocal terminate_calls
+                terminate_calls += 1
+                if terminate_calls == 1:
+                    return False, "permission denied"
+                if not stopped.is_set():
+                    stopped.set()
+                    return True, ""
+                return False, "process still running"
+
+            client = app.test_client()
+            with patch.object(install, "persist_online_install", side_effect=persist_with_stop_failure), patch.object(
+                install, "terminate_install_process", side_effect=terminate,
+            ) as terminate_mock:
+                first = client.post(
+                    "/api/online-scripts/install-stop/install", headers={"X-Token": TOKEN},
+                )
+
+                self.assertEqual(first.status_code, 503)
+                self.assertFalse(first.json["ok"])
+                self.assertTrue(first.json["receipt_confirmation_required"])
+                self.assertTrue(first.json["stop_receipt_confirmation_required"])
+                self.assertEqual(first.json["state_url"], "/api/online-scripts/log/install?state_only=1")
+                self.assertTrue(info["running"])
+                self.assertEqual(info["status"], "停止失败")
+                self.assertTrue(info["stop_receipt_confirmation_required"])
+                self.assertEqual(self.snapshot()["status"], "停止中")
+
+                state = client.get(first.json["state_url"], headers={"X-Token": TOKEN})
+                self.assertEqual(state.status_code, 200)
+                self.assertEqual(state.json["status"], "停止失败")
+                self.assertTrue(state.json["running"])
+                self.assertTrue(state.json["persistence_error"])
+                self.assertTrue(state.json["stop_receipt_confirmation_required"])
+
+                recovered = client.post(
+                    "/api/online-scripts/install-stop/install", headers={"X-Token": TOKEN},
+                )
+                self.assertEqual(recovered.status_code, 200)
+                self.assertTrue(recovered.json["ok"])
+                self.assertEqual(terminate_mock.call_count, 2)
+                self.assertNotIn("stop_receipt_confirmation_required", info)
+                self.assertEqual(self.snapshot()["status"], "停止中")
+
+            with patch.object(install, "download_online_script_logged") as download:
+                install.install_worker("install", self.item())
+            download.assert_not_called()
+            self.assertEqual(info["status"], "已停止")
+            self.assertNotIn("install", ONLINE_INSTALL_STOPPING)
+            self.assertEqual(self.snapshot()["status"], "已停止")
+
+    def test_stop_failure_receipt_write_failure_html_keeps_csrf_state_recovery(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import install
+            from fls_manager.online_scripts.constants import persist_online_install
+
+            info = self.register(base_dir)
+            info["process"] = SimpleNamespace(pid=4321, poll=lambda: None)
+            original_persist = persist_online_install
+            terminate = Mock(return_value=(False, "permission denied"))
+            calls = {"receipt": 0}
+
+            def fail_stop_receipt(value):
+                if value.get("status") == "停止失败":
+                    calls["receipt"] += 1
+                    raise OSError("stop receipt read only")
+                return original_persist(value)
+
+            client = app.test_client()
+            with client.session_transaction() as session:
+                session.update(
+                    token=TOKEN,
+                    token_expire_at=int(time.time()) + 3600,
+                    security_verified=True,
+                    csrf_token="stop-receipt-csrf",
+                )
+
+            with patch.object(install, "persist_online_install", side_effect=fail_stop_receipt), patch.object(
+                install, "terminate_install_process", terminate,
+            ):
+                rejected = client.post(
+                    "/online-scripts/install-stop/install",
+                    data={"csrf_token": "wrong"},
+                )
+                self.assertEqual(rejected.status_code, 400)
+                self.assertEqual(terminate.call_count, 0)
+
+                response = client.post(
+                    "/online-scripts/install-stop/install?back=%2Fonline-scripts%2Finstall-history",
+                    data={"csrf_token": "stop-receipt-csrf"},
+                )
+                self.assertEqual(response.status_code, 503)
+                page = response.get_data(as_text=True)
+                self.assertIn("停止失败状态尚未确认保存", page)
+                self.assertIn("查询原安装状态", page)
+                self.assertIn("online-scripts/log/install", page)
+                self.assertIn("install-history", page)
+                self.assertEqual(calls["receipt"], 1)
+                self.assertEqual(terminate.call_count, 1)
+                self.assertEqual(self.snapshot()["status"], "停止中")
+
     def test_failure_during_stop_is_not_misreported_as_cancelled(self):
         with isolated_app() as (_app, base_dir):
             from fls_manager.online_scripts.install import install_worker, request_stop_online_install
@@ -476,6 +597,39 @@ class OnlineInstallLifecycleTests(unittest.TestCase):
             self.assertIn("read only", response.json["msg"])
             self.assertNotIn("install", ONLINE_INSTALL_STOPPING)
             self.assertEqual(info["status"], "准备中")
+
+    def test_stop_receipt_published_before_storage_error_still_sends_stop_signal(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import install
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_STOPPING, persist_online_install
+
+            info = self.register(base_dir)
+            info["process"] = SimpleNamespace(pid=4321, poll=lambda: None)
+            original_persist = persist_online_install
+            raised = False
+
+            def publish_then_raise(value):
+                nonlocal raised
+                original_persist(value)
+                if not raised and value.get("status") == "停止中":
+                    raised = True
+                    raise OSError("connection dropped after replace")
+
+            with patch.object(install, "persist_online_install", side_effect=publish_then_raise), patch.object(
+                install, "terminate_install_process", return_value=(False, "permission denied"),
+            ) as terminate:
+                response = app.test_client().post(
+                    "/api/online-scripts/install-stop/install", headers={"X-Token": TOKEN},
+                )
+
+            self.assertTrue(raised)
+            self.assertEqual(response.status_code, 409)
+            self.assertFalse(response.json["ok"])
+            self.assertEqual(response.json["status"], "停止失败")
+            self.assertTrue(info["running"])
+            self.assertEqual(self.snapshot()["status"], "停止失败")
+            self.assertIn("install", ONLINE_INSTALL_STOPPING)
+            terminate.assert_called_once_with(info["process"])
 
     def test_stop_log_failure_keeps_committed_stop_request_and_recovers_without_download(self):
         with isolated_app() as (app, base_dir):
@@ -1501,20 +1655,31 @@ const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
   let resolveOldLog;
   const calls = [];
   let intervals = 0;
-  const response = payload => ({ok: true, status: 200, json: async () => payload});
+  const response = (payload, status = 200) => ({ok: status < 400, status, json: async () => payload});
   const context = {
     window: {innerHeight: 800, scrollY: 0, addEventListener() {}, scrollTo() {}},
     document: {documentElement: {scrollHeight: 800}, getElementById: id => elements[id],
       querySelector: () => form},
-    flsGetCsrfToken: () => 'stop-csrf', flsReadJsonResponse: res => res.json(),
+    flsGetCsrfToken: () => 'stop-csrf', flsReadJsonResponse: async res => {
+      const payload = await res.json();
+      if(!res.ok) { const error = new Error(payload.msg || 'HTTP ' + res.status); error.status = res.status; error.payload = payload; throw error; }
+      return payload;
+    },
     fetch: (url, options) => {
       calls.push({url, options});
       if(calls.length === 1) return new Promise(done => { resolveOldLog = done; });
+      if(options && options.method === 'POST' && calls.filter(call => call.options && call.options.method === 'POST').length === 1) {
+        return Promise.resolve(response({ok: false, install_id: 'install', msg: 'receipt pending',
+          receipt_confirmation_required: true, stop_receipt_confirmation_required: true}, 503));
+      }
       if(options && options.method === 'POST') return Promise.resolve(response({ok: true, install_id: 'install'}));
-      return Promise.resolve(response({ok: true, install_id: 'install', running: false,
-        status: '已停止', returncode: -15, recovery: {available: false}}));
+      const pending = calls.filter(call => call.options && call.options.method === 'POST').length === 1;
+      return Promise.resolve(response({ok: true, install_id: 'install', running: pending,
+        persistence_error: pending, stop_receipt_confirmation_required: pending,
+        status: pending ? '停止失败' : '已停止', returncode: pending ? null : -15,
+        recovery: {available: false}}));
     },
-    setInterval: () => { intervals++; return 1; }, clearInterval() {},
+    setInterval: () => { intervals++; return intervals; }, clearInterval() { intervals = Math.max(0, intervals - 1); },
   };
   vm.createContext(context); vm.runInContext(input.script, context);
   assert.equal(calls.length, 1);
@@ -1522,6 +1687,13 @@ const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
   assert.equal(calls.length, 3, 'stop state query must not wait for an unrelated log response');
   assert.equal(calls[1].options.headers['X-CSRF-Token'], 'stop-csrf');
   assert.equal(calls[2].url, '/api/online-scripts/log/install?state_only=1');
+  assert.equal(elements.installStatus.textContent, '停止失败');
+  assert.equal(button.disabled, false, 'confirmed live stop failure remains safely retryable');
+  assert.match(elements.installPollError.textContent, /修复存储后可再次提交停止请求/);
+  await form.submit({preventDefault() {}});
+  assert.equal(calls.length, 5, 'confirmed stop retry must post once and query the original install');
+  assert.equal(calls[3].url, '/api/online-scripts/install-stop/install');
+  assert.equal(calls[4].url, '/api/online-scripts/log/install?state_only=1');
   assert.equal(elements.installStatus.textContent, '已停止');
   assert.equal(elements.log.textContent, 'previous output');
   assert.equal(elements.installStopAction.hidden, true);

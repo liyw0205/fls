@@ -1644,7 +1644,12 @@ def online_scripts_install_retry(install_id):
 def _stop_install_result(install_id):
     try:
         ok, msg = request_stop_online_install(install_id)
-        code = 200 if ok else (404 if get_online_install_job(install_id) is None else 409)
+        info = get_online_install_job(install_id)
+        if not ok and isinstance(info, dict) and info.get("stop_receipt_confirmation_required"):
+            return False, (
+                f"{msg}；停止失败状态尚未确认保存，请查询原安装状态后修复存储并重试停止。"
+            ), 503
+        code = 200 if ok else (404 if info is None else 409)
         return ok, msg, code
     except Exception as e:
         return False, f"停止请求失败：{e}", 500
@@ -1693,6 +1698,12 @@ def api_online_scripts_install_stop(install_id):
         "status": (info or {}).get("status") or ("记录不存在" if code == 404 else "记录不可读"),
         "state_url": url_for("online_scripts.api_online_install_log", install_id=install_id, state_only=1),
     }
+    if info and info.get("stop_receipt_confirmation_required"):
+        payload.update(
+            receipt_confirmation_required=True,
+            stop_receipt_confirmation_required=True,
+            persistence_error=True,
+        )
     warning_marker = "停止请求日志写入失败："
     if warning_marker in msg:
         payload["warning"] = msg[msg.index(warning_marker):]

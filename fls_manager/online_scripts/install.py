@@ -28,6 +28,8 @@ from .constants import (
     active_online_install_for_script,
     get_online_install_job,
     persist_online_install,
+    _install_snapshot,
+    _load_persisted_online_install,
 )
 from .logs import append_log
 from .tasks import import_task_if_needed, validate_online_task_import
@@ -52,8 +54,16 @@ class InstallStopped(InstallCommandError):
 def _persist_install_state(info):
     try:
         persist_online_install(info)
+        info.pop("stop_receipt_confirmation_required", None)
         return True
     except Exception as e:
+        try:
+            persisted = _load_persisted_online_install(info.get("id"))
+            if persisted and _install_snapshot(persisted) == _install_snapshot(info):
+                info.pop("stop_receipt_confirmation_required", None)
+                return True
+        except Exception:
+            pass
         detail = f"保存安装状态失败：{e}"
         info["persistence_error"] = detail
         info["error"] = "；".join(filter(None, (info.get("error"), detail)))
@@ -238,7 +248,8 @@ def _interrupt_install_command(install_id, proc, reason, retry=False):
                     if reason == "timeout" else detail
                 )
                 info["updated_at"] = now_str()
-                _persist_install_state(info)
+                if not _persist_install_state(info):
+                    info["stop_receipt_confirmation_required"] = True
         return ok, detail
 
 
@@ -258,13 +269,22 @@ def request_stop_online_install(install_id):
             return True, "已请求停止安装"
 
         previous_status = info.get("status")
+        previous_error = info.get("error")
+        previous_persistence_error = info.get("persistence_error")
         info["status"] = "停止中"
+        info["error"] = ""
+        info.pop("persistence_error", None)
         info["updated_at"] = now_str()
-        try:
-            persist_online_install(info)
-        except Exception:
+        if not _persist_install_state(info):
+            detail = info.get("persistence_error") or "停止状态回执未能确认保存"
             info["status"] = previous_status
-            raise
+            info["error"] = previous_error or ""
+            if previous_persistence_error:
+                info["persistence_error"] = previous_persistence_error
+            else:
+                info.pop("persistence_error", None)
+            raise RuntimeError(detail)
+        info.pop("stop_receipt_confirmation_required", None)
         ONLINE_INSTALL_STOPPING.add(install_id)
         proc = info.get("process")
         log_file = info.get("log_file")
