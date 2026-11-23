@@ -103,6 +103,104 @@ class OnlineInstallLifecycleTests(unittest.TestCase):
             self.assertEqual(persisted["phase"], "completed")
             self.assertEqual(info["status"], "已完成")
 
+    def test_worker_does_not_continue_actions_without_durable_phase_or_output_receipt(self):
+        for failure_point in (
+            "validating_tasks", "downloading", "running_command", "download_output", "task_output",
+            "scheduler_pending",
+        ):
+            with self.subTest(failure_point=failure_point), isolated_app() as (app, base_dir):
+                from fls_manager.online_scripts import install
+                from fls_manager.online_scripts import tasks as online_tasks
+                from fls_manager.online_scripts.constants import persist_online_install
+                from fls_manager.online_scripts.source import save_online_script_cache
+
+                item = self.item("exit 0")
+                importing = failure_point in (
+                    "validating_tasks", "download_output", "task_output", "scheduler_pending",
+                )
+                if importing:
+                    item["task_cron"] = [{"name": "Imported task", "command": "echo imported", "cron": ""}]
+                save_online_script_cache([item])
+                info = self.register(base_dir)
+                info.update(
+                    import_task=importing,
+                    enable_task=False,
+                    selected_task_indexes=["1"] if importing else [],
+                    selected_tasks=item.get("task_cron", []) if importing else [],
+                )
+                target = base_dir / "scripts" / "demo.sh"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("echo downloaded\n", encoding="utf-8")
+                real_persist = persist_online_install
+                real_import = install.import_task_if_needed
+                real_validate = install.validate_online_task_import
+                failed = False
+
+                def persist_with_one_failure(value):
+                    nonlocal failed
+                    should_fail = (
+                        not failed
+                        and value.get("running")
+                        and (
+                            (failure_point in ("validating_tasks", "downloading", "running_command")
+                             and value.get("phase") == failure_point)
+                            or (failure_point == "download_output" and value.get("target_fingerprint"))
+                            or (failure_point == "task_output" and value.get("task_snapshot"))
+                            or (failure_point == "scheduler_pending"
+                                and value.get("scheduler_reload_pending"))
+                        )
+                    )
+                    if should_fail:
+                        failed = True
+                        raise OSError("checkpoint disk full")
+                    return real_persist(value)
+
+                with patch.object(install, "persist_online_install", side_effect=persist_with_one_failure), patch.object(
+                    install, "download_online_script_logged", return_value=target,
+                ) as download, patch.object(install, "run_logged_command") as command, patch.object(
+                    install, "import_task_if_needed", wraps=real_import,
+                ) as importer, patch.object(
+                    install, "validate_online_task_import", wraps=real_validate,
+                ) as validator, patch.object(
+                    online_tasks, "reload_scheduler",
+                    side_effect=RuntimeError("scheduler unavailable")
+                    if failure_point == "scheduler_pending" else None,
+                ):
+                    install.install_worker(
+                        "install",
+                        item,
+                        import_task=importing,
+                        enable_task=False,
+                        selected_task_indexes=["1"] if importing else [],
+                    )
+
+                expected_download_calls = 0 if failure_point in ("validating_tasks", "downloading") else 1
+                self.assertEqual(download.call_count, expected_download_calls)
+                self.assertEqual(importer.call_count, 1 if failure_point in ("task_output", "scheduler_pending") else 0)
+                self.assertEqual(validator.call_count, 0 if failure_point == "validating_tasks" else int(importing))
+                command.assert_not_called()
+                self.assertTrue(failed)
+                self.assertFalse(info["running"])
+                self.assertEqual(info["status"], "失败")
+                self.assertIn("保存安装状态失败", info["error"])
+                self.assertEqual(self.snapshot()["status"], "失败")
+                api = app.test_client().get("/api/online-scripts/log/install", headers={"X-Token": TOKEN})
+                self.assertEqual(api.status_code, 200)
+                self.assertEqual(api.json["status"], "失败")
+                self.assertIn("recovery", api.json, repr(api.json))
+                page = app.test_client().get("/online-scripts/log/install", headers={"X-Token": TOKEN})
+                self.assertEqual(page.status_code, 200)
+                if failure_point == "scheduler_pending":
+                    self.assertTrue(api.json["scheduler_reload_pending"])
+                    self.assertEqual(api.json["recovery"]["label"], "重新加载调度器")
+                    self.assertIn("重新加载调度器", page.get_data(as_text=True))
+                elif failure_point in ("download_output", "task_output"):
+                    self.assertEqual(api.json["recovery"].get("label"), "仅恢复任务导入", repr(api.json))
+                    self.assertIn("仅恢复任务导入", page.get_data(as_text=True))
+                else:
+                    self.assertEqual(api.json["recovery"]["label"], "重试安装")
+                    self.assertIn("重试安装", page.get_data(as_text=True))
+
     def test_install_log_does_not_report_completed_phase_for_noncompleted_status(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.online_scripts.constants import (
