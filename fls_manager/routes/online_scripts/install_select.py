@@ -1782,6 +1782,12 @@ async function flsInstallSubmitApi(action, form, submitter, allowOriginalRetry){
                 }}
             }}
         }}
+        if(!denied && !knownRejected){{
+            try{{ await flsInstallRecoverPending(); }}
+            catch(recoveryError){{
+                flsInstallSetStatus("原安装状态核实失败：" + String(recoveryError && recoveryError.message || recoveryError));
+            }}
+        }}
     }}finally{{ form.__flsInstallSubmitting = false; }}
 }}
 
