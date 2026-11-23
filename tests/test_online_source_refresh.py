@@ -1222,6 +1222,98 @@ vm.runInContext(input.reader + input.script, context);
 '''], input=json.dumps({"script": script, "reader": reader}), text=True, capture_output=True, timeout=5)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise refresh submission recovery")
+    def test_refresh_form_reconciles_ambiguous_post_error_without_resubmitting(self):
+        with isolated_app() as (app, _base_dir):
+            response = app.test_client().get("/online-scripts", headers={"X-Token": TOKEN})
+            self.assertEqual(response.status_code, 200)
+            html = response.get_data(as_text=True)
+            script = next(
+                script for script in re.findall(r"<script>(.*?)</script>", html, re.S)
+                if "submitOnlineRefreshForm" in script
+            )
+            source = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+            reader = source[source.index("async function flsReadJsonResponse("):source.index("async function flsReadTextResponse(")]
+            result = subprocess.run(["node", "-e", r'''
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+const requestId = 'c'.repeat(32);
+const serverId = 'd'.repeat(32);
+const requestInput = {value:requestId};
+const proxyInput = {value:'proxy-a'};
+const button = {disabled:false, textContent:'同步在线脚本源'};
+const form = {action:'/online-scripts/refresh', querySelector(selector){
+  if(selector.includes('request_id')) return requestInput;
+  if(selector.includes('proxy_id')) return proxyInput;
+  return button;
+}};
+button.form = form;
+const elements = {
+  onlineRefreshStatusCard:{style:{}}, onlineRefreshStatusText:{innerHTML:'',textContent:''},
+  onlineRefreshTaskLinkFailures:{innerHTML:''}, onlineRefreshPersistence:{innerHTML:''},
+  onlineRefreshBtn:button, onlineRefreshQuery:{hidden:true,disabled:false},
+  onlineRefreshLogin:{hidden:true,href:''}, onlineRefreshLogLink:{hidden:true,href:''},
+};
+const values = new Map();
+const storage = {getItem:key=>values.get(key)||null,setItem:(key,value)=>values.set(key,value),removeItem:key=>values.delete(key)};
+const calls = [];
+let posts = 0;
+const response = (status, body) => ({ok:status>=200&&status<300,status,text:async()=>JSON.stringify(body)});
+const context = {
+  window:{location:{pathname:'/online-scripts',search:''}},
+  location:{pathname:'/online-scripts',search:''},
+  document:{
+    getElementById:id=>elements[id], querySelectorAll:()=>[], addEventListener:()=>{}
+  },
+  sessionStorage:storage, encodeURIComponent, FormData:class {constructor(value){this.value=value;}},
+  flsGetCsrfToken:()=> 'refresh-csrf',
+  flsResponseErrorDiagnostic:(_response,body)=>({payload:JSON.parse(body),message:JSON.parse(body).error||''}),
+  setTimeout:()=>0, clearTimeout:()=>{},
+  fetch:async(url,options={})=>{
+    calls.push({url,method:options.method||'GET'});
+    if(url==='/api/online-scripts/refresh'){
+      posts++;
+      return response(500,{ok:false,request_id:requestId,status:'启动失败',error:'thread startup receipt failed'});
+    }
+    if(url==='/api/online-scripts/refresh-status')
+      return response(200,{request_id:'',running:false,status:'',message:'',error:'',task_link_failures:[]});
+    if(url==='/api/online-scripts/refresh-status/'+requestId)
+      return response(200,{id:serverId,request_id:requestId,running:false,status:'启动失败',message:'',
+        error:'thread quota exhausted',persistence_error:'state disk full',updated_at:'now',log_file:'/refresh.log',
+        task_link_failures:[],task_link_failure_count:0,task_link_failure_digest:'e'.repeat(64)});
+    assert.fail('unexpected request: '+url);
+  }
+};
+vm.createContext(context);
+vm.runInContext(input.reader+input.script,context);
+(async()=>{
+  await new Promise(resolve=>setImmediate(resolve));
+  await context.submitOnlineRefreshForm(form,{preventDefault(){},stopImmediatePropagation(){}});
+  assert.equal(posts,1);
+  assert.equal(calls.filter(call=>call.url==='/api/online-scripts/refresh-status/'+requestId).length,1);
+  assert.equal(values.get('fls-online-refresh-request') && JSON.parse(values.get('fls-online-refresh-request')).request_id,requestId);
+  assert.match(elements.onlineRefreshPersistence.innerHTML,/refresh-recover\//);
+  assert.match(elements.onlineRefreshPersistence.innerHTML,new RegExp(requestId));
+  assert.match(elements.onlineRefreshStatusText.innerHTML,/启动失败/);
+  assert.equal(elements.onlineRefreshLogin.hidden,true);
+  assert.equal(button.disabled,false);
+  calls.length=0;
+  context.fetch=async(url,options={})=>{
+    calls.push({url,method:options.method||'GET'});
+    assert.equal(url,'/api/online-scripts/refresh');
+    posts++;
+    return response(403,{ok:false,error:'permission denied'});
+  };
+  await context.submitOnlineRefreshForm(form,{preventDefault(){},stopImmediatePropagation(){}});
+  assert.equal(posts,2);
+  assert.deepEqual(calls.map(call=>call.method),['POST']);
+  assert.equal(elements.onlineRefreshLogin.hidden,false);
+  assert.match(elements.onlineRefreshLogin.href,/^\/login\?next=/);
+})().catch(error=>{console.error(error);process.exitCode=1;});
+'''], input=json.dumps({"script": script, "reader": reader}), text=True, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_refresh_worker_persists_success_and_failure_without_losing_cache(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.online_scripts import source
@@ -1670,6 +1762,84 @@ vm.runInContext(input.reader + input.script, context);
             self.assertEqual(retried.json["request_id"], request_id)
             self.assertEqual(duplicate.status_code, 409)
             self.assertEqual(duplicate.json["request_id"], request_id)
+            retry_start.assert_called_once()
+            self.assertEqual(cache.read_bytes(), cache_before)
+
+    def test_html_start_failure_receipt_recovery_preserves_form_identity_and_csrf(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.online_scripts import constants, source
+            from fls_manager.online_scripts.constants import ONLINE_REFRESH_HISTORY_FILE, ONLINE_REFRESH_STATE_FILE
+            import fls_manager.routes.online_scripts.refresh as refresh
+
+            request_id = "b" * 32
+            csrf = "html-refresh-start-recovery-csrf"
+            client = app.test_client()
+            with client.session_transaction() as session:
+                session.update(
+                    token=TOKEN,
+                    token_expire_at=int(time.time()) + 3600,
+                    security_verified=True,
+                    csrf_token=csrf,
+                )
+            source.save_online_script_cache([
+                {"id": "stable", "name": "Stable", "type": "raw", "link": "stable.sh"},
+            ])
+            cache = base_dir / "data" / "online_scripts_cache.json"
+            cache_before = cache.read_bytes()
+            persist = constants.persist_online_refresh
+            fail_startup_receipt = True
+
+            def reject_startup_receipt_once(info):
+                nonlocal fail_startup_receipt
+                if (
+                    info.get("request_id") == request_id
+                    and info.get("status") == "启动失败"
+                    and fail_startup_receipt
+                ):
+                    fail_startup_receipt = False
+                    raise OSError("startup receipt disk full")
+                return persist(info)
+
+            form = {"request_id": request_id, "proxy_id": "", "csrf_token": csrf}
+            with patch.object(constants, "persist_online_refresh", side_effect=reject_startup_receipt_once), patch.object(
+                refresh, "start_refresh_thread", side_effect=RuntimeError("thread quota exhausted"),
+            ) as first_start:
+                failed = client.post("/online-scripts/refresh", data=form)
+                self.assertEqual(failed.status_code, 500)
+                self.assertIn(f'name="request_id" value="{request_id}"', failed.get_data(as_text=True))
+                first_start.assert_called_once()
+
+            page = client.get(f"/online-scripts?refresh_request_id={request_id}")
+            self.assertEqual(page.status_code, 200)
+            html = page.get_data(as_text=True)
+            recovery_url = f"/online-scripts/refresh-recover/{request_id}"
+            self.assertIn(f'action="{recovery_url}"', html)
+            self.assertIn(f'data-api-action="/api{recovery_url}"', html)
+            self.assertRegex(
+                html,
+                rf'<form class="inline-form fls-online-refresh-recover-form" method="post" '
+                rf'action="{re.escape(recovery_url)}"[^>]*>.*?name="csrf_token" value="{csrf}"',
+            )
+            state_before_recovery = ONLINE_REFRESH_STATE_FILE.read_bytes()
+            history_before_recovery = ONLINE_REFRESH_HISTORY_FILE.read_bytes()
+
+            denied = client.post(recovery_url)
+            self.assertEqual(denied.status_code, 400)
+            self.assertEqual(ONLINE_REFRESH_STATE_FILE.read_bytes(), state_before_recovery)
+            self.assertEqual(ONLINE_REFRESH_HISTORY_FILE.read_bytes(), history_before_recovery)
+
+            repaired = client.post(recovery_url, data={"csrf_token": csrf})
+            self.assertEqual(repaired.status_code, 200)
+            self.assertIn("刷新回执已修复", repaired.get_data(as_text=True))
+            self.assertIn("不重新抓取或改动缓存", repaired.get_data(as_text=True))
+
+            with patch.object(refresh, "start_refresh_thread") as retry_start:
+                retried = client.post("/online-scripts/refresh", data=form)
+                duplicate = client.post("/online-scripts/refresh", data=form)
+            self.assertEqual(retried.status_code, 302)
+            self.assertEqual(duplicate.status_code, 409)
+            self.assertEqual(constants.get_online_refresh_state()["request_id"], request_id)
+            self.assertTrue(constants.get_online_refresh_state()["running"])
             retry_start.assert_called_once()
             self.assertEqual(cache.read_bytes(), cache_before)
 

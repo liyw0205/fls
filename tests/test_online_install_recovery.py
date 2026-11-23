@@ -1650,6 +1650,104 @@ vm.createContext(context);vm.runInContext(input.reader+input.script,context);
 """], input=json.dumps({"script": script, "reader": reader}), capture_output=True, text=True, timeout=5)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise ambiguous install recovery")
+    def test_install_selection_ambiguous_submit_reconciles_original_request_without_repost(self):
+        with isolated_app() as (app, base_dir):
+            self.prepare(base_dir)
+            html = app.test_client().get(
+                "/online-scripts/install-select/demo", headers={"X-Token": TOKEN},
+            ).get_data(as_text=True)
+            script = next(
+                script for script in re.findall(r"<script>(.*?)</script>", html, re.S)
+                if "flsInstallSubmitApi" in script
+            )
+            source = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+            reader = source[
+                source.index("async function flsReadJsonResponse("):source.index(
+                    "async function flsReadTextResponse("
+                )
+            ]
+            result = subprocess.run(["node", "-e", r"""
+const vm=require('node:vm'),assert=require('node:assert/strict');
+const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const id='d'.repeat(32);
+function setup(responses){
+  const ids=['onlineInstallApiError','onlineInstallApiLogin','onlineInstallRecoveryStatus',
+    'onlineInstallRecoveryLog','onlineInstallRecoveryStatusLink','onlineInstallRecoveryHistory',
+    'onlineInstallRecoveryConfirm','onlineInstallRecoveryReload','onlineInstallRecoveryRetry',
+    'onlineInstallRecoveryResume','onlineInstallRecoveryInstallHistory','onlineInstallRecoveryCheckHistory',
+    'onlineInstallRecoveryHistoryItems','onlineInstallRecoveryClear'];
+  const elements=Object.fromEntries(ids.map(name=>[name,{hidden:true,disabled:false,textContent:'',href:'',onclick:null,
+    replaceChildren(){},appendChild(){}}]));
+  const request={value:id},importTask={checked:false},enableTask={checked:true},proxy={value:''};
+  const button={disabled:false};
+  const form={__flsInstallRecoveryLocked:false,__flsInstallSubmitting:false,addEventListener(){},
+    getAttribute(){return '/online-scripts/install/demo';},
+    querySelector(selector){
+      if(selector.includes('request_id'))return request;
+      if(selector.includes('import_task'))return importTask;
+      if(selector.includes('enable_task'))return enableTask;
+      if(selector.includes('proxy_id'))return proxy;
+      return null;
+    },querySelectorAll(){return[button];}};
+  const storage={value:null,getItem(){return this.value;},setItem(_key,value){this.value=value;},removeItem(){this.value=null;}};
+  const calls=[];
+  class FormDataMock{constructor(){this.values={request_id:id};}delete(name){delete this.values[name];}set(name,value){this.values[name]=value;}}
+  const context={window:{FLS_INSTALL_SCRIPT_ID:'demo',confirm:()=>true,
+      location:{pathname:'/online-scripts/install-select/demo',search:''}},
+    location:{pathname:'/online-scripts/install-select/demo',search:''},document:{
+      getElementById(name){return name==='onlineInstallSelectForm'?form:name==='excludedTaskIndexes'?{value:''}:elements[name];},
+      querySelectorAll(){return[];},querySelector(){return null;},createElement(){return{textContent:'',href:'',appendChild(){}};}},
+    sessionStorage:storage,FormData:FormDataMock,flsGetCsrfToken:()=> 'csrf',flsApplyExcludedToVisible(){},
+    flsResponseErrorDiagnostic(_response,body){let payload=null;try{payload=JSON.parse(body)}catch(_){};return{payload,message:payload&&payload.msg||''};},
+    fetch:async(url,options)=>{calls.push({url,options});const item=responses.shift();if(item.throw)throw new Error(item.throw);
+      return{ok:item.ok,status:item.status,headers:{get:()=> 'application/json'},text:async()=>item.body};},
+    encodeURIComponent,setTimeout};
+  vm.createContext(context);vm.runInContext(input.reader+input.script,context);
+  return{context,elements,form,button,storage,calls};
+}
+const reply=(status,payload)=>({ok:status>=200&&status<300,status,body:JSON.stringify(payload)});
+(async()=>{
+  const running=setup([
+    reply(502,{msg:'gateway lost response'}),
+    reply(200,{ok:true,install_id:id,running:true,status:'安装中',phase:'downloading'})
+  ]);
+  await new Promise(resolve=>setImmediate(resolve));
+  await running.context.flsInstallSubmitApi('/online-scripts/install/demo',running.form,running.button);
+  assert.equal(running.calls.length,2);
+  assert.equal(running.calls[0].url,'/api/online-scripts/install/demo');
+  assert.equal(running.calls[0].options.method,'POST');
+  assert.equal(running.calls[1].url,'/api/online-scripts/log/'+id+'?state_only=1');
+  assert.equal(running.calls[1].options.method,undefined);
+  assert.equal(running.storage.value,JSON.stringify({request_id:id,script_id:'demo',action:'/online-scripts/install/demo',
+    import_task:false,excluded_task_indexes:'',enable_task:true,proxy_id:'',force:false}));
+  assert.equal(running.form.__flsInstallRecoveryLocked,true);
+  assert.equal(running.elements.onlineInstallRecoveryLog.href,'/online-scripts/log/'+id);
+  assert.match(running.elements.onlineInstallRecoveryStatus.textContent,/安装中/);
+
+  const retry=setup([reply(502,{msg:'gateway lost response'}),reply(503,{msg:'status store unavailable'}),
+    reply(200,{ok:true,install_id:id,running:false,status:'启动失败',phase:'startup_failed'})]);
+  await new Promise(resolve=>setImmediate(resolve));
+  await retry.context.flsInstallSubmitApi('/online-scripts/install/demo',retry.form,retry.button);
+  assert.equal(retry.calls.length,2);
+  assert.match(retry.elements.onlineInstallRecoveryStatus.textContent,/status store unavailable/);
+  assert.equal(retry.elements.onlineInstallRecoveryRetry.hidden,false);
+  await retry.elements.onlineInstallRecoveryRetry.onclick();
+  assert.equal(retry.calls.length,3);
+  assert.equal(retry.calls[2].url,'/api/online-scripts/log/'+id+'?state_only=1');
+  assert.equal(retry.calls[2].options.method,undefined);
+  assert.equal(retry.storage.value!==null,true);
+
+  const denied=setup([reply(403,{msg:'permission expired'})]);
+  await new Promise(resolve=>setImmediate(resolve));
+  await denied.context.flsInstallSubmitApi('/online-scripts/install/demo',denied.form,denied.button);
+  assert.equal(denied.calls.length,1);
+  assert.equal(denied.elements.onlineInstallApiLogin.hidden,false);
+  assert.equal(denied.storage.value!==null,true);
+})().catch(error=>{console.error(error);process.exitCode=1;});
+"""], input=json.dumps({"script": script, "reader": reader}), capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise install recovery")
     def test_install_selection_refresh_recovers_original_request_without_new_post(self):
         with isolated_app() as (app, base_dir):

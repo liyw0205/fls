@@ -1249,10 +1249,19 @@ async function submitOnlineRefreshForm(form, event){{
         await updateOnlineRefreshStatus();
     }}catch(error){{
         if(button) button.disabled = false;
+        const denied = error && (error.status === 401 || error.status === 403);
+        const responseStatus = Number(error && error.status);
+        const shouldReconcile = !Number.isInteger(responseStatus) || responseStatus === 408 ||
+            responseStatus === 409 || responseStatus === 429 ||
+            (responseStatus >= 200 && responseStatus < 300) ||
+            (responseStatus >= 500 && responseStatus <= 599);
+        if(!denied && shouldReconcile){{
+            await updateOnlineRefreshStatus();
+            return;
+        }}
         const card = document.getElementById("onlineRefreshStatusCard");
         const text = document.getElementById("onlineRefreshStatusText");
         const login = document.getElementById("onlineRefreshLogin");
-        const denied = error && (error.status === 401 || error.status === 403);
         if(card) card.style.display = "block";
         if(text) text.textContent = "刷新请求失败：" + (error && error.message || String(error || "请求失败")) + "。请查询状态后重试。";
         const query = document.getElementById("onlineRefreshQuery");
