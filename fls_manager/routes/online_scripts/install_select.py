@@ -1796,8 +1796,11 @@ async function flsInstallSubmitApi(action, form, submitter, allowOriginalRetry){
         const denied = error && (error.status === 401 || error.status === 403);
         const message = error && error.message ? error.message : String(error || "安装请求失败");
         const knownRejected = error && error.payload && error.payload.accepted === false;
+        const installHistoryFull = knownRejected && !importMode && error.payload.history_full === true;
         if(errorEl){{
-            errorEl.textContent = knownRejected
+            errorEl.textContent = installHistoryFull
+                ? "安装未启动：" + message + "。请先核对现有安装历史，再重新提交。"
+                : knownRejected
                 ? "安装未启动：" + message + "。可保留当前请求标识与选择后重试。"
                 : "安装请求失败：" + message + (denied ? "。请重新登录后查询原安装请求。" : "。请保留当前请求标识后重试或查看安装日志。");
             errorEl.hidden = false;
@@ -1828,6 +1831,13 @@ async function flsInstallSubmitApi(action, form, submitter, allowOriginalRetry){
             if(rejected){{
                 try{{ flsInstallClearKnownRejected(requestState); flsInstallLockForm(false); }}
                 catch(_error){{ flsInstallLockForm(true); }}
+                const history = document.getElementById("onlineInstallRecoveryInstallHistory");
+                const full = error.payload.history_full === true;
+                if(history){{
+                    history.hidden = !full;
+                    if(full) history.href = "/online-scripts/install-history";
+                }}
+                if(full) flsInstallSetStatus("历史中仍有待核对安装，新请求未启动。请处理相关记录后再提交。");
             }}else{{
                 flsInstallLockForm(true);
                 flsInstallShowHistory(pendingValue);

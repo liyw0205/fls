@@ -1540,7 +1540,7 @@ def _install_snapshot(info):
     return {field: info.get(field) for field in fields}
 
 
-def _bounded_online_install_jobs(data):
+def _bounded_online_install_jobs(data, allow_protected_overflow=False):
     if len(data) <= ONLINE_INSTALL_LIMIT:
         return dict(data)
 
@@ -1579,7 +1579,7 @@ def _bounded_online_install_jobs(data):
         jobs = [data[install_id] for install_id in group]
         if any(
             job.get("running")
-            or job.get("status") in ("准备中", "运行中", "停止中")
+            or job.get("status") in ("准备中", "运行中", "停止中", "结果未知")
             or job.get("phase") == "startup_receipt_failed"
             or bool(job.get("scheduler_reload_pending"))
             or bool((job.get("task_recovery") or {}).get("pending"))
@@ -1590,9 +1590,9 @@ def _bounded_online_install_jobs(data):
             disposable.append(group)
 
     protected_count = sum(len(group) for group in protected)
-    if protected_count > ONLINE_INSTALL_LIMIT:
+    if protected_count > ONLINE_INSTALL_LIMIT and not allow_protected_overflow:
         raise InstallHistoryLimitError(
-            "活动在线安装及其重试链超过历史保留上限，未写入新回执，也未启动下载或安装进程。"
+            "待核对在线安装及其重试链超过历史保留上限，未写入新回执，也未启动下载或安装进程。"
         )
 
     retained_ids = set().union(*protected) if protected else set()
@@ -1741,7 +1741,7 @@ def persist_online_install(info):
                     raise RuntimeError("在线脚本重试关联损坏，未覆盖原文件")
             jobs.pop(install_id, None)
             jobs = {install_id: snapshot, **jobs}
-            return _bounded_online_install_jobs(jobs)
+            return _bounded_online_install_jobs(jobs, allow_protected_overflow=existing is not None)
 
         mutate_json(ONLINE_INSTALL_JOBS_FILE, {}, update, strict=True)
         previous = ONLINE_INSTALL_RUNNING.get(str(snapshot.get("retry_of") or ""))
