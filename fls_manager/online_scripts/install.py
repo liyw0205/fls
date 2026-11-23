@@ -68,6 +68,11 @@ def _set_install_phase(info, phase, *, persist=True):
     return _persist_install_state(info) if persist else True
 
 
+def _require_install_phase(info, phase):
+    if not _set_install_phase(info, phase):
+        raise RuntimeError(f"安装阶段 {phase} 回执未能确认保存，未开始后续操作")
+
+
 def _fingerprint_file(path):
     digest = hashlib.sha256()
     with open(path, "rb") as stream:
@@ -558,10 +563,10 @@ def install_worker(
         append_log(log_file, "============================================================")
 
         if import_task:
-            _set_install_phase(info, "validating_tasks")
+            _require_install_phase(info, "validating_tasks")
             validate_online_task_import(item, selected_task_indexes)
 
-        _set_install_phase(info, "downloading")
+        _require_install_phase(info, "downloading")
         target = download_online_script_logged(
             item=item,
             proxy_id=proxy_id,
@@ -569,13 +574,16 @@ def install_worker(
             force=force,
             install_id=install_id,
         )
-        capture_install_outputs(info, target)
+        if not capture_install_outputs(info, target):
+            if import_task:
+                info["phase"] = "importing_tasks"
+            raise RuntimeError("下载产物回执未能确认保存，未导入任务或执行安装命令")
 
         if online_install_should_stop(install_id):
             raise InstallStopped("安装已停止")
 
         if import_task:
-            _set_install_phase(info, "importing_tasks")
+            _require_install_phase(info, "importing_tasks")
             append_log(log_file, "")
             append_log(log_file, "===== 导入任务 =====")
             try:
@@ -586,7 +594,8 @@ def install_worker(
                     selected_task_indexes=selected_task_indexes,
                     raise_on_reload_error=True,
                 )
-                capture_install_outputs(info, target)
+                if not capture_install_outputs(info, target):
+                    raise RuntimeError("任务导入产物回执未能确认保存，未执行安装命令")
             except TaskSchedulerReloadError as e:
                 capture_install_outputs(info, target)
                 with ONLINE_INSTALL_LOCK:
@@ -596,7 +605,8 @@ def install_worker(
                         scheduler_reload_error=f"任务已保存，但调度器重载失败：{e}",
                         updated_at=now_str(),
                     )
-                    _persist_install_state(info)
+                    if not _persist_install_state(info):
+                        raise RuntimeError("调度器待恢复回执未能确认保存，未执行后续安装命令")
 
         if online_install_should_stop(install_id):
             raise InstallStopped("安装已停止")
@@ -604,7 +614,7 @@ def install_worker(
         install_cmd = str(item.get("install") or "").strip()
 
         if install_cmd:
-            _set_install_phase(info, "running_command")
+            _require_install_phase(info, "running_command")
             append_log(log_file, "")
             append_log(log_file, "===== 执行安装命令 =====")
             append_log(log_file, f"安装命令: {install_cmd}")
