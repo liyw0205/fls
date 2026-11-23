@@ -4,6 +4,7 @@ import math
 import re
 import threading
 import os
+import unicodedata
 import uuid
 
 from ..paths import DATA_DIR
@@ -229,7 +230,10 @@ def list_online_task_import_requests(limit=50, script_id="", *, recovery=False, 
         raise ValueError("在线任务导入历史起始位置无效") from exc
     if not 0 <= offset <= 200:
         raise ValueError("在线任务导入历史起始位置必须在 0 到 200 之间")
-    script_id = str(script_id or "").strip()
+    script_id = str(script_id or "")
+    if len(script_id) > 200 or any(unicodedata.category(char) == "Cc" for char in script_id):
+        raise ValueError("在线任务导入历史脚本 ID 无效")
+    script_id = script_id.strip()
     with ONLINE_TASK_IMPORT_LOCK, storage_transaction():
         records = _read_task_import_requests()
         if _recover_stale_task_imports(records):

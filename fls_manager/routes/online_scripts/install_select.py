@@ -453,6 +453,46 @@ def _import_history_page():
                                            with_pagination=True)
 
 
+def _import_history_url(script_id="", recovery=False, limit=50, offset=0):
+    query = {"recovery": "1" if recovery else "0"}
+    if script_id:
+        query["script_id"] = script_id
+    if limit != 50:
+        query["limit"] = limit
+    if offset:
+        query["offset"] = offset
+    return url_for("online_scripts.online_scripts_import_tasks_history", **query)
+
+
+def _import_history_filter_form(script_id="", recovery=False, limit=50):
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = 50
+    if not 1 <= limit <= 100:
+        limit = 50
+    limit_values = sorted({25, 50, 100, limit})
+    options = "".join(
+        f'<option value="{value}"{" selected" if limit == value else ""}>{value} 条</option>'
+        for value in limit_values
+    )
+    action = url_for("online_scripts.online_scripts_import_tasks_history")
+    reset = _import_history_url(recovery=recovery)
+    return f"""
+<form method="get" action="{h(action)}">
+<section class="section fls-form-section">
+    <div class="form-grid">
+        <div class="form-item"><label for="import-history-script">脚本 ID</label><input id="import-history-script" name="script_id" value="{h(script_id)}" maxlength="200" autocomplete="off"></div>
+        <div class="form-item"><label for="import-history-limit">每页条数</label><select id="import-history-limit" name="limit">{options}</select></div>
+    </div>
+    <input type="hidden" name="recovery" value="{"1" if recovery else "0"}">
+    <br><button class="btn btn-primary" type="submit">筛选导入历史</button>
+    <a class="btn btn-gray" href="{h(reset)}">清除脚本筛选</a>
+</section>
+</form>
+"""
+
+
 def _confirm_task_import(request_id):
     if not re.fullmatch(r"[a-f0-9]{32}", request_id or ""):
         return {"ok": False, "msg": "在线任务导入请求标识无效", "retry_allowed": False}, 400
@@ -739,10 +779,13 @@ def online_scripts_import_tasks_history():
     try:
         page = _import_history_page()
     except ValueError as exc:
+        safe_script_id = script_id if len(script_id) <= 200 and not any(ord(char) < 32 for char in script_id) else ""
         body = page_header_card(
             "在线任务导入历史",
             help_html=h(exc),
             actions_html='<a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>',
+        ) + _import_history_filter_form(
+            safe_script_id, request.args.get("recovery") == "1", request.args.get("limit", 50),
         )
         return layout("在线任务导入历史", "online_scripts", body), 400
     except Exception as exc:
@@ -766,6 +809,13 @@ def online_scripts_import_tasks_history():
         request_id = str(record.get("request_id") or "")
         state = str(record.get("state") or "unknown")
         status_label = "失败" if state == "failed" and record.get("archived") else labels.get(state, state)
+        diagnosis = list(dict.fromkeys(
+            value.strip() for value in (record.get("message"), record.get("scheduler_reload_error"))
+            if isinstance(value, str) and value.strip()
+        ))
+        diagnosis_text = "；".join(diagnosis)
+        diagnosis_summary = diagnosis_text[:300] + ("..." if len(diagnosis_text) > 300 else "")
+        diagnosis_html = f'<span title="{h(diagnosis_text)}">{h(diagnosis_summary)}</span>' if diagnosis_text else "-"
         actions = f'<a class="btn btn-blue" href="/online-scripts/import-tasks-status/{h(request_id)}">查看状态</a>'
         if (state == "scheduler_pending" and not record.get("active") and not record.get("archived")
                 and not record.get("confirmation_stale") and not record.get("confirmation_check_error")):
@@ -786,28 +836,33 @@ def online_scripts_import_tasks_history():
             f"<td>{h(record.get('script_id') or '-')}</td>"
             f"<td>{h(status_label)}{'（已归档）' if record.get('archived') else ''}</td>"
             f"<td>{h(','.join(record.get('selected_task_indexes') or []) or '-')}</td>"
+            f"<td>{'是' if record.get('enable_task') else '否'}</td>"
+            f"<td>{diagnosis_html}</td>"
             f"<td>{h(record.get('updated_at') or '-')}</td>"
             f"<td>{actions}</td>"
             "</tr>"
         )
     table = (
         '<div class="table-wrap"><table><thead><tr><th>请求标识</th><th>脚本</th><th>状态</th>'
-        '<th>任务序号</th><th>更新时间</th><th>操作</th></tr></thead><tbody>'
-        + ("".join(rows) or '<tr><td colspan="6">暂无导入历史</td></tr>')
+        '<th>任务序号</th><th>导入后启用</th><th>诊断</th><th>更新时间</th><th>操作</th></tr></thead><tbody>'
+        + ("".join(rows) or '<tr><td colspan="8">暂无导入历史</td></tr>')
         + "</tbody></table></div>"
     )
-    recovery = request.args.get("recovery", "0")
-    links = '<a class="btn btn-blue" href="/online-scripts/import-tasks-history?recovery=1">待恢复导入</a><a class="btn btn-gray" href="/online-scripts/import-tasks-history">全部导入</a>'
+    recovery = request.args.get("recovery", "0") == "1"
+    links = (
+        f'<a class="btn btn-blue" href="{h(_import_history_url(script_id, True, page["limit"]))}">待恢复导入</a>'
+        f'<a class="btn btn-gray" href="{h(_import_history_url(script_id, False, page["limit"]))}">全部导入</a>'
+    )
     for label, offset in (("上一页", max(0, page["offset"] - page["limit"])), ("下一页", page["offset"] + page["limit"])):
         if (label == "上一页" and page["offset"]) or (label == "下一页" and page["has_more"]):
-            href = url_for("online_scripts.online_scripts_import_tasks_history", script_id=script_id,
-                           recovery=recovery, limit=page["limit"], offset=offset)
+            href = _import_history_url(script_id, recovery, page["limit"], offset)
             links += f'<a class="btn btn-blue" href="{h(href)}">{label}</a>'
+    displayed = f'{page["offset"] + 1}-{page["offset"] + len(page["items"])}' if page["items"] else "0"
     body = page_header_card(
         "在线任务导入历史",
-        help_html="历史只读取已保存回执，不会重复写入任务；调度器待恢复时只执行重载。",
+        help_html=f'当前显示 {displayed} / {page["total"]} 条。历史只读取已保存回执，不会重复写入任务；调度器待恢复时只执行重载。',
         actions_html=links + '<a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>',
-    ) + f'<section class="section"><div class="card">{table}</div></section>'
+    ) + _import_history_filter_form(script_id, recovery, page["limit"]) + f'<section class="section"><div class="card">{table}</div></section>'
     return layout("在线任务导入历史", "online_scripts", body)
 
 

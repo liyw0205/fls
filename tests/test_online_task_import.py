@@ -484,8 +484,14 @@ class OnlineTaskImportConcurrencyTests(unittest.TestCase):
             constants.persist_online_task_import_request({
                 "request_id": "a" * 32, "script_id": "demo", "expected_version": expected_version,
                 "selected_task_indexes": ["1"], "enable_task": False, "state": "scheduler_pending",
-                "message": "任务已保存，调度器待恢复", "scheduler_reload_error": "scheduler down",
+                "message": "任务已保存，调度器待恢复 <script>alert(1)</script>",
+                "scheduler_reload_error": "scheduler down",
                 "updated_at": "2026-11-18 11:00:00",
+            })
+            other_item = self.task_item("other", "Other")
+            constants.persist_online_task_import_request({
+                **self.import_record(other_item, request_id="b" * 32, state="failed"),
+                "message": "other-only diagnosis",
             })
             client = app.test_client()
             history = client.get(
@@ -498,6 +504,15 @@ class OnlineTaskImportConcurrencyTests(unittest.TestCase):
             html = page.get_data(as_text=True)
             self.assertIn("仅重载调度器", html)
             self.assertIn("/online-scripts/import-tasks-status/" + "9" * 32, html)
+            self.assertIn('name="script_id" value="demo"', html)
+            self.assertIn("任务已保存，调度器待恢复 &lt;script&gt;alert(1)&lt;/script&gt;", html)
+            self.assertNotIn("<script>alert(1)</script>", html)
+            self.assertIn("scheduler down", html)
+            self.assertIn('<th>导入后启用</th>', html)
+            self.assertIn("<td>是</td>", html)
+            self.assertIn("<td>否</td>", html)
+            self.assertNotIn("other-only diagnosis", html)
+            self.assertIn("script_id=demo", html)
             with patch("fls_manager.routes.online_scripts.install_select.reload_scheduler") as reload_scheduler:
                 response = client.post(
                     "/api/online-scripts/import-tasks-reload/" + "a" * 32,
