@@ -1,7 +1,7 @@
 import re
 
 from ..csrf import csrf_token
-from ..config import load_config, THEME_OPTIONS
+from ..config import DEFAULT_CONFIG, load_config, THEME_OPTIONS
 from ..utils import h
 
 
@@ -22,9 +22,9 @@ def inject_csrf_inputs(body, token):
 def layout(title, active, body):
     token = csrf_token()
     body = inject_csrf_inputs(body, token)
-    theme = str(load_config().get("theme", "default") or "default").strip().lower()
+    theme = str(load_config().get("theme", DEFAULT_CONFIG["theme"]) or DEFAULT_CONFIG["theme"]).strip().lower()
     if theme not in THEME_OPTIONS:
-        theme = "default"
+        theme = DEFAULT_CONFIG["theme"]
 
     nav = [
         ("dashboard", "/", "仪表盘"),
@@ -67,7 +67,7 @@ def layout(title, active, body):
 <link rel="apple-touch-icon" href="/static/favicon-generated.png?v=20260920-1">
 <link rel="stylesheet" href="/static/fls.css?v=20260920-3&actions=3">
 <link rel="stylesheet" href="/static/fls_responsive.css?v=20260920-3&actions=2">
-<link rel="stylesheet" href="/static/fls_theme.css?v=20260920-3&actions=2&theme=neumorphism&rev=20260930-1">
+<link rel="stylesheet" href="/static/fls_theme.css?v=20261124-1&theme=deepseek">
 <link rel="stylesheet" href="/static/fls_density.css?v=20260930-2">
 <script src="/static/fls.js?v=20260920-3&actions=6&editor=20261117-1&toggle=1&copy=1&execution=1&collection=4&env=1&proxy=2&notify=4&restore=1&response=3"></script>
 

@@ -276,6 +276,22 @@ class ConfigApplyRecoveryTests(unittest.TestCase):
             retry = next(form["fields"] for form in TaskFormParser(html).forms if form["action"] == "/config")
             self.assertEqual(client.post("/config", data=self.data(retry, theme="glassmorphism"), headers={"X-Token": TOKEN}).status_code, 302)
 
+    def test_deepseek_and_neumorphism_theme_selections_persist_and_render(self):
+        with isolated_app() as (app, base_dir):
+            self.seed(base_dir)
+            client = app.test_client()
+            for theme in ("deepseek", "neumorphism"):
+                with self.subTest(theme=theme):
+                    fields = self.form(client)
+                    with patch("fls_manager.routes.config.page.cleanup_logs"), patch(
+                        "fls_manager.routes.config.page.reload_scheduler",
+                    ):
+                        response = client.post("/config", data=self.data(fields, theme=theme), headers={"X-Token": TOKEN})
+                    self.assertEqual(response.status_code, 302)
+                    self.assertEqual(json.loads((base_dir / "data" / "config.json").read_text())["theme"], theme)
+                    page = client.get("/", headers={"X-Token": TOKEN})
+                    self.assertIn(f"fls-theme-{theme}", page.get_data(as_text=True))
+
     def test_corrupt_configuration_is_not_replaced_by_defaults(self):
         for corrupted in (b"{broken", b"\xff", b"[]"):
             with self.subTest(corrupted=corrupted), isolated_app() as (app, base_dir):

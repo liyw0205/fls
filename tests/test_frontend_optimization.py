@@ -65,8 +65,8 @@ class FrontendOptimizationTests(unittest.TestCase):
             self.assertIn('/static/favicon-generated.png?v=20260920-1', html)
             self.assertIn('/static/fls.css?v=20260920-3', html)
             self.assertIn('/static/fls.js?v=20260920-3&actions=6', html)
-            self.assertIn('/static/fls_theme.css?v=20260920-3', html)
-            self.assertIn('theme=neumorphism&rev=20260930-1', html)
+            self.assertIn('/static/fls_theme.css?v=20261124-1&theme=deepseek', html)
+            self.assertIn('class="page-dashboard fls-theme-deepseek"', html)
             self.assertIn('/static/fls_density.css?v=20260930-2', html)
             self.assertIn('id="flsUpdateNoticeSlot"', html)
 
@@ -143,9 +143,29 @@ class FrontendOptimizationTests(unittest.TestCase):
             config_html = config.get_data(as_text=True)
             self.assertEqual(config.status_code, 200)
             self.assertIn('id="config-theme"', config_html)
-            self.assertIn('<option value="default" selected>默认主题</option>', config_html)
+            self.assertIn('<option value="deepseek" selected>deepseek</option>', config_html)
+            self.assertIn('<option value="neumorphism">新拟物派</option>', config_html)
             self.assertIn('<option value="editorial">编辑杂志风</option>', config_html)
             self.assertIn('<option value="glassmorphism">玻璃拟态</option>', config_html)
+            self.assertNotIn('默认主题', config_html)
+
+    def test_theme_defaults_migrate_legacy_default_and_keep_theme_rules_scoped(self):
+        with isolated_app() as app:
+            from fls_manager.config import DEFAULT_CONFIG, normalize_config_data
+
+            self.assertEqual(DEFAULT_CONFIG["theme"], "deepseek")
+            self.assertEqual(normalize_config_data({})["theme"], "deepseek")
+            self.assertEqual(normalize_config_data({"theme": "default"})["theme"], "neumorphism")
+            self.assertEqual(normalize_config_data({"theme": "unknown"})["theme"], "deepseek")
+
+            css = (ROOT / "fls_manager" / "static" / "fls_theme.css").read_text(encoding="utf-8")
+            legacy_theme = css.split("Neumorphism theme refresh", 1)[1].split("DeepSeek-inspired theme", 1)[0]
+            self.assertNotIn("\n.sidebar {", legacy_theme)
+            self.assertIn("body.fls-theme-neumorphism .sidebar", legacy_theme)
+            deepseek_theme = css.split("DeepSeek-inspired theme", 1)[1]
+            self.assertIn("--primary:#3964fe", deepseek_theme)
+            self.assertIn("@media (prefers-color-scheme:dark)", deepseek_theme)
+            self.assertIn("--bg:#151517", deepseek_theme)
 
     def test_shell_layering_tokens_are_present(self):
         css = (ROOT / "fls_manager" / "static" / "fls.css").read_text(encoding="utf-8")
