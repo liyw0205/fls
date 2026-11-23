@@ -1222,6 +1222,98 @@ vm.runInContext(input.reader + input.script, context);
 '''], input=json.dumps({"script": script, "reader": reader}), text=True, capture_output=True, timeout=5)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise refresh submission recovery")
+    def test_refresh_form_reconciles_ambiguous_post_error_without_resubmitting(self):
+        with isolated_app() as (app, _base_dir):
+            response = app.test_client().get("/online-scripts", headers={"X-Token": TOKEN})
+            self.assertEqual(response.status_code, 200)
+            html = response.get_data(as_text=True)
+            script = next(
+                script for script in re.findall(r"<script>(.*?)</script>", html, re.S)
+                if "submitOnlineRefreshForm" in script
+            )
+            source = (ROOT / "fls_manager" / "static" / "fls.js").read_text(encoding="utf-8")
+            reader = source[source.index("async function flsReadJsonResponse("):source.index("async function flsReadTextResponse(")]
+            result = subprocess.run(["node", "-e", r'''
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+const requestId = 'c'.repeat(32);
+const serverId = 'd'.repeat(32);
+const requestInput = {value:requestId};
+const proxyInput = {value:'proxy-a'};
+const button = {disabled:false, textContent:'同步在线脚本源'};
+const form = {action:'/online-scripts/refresh', querySelector(selector){
+  if(selector.includes('request_id')) return requestInput;
+  if(selector.includes('proxy_id')) return proxyInput;
+  return button;
+}};
+button.form = form;
+const elements = {
+  onlineRefreshStatusCard:{style:{}}, onlineRefreshStatusText:{innerHTML:'',textContent:''},
+  onlineRefreshTaskLinkFailures:{innerHTML:''}, onlineRefreshPersistence:{innerHTML:''},
+  onlineRefreshBtn:button, onlineRefreshQuery:{hidden:true,disabled:false},
+  onlineRefreshLogin:{hidden:true,href:''}, onlineRefreshLogLink:{hidden:true,href:''},
+};
+const values = new Map();
+const storage = {getItem:key=>values.get(key)||null,setItem:(key,value)=>values.set(key,value),removeItem:key=>values.delete(key)};
+const calls = [];
+let posts = 0;
+const response = (status, body) => ({ok:status>=200&&status<300,status,text:async()=>JSON.stringify(body)});
+const context = {
+  window:{location:{pathname:'/online-scripts',search:''}},
+  location:{pathname:'/online-scripts',search:''},
+  document:{
+    getElementById:id=>elements[id], querySelectorAll:()=>[], addEventListener:()=>{}
+  },
+  sessionStorage:storage, encodeURIComponent, FormData:class {constructor(value){this.value=value;}},
+  flsGetCsrfToken:()=> 'refresh-csrf',
+  flsResponseErrorDiagnostic:(_response,body)=>({payload:JSON.parse(body),message:JSON.parse(body).error||''}),
+  setTimeout:()=>0, clearTimeout:()=>{},
+  fetch:async(url,options={})=>{
+    calls.push({url,method:options.method||'GET'});
+    if(url==='/api/online-scripts/refresh'){
+      posts++;
+      return response(500,{ok:false,request_id:requestId,status:'启动失败',error:'thread startup receipt failed'});
+    }
+    if(url==='/api/online-scripts/refresh-status')
+      return response(200,{request_id:'',running:false,status:'',message:'',error:'',task_link_failures:[]});
+    if(url==='/api/online-scripts/refresh-status/'+requestId)
+      return response(200,{id:serverId,request_id:requestId,running:false,status:'启动失败',message:'',
+        error:'thread quota exhausted',persistence_error:'state disk full',updated_at:'now',log_file:'/refresh.log',
+        task_link_failures:[],task_link_failure_count:0,task_link_failure_digest:'e'.repeat(64)});
+    assert.fail('unexpected request: '+url);
+  }
+};
+vm.createContext(context);
+vm.runInContext(input.reader+input.script,context);
+(async()=>{
+  await new Promise(resolve=>setImmediate(resolve));
+  await context.submitOnlineRefreshForm(form,{preventDefault(){},stopImmediatePropagation(){}});
+  assert.equal(posts,1);
+  assert.equal(calls.filter(call=>call.url==='/api/online-scripts/refresh-status/'+requestId).length,1);
+  assert.equal(values.get('fls-online-refresh-request') && JSON.parse(values.get('fls-online-refresh-request')).request_id,requestId);
+  assert.match(elements.onlineRefreshPersistence.innerHTML,/refresh-recover\//);
+  assert.match(elements.onlineRefreshPersistence.innerHTML,new RegExp(requestId));
+  assert.match(elements.onlineRefreshStatusText.innerHTML,/启动失败/);
+  assert.equal(elements.onlineRefreshLogin.hidden,true);
+  assert.equal(button.disabled,false);
+  calls.length=0;
+  context.fetch=async(url,options={})=>{
+    calls.push({url,method:options.method||'GET'});
+    assert.equal(url,'/api/online-scripts/refresh');
+    posts++;
+    return response(403,{ok:false,error:'permission denied'});
+  };
+  await context.submitOnlineRefreshForm(form,{preventDefault(){},stopImmediatePropagation(){}});
+  assert.equal(posts,2);
+  assert.deepEqual(calls.map(call=>call.method),['POST']);
+  assert.equal(elements.onlineRefreshLogin.hidden,false);
+  assert.match(elements.onlineRefreshLogin.href,/^\/login\?next=/);
+})().catch(error=>{console.error(error);process.exitCode=1;});
+'''], input=json.dumps({"script": script, "reader": reader}), text=True, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_refresh_worker_persists_success_and_failure_without_losing_cache(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.online_scripts import source
