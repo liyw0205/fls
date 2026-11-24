@@ -1074,6 +1074,8 @@ const {chromium} = require(process.env.FLS_PLAYWRIGHT_CORE);
       await page.getByRole('button',{name:'重新加载调度器',exact:true}).click();
       await page.getByText('已重新加载调度器',{exact:true}).waitFor();
       assert.equal((await state()).tasks.length,3);
+      await copy(200);
+      assert.equal((await state()).tasks.length,4);
       let dropped=false;
       await page.route('**/api/task/action/copy/a',async route=>{
        if(!dropped){dropped=true;await route.fetch();return route.abort();}
@@ -1086,7 +1088,7 @@ const {chromium} = require(process.env.FLS_PLAYWRIGHT_CORE);
       await page.reload();
       await page.getByRole('button',{name:'查询本次操作结果',exact:true}).click();
       await settled();
-      assert.equal((await state()).tasks.length,4);
+      assert.equal((await state()).tasks.length,5);
       await page.unroute('**/api/task/action/copy/a');
       await fixture({reload:true});
       dropped=false;
