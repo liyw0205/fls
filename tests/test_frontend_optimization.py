@@ -223,6 +223,20 @@ class FrontendOptimizationTests(unittest.TestCase):
         backup = (ROOT / "fls_manager" / "routes" / "backup" / "page.py").read_text(encoding="utf-8")
         self.assertIn("if(payload && payload.job_id)", backup)
 
+    def test_task_action_menu_closes_portal_and_resets_after_partial_refresh(self):
+        with isolated_app() as app:
+            response = app.test_client().get("/tasks", headers={"X-Token": TOKEN})
+            html = response.get_data(as_text=True)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('function closeTaskActionMenus()', html)
+            self.assertIn('menu.__flsActionMenuOrigin', html)
+            self.assertIn('origin.parent.insertBefore(item, next)', html)
+            self.assertIn('if(event.target.closest(".task-action-menu-toggle")) return;', html)
+            self.assertIn('document.addEventListener("click", function(event){', html)
+            self.assertIn('}, true);', html)
+            self.assertIn('async function refreshTasksBlockPartial(keepSelection){\n    closeTaskActionMenus();', html)
+
     def test_density_styles_preserve_table_details_and_mobile_targets(self):
         css = (ROOT / "fls_manager" / "static" / "fls_density.css").read_text(encoding="utf-8")
 
