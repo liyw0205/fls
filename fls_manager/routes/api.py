@@ -482,6 +482,30 @@ def api_collection_add_task(collection_id):
         return jsonify(ok=False, msg=str(exc)), 500
 
 
+@bp.route("/api/collections")
+def api_collections_list():
+    from ..collection_api import list_collections
+    from ..models import load_collections
+
+    payload, status = list_collections(request.args, load_collections=load_collections,
+                                        load_tasks=load_tasks_for_read)
+    response = jsonify(payload)
+    response.headers["Cache-Control"] = "no-store"
+    return response, status
+
+
+@bp.route("/api/collection/<collection_id>")
+def api_collection_tasks(collection_id):
+    from ..collection_api import collection_tasks
+    from ..models import load_collections
+
+    payload, status = collection_tasks(collection_id, request.args, load_collections=load_collections,
+                                        load_tasks=load_tasks_for_read)
+    response = jsonify(payload)
+    response.headers["Cache-Control"] = "no-store"
+    return response, status
+
+
 @bp.route("/api/collection/delete/<collection_id>", methods=["POST"])
 def api_collection_delete(collection_id):
     from ..collection_delete import delete_collection
