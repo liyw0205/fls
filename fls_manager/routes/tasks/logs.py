@@ -1,7 +1,7 @@
 import uuid
 from urllib.parse import quote
 
-from flask import request, abort, Response
+from flask import request, abort, Response, jsonify
 
 from . import bp
 
@@ -283,3 +283,33 @@ def api_log(task_id):
         tail_file(log_file, lines),
         mimetype="text/plain; charset=utf-8",
     )
+
+
+@bp.route("/api/task/<task_id>/log")
+def api_task_log_json(task_id):
+    task = get_task(task_id)
+    if not task:
+        return jsonify({"ok": False, "msg": "任务不存在"}), 404
+
+    try:
+        lines = int(request.args.get("lines", "300"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "msg": "lines 必须为整数"}), 400
+    if lines < 1 or lines > 1000:
+        return jsonify({"ok": False, "msg": "lines 必须在 1 到 1000 之间"}), 400
+
+    running = is_running(task_id)
+    if running:
+        log_file = RUNNING.get(task_id, {}).get("log_file", "")
+    else:
+        log_file = latest_log_for_task(task)
+
+    response = jsonify({
+        "ok": True,
+        "task_id": task_id,
+        "running": running,
+        "lines": lines,
+        "log": tail_file(log_file, lines),
+    })
+    response.headers["Cache-Control"] = "no-store"
+    return response

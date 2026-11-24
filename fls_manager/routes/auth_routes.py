@@ -1,8 +1,9 @@
 import ipaddress
 import os
+import secrets
 import time
 
-from flask import Blueprint, request, redirect, url_for, current_app, session
+from flask import Blueprint, request, redirect, url_for, current_app, jsonify, session
 
 from ..ui.layout import layout
 from ..utils import h, now_str
@@ -12,6 +13,14 @@ from ..auth import (
     auth_clear_session,
     auth_session_valid,
     safe_local_next_url,
+)
+from ..native_sessions import (
+    clear_native_session_cookie,
+    create_native_session,
+    delete_native_session,
+    mark_native_session_verified,
+    native_session_from_request,
+    set_native_session_cookie,
 )
 from ..notify import send_all_enabled
 from ..security import (
@@ -249,6 +258,154 @@ def login():
 </div>
 """
     return layout("登录", "login", body)
+
+
+@bp.route("/api/auth/session", methods=["POST"])
+def api_native_session():
+    if not request.is_json:
+        return jsonify({"ok": False, "msg": "请求必须使用 JSON"}), 415
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"ok": False, "msg": "请求必须是对象"}), 400
+
+    input_token = data.get("token")
+    if not isinstance(input_token, str) or not input_token.strip() or len(input_token) > 4096:
+        return jsonify({"ok": False, "msg": "Token 无效"}), 400
+
+    remember = data.get("remember", False)
+    if not isinstance(remember, bool):
+        return jsonify({"ok": False, "msg": "保持登录选项无效"}), 400
+
+    token = fls_get_admin_token()
+    if not token:
+        return jsonify({"ok": False, "msg": "面板尚未设置 Token，请访问 /setup"}), 403
+
+    ip = client_ip()
+    fail_info = login_fail_info(ip)
+    lock_until = int(fail_info.get("lock_until", 0) or 0)
+    if lock_until > int(time.time()):
+        return jsonify({"ok": False, "msg": "登录失败次数过多，请稍后再试"}), 429
+
+    ua = request.headers.get("User-Agent", "")
+    if not secrets.compare_digest(
+        input_token.strip().encode("utf-8"),
+        token.encode("utf-8"),
+    ):
+        info = record_login_fail(ip, ua=ua)
+        status = 429 if int(info.get("lock_until", 0) or 0) > int(time.time()) else 403
+        return jsonify({"ok": False, "msg": "Token 错误，请检查后重试"}), status
+
+    clear_login_fail(ip)
+    verified = not security_enabled()
+    session_id, csrf, max_age = create_native_session(
+        token,
+        remember=remember,
+        verified=verified,
+    )
+    requires_verification = not verified
+    if requires_verification and security_type() == "code":
+        create_and_send_security_code()
+
+    response = jsonify({
+        "ok": True,
+        "authenticated": verified,
+        "requires_verification": requires_verification,
+        "verification_type": security_type() if requires_verification else None,
+        "csrf_token": csrf,
+        "remember": remember,
+    })
+    set_native_session_cookie(
+        response,
+        session_id,
+        max_age=max_age if remember else None,
+    )
+    return response, 202 if requires_verification else 200
+
+
+@bp.route("/api/auth/verify", methods=["POST"])
+def api_native_verify():
+    token = fls_get_admin_token()
+    native = native_session_from_request(token)
+    if not token or not native:
+        return jsonify({"ok": False, "msg": "登录已过期，请重新登录"}), 401
+    if native["verified"]:
+        return jsonify({"ok": False, "msg": "登录已完成安全验证"}), 400
+
+    if not security_enabled():
+        if not mark_native_session_verified(native, token):
+            return jsonify({"ok": False, "msg": "登录已过期，请重新登录"}), 401
+        return jsonify({
+            "ok": True,
+            "authenticated": True,
+            "csrf_token": native["csrf_token"],
+        })
+
+    ip = client_ip()
+    fail_info = login_fail_info(ip)
+    lock_until = int(fail_info.get("lock_until", 0) or 0)
+    if lock_until > int(time.time()):
+        return jsonify({"ok": False, "msg": "验证失败次数过多，请稍后再试"}), 429
+
+    if not request.is_json:
+        return jsonify({"ok": False, "msg": "请求必须使用 JSON"}), 415
+    data = request.get_json(silent=True)
+    raw_code = data.get("code") if isinstance(data, dict) else None
+    code = raw_code.strip() if isinstance(raw_code, str) else ""
+    if not code or len(code) > 64:
+        return jsonify({"ok": False, "msg": "验证码无效"}), 400
+
+    ua = request.headers.get("User-Agent", "")
+    if security_type() == "code":
+        valid, message = random_code_valid(code)
+    elif security_type() == "totp":
+        valid = verify_totp(security_config().get("totp_secret", ""), code)
+        message = "验证成功" if valid else "2FA 验证码错误"
+    else:
+        valid, message = False, "未知安全验证方式"
+
+    if not valid:
+        info = record_login_fail(ip, ua=ua)
+        status = 429 if int(info.get("lock_until", 0) or 0) > int(time.time()) else 403
+        return jsonify({"ok": False, "msg": message}), status
+
+    if not mark_native_session_verified(native, token):
+        return jsonify({"ok": False, "msg": "登录已过期，请重新登录"}), 401
+    if security_type() == "code":
+        clear_random_code()
+    clear_login_fail(ip)
+    return jsonify({
+        "ok": True,
+        "authenticated": True,
+        "csrf_token": native["csrf_token"],
+    })
+
+
+@bp.route("/api/auth/resend-code", methods=["POST"])
+def api_native_resend_code():
+    token = fls_get_admin_token()
+    native = native_session_from_request(token)
+    if not token or not native:
+        return jsonify({"ok": False, "msg": "登录已过期，请重新登录"}), 401
+    if native["verified"]:
+        return jsonify({"ok": False, "msg": "登录已完成安全验证"}), 400
+    if not security_enabled() or security_type() != "code":
+        return jsonify({"ok": False, "msg": "当前没有可重新发送的验证码"}), 400
+
+    fail_info = login_fail_info(client_ip())
+    if int(fail_info.get("lock_until", 0) or 0) > int(time.time()):
+        return jsonify({"ok": False, "msg": "验证失败次数过多，请稍后再试"}), 429
+
+    create_and_send_security_code()
+    return jsonify({"ok": True, "msg": "验证码已重新发送"})
+
+
+@bp.route("/api/auth/logout", methods=["POST"])
+def api_native_logout():
+    delete_native_session(request.cookies.get("fls_native_session", ""))
+    response = jsonify({"ok": True})
+    clear_native_session_cookie(response)
+    return response
 
 
 @bp.route("/verify", methods=["GET", "POST"])

@@ -3,7 +3,14 @@ import threading
 
 from flask import Blueprint, Response, jsonify, request
 
-from ..models import load_tasks, load_tasks_for_read, save_tasks, mutate_tasks
+from ..models import (
+    get_task,
+    load_tasks,
+    load_tasks_for_read,
+    save_tasks,
+    mutate_tasks,
+    task_history_for_task,
+)
 from ..task_runner import (
     run_task_now,
     stop_task_now,
@@ -287,6 +294,44 @@ def api_scheduler_reload():
         }), 500
 
     return jsonify({"ok": True, "status": "succeeded", "state": state})
+
+
+@bp.route("/api/task/<task_id>")
+def api_task_detail(task_id):
+    task = get_task(task_id)
+    if task is None:
+        return jsonify({"ok": False, "msg": "任务不存在"}), 404
+
+    task_fields = (
+        "id", "name", "remark", "command", "cron", "config_path",
+        "collection_id", "enabled", "env", "proxy_id", "notify",
+        "random_delay", "retry", "run_count", "pinned", "created_at",
+        "updated_at", "last_run_at",
+    )
+    task_payload = {key: task[key] for key in task_fields if key in task}
+    runtime = running_task_snapshot([task_id]).get(task_id, {})
+    history_fields = (
+        "id", "start_at", "end_at", "duration_seconds", "return_code",
+        "status", "source", "message",
+    )
+    history = [
+        {key: row.get(key) for key in history_fields if key in row}
+        for row in task_history_for_task(task_id, 10)
+    ]
+
+    response = jsonify({
+        "ok": True,
+        "task": task_payload,
+        "runtime": {
+            "running": bool(runtime),
+            "status": str(runtime.get("status") or ("running" if runtime else "stopped")),
+            "pid": runtime.get("pid"),
+            "process_name": runtime.get("process_name"),
+        },
+        "history": history,
+    })
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @bp.route("/api/task/action/<action>/<task_id>", methods=["POST"])

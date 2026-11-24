@@ -292,6 +292,443 @@ class AuthFlowTests(unittest.TestCase):
                 self.assertEqual(auth_routes.client_ip(), "127.0.0.1")
 
 
+class NativeAuthApiTests(unittest.TestCase):
+    def _login(self, client, token="unit-token", remember=False):
+        return client.post(
+            "/api/auth/session",
+            json={"token": token, "remember": remember},
+        )
+
+    def test_native_login_validates_json_token_and_rate_limits_failures(self):
+        with isolated_fls_env(token="unit-token"):
+            client = load_app().test_client()
+
+            malformed = client.post("/api/auth/session", data="token=unit-token")
+            self.assertEqual(malformed.status_code, 415)
+
+            invalid = self._login(client, token="wrong")
+            self.assertEqual(invalid.status_code, 403)
+            self.assertFalse(invalid.get_json()["ok"])
+
+            self._login(client, token="wrong")
+            locked = self._login(client, token="wrong")
+            self.assertEqual(locked.status_code, 429)
+            self.assertEqual(self._login(client).status_code, 429)
+
+    def test_native_login_sets_session_cookie_and_session_authenticates_api(self):
+        with isolated_fls_env(token="unit-token"):
+            client = load_app().test_client()
+
+            response = self._login(client, remember=True)
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertTrue(payload["authenticated"])
+            self.assertFalse(payload["requires_verification"])
+            self.assertTrue(payload["remember"])
+            self.assertTrue(payload["csrf_token"])
+            cookie = response.headers.get("Set-Cookie", "")
+            self.assertIn("fls_native_session=", cookie)
+            self.assertFalse(cookie.startswith("session="))
+            self.assertIn("HttpOnly", cookie)
+            self.assertNotIn("unit-token", cookie)
+            self.assertEqual(client.get("/api/status").status_code, 200)
+
+            from fls_manager.native_sessions import NATIVE_SESSION_FILE
+            self.assertEqual(stat.S_IMODE(NATIVE_SESSION_FILE.stat().st_mode), 0o600)
+            self.assertNotIn(b"unit-token", NATIVE_SESSION_FILE.read_bytes())
+
+            with patch.dict(os.environ, {"FLS_TOKEN": "rotated-token"}):
+                rotated = client.get("/api/status")
+            self.assertEqual(rotated.status_code, 401)
+
+    def test_native_login_requires_second_factor_and_verification_unlocks_api(self):
+        with isolated_fls_env(token="unit-token"):
+            from fls_manager.config import save_config
+            from fls_manager.routes import auth_routes
+
+            save_config({"security_verify_enabled": True, "security_verify_type": "code"})
+            with patch.object(auth_routes, "create_and_send_security_code"):
+                client = load_app().test_client()
+                login = self._login(client)
+
+            self.assertEqual(login.status_code, 202)
+            self.assertTrue(login.get_json()["requires_verification"])
+            csrf = login.get_json()["csrf_token"]
+            self.assertEqual(client.get("/api/status").status_code, 401)
+
+            malformed = client.post(
+                "/api/auth/verify",
+                json={"code": 123456},
+                headers={"X-CSRF-Token": csrf},
+            )
+            self.assertEqual(malformed.status_code, 400)
+
+            with patch.object(auth_routes, "random_code_valid", return_value=(True, "验证成功")):
+                verified = client.post(
+                    "/api/auth/verify",
+                    json={"code": "123456"},
+                    headers={"X-CSRF-Token": csrf},
+                )
+
+            self.assertEqual(verified.status_code, 200)
+            self.assertTrue(verified.get_json()["authenticated"])
+            self.assertEqual(client.get("/api/status").status_code, 200)
+
+    def test_native_resend_is_available_before_verification_and_requires_csrf(self):
+        with isolated_fls_env(token="unit-token"):
+            from fls_manager.config import save_config
+            from fls_manager.routes import auth_routes
+
+            save_config({"security_verify_enabled": True, "security_verify_type": "code"})
+            with patch.object(auth_routes, "create_and_send_security_code"):
+                client = load_app().test_client()
+                login = self._login(client)
+
+            self.assertEqual(login.status_code, 202)
+            response = client.post("/api/auth/resend-code")
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("CSRF", response.get_json()["msg"])
+
+            with patch.object(auth_routes, "create_and_send_security_code") as send_code:
+                response = client.post(
+                    "/api/auth/resend-code",
+                    headers={"X-CSRF-Token": login.get_json()["csrf_token"]},
+                )
+
+            self.assertEqual(response.status_code, 200)
+            send_code.assert_called_once()
+
+    def test_native_totp_verification_uses_configured_second_factor(self):
+        with isolated_fls_env(token="unit-token"):
+            from fls_manager.config import save_config
+            from fls_manager.routes import auth_routes
+
+            save_config({
+                "security_verify_enabled": True,
+                "security_verify_type": "totp",
+                "totp_secret": "JBSWY3DPEHPK3PXP",
+            })
+            client = load_app().test_client()
+            login = self._login(client)
+            self.assertEqual(login.status_code, 202)
+            self.assertEqual(login.get_json()["verification_type"], "totp")
+            headers = {"X-CSRF-Token": login.get_json()["csrf_token"]}
+
+            with patch.object(auth_routes, "verify_totp", return_value=False) as verify:
+                rejected = client.post(
+                    "/api/auth/verify",
+                    json={"code": "000000"},
+                    headers=headers,
+                )
+            self.assertEqual(rejected.status_code, 403)
+            verify.assert_called_once_with("JBSWY3DPEHPK3PXP", "000000")
+
+            with patch.object(auth_routes, "verify_totp", return_value=True):
+                accepted = client.post(
+                    "/api/auth/verify",
+                    json={"code": "123456"},
+                    headers=headers,
+                )
+            self.assertEqual(accepted.status_code, 200)
+            self.assertTrue(accepted.get_json()["authenticated"])
+
+    def test_native_logout_requires_csrf_and_invalidates_session(self):
+        with isolated_fls_env(token="unit-token"):
+            client = load_app().test_client()
+            login = self._login(client)
+            csrf = login.get_json()["csrf_token"]
+
+            denied = client.post("/api/auth/logout")
+            self.assertEqual(denied.status_code, 400)
+
+            response = client.post(
+                "/api/auth/logout",
+                headers={"X-CSRF-Token": csrf},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.get_json()["ok"])
+            self.assertEqual(client.get("/api/status").status_code, 401)
+
+
+class NativeTaskApiTests(unittest.TestCase):
+    def test_task_detail_returns_task_runtime_and_bounded_safe_history(self):
+        with isolated_fls_env(token="unit-token"):
+            app = load_app()
+            client = app.test_client()
+            from fls_manager.models import save_tasks
+            from fls_manager.paths import TASK_HISTORY_FILE
+
+            save_tasks([{
+                "id": "daily",
+                "name": "每日任务",
+                "remark": "测试备注",
+                "command": "python daily.py",
+                "cron": "0 8 * * *",
+                "env": {"API_KEY": "task-secret"},
+                "legacy_secret": "must-not-leak",
+            }])
+            TASK_HISTORY_FILE.write_text(json.dumps([
+                {
+                    "id": "history-1",
+                    "task_id": "daily",
+                    "start_at": "2026-11-25 08:00:00",
+                    "end_at": "2026-11-25 08:00:02",
+                    "duration_seconds": 2,
+                    "return_code": 0,
+                    "status": "success",
+                    "source": "manual",
+                    "message": "完成",
+                    "log_file": "/private/path/secret.log",
+                }
+            ]), encoding="utf-8")
+
+            login = client.post(
+                "/api/auth/session",
+                json={"token": "unit-token", "remember": False},
+            )
+            self.assertEqual(login.status_code, 200)
+
+            denied = app.test_client().get("/api/task/daily")
+            self.assertEqual(denied.status_code, 401)
+
+            response = client.get("/api/task/daily")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            payload = response.get_json()
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["task"]["env"], {"API_KEY": "task-secret"})
+            self.assertNotIn("legacy_secret", payload["task"])
+            self.assertEqual(payload["runtime"]["running"], False)
+            self.assertEqual(payload["history"][0]["id"], "history-1")
+            self.assertNotIn("log_file", payload["history"][0])
+
+            missing = client.get("/api/task/missing")
+            self.assertEqual(missing.status_code, 404)
+            self.assertEqual(missing.get_json(), {"ok": False, "msg": "任务不存在"})
+
+    def test_task_log_json_is_bounded_authenticated_and_uncached(self):
+        with isolated_fls_env(token="unit-token"):
+            app = load_app()
+            from fls_manager.models import save_tasks
+            from fls_manager.routes.tasks import logs as task_logs
+
+            save_tasks([{"id": "daily", "name": "daily", "command": "task daily.py"}])
+            with tempfile.TemporaryDirectory(prefix="fls-task-log-") as temp_dir:
+                log_path = Path(temp_dir) / "daily.log"
+                log_path.write_text("first\nsecond\nthird\n", encoding="utf-8")
+                with patch.object(task_logs, "latest_log_for_task", return_value=str(log_path)):
+                    denied = app.test_client().get("/api/task/daily/log")
+                    self.assertEqual(denied.status_code, 401)
+
+                    response = app.test_client().get(
+                        "/api/task/daily/log?lines=2",
+                        headers={"X-Token": "unit-token"},
+                    )
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+                    self.assertEqual(response.get_json()["log"], "second\nthird")
+
+                    invalid = app.test_client().get(
+                        "/api/task/daily/log?lines=1001",
+                        headers={"X-Token": "unit-token"},
+                    )
+                    self.assertEqual(invalid.status_code, 400)
+                    self.assertFalse(invalid.get_json()["ok"])
+
+
+class NativeTaskMutationApiTests(unittest.TestCase):
+    def _task_payload(self, **changes):
+        task = {
+            "name": "每日任务",
+            "remark": "主账号",
+            "command": "python daily.py",
+            "cron": "0 8 * * *",
+            "config_path": "",
+            "collection_id": "",
+            "enabled": True,
+            "env": {"API_KEY": "task-secret"},
+            "proxy_id": "",
+            "notify": {"mode": "none", "ids": []},
+            "random_delay": {"mode": "custom", "seconds": 5},
+            "retry": {"attempts": 2, "interval_seconds": 30},
+        }
+        task.update(changes)
+        return task
+
+    def test_task_form_options_never_expose_proxy_or_notification_secrets(self):
+        with isolated_fls_env(token="unit-token"):
+            app = load_app()
+            from fls_manager.config import save_config
+            from fls_manager.models import save_collections, save_proxies
+
+            save_collections([{"id": "group-1", "name": "签到"}])
+            save_proxies([{
+                "id": "proxy-1",
+                "name": "代理 A",
+                "type": "http",
+                "host": "127.0.0.1",
+                "port": "8080",
+                "password": "proxy-secret",
+            }])
+            save_config({"notify_items": [{
+                "id": "notify-1",
+                "name": "通知 A",
+                "channel": "serverj",
+                "enabled": True,
+                "config": {"sendkey": "notify-secret"},
+            }]})
+
+            response = app.test_client().get(
+                "/api/tasks/form-options",
+                headers={"X-Token": "unit-token"},
+            )
+
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload["collections"][0]["id"], "group-1")
+            self.assertEqual(payload["proxies"][0]["id"], "proxy-1")
+            self.assertEqual(payload["notifications"][0]["id"], "notify-1")
+            serialized = json.dumps(payload)
+            self.assertNotIn("proxy-secret", serialized)
+            self.assertNotIn("notify-secret", serialized)
+
+    def test_native_task_create_requires_csrf_and_is_idempotent(self):
+        with isolated_fls_env(token="unit-token"):
+            app = load_app()
+            client = app.test_client()
+            from fls_manager.models import load_tasks
+            from fls_manager.routes.tasks import pages
+
+            login = client.post(
+                "/api/auth/session",
+                json={"token": "unit-token", "remember": False},
+            )
+            self.assertEqual(login.status_code, 200)
+            csrf = login.get_json()["csrf_token"]
+            body = {"request_id": "a" * 32, "task": self._task_payload()}
+
+            denied = client.post("/api/tasks", json=body)
+            self.assertEqual(denied.status_code, 400)
+
+            with patch.object(pages, "reload_scheduler") as reload_scheduler:
+                created = client.post(
+                    "/api/tasks",
+                    json=body,
+                    headers={"X-CSRF-Token": csrf},
+                )
+                replay = client.post(
+                    "/api/tasks",
+                    json=body,
+                    headers={"X-CSRF-Token": csrf},
+                )
+
+            self.assertEqual(created.status_code, 201)
+            self.assertTrue(created.get_json()["created"])
+            self.assertEqual(replay.status_code, 200)
+            self.assertFalse(replay.get_json()["created"])
+            self.assertEqual(len(load_tasks()), 1)
+            self.assertEqual(reload_scheduler.call_count, 2)
+
+    def test_native_task_create_rejects_invalid_fields_without_saving(self):
+        with isolated_fls_env(token="unit-token"):
+            app = load_app()
+            from fls_manager.models import load_tasks
+
+            cases = (
+                ("cron", {"cron": "not a cron"}),
+                ("config_path", {"config_path": "../../outside.yml"}),
+                ("notify", {"notify": {"mode": "custom", "ids": ["missing"]}}),
+                ("retry", {"retry": {"attempts": 6, "interval_seconds": 30}}),
+            )
+            client = app.test_client()
+            for suffix, changes in cases:
+                with self.subTest(field=suffix):
+                    body = {
+                        "request_id": (suffix.encode().hex() * 16)[:32],
+                        "task": self._task_payload(**changes),
+                    }
+                    response = client.post(
+                        "/api/tasks",
+                        json=body,
+                        headers={"X-Token": "unit-token"},
+                    )
+                    self.assertEqual(response.status_code, 400)
+                    self.assertFalse(response.get_json()["ok"])
+            self.assertEqual(load_tasks(), [])
+
+    def test_native_task_update_detects_stale_edits_and_supports_replay(self):
+        with isolated_fls_env(token="unit-token"):
+            app = load_app()
+            client = app.test_client()
+            from fls_manager.models import load_tasks, save_tasks
+            from fls_manager.routes.tasks import pages
+
+            save_tasks([{
+                "id": "daily",
+                "name": "每日任务",
+                "command": "python old.py",
+                "updated_at": "revision-1",
+            }])
+            body = {
+                "expected_updated_at": "revision-1",
+                "task": self._task_payload(command="python new.py"),
+            }
+
+            with patch.object(pages, "reload_scheduler"):
+                updated = client.put(
+                    "/api/tasks/daily",
+                    json=body,
+                    headers={"X-Token": "unit-token"},
+                )
+                replay = client.put(
+                    "/api/tasks/daily",
+                    json=body,
+                    headers={"X-Token": "unit-token"},
+                )
+                stale = client.put(
+                    "/api/tasks/daily",
+                    json={
+                        "expected_updated_at": "revision-1",
+                        "task": self._task_payload(command="python conflicting.py"),
+                    },
+                    headers={"X-Token": "unit-token"},
+                )
+
+            self.assertEqual(updated.status_code, 200)
+            self.assertTrue(updated.get_json()["changed"])
+            self.assertEqual(replay.status_code, 200)
+            self.assertFalse(replay.get_json()["changed"])
+            self.assertEqual(stale.status_code, 409)
+            self.assertIn("其他操作修改", stale.get_json()["msg"])
+            self.assertEqual(load_tasks()[0]["command"], "python new.py")
+
+    def test_task_save_reports_scheduler_reload_failure_as_saved(self):
+        with isolated_fls_env(token="unit-token"):
+            app = load_app()
+            from fls_manager.models import load_tasks
+            from fls_manager.routes.tasks import pages
+
+            with patch.object(pages, "reload_scheduler", side_effect=RuntimeError("scheduler offline")):
+                response = app.test_client().post(
+                    "/api/tasks",
+                    json={"request_id": "b" * 32, "task": self._task_payload()},
+                    headers={"X-Token": "unit-token"},
+                )
+                replay = app.test_client().post(
+                    "/api/tasks",
+                    json={"request_id": "b" * 32, "task": self._task_payload()},
+                    headers={"X-Token": "unit-token"},
+                )
+
+            self.assertEqual(response.status_code, 503)
+            self.assertTrue(response.get_json()["saved"])
+            self.assertTrue(response.get_json()["reload_required"])
+            self.assertEqual(replay.status_code, 503)
+            self.assertTrue(replay.get_json()["saved"])
+            self.assertEqual(len(load_tasks()), 1)
+
+
 class CsrfSafetyTests(unittest.TestCase):
     def test_layout_injects_csrf_meta_and_post_form_hidden_input(self):
         with isolated_fls_env(token="unit-token"):
@@ -455,6 +892,26 @@ class BackupSafetyTests(unittest.TestCase):
             target = backup_safe_file("demo.tar.gz")
             self.assertEqual(target.name, "demo.tar.gz")
             self.assertIn("backups", target.parts)
+
+    def test_backup_filter_excludes_runtime_native_sessions_and_sidecars(self):
+        with isolated_fls_env(token="unit-token"):
+            from fls_manager.routes.backup._common import _backup_tar_filter
+
+            filter_entry = _backup_tar_filter(MagicMock(is_set=MagicMock(return_value=False)))
+            excluded = (
+                "data/backups",
+                "data/backups/previous.tar.gz",
+                "data/native_sessions.sqlite3",
+                "data/native_sessions.sqlite3-wal",
+                "data/native_sessions.sqlite3-shm",
+                "data/native_sessions.sqlite3-journal",
+            )
+
+            for name in excluded:
+                with self.subTest(name=name):
+                    self.assertIsNone(filter_entry(tarfile.TarInfo(name)))
+
+            self.assertIsNotNone(filter_entry(tarfile.TarInfo("data/config.json")))
 
     def test_api_backup_job_returns_stable_progress_fields(self):
         with isolated_fls_env(token="unit-token"):

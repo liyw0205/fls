@@ -3,6 +3,7 @@ import secrets
 from flask import abort, jsonify, request, session
 
 from .config import fls_get_admin_token
+from .native_sessions import NATIVE_SESSION_COOKIE, native_session_from_request
 
 
 CSRF_SESSION_KEY = "csrf_token"
@@ -41,11 +42,23 @@ def csrf_before_request():
     if request.method in ("GET", "HEAD", "OPTIONS", "TRACE"):
         return None
 
+    if request.endpoint == "auth.api_native_session":
+        return None
+
     header_token = request.headers.get("X-Token", "")
     if header_token and header_token == fls_get_admin_token():
         return None
 
-    expected = session.get(CSRF_SESSION_KEY)
+    native = None
+    if request.path.startswith("/api/") and request.cookies.get(NATIVE_SESSION_COOKIE):
+        native = native_session_from_request(fls_get_admin_token())
+        if native is None:
+            return jsonify({"ok": False, "msg": "登录已过期，请重新登录"}), 401
+    expected = (
+        native["csrf_token"]
+        if native
+        else session.get(CSRF_SESSION_KEY)
+    )
     submitted = (
         request.headers.get("X-CSRF-Token")
         or request.form.get("csrf_token")

@@ -519,12 +519,17 @@ def write_dependencies_file(path, cancel_event=None):
 
 def tar_filter_exclude_backups(tarinfo):
     """
-    备份 data 时排除 data/backups，避免递归把备份打进备份里。
+    排除备份归档和运行时认证会话，避免递归归档或恢复失效/敏感会话。
     """
     try:
         name = str(tarinfo.name or "").replace("\\", "/")
 
-        if name == "data/backups" or name.startswith("data/backups/"):
+        if (
+            name == "data/backups"
+            or name.startswith("data/backups/")
+            or name == "data/native_sessions.sqlite3"
+            or name.startswith("data/native_sessions.sqlite3-")
+        ):
             return None
     except Exception:
         pass

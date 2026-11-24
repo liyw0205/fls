@@ -5,6 +5,7 @@ from urllib.parse import quote, urlencode, unquote, urlsplit
 from flask import request, redirect, url_for, session, jsonify, current_app
 
 from .config import fls_get_admin_token
+from .native_sessions import native_session_from_request
 from .security import security_enabled
 
 FLS_AUTH_SHORT_SECONDS = 3600
@@ -121,10 +122,20 @@ def auth_before_request():
         "auth.setup",
         "auth.verify",
         "auth.resend_code",
+        "auth.api_native_session",
+        "auth.api_native_logout",
     ):
         return None
 
     token = fls_get_admin_token()
+
+    if endpoint in ("auth.api_native_verify", "auth.api_native_resend_code"):
+        native = native_session_from_request(token)
+        if native:
+            if native["verified"]:
+                return jsonify({"ok": False, "msg": "登录已完成安全验证"}), 400
+            return None
+        return jsonify({"ok": False, "msg": "登录已过期，请重新登录"}), 401
 
     if not token:
         if _is_api_request():
@@ -179,6 +190,18 @@ def auth_before_request():
             }), 403
 
         return redirect(url_for("auth.login"))
+
+    native = (
+        native_session_from_request(token)
+        if request.path.startswith("/api/")
+        else None
+    )
+    if native:
+        if not native["verified"]:
+            if _is_api_request():
+                return jsonify({"ok": False, "msg": "需要安全验证"}), 401
+            return redirect(url_for("auth.verify"))
+        return None
 
     if auth_session_valid(token):
         if not auth_security_verified():
