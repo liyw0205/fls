@@ -738,24 +738,39 @@ function toggleTaskActionMenu(button){{
     const menu = targetId ? document.getElementById(targetId) : null;
     if(!menu) return;
     const willOpen = !!menu.hidden;
+    closeTaskActionMenus();
+    if(!willOpen){{
+        return;
+    }}
+
+    if(menu.parentElement !== document.body){{
+        menu.__flsActionMenuOrigin = {{ parent: menu.parentElement, nextSibling: menu.nextSibling }};
+        document.body.appendChild(menu);
+    }}
+    menu.classList.add("fls-action-menu-popover");
+    menu.hidden = false;
+    positionTaskActionMenu(button, menu);
+    button.setAttribute("aria-expanded", "true");
+}}
+
+function closeTaskActionMenus(){{
     document.querySelectorAll(".task-action-more-menu").forEach(function(item){{
         item.hidden = true;
         item.classList.remove("fls-action-menu-popover");
+        const origin = item.__flsActionMenuOrigin;
+        if(!origin) return;
+        if(origin.parent && origin.parent.isConnected){{
+            const next = origin.nextSibling && origin.nextSibling.parentNode === origin.parent
+                ? origin.nextSibling : null;
+            origin.parent.insertBefore(item, next);
+        }}else{{
+            item.remove();
+        }}
+        delete item.__flsActionMenuOrigin;
     }});
     document.querySelectorAll(".task-action-menu-toggle").forEach(function(item){{
         item.setAttribute("aria-expanded", "false");
     }});
-    if(!willOpen){{
-        menu.hidden = true;
-        button.setAttribute("aria-expanded", "false");
-        return;
-    }}
-
-    if(menu.parentElement !== document.body) document.body.appendChild(menu);
-    menu.classList.add("fls-action-menu-popover");
-    menu.hidden = false;
-    positionTaskActionMenu(button, menu);
-    button.setAttribute("aria-expanded", willOpen ? "true" : "false");
 }}
 
 function positionTaskActionMenu(button, menu){{
@@ -781,25 +796,15 @@ window.addEventListener("resize", function(){{
 }});
 
 document.addEventListener("click", function(event){{
-    if(event.target.closest(".task-action-more") || event.target.closest(".task-action-more-menu")) return;
-    document.querySelectorAll(".task-action-more-menu").forEach(function(item){{
-        item.hidden = true;
-        item.classList.remove("fls-action-menu-popover");
-    }});
-    document.querySelectorAll(".task-action-menu-toggle").forEach(function(item){{
-        item.setAttribute("aria-expanded", "false");
-    }});
-}});
+    if(event.target.closest(".task-action-menu-toggle")) return;
+    closeTaskActionMenus();
+}}, true);
 
 document.addEventListener("keydown", function(event){{
     if(event.key !== "Escape") return;
-    document.querySelectorAll(".task-action-more-menu").forEach(function(item){{
-        item.hidden = true;
-        item.classList.remove("fls-action-menu-popover");
-    }});
-    document.querySelectorAll(".task-action-menu-toggle").forEach(function(item){{
-        item.setAttribute("aria-expanded", "false");
-    }});
+    const open = document.querySelector(".task-action-menu-toggle[aria-expanded='true']");
+    closeTaskActionMenus();
+    if(open) open.focus();
 }});
 
 function taskCssValue(value){{
@@ -1008,6 +1013,7 @@ async function taskAjaxAction(action, taskId, source){{
 }}
 
 async function refreshTasksBlockPartial(keepSelection){{
+    closeTaskActionMenus();
     try{{
         const res = await fetch(window.location.href, {{
             headers: {{"X-Requested-With":"XMLHttpRequest"}},
