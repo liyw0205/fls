@@ -1076,6 +1076,13 @@ const {chromium} = require(process.env.FLS_PLAYWRIGHT_CORE);
       assert.equal((await state()).tasks.length,3);
       await copy(200);
       assert.equal((await state()).tasks.length,4);
+      toggle=menuToggle();
+      menu=await menuFor(toggle);
+      assert.equal(await menu.evaluate(el=>document.querySelector('#tasksBlock').contains(el)),true);
+      await toggle.click();
+      assert.equal(await menu.isVisible(),true);
+      await toggle.click();
+      await assertMenuClosed(toggle,menu);
       let dropped=false;
       await page.route('**/api/task/action/copy/a',async route=>{
        if(!dropped){dropped=true;await route.fetch();return route.abort();}
