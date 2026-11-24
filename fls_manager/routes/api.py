@@ -1,3 +1,4 @@
+import json
 import os
 import threading
 
@@ -235,6 +236,16 @@ def api_status():
     return response
 
 
+@bp.route("/api/tasks")
+def api_task_list():
+    from ..task_list_api import list_tasks
+
+    payload, status = list_tasks(request.args, load_tasks=load_tasks_for_read)
+    response = jsonify(payload)
+    response.headers["Cache-Control"] = "no-store"
+    return response, status
+
+
 @bp.route("/api/scheduler/jobs")
 def api_scheduler_jobs():
     result = []
@@ -376,7 +387,7 @@ def api_task_action(action, task_id):
             )
             return jsonify(payload), status
 
-        if action in ("copy", "delete", "clear_collection"):
+        if action in ("copy", "delete", "clear_collection", "unpin"):
             from ..task_bulk import execute_single
             data = request.get_json(silent=True) if request.is_json else request.form.to_dict()
             payload, status = execute_single(
@@ -387,6 +398,23 @@ def api_task_action(action, task_id):
             return jsonify(payload), status
 
         if action == "pin":
+            if request.is_json:
+                data = request.get_json(silent=True)
+                if not isinstance(data, dict) or not isinstance(data.get("pinned"), bool):
+                    return jsonify(ok=False, msg="pinned 必须是布尔值"), 400
+                request_id = data.get("request_id")
+                if not isinstance(request_id, str) or not request_id:
+                    return jsonify(ok=False, msg="提交标识不能为空，请刷新后重试"), 400
+                from ..task_bulk import execute_single
+                target_action = "pin" if data["pinned"] else "unpin"
+                payload, status = execute_single(
+                    target_action, task_id, data, load_tasks=load_tasks, mutate_tasks=mutate_tasks,
+                    run_task=run_task_now, stop_task=stop_task_now,
+                    cancel_retry=cancel_task_retry, reload_scheduler=reload_scheduler,
+                )
+                payload["pinned"] = data["pinned"]
+                return jsonify(payload), status
+
             result = {}
 
             def pin(tasks):
@@ -434,6 +462,8 @@ def api_task_bulk_action():
             "task_ids": request.form.getlist("task_ids"),
             "request_id": request.form.get("request_id", ""),
         }
+        if not request.is_json and "expected_collections" in request.form:
+            data["expected_collections"] = request.form.get("expected_collections")
         action, task_ids, request_id = parse_bulk_request(data)
     except ValueError as exc:
         invalid = data if isinstance(data, dict) else {}
@@ -441,12 +471,28 @@ def api_task_bulk_action():
         values = [values] if isinstance(values, str) else values
         count = len({value.strip() for value in values if isinstance(value, str) and value.strip()}) if isinstance(values, list) else 0
         return jsonify({"ok": False, "msg": str(exc), "action": invalid.get("action", ""), "count": count}), 400
+    expected_collections = None
+    if action == "clear_collection" and "expected_collections" in data:
+        expected_collections = data.get("expected_collections")
+        if isinstance(expected_collections, str):
+            try:
+                expected_collections = json.loads(expected_collections)
+            except (ValueError, TypeError):
+                return jsonify({"ok": False, "msg": "原合集选择无效，请刷新后重试", "action": action}), 400
+        if (
+            not isinstance(expected_collections, dict)
+            or any(task_id not in expected_collections for task_id in task_ids)
+            or any(not isinstance(value, str) or "\x00" in value for value in expected_collections.values())
+        ):
+            return jsonify({"ok": False, "msg": "原合集选择无效，请刷新后重试", "action": action}), 400
+        expected_collections = {task_id: expected_collections[task_id] for task_id in task_ids}
     try:
         payload, status = execute_bulk(
             action, task_ids, request_id,
             load_tasks=load_tasks, mutate_tasks=mutate_tasks,
             run_task=run_task_now, stop_task=stop_task_now,
             cancel_retry=cancel_task_retry, reload_scheduler=reload_scheduler,
+            expected_collections=expected_collections,
         )
         if action == "run" and any("脚本重命名待恢复" in row["msg"] for row in payload.get("results", [])):
             from ..models import get_task

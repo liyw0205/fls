@@ -11,10 +11,14 @@ from .utils import now_str
 
 
 BULK_LOCK = threading.RLock()
-BULK_ACTIONS = ("enable", "disable", "run", "stop", "delete", "clear_collection", "copy", "assign_collection")
+BULK_ACTIONS = ("enable", "disable", "run", "stop", "delete", "clear_collection", "copy", "assign_collection", "pin", "unpin")
 
 
 class TaskBulkSelectionChanged(ValueError):
+    pass
+
+
+class TaskPinnedLimitExceeded(ValueError):
     pass
 
 
@@ -34,6 +38,8 @@ def parse_bulk_request(data):
         raise ValueError("请选择任务")
     if action.strip() == "copy" and len(task_ids) != 1:
         raise ValueError("一次只能复制一个任务")
+    if action.strip() in ("pin", "unpin") and len(task_ids) != 1:
+        raise ValueError("置顶操作一次只能指定一个任务")
     request_id = data.get("request_id", "")
     if not isinstance(request_id, str) or (request_id and not re.fullmatch(r"[a-f0-9]{32}", request_id)):
         raise ValueError("提交标识无效，请刷新页面后重试")
@@ -238,7 +244,7 @@ def execute_bulk(action, task_ids, request_id, *, load_tasks, mutate_tasks, run_
             if "payload" in record:
                 return record["payload"], record["http_status"]
             created_ids = []
-            if action in ("copy", "delete", "clear_collection", "assign_collection"):
+            if action in ("copy", "delete", "clear_collection", "assign_collection", "pin", "unpin"):
                 actual = {task["id"]: task for task in load_tasks()}
                 for row in record["results"]:
                     if action == "copy" and record.get("copy_ids", {}).get(row["task_id"]) in actual:
@@ -250,6 +256,8 @@ def execute_bulk(action, task_ids, request_id, *, load_tasks, mutate_tasks, run_
                         row.update(status="succeeded", msg="任务已移出合集")
                     elif action == "assign_collection" and row["task_id"] in actual and actual[row["task_id"]].get("collection_id") == target_collection:
                         row.update(status="succeeded", msg="任务已加入合集")
+                    elif action in ("pin", "unpin") and row["task_id"] in actual and bool(actual[row["task_id"]].get("pinned")) == (action == "pin"):
+                        row.update(status="succeeded", msg="任务置顶状态已确认")
             payload = _with_results({
                 "ok": False, "action": action, "count": len(task_ids), "request_id": request_id,
                 "msg": "上次请求中断；已完成项不会重复执行，结果未知项请先查看任务历史。",
@@ -382,12 +390,12 @@ def execute_bulk(action, task_ids, request_id, *, load_tasks, mutate_tasks, run_
                             count += 1
                     checkpoint()
 
-            if action in ("enable", "disable", "clear_collection", "assign_collection", "delete", "copy"):
+            if action in ("enable", "disable", "clear_collection", "assign_collection", "delete", "copy", "pin", "unpin"):
                 selected = set(stopped_ids if action == "delete" else task_ids)
                 selected_rows = [row for row in rows if row["task_id"] in selected]
                 state = {"saved": False, "changed": 0}
-                field = "collection_id" if collection_action else "enabled"
-                value = (target_collection or "") if collection_action else action == "enable"
+                field = "collection_id" if collection_action else "pinned" if action in ("pin", "unpin") else "enabled"
+                value = (target_collection or "") if collection_action else action == "pin" if field == "pinned" else action == "enable"
 
                 def update(tasks):
                     existing = {task["id"] for task in tasks}
@@ -403,6 +411,10 @@ def execute_bulk(action, task_ids, request_id, *, load_tasks, mutate_tasks, run_
                         for task in tasks if task["id"] in selected
                     ):
                         raise TaskBulkSelectionChanged("任务合集归属已变化，未加入，请刷新后重新选择")
+                    if action == "pin" and not any(
+                        task.get("pinned") for task in tasks if task["id"] in selected
+                    ) and sum(1 for task in tasks if task.get("pinned")) >= 5:
+                        raise TaskPinnedLimitExceeded("最多只能置顶 5 个任务，请先取消一个置顶任务")
                     if action == "delete":
                         from .task_runner import running_task_snapshot
                         running = running_task_snapshot()
@@ -463,7 +475,7 @@ def execute_bulk(action, task_ids, request_id, *, load_tasks, mutate_tasks, run_
                         row.update(status="unknown", msg="保存结果尚未确认")
                     checkpoint()
                     try:
-                        mutate_tasks(update, None if collection_action else reload_scheduler, after_write)
+                        mutate_tasks(update, None if collection_action or action in ("pin", "unpin") else reload_scheduler, after_write)
                     except Exception as exc:
                         # Atomic publication may succeed before a subsequent confirmation fails.
                         if not state["saved"] and not isinstance(exc, TaskBulkSelectionChanged):
@@ -477,7 +489,12 @@ def execute_bulk(action, task_ids, request_id, *, load_tasks, mutate_tasks, run_
                                 )
                             except Exception:
                                 state["saved"] = None
-                        if state["saved"] or isinstance(exc, TaskSchedulerReloadError):
+                        if isinstance(exc, TaskPinnedLimitExceeded):
+                            for row in selected_rows:
+                                row.update(status="failed", msg=str(exc))
+                            payload.update(ok=False, saved=False, msg=str(exc))
+                            status = 400
+                        elif state["saved"] or isinstance(exc, TaskSchedulerReloadError):
                             for row in selected_rows:
                                 row.update(status="succeeded", msg="已保存")
                             payload.update(saved=True, reload_required=not collection_action)
@@ -506,8 +523,8 @@ def execute_bulk(action, task_ids, request_id, *, load_tasks, mutate_tasks, run_
 
             if action == "copy":
                 parts = [f"已复制为 {state.get('copy_name', '')}" if count else "任务未复制"]
-            elif action in ("enable", "disable", "clear_collection", "assign_collection"):
-                verb = {"enable": "启用", "disable": "禁用", "clear_collection": "取出", "assign_collection": "加入合集"}[action]
+            elif action in ("enable", "disable", "clear_collection", "assign_collection", "pin", "unpin"):
+                verb = {"enable": "启用", "disable": "禁用", "clear_collection": "取出", "assign_collection": "加入合集", "pin": "置顶", "unpin": "取消置顶"}[action]
                 payload.update(updated_count=count)
                 parts = [f"已{verb} {count} 个任务"]
             else:
