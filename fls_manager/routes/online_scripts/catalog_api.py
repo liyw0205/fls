@@ -93,6 +93,7 @@ def _script_dto(item, *, include_task_details=False):
         "has_doc": bool(str(item.get("doc_link") or "").strip()),
         "has_tasks": bool(tasks),
         "task_count": len(tasks),
+        "has_task_source": bool(str(item.get("task_link") or "").strip()),
     }
     if include_task_details:
         dto["tasks"] = [_task_dto(task, index, item) for index, task in enumerate(tasks, 1)]

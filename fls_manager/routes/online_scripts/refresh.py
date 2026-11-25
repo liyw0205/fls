@@ -21,6 +21,7 @@ from ...online_scripts.constants import (
 )
 from ...online_scripts.logs import online_refresh_log_file
 from ...online_scripts.source import online_script_cache_fingerprint, online_script_source_fingerprint
+from ...models import load_proxies
 from ...utils import now_str
 
 
@@ -29,6 +30,28 @@ def _refresh_request_id(raw):
     if not re.fullmatch(r"[a-f0-9]{32}", value):
         raise ValueError("在线脚本源刷新请求标识无效，请刷新页面后重试")
     return value
+
+
+@bp.route("/api/online-scripts/refresh-options")
+def api_online_refresh_options():
+    try:
+        proxies = [
+            {
+                "id": str(proxy.get("id") or ""),
+                "name": str(proxy.get("name") or "未命名代理"),
+                "type": str(proxy.get("type") or ""),
+            }
+            for proxy in load_proxies()
+            if proxy.get("enabled", True) and proxy.get("id")
+        ]
+    except Exception:
+        response = jsonify(ok=False, error="代理配置无法读取")
+        response.status_code = 500
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    response = jsonify(ok=True, proxies=proxies)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def _refresh_status_with_failure_recovery(state):
