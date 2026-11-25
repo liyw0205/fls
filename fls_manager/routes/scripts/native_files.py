@@ -1,7 +1,8 @@
 import json
-import uuid
 import stat
+import uuid
 from datetime import datetime
+from pathlib import Path
 
 from flask import jsonify, request
 from werkzeug.datastructures import MultiDict
@@ -25,6 +26,8 @@ from ...script_rename import (
     get_script_rename,
     rename_preview,
     resume_script_rename,
+    ScriptReferenceLimitError,
+    script_delete_preview,
     validate_new_name,
     validate_rename_updates,
 )
@@ -152,6 +155,33 @@ def _rename_identifier(value):
         return False
 
 
+def _delete_preview(path):
+    target, relative = _path_target(path)
+    _guard_file_mutation(target)
+    references, revision, metadata = script_delete_preview(target)
+    return target, {
+        "path": relative,
+        "kind": "file",
+        "revision": revision,
+        "size_bytes": metadata.st_size,
+        "modified_at": datetime.fromtimestamp(metadata.st_mtime).astimezone().isoformat(),
+        "references": references,
+    }
+
+
+def _assert_script_not_running(target, references):
+    from ...task_runner import is_running
+    from .debug import SCRIPT_DEBUG_LOCK, SCRIPT_DEBUG_RUNNING
+
+    if any(is_running(reference["task_id"]) for reference in references):
+        raise ScriptFileConflict("引用该脚本的任务仍在运行，请先停止任务后删除")
+    with SCRIPT_DEBUG_LOCK:
+        for info in SCRIPT_DEBUG_RUNNING.values():
+            running_path = info.get("script") or ""
+            if info.get("running") and running_path and Path(running_path).resolve() == target:
+                raise ScriptFileConflict("脚本仍在调试，请先停止调试后删除")
+
+
 @bp.route("/api/scripts/tree")
 def api_script_tree():
     raw_path = request.args.get("path", "")
@@ -216,7 +246,26 @@ def api_script_tree():
     })
 
 
-@bp.route("/api/scripts/file", methods=["GET", "PUT", "POST"])
+@bp.route("/api/scripts/delete/preview")
+def api_script_delete_preview():
+    raw_path = request.args.get("path", "")
+    try:
+        with TASKS_MUTATION_LOCK:
+            _target, preview = _delete_preview(raw_path)
+    except FileNotFoundError:
+        return _error("脚本文件不存在", 404, "not_found")
+    except ScriptFileConflict:
+        return _error("脚本路径存在待恢复操作", 409, "recovery_required")
+    except ScriptReferenceLimitError:
+        return _error("引用该文件的任务超过原生确认上限", 413, "too_many_references")
+    except ValueError:
+        return _error("只支持预览普通脚本文件", 400, "not_file")
+    except OSError:
+        return _error("删除影响预览读取失败", 500, "preview_failed")
+    return _response({"ok": True, "preview": preview})
+
+
+@bp.route("/api/scripts/file", methods=["GET", "PUT", "POST", "DELETE"])
 def api_script_file():
     if request.method == "GET":
         raw_path = request.args.get("path")
@@ -249,6 +298,51 @@ def api_script_file():
     data, error = _json_body()
     if error is not None:
         return error
+
+    if request.method == "DELETE":
+        if set(data) != {"path", "revision", "confirm_references"}:
+            return _error("请求字段无效", 400, "invalid_body")
+        raw_path = data.get("path")
+        revision = data.get("revision")
+        confirm_references = data.get("confirm_references")
+        if (
+            not isinstance(raw_path, str)
+            or not isinstance(revision, str)
+            or len(revision) != 64
+            or any(char not in "0123456789abcdef" for char in revision)
+            or not isinstance(confirm_references, bool)
+        ):
+            return _error("path、revision 或引用确认无效", 400, "invalid_body")
+        try:
+            with TASKS_MUTATION_LOCK:
+                target, preview = _delete_preview(raw_path)
+                if revision != preview["revision"]:
+                    return _response({
+                        "ok": False,
+                        "code": "revision_conflict",
+                        "msg": "文件或任务引用已变更，请重新检查删除影响",
+                        "preview": preview,
+                    }, 409)
+                if preview["references"] and not confirm_references:
+                    return _response({
+                        "ok": False,
+                        "code": "references_ack_required",
+                        "msg": "该文件仍被任务引用，请确认任务可能无法运行后再删除",
+                        "preview": preview,
+                    }, 409)
+                _assert_script_not_running(target, preview["references"])
+                target.unlink()
+        except FileNotFoundError:
+            return _error("脚本文件不存在", 404, "not_found")
+        except ScriptFileConflict:
+            return _error("脚本正在运行或存在待恢复操作，未删除", 409, "script_busy_or_recovery_required")
+        except ScriptReferenceLimitError:
+            return _error("引用该文件的任务超过原生确认上限", 413, "too_many_references")
+        except ValueError:
+            return _error("只支持删除普通脚本文件", 400, "not_file")
+        except OSError:
+            return _error("删除失败或结果未知，请刷新目录确认", 503, "delete_result_unknown")
+        return _response({"ok": True, "deleted": True, "path": preview["path"]})
 
     if request.method == "POST":
         if set(data) - {"path", "kind", "content"}:

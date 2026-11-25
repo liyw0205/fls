@@ -17,6 +17,10 @@ from .utils import now_str
 RENAME_TERMINAL = ("succeeded", "rolled_back")
 
 
+class ScriptReferenceLimitError(ValueError):
+    pass
+
+
 def load_script_renames():
     with storage_transaction():
         try:
@@ -140,6 +144,55 @@ def rename_preview(source, destination):
                  [{"id": row["id"], "before": row["before"]} for row in references]]
     revision = hashlib.sha256(json.dumps(signature, sort_keys=True).encode("utf-8")).hexdigest()
     return references, revision
+
+
+def script_delete_preview(target):
+    """Describe task references without returning their command or config values."""
+    from .models import load_tasks
+
+    target = Path(target)
+    metadata = target.lstat()
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError("只允许通过原生接口删除普通文件")
+
+    references = []
+    signature_references = []
+    for task in load_tasks():
+        command = str(task.get("command") or "")
+        config_path = str(task.get("config_path") or "")
+        fields = []
+        if _mentions_path(command, target):
+            fields.append("command")
+        if _mapped_path(config_path, target, target) is not None:
+            fields.append("config_path")
+        if not fields:
+            continue
+        references.append({
+            "task_id": str(task["id"]),
+            "task_name": str(task.get("name") or "")[:160],
+            "fields": fields,
+        })
+        signature_references.append({
+            "task_id": str(task["id"]),
+            "task_name": str(task.get("name") or ""),
+            "fields": fields,
+            "command": command,
+            "config_path": config_path,
+        })
+        if len(references) > 200:
+            raise ScriptReferenceLimitError("引用该文件的任务超过原生确认上限")
+
+    signature = [
+        target.relative_to(SCRIPT_DIR.resolve()).as_posix(),
+        rename_identity(target),
+        metadata.st_mtime_ns,
+        metadata.st_size,
+        signature_references,
+    ]
+    revision = hashlib.sha256(
+        json.dumps(signature, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    return references, revision, metadata
 
 
 def validate_rename_updates(references, form, source, destination):

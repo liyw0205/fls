@@ -1,3 +1,4 @@
+import json
 import os
 import unittest
 from unittest.mock import patch
@@ -359,6 +360,142 @@ class NativeScriptFilesApiTests(unittest.TestCase):
             )
             self.assertEqual(recovered.status_code, 200, recovered.json)
             self.assertEqual(recovered.json["operation"]["status"], "succeeded")
+
+    def test_native_delete_requires_current_preview_and_explicit_reference_acknowledgement(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.native_sessions import create_native_session
+
+            scripts = base_dir / "scripts"
+            scripts.joinpath("demo.py").write_text("print('demo')\n", encoding="utf-8")
+            data_dir = base_dir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            (data_dir / "tasks.json").write_text(json.dumps([
+                {
+                    "id": "task-delete",
+                    "name": "依赖脚本的任务",
+                    "command": "python demo.py",
+                    "config_path": "demo.py",
+                },
+            ]), encoding="utf-8")
+            with app.app_context():
+                session_id, csrf_token, _max_age = create_native_session(
+                    TOKEN, remember=True, verified=True,
+                )
+            client = app.test_client()
+            client.set_cookie("fls_native_session", session_id)
+            headers = {"X-CSRF-Token": csrf_token}
+
+            preview_response = client.get(
+                "/api/scripts/delete/preview?path=demo.py",
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(preview_response.status_code, 200, preview_response.json)
+            preview = preview_response.json["preview"]
+            self.assertEqual(preview["references"], [{
+                "task_id": "task-delete",
+                "task_name": "依赖脚本的任务",
+                "fields": ["command", "config_path"],
+            }])
+            self.assertNotIn("python demo.py", preview_response.get_data(as_text=True))
+            self.assertEqual(preview_response.headers.get("Cache-Control"), "no-store")
+
+            missing_csrf = client.delete("/api/scripts/file", json={
+                "path": "demo.py",
+                "revision": preview["revision"],
+                "confirm_references": True,
+            })
+            self.assertEqual(missing_csrf.status_code, 400)
+            self.assertTrue((scripts / "demo.py").exists())
+
+            unconfirmed = client.delete("/api/scripts/file", json={
+                "path": "demo.py",
+                "revision": preview["revision"],
+                "confirm_references": False,
+            }, headers=headers)
+            self.assertEqual(unconfirmed.status_code, 409)
+            self.assertEqual(unconfirmed.json["code"], "references_ack_required")
+            self.assertTrue((scripts / "demo.py").exists())
+
+            (scripts / "demo.py").write_text("print('changed')\n", encoding="utf-8")
+            stale = client.delete("/api/scripts/file", json={
+                "path": "demo.py",
+                "revision": preview["revision"],
+                "confirm_references": True,
+            }, headers=headers)
+            self.assertEqual(stale.status_code, 409)
+            self.assertEqual(stale.json["code"], "revision_conflict")
+            self.assertTrue((scripts / "demo.py").exists())
+
+            current = stale.json["preview"]
+            tasks_file = data_dir / "tasks.json"
+            task_rows = json.loads(tasks_file.read_text(encoding="utf-8"))
+            task_rows[0]["config_path"] = ""
+            tasks_file.write_text(json.dumps(task_rows), encoding="utf-8")
+            stale_references = client.delete("/api/scripts/file", json={
+                "path": "demo.py",
+                "revision": current["revision"],
+                "confirm_references": True,
+            }, headers=headers)
+            self.assertEqual(stale_references.status_code, 409)
+            self.assertEqual(stale_references.json["code"], "revision_conflict")
+            self.assertTrue((scripts / "demo.py").exists())
+
+            current = stale_references.json["preview"]
+            deleted = client.delete("/api/scripts/file", json={
+                "path": "demo.py",
+                "revision": current["revision"],
+                "confirm_references": True,
+            }, headers=headers)
+            self.assertEqual(deleted.status_code, 200, deleted.json)
+            self.assertTrue(deleted.json["deleted"])
+            self.assertFalse((scripts / "demo.py").exists())
+
+    def test_native_delete_rejects_busy_files_and_non_files(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.routes.scripts import native_files
+
+            scripts = base_dir / "scripts"
+            (scripts / "busy.py").write_text("print('busy')\n", encoding="utf-8")
+            (scripts / "folder").mkdir()
+            data_dir = base_dir / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
+            (data_dir / "tasks.json").write_text(json.dumps([
+                {
+                    "id": "busy-task",
+                    "name": "运行中任务",
+                    "command": "python busy.py",
+                },
+            ]), encoding="utf-8")
+            client = app.test_client()
+            headers = {"X-Token": TOKEN}
+            directory = client.get(
+                "/api/scripts/delete/preview?path=folder",
+                headers=headers,
+            )
+            self.assertEqual(directory.status_code, 400)
+            self.assertTrue((scripts / "folder").is_dir())
+
+            preview = client.get(
+                "/api/scripts/delete/preview?path=busy.py",
+                headers=headers,
+            ).json["preview"]
+            with patch("fls_manager.task_runner.is_running", return_value=True):
+                busy = client.delete("/api/scripts/file", json={
+                    "path": "busy.py",
+                    "revision": preview["revision"],
+                    "confirm_references": True,
+                }, headers=headers)
+            self.assertEqual(busy.status_code, 409)
+            self.assertEqual(busy.json["code"], "script_busy_or_recovery_required")
+            self.assertTrue((scripts / "busy.py").exists())
+
+            successful = client.delete("/api/scripts/file", json={
+                "path": "busy.py",
+                "revision": preview["revision"],
+                "confirm_references": True,
+            }, headers=headers)
+            self.assertEqual(successful.status_code, 200)
+            self.assertFalse((scripts / "busy.py").exists())
 
 
 if __name__ == "__main__":
