@@ -43,6 +43,7 @@ def find_install_log_context(install_id):
     marker = f"-{install_id}.log"
     candidates = (
         ("dependency", "deps-install-"),
+        ("dependency", "deps-uninstall-"),
         ("runtime", "system-install-"),
     )
 
@@ -67,6 +68,7 @@ def find_install_log_context(install_id):
                 if package:
                     return {
                         "kind": kind,
+                        "operation": "uninstall" if prefix == "deps-uninstall-" else "install",
                         "package": package,
                         "log_file": str(resolved),
                     }
@@ -104,6 +106,8 @@ def install_recovery_action(context):
         )
 
     install_id = str(context.get("id") or "").strip()
+    operation = str(context.get("operation") or "install")
+    verb = "卸载" if operation == "uninstall" else "安装"
     if install_id and re.fullmatch(r"[A-Za-z0-9_-]{1,80}", install_id):
         return (
             f'<form class="inline-form install-retry-form" method="post" '
@@ -111,9 +115,11 @@ def install_recovery_action(context):
             f'data-api-action="/api/deps/install-retry/{h(install_id)}">'
             f'<input type="hidden" name="request_id" value="{h(uuid.uuid4().hex)}">'
             f'<input type="hidden" name="package" value="{h(package)}">'
-            '<button class="btn btn-orange" type="submit">重试安装依赖</button>'
+            f'<button class="btn btn-orange" type="submit">重试{verb}依赖</button>'
             '</form>'
         )
+    if operation == "uninstall":
+        return ""
     return (
         '<form class="inline-form" method="post" action="/deps/install">'
         f'<input type="hidden" name="name" value="{h(package)}">'
@@ -443,17 +449,28 @@ def _install_cancel_status(install_id, cancel_id):
 
 def _retry_install_info(original, retry_id):
     kind = str(original.get("kind") or "")
+    operation = str(original.get("operation") or "install")
     package = str(original.get("package") or "")
-    if kind not in ("dependency", "runtime") or not package:
+    if (
+        kind not in ("dependency", "runtime")
+        or operation not in ("install", "uninstall")
+        or (kind == "runtime" and operation != "install")
+        or not package
+    ):
         raise ValueError("原安装回执缺少可重试的安装类型或包名")
     if retry_id == str(original.get("id") or ""):
         raise ValueError("重试请求不能复用原安装 ID")
-    log_prefix = "deps-install" if kind == "dependency" else "system-install"
+    log_prefix = (
+        "system-install" if kind == "runtime"
+        else "deps-uninstall" if operation == "uninstall"
+        else "deps-install"
+    )
     log_file = LOG_DIR / f"{log_prefix}-{safe_name(package)}-{retry_id}.log"
     info = {
         "id": retry_id,
         "request_id": retry_id,
         "kind": kind,
+        "operation": operation,
         "retry_of": str(original.get("id") or ""),
         "package": package,
         "log_file": str(log_file),
@@ -478,6 +495,7 @@ def _install_retry_pair_matches(parent, child):
         and parent.get("retried_by") == child.get("id")
         and child.get("retry_of") == parent.get("id")
         and parent.get("kind") == child.get("kind")
+        and parent.get("operation", "install") == child.get("operation", "install")
         and parent.get("package") == child.get("package")
     )
 
@@ -604,10 +622,14 @@ def _retry_install_lookup(install_id, retry_id):
 
 def _retry_install_result(install_id, location=""):
     result = deps_install_result(install_id, recover_receipt=True)
+    info = get_install_job(install_id, DEPS_RUNNING) or {}
     return {
         "ok": not result.get("receipt_pending"),
         "request_id": install_id,
         "install_id": install_id,
+        "kind": info.get("kind", "dependency"),
+        "operation": info.get("operation", "install"),
+        "package": info.get("package", ""),
         "log_url": location or url_for("deps.deps_install_log", install_id=install_id, back="/deps"),
         **result,
         **({"msg": result["error"]} if result.get("receipt_pending") else {}),
@@ -658,7 +680,23 @@ def _retry_install_start(install_id, retry_id):
         }, 409
     try:
         info = _retry_install_info(original, retry_id)
-        claim = claim_install_retry(info)
+        with INSTALL_JOBS_LOCK:
+            if info["kind"] == "dependency":
+                conflict = _conflicting_dependency_operation(
+                    info["package"], exclude_ids={install_id},
+                )
+                if conflict:
+                    return {
+                        "ok": False,
+                        "request_id": retry_id,
+                        "msg": "该依赖已有运行中或结果未确认的操作，未提交重试。",
+                    }, 409
+            claim = claim_install_retry(info)
+            if claim["claimed"]:
+                live_parent = DEPS_RUNNING.get(install_id)
+                if isinstance(live_parent, dict):
+                    live_parent["retried_by"] = retry_id
+                DEPS_RUNNING[retry_id] = info
     except ValueError as exc:
         return {"ok": False, "request_id": retry_id, "msg": str(exc)}, 400
     except LookupError as exc:
@@ -687,10 +725,6 @@ def _retry_install_start(install_id, retry_id):
             }, 409
         return _retry_install_response(child_id)
 
-    live_parent = DEPS_RUNNING.get(install_id)
-    if isinstance(live_parent, dict):
-        live_parent["retried_by"] = retry_id
-    DEPS_RUNNING[retry_id] = info
     try:
         info["log_fp"] = open(info["log_file"], "ab", buffering=0)
     except Exception as exc:
@@ -706,8 +740,9 @@ def _retry_install_start(install_id, retry_id):
         return _retry_install_response(retry_id)
     package = info["package"]
     try:
+        verb = "重试卸载" if info.get("operation") == "uninstall" else "重试安装"
         fp.write((
-            f"===== 重试安装: {package} =====\n"
+            f"===== {verb}: {package} =====\n"
             f"时间: {now_str()}\n"
             f"原安装 ID: {install_id}\n"
             f"日志文件: {info['log_file']}\n"
@@ -715,8 +750,13 @@ def _retry_install_start(install_id, retry_id):
         ).encode("utf-8"))
         if info["kind"] == "dependency":
             import sys
+            command = [sys.executable, "-m", "pip"]
+            if info.get("operation") == "uninstall":
+                command.extend(("uninstall", "-y", package))
+            else:
+                command.extend(("install", package))
             process = subprocess.Popen(
-                [sys.executable, "-m", "pip", "install", package],
+                command,
                 stdout=fp, stderr=subprocess.STDOUT, cwd=str(BASE_DIR),
             )
         else:
@@ -920,6 +960,17 @@ def deps_install_result(install_id, *, recover_receipt=False):
         status, label = "unknown", "结果未知"
         error = "无法取得安装进程的退出码，请查看安装日志并刷新依赖检测结果。"
 
+    if info and info.get("operation") == "uninstall":
+        label = {
+            "prepared": "准备卸载",
+            "running": "卸载中",
+            "succeeded": "卸载成功",
+            "failed": "卸载失败",
+            "cancelled": "已取消",
+            "unknown": "结果未知",
+            "missing": "无法追踪",
+            "start_failed": "启动失败",
+        }.get(status, label)
     return {
         "running": running,
         "status": status,
@@ -930,12 +981,43 @@ def deps_install_result(install_id, *, recover_receipt=False):
     }
 
 
+def _install_receipt_exists(info):
+    if not isinstance(info, dict) or info.get("receipt_error"):
+        return False
+    install_id = str(info.get("id") or "")
+    try:
+        persisted = get_install_job(install_id)
+    except Exception:
+        return False
+    return bool(
+        persisted
+        and persisted.get("kind") == info.get("kind")
+        and persisted.get("operation", "install") == info.get("operation", "install")
+        and persisted.get("package") == info.get("package")
+    )
+
+
 def install_api_payload(install_id, log_url):
     result = deps_install_result(install_id)
+    info = get_install_job(install_id, DEPS_RUNNING) or {}
+    history_payload = _install_history_payload(info, {}) if info else {}
     return {
         "ok": not result.get("receipt_pending"),
         "request_id": install_id,
         "install_id": install_id,
+        "kind": info.get("kind", "dependency"),
+        "operation": info.get("operation", "install"),
+        "package": info.get("package", ""),
+        "retry_available": bool(
+            history_payload.get("retry_available")
+            and not result.get("receipt_pending")
+            and _install_receipt_exists(info)
+        ),
+        "recovery_available": bool(
+            history_payload.get("recovery_available")
+            and not result.get("receipt_pending")
+            and _install_receipt_exists(info)
+        ),
         "log_url": log_url,
         **result,
         **({"msg": result["error"]} if result.get("receipt_pending") else {}),
@@ -982,6 +1064,74 @@ def refresh_dependency_cache():
             result["packages"][pkg] = f"不可用：{e}"
 
     return result
+
+
+def _installed_packages():
+    result = pip_cmd(["list", "--format=json"], timeout=60)
+    if result.returncode != 0:
+        raise RuntimeError((result.stdout or "pip list failed")[-2000:])
+    try:
+        value = json.loads(result.stdout or "[]")
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("pip list returned invalid JSON") from exc
+    if not isinstance(value, list):
+        raise RuntimeError("pip list response is not a list")
+    packages = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        version = str(item.get("version") or "").strip()
+        if (
+            re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}", name)
+            and len(version) <= 200
+        ):
+            packages.append({"name": name, "version": version or "未知"})
+    packages.sort(key=lambda item: item["name"].casefold())
+    return packages
+
+
+@bp.route("/api/deps/packages")
+def api_deps_packages():
+    query = str(request.args.get("q") or "").strip()
+    if len(query) > 200:
+        return jsonify(ok=False, msg="搜索内容过长"), 400
+    try:
+        page = int(request.args.get("page", "1"))
+        limit = int(request.args.get("limit", "50"))
+    except (TypeError, ValueError):
+        return jsonify(ok=False, msg="依赖分页参数无效"), 400
+    if page < 1 or limit < 1 or limit > 100:
+        return jsonify(ok=False, msg="依赖分页参数超出范围"), 400
+    try:
+        packages = _installed_packages()
+    except Exception:
+        return jsonify(ok=False, msg="已安装依赖无法读取，请检查面板 Python 与 pip。"), 500
+    if query:
+        folded = query.casefold()
+        packages = [item for item in packages if folded in item["name"].casefold()]
+    total = len(packages)
+    pages = max(1, (total + limit - 1) // limit)
+    if page > pages:
+        page = pages
+    start = (page - 1) * limit
+    return jsonify(
+        ok=True,
+        items=packages[start:start + limit],
+        query=query,
+        page=page,
+        pages=pages,
+        limit=limit,
+        total=total,
+    )
+
+
+@bp.route("/api/deps/refresh", methods=["POST"])
+def api_deps_refresh():
+    try:
+        return jsonify(ok=True, **refresh_dependency_cache())
+    except Exception:
+        return jsonify(ok=False, msg="依赖检测失败，请稍后重试。"), 500
 
 
 @bp.route("/deps")
@@ -1070,8 +1220,13 @@ def deps_install():
     data = data if isinstance(data, dict) else request.form
     name = str(data.get("name", "") or "").strip()
 
-    if not name:
-        return "依赖名不能为空。下一步：填写包名后重试", 400
+    if (
+        not name
+        or len(name) > 200
+        or name.startswith("-")
+        or any(ord(char) < 32 or ord(char) == 127 for char in name)
+    ):
+        return "依赖需求格式无效。下一步：检查包名后重试", 400
 
     try:
         install_id = install_request_id(data.get("request_id"))
@@ -1083,67 +1238,90 @@ def deps_install():
     except Exception as exc:
         return f"安装回执无法读取，未启动安装：{exc}", 500
     if previous:
-        if previous.get("kind") != "dependency" or previous.get("package") != name:
+        if (
+            previous.get("kind") != "dependency"
+            or previous.get("operation", "install") != "install"
+            or previous.get("package") != name
+        ):
             return "安装请求标识已绑定其他依赖，请重新打开依赖页面后重试", 409
         return redirect(url_for("deps.deps_install_log", install_id=install_id, back="/deps"))
 
-    log_file = deps_log_file(install_id, name)
-    try:
-        log_fp = open(log_file, "ab", buffering=0)
-    except Exception as exc:
+    with INSTALL_JOBS_LOCK:
+        previous = get_install_job(install_id, DEPS_RUNNING)
+        if previous:
+            if (
+                previous.get("kind") != "dependency"
+                or previous.get("operation", "install") != "install"
+                or previous.get("package") != name
+            ):
+                return "安装请求标识已绑定其他依赖，请重新打开依赖页面后重试", 409
+            return redirect(url_for("deps.deps_install_log", install_id=install_id, back="/deps"))
+        try:
+            conflict = _conflicting_dependency_operation(name)
+        except Exception:
+            return "无法确认该依赖是否有未完成的包管理操作", 500
+        if conflict:
+            return "该依赖已有运行中或结果未确认的操作", 409
+
+        log_file = deps_log_file(install_id, name)
+        try:
+            log_fp = open(log_file, "ab", buffering=0)
+        except Exception as exc:
+            info = {
+                "id": install_id, "request_id": install_id, "kind": "dependency", "package": name,
+                "log_file": str(log_file), "running": False, "finished": True,
+                "status": "failed", "returncode": None,
+                "error": f"打开安装日志失败：{exc}", "updated_at": now_str(),
+            }
+            try:
+                persist_install_job(info)
+            except Exception as persist_error:
+                info["error"] += f"；保存失败：{persist_error}"
+            DEPS_RUNNING[install_id] = info
+            return redirect(url_for("deps.deps_install_log", install_id=install_id, back="/deps"))
+
+        header = (
+            f"===== 安装依赖: {name} =====\n"
+            f"时间: {now_str()}\n"
+            f"Python: {sys.executable}\n"
+            f"命令: {sys.executable} -m pip install {name}\n"
+            f"日志文件: {log_file}\n"
+            f"============================================================\n"
+        )
+        log_fp.write(header.encode("utf-8"))
+
+        prune_install_results()
         info = {
-            "id": install_id, "request_id": install_id, "kind": "dependency", "package": name,
-            "log_file": str(log_file), "running": False, "finished": True,
-            "status": "failed", "returncode": None,
-            "error": f"打开安装日志失败：{exc}", "updated_at": now_str(),
+            "id": install_id,
+            "request_id": install_id,
+            "kind": "dependency",
+            "operation": "install",
+            "process": None,
+            "package": name,
+            "log_file": str(log_file),
+            "log_fp": log_fp,
+            "start_time": time.time(),
+            "finished": False,
+            "running": True,
+            "status": "prepared",
+            "returncode": None,
+            "updated_at": now_str(),
         }
+        DEPS_RUNNING[install_id] = info
         try:
             persist_install_job(info)
-        except Exception as persist_error:
-            info["error"] += f"；保存失败：{persist_error}"
-        DEPS_RUNNING[install_id] = info
-        return redirect(url_for("deps.deps_install_log", install_id=install_id, back="/deps"))
-
-    header = (
-        f"===== 安装依赖: {name} =====\n"
-        f"时间: {now_str()}\n"
-        f"Python: {sys.executable}\n"
-        f"命令: {sys.executable} -m pip install {name}\n"
-        f"日志文件: {log_file}\n"
-        f"============================================================\n"
-    )
-    log_fp.write(header.encode("utf-8"))
-
-    prune_install_results()
-    info = {
-        "id": install_id,
-        "request_id": install_id,
-        "kind": "dependency",
-        "process": None,
-        "package": name,
-        "log_file": str(log_file),
-        "log_fp": log_fp,
-        "start_time": time.time(),
-        "finished": False,
-        "running": True,
-        "status": "prepared",
-        "returncode": None,
-        "updated_at": now_str(),
-    }
-    DEPS_RUNNING[install_id] = info
-    try:
-        persist_install_job(info)
-    except Exception as exc:
-        info.update(
-            running=False,
-            finished=True,
-            status="unknown",
-            error=f"安装已准备但状态保存失败：{exc}",
-            updated_at=now_str(),
-        )
-        log_fp.write((info["error"] + "\n").encode("utf-8", errors="replace"))
-        log_fp.close()
-        return redirect(url_for("deps.deps_install_log", install_id=install_id, back="/deps"))
+        except Exception as exc:
+            info.update(
+                running=False,
+                finished=True,
+                status="unknown",
+                error=f"安装已准备但状态保存失败：{exc}",
+                updated_at=now_str(),
+            )
+            log_fp.write((info["error"] + "\n").encode("utf-8", errors="replace"))
+            log_fp.close()
+            info["log_fp"] = None
+            return redirect(url_for("deps.deps_install_log", install_id=install_id, back="/deps"))
 
     try:
         info["process"] = subprocess.Popen(
@@ -1179,6 +1357,16 @@ def api_deps_install():
     data = request.get_json(silent=True) if request.is_json else request.form
     if isinstance(data, dict):
         request_id = str(data.get("request_id") or "").strip()
+        name = str(data.get("name") or "").strip()
+    else:
+        name = ""
+    if (
+        not name
+        or len(name) > 200
+        or name.startswith("-")
+        or any(ord(char) < 32 or ord(char) == 127 for char in name)
+    ):
+        return jsonify(ok=False, request_id=request_id, msg="依赖需求格式无效"), 400
     try:
         result = deps_install()
     except Exception as exc:
@@ -1192,6 +1380,195 @@ def api_deps_install():
         body, status = result
         return jsonify(ok=False, request_id=request_id, msg=str(body)), status
     return jsonify(ok=False, request_id=request_id, msg="安装提交响应无效"), 500
+
+
+def _package_key(name):
+    value = str(name or "").strip()
+    match = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)", value)
+    normalized = match.group(1) if match else value
+    return re.sub(r"[-_.]+", "-", normalized).casefold()
+
+
+def _conflicting_dependency_operation(package, *, exclude_ids=()):
+    key = _package_key(package)
+    excluded = set(exclude_ids)
+    jobs = list_install_jobs(100, "dependency", DEPS_RUNNING)
+    jobs.extend(DEPS_RUNNING.values())
+    for job in jobs:
+        if str(job.get("id") or "") in excluded or _package_key(job.get("package")) != key:
+            continue
+        if (
+            job.get("running")
+            or job.get("status") in ("prepared", "running")
+            or job.get("retry_confirmation_required")
+        ):
+            return job
+    return None
+
+
+@bp.route("/api/deps/uninstall", methods=["POST"])
+def api_deps_uninstall():
+    import sys
+
+    data = request.get_json(silent=True) if request.is_json else request.form
+    data = data if isinstance(data, dict) else request.form
+    requested_name = str(data.get("name") or "").strip()
+    if (
+        not requested_name
+        or len(requested_name) > 200
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", requested_name)
+    ):
+        return jsonify(ok=False, msg="依赖包名无效"), 400
+    try:
+        install_id = install_request_id(data.get("request_id"))
+    except ValueError as exc:
+        return jsonify(ok=False, msg=str(exc)), 400
+
+    try:
+        previous = get_install_job(install_id, DEPS_RUNNING)
+    except Exception as exc:
+        return jsonify(ok=False, request_id=install_id, msg=f"安装回执无法读取：{exc}"), 500
+    if previous:
+        if (
+            previous.get("kind") != "dependency"
+            or previous.get("operation", "install") != "uninstall"
+            or _package_key(previous.get("package")) != _package_key(requested_name)
+        ):
+            return jsonify(ok=False, request_id=install_id, msg="安装请求标识已绑定其他操作或依赖"), 409
+        payload = install_api_payload(
+            install_id,
+            url_for("deps.deps_install_log", install_id=install_id, back="/deps"),
+        )
+        return jsonify(payload), 503 if payload.get("receipt_pending") else 200
+
+    try:
+        installed = _installed_packages()
+    except Exception:
+        return jsonify(ok=False, request_id=install_id, msg="卸载前无法读取已安装依赖，请稍后重试。"), 500
+    match = next(
+        (item for item in installed if _package_key(item["name"]) == _package_key(requested_name)),
+        None,
+    )
+    with INSTALL_JOBS_LOCK:
+        # Recheck after pip list: concurrent retries may have reserved this ID
+        # or package while the inventory command was running.
+        previous = get_install_job(install_id, DEPS_RUNNING)
+        if previous:
+            if (
+                previous.get("kind") != "dependency"
+                or previous.get("operation", "install") != "uninstall"
+                or _package_key(previous.get("package")) != _package_key(requested_name)
+            ):
+                return jsonify(ok=False, request_id=install_id, msg="安装请求标识已绑定其他操作或依赖"), 409
+            payload = install_api_payload(
+                install_id,
+                url_for("deps.deps_install_log", install_id=install_id, back="/deps"),
+            )
+            return jsonify(payload), 503 if payload.get("receipt_pending") else 200
+
+        if match is None:
+            return jsonify(ok=False, request_id=install_id, msg="该依赖当前未安装，列表已可能过期"), 404
+        package = match["name"]
+        try:
+            conflict = _conflicting_dependency_operation(package)
+        except Exception:
+            return jsonify(ok=False, request_id=install_id, msg="无法确认该依赖是否有未完成的包管理操作"), 500
+        if conflict:
+            return jsonify(ok=False, request_id=install_id, msg="该依赖已有运行中或结果未确认的操作"), 409
+
+        log_file = LOG_DIR / f"deps-uninstall-{safe_name(package)}-{install_id}.log"
+        try:
+            log_fp = open(log_file, "ab", buffering=0)
+        except Exception as exc:
+            info = {
+                "id": install_id, "request_id": install_id, "kind": "dependency",
+                "operation": "uninstall", "package": package, "log_file": str(log_file),
+                "running": False, "finished": True, "status": "failed", "returncode": None,
+                "error": f"打开卸载日志失败：{exc}", "updated_at": now_str(),
+            }
+            DEPS_RUNNING[install_id] = info
+            try:
+                persist_install_job(info)
+            except Exception as persist_error:
+                info["error"] += f"；保存失败：{persist_error}"
+            payload = install_api_payload(
+                install_id,
+                url_for("deps.deps_install_log", install_id=install_id, back="/deps"),
+            )
+            return jsonify(payload)
+
+        info = {
+            "id": install_id,
+            "request_id": install_id,
+            "kind": "dependency",
+            "operation": "uninstall",
+            "process": None,
+            "package": package,
+            "log_file": str(log_file),
+            "log_fp": log_fp,
+            "start_time": time.time(),
+            "finished": False,
+            "running": True,
+            "status": "prepared",
+            "returncode": None,
+            "updated_at": now_str(),
+        }
+        DEPS_RUNNING[install_id] = info
+        try:
+            prune_install_results()
+            persist_install_job(info)
+        except Exception as exc:
+            info.update(
+                running=False,
+                finished=True,
+                status="unknown",
+                error=f"卸载已准备但状态保存失败：{exc}",
+                updated_at=now_str(),
+            )
+            log_fp.write((info["error"] + "\n").encode("utf-8", errors="replace"))
+            log_fp.close()
+            info["log_fp"] = None
+            payload = install_api_payload(
+                install_id,
+                url_for("deps.deps_install_log", install_id=install_id, back="/deps"),
+            )
+            return jsonify(payload)
+
+    log_fp.write((
+        f"===== 卸载依赖: {package} =====\n"
+        f"时间: {now_str()}\n"
+        f"命令: {sys.executable} -m pip uninstall -y {package}\n"
+        f"日志文件: {log_file}\n"
+        "============================================================\n"
+    ).encode("utf-8"))
+    try:
+        info["process"] = subprocess.Popen(
+            [sys.executable, "-m", "pip", "uninstall", "-y", package],
+            stdout=log_fp,
+            stderr=subprocess.STDOUT,
+            cwd=str(BASE_DIR),
+        )
+    except Exception as exc:
+        log_fp.write(f"启动卸载失败: {exc}\n".encode("utf-8", errors="replace"))
+        log_fp.close()
+        info.update(
+            finished=True,
+            log_fp=None,
+            running=False,
+            status="failed",
+            error=f"启动卸载失败：{exc}",
+            updated_at=now_str(),
+        )
+        _persist_dependency_state(info)
+    else:
+        info["status"] = "running"
+        _persist_dependency_state(info)
+
+    payload = install_api_payload(
+        install_id,
+        url_for("deps.deps_install_log", install_id=install_id, back="/deps"),
+    )
+    return jsonify(payload), 503 if payload.get("receipt_pending") else 200
 
 
 def _retry_request_value(raw):
@@ -1722,7 +2099,11 @@ def api_deps_install_log(install_id):
     if not info:
         result = deps_install_result(install_id)
         if context:
+            result["kind"] = context["kind"]
+            result["operation"] = context.get("operation", "install")
             result["package"] = context["package"]
+            result["recovery_available"] = False
+            result["retry_confirmation_required"] = True
             result["recovery"] = {
                 "kind": context["kind"],
                 "package": context["package"],
@@ -1743,6 +2124,9 @@ def api_deps_install_log(install_id):
 
         return jsonify({
             **result,
+            "kind": "",
+            "operation": "install",
+            "package": "",
             "log": "安装进程已结束或面板已重启，无法通过该 ID 继续追踪。请到日志管理查看 deps-install-*.log / system-install-*.log。",
         })
 
@@ -1757,6 +2141,26 @@ def api_deps_install_log(install_id):
         }), 400
 
     result = deps_install_result(install_id, recover_receipt=True)
+    result["kind"] = info.get("kind", "dependency")
+    result["operation"] = info.get("operation", "install")
+    result["package"] = info.get("package", "")
+    history_info = dict(info)
+    history_info.setdefault("id", install_id)
+    history_info.setdefault("request_id", install_id)
+    history_payload = _install_history_payload(history_info, {})
+    result["retry_of"] = info.get("retry_of", "")
+    result["retried_by"] = info.get("retried_by", "")
+    result["retry_available"] = bool(
+        history_payload["retry_available"]
+        and not result.get("receipt_pending")
+        and _install_receipt_exists(history_info)
+    )
+    result["recovery_available"] = bool(
+        history_payload["recovery_available"]
+        and not result.get("receipt_pending")
+        and _install_receipt_exists(history_info)
+    )
+    result["cancel_request_id"] = info.get("cancel_request_id", "")
     log_file, log_failure = safe_install_log_file(info, install_id)
     if log_failure:
         _title, message, failure_status = log_failure
@@ -1838,12 +2242,17 @@ def _install_history_payload(info, history_by_id):
         "prepared": "准备中", "running": "安装中", "succeeded": "安装成功",
         "failed": "安装失败", "unknown": "结果未知", "cancelled": "已取消",
     }
+    if info.get("operation") == "uninstall":
+        status_labels.update({
+            "prepared": "准备卸载", "running": "卸载中", "succeeded": "卸载成功",
+            "failed": "卸载失败",
+        })
     if cancel_status == "requested" and info.get("running"):
         cancel_status_label = "正在取消"
     else:
         cancel_status_label = {
             "requested": "取消结果待确认", "cancelled": "已取消",
-            "completed": "安装已结束", "failed": "取消失败", "unknown": "取消结果未知",
+            "completed": "操作已结束", "failed": "取消失败", "unknown": "取消结果未知",
         }.get(cancel_status, "")
     retry_available = (
         not info.get("running")
@@ -1897,6 +2306,7 @@ def _install_history_payload(info, history_by_id):
         "status_label": status_labels.get(status, "结果未知"),
         "cancel_status_label": cancel_status_label,
         "diagnostic": diagnostic,
+        "retry_available": retry_available and not relation_errors,
         "recovery_available": retry_available and not relation_errors,
         "retry_relations": relations,
         "retry_relation_diagnostic": relation_diagnostic,

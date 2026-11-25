@@ -181,7 +181,11 @@ def install_runtime(runtime):
     except Exception as exc:
         return f"安装回执无法读取，未启动安装：{exc}", 500
     if previous:
-        if previous.get("kind") != "runtime" or previous.get("package") != runtime:
+        if (
+            previous.get("kind") != "runtime"
+            or previous.get("operation", "install") != "install"
+            or previous.get("package") != runtime
+        ):
             return "安装请求标识已绑定其他运行时，请重新打开运行器页面后重试", 409
         return redirect(url_for("deps.deps_install_log", install_id=install_id, back="/panel/status"))
 
@@ -207,6 +211,7 @@ def install_runtime(runtime):
         "id": install_id,
         "request_id": install_id,
         "kind": "runtime",
+        "operation": "install",
         "process": None,
         "package": runtime,
         "log_file": str(log_file),

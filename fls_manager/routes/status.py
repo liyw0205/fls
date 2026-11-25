@@ -1,9 +1,10 @@
+import os
 import sys
 import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 
-from flask import Blueprint
+from flask import Blueprint, jsonify
 
 from ..ui.layout import layout
 from ..ui.components import table_card, page_header
@@ -142,6 +143,44 @@ def runtime_items():
             item.update(result)
 
     return items
+
+
+@bp.route("/api/runtime/status")
+def api_runtime_status():
+    try:
+        items = runtime_items()
+    except Exception:
+        return jsonify(ok=False, msg="运行时状态无法读取，请稍后重试。"), 500
+    payload_items = []
+    for item in items:
+        installable = os.name != "nt"
+        install_error = ""
+        if installable:
+            try:
+                from .runtime import runtime_install_command
+
+                runtime_install_command(item["key"])
+            except Exception:
+                installable = False
+                install_error = "该运行器不支持当前面板平台的自动安装"
+        detail = ""
+        if item["status"] == "missing":
+            detail = "未检测到可用运行器"
+        elif item["status"] == "timeout":
+            detail = "运行器版本检测超时"
+        elif item["status"] == "error":
+            detail = "运行器版本检测失败"
+        payload_items.append({
+                "key": item["key"],
+                "name": item["name"],
+                "suffix": item["suffix"],
+                "status": item["status"],
+                "version": item.get("version", ""),
+                "detail": detail,
+                "installable": installable,
+                "install_error": install_error,
+            })
+    return jsonify(ok=True, items=payload_items)
 
 
 @bp.route("/panel/status")

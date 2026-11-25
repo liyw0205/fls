@@ -278,6 +278,16 @@ class DependencyInstallLogRecoveryTests(unittest.TestCase):
                 self.assertFalse(response.json["ok"])
                 popen.assert_not_called()
 
+            from fls_manager.state import DEPS_RUNNING
+            DEPS_RUNNING.pop("cannot-retry-running", None)
+            persist_install_job({
+                "id": "cannot-retry-running", "request_id": "cannot-retry-running",
+                "kind": "dependency", "package": "demo",
+                "log_file": str(base_dir / "log" / "cannot-retry-running.log"),
+                "running": False, "finished": True, "status": "failed", "returncode": 1,
+                "error": "test process completed", "start_time": 1,
+                "updated_at": "2026-11-18 18:02:01",
+            })
             original = "conflict-original"
             persist_install_job({
                 "id": original, "request_id": original, "kind": "dependency", "package": "demo",
@@ -1868,6 +1878,7 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
             self.assertEqual(response.status_code, 200)
             self.assertTrue(response.get_json()["running"])
             self.assertEqual(response.get_json()["log"], "already installed output")
+            self.assertFalse(response.get_json()["recovery_available"])
 
             page = client.get(
                 "/deps/install-log/demo-id", headers={"X-Token": TOKEN},

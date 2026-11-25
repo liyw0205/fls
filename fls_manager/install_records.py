@@ -29,6 +29,7 @@ def _snapshot(info):
         "id": install_id,
         "request_id": str(info.get("request_id") or install_id),
         "kind": str(info.get("kind") or ""),
+        "operation": str(info.get("operation") or "install"),
         "package": str(info.get("package") or ""),
         "log_file": str(info.get("log_file") or ""),
         "start_time": info.get("start_time") or 0,
@@ -52,6 +53,8 @@ def _validate(info):
         or not INSTALL_ID_RE.fullmatch(str(info.get("id") or ""))
         or info.get("request_id") != info.get("id")
         or info.get("kind") not in ("dependency", "runtime")
+        or info.get("operation", "install") not in ("install", "uninstall")
+        or (info.get("kind") == "runtime" and info.get("operation", "install") != "install")
         or not isinstance(info.get("package"), str)
         or not info.get("package")
         or not isinstance(info.get("log_file"), str)
@@ -174,8 +177,9 @@ def persist_install_job(info):
                 _validate(value)
             existing = data.get(snapshot["id"])
             if isinstance(existing, dict) and any(
-                existing.get(field) != snapshot[field]
-                for field in ("kind", "package", "retry_of")
+                (existing.get(field, "install") if field == "operation" else existing.get(field))
+                != snapshot[field]
+                for field in ("kind", "operation", "package", "retry_of")
             ):
                 raise RuntimeError("依赖安装请求标识已绑定其他安装，未覆盖原回执")
             retry_of = snapshot["retry_of"]
@@ -234,6 +238,7 @@ def claim_install_retry(info):
                     isinstance(existing_child, dict)
                     and existing_child.get("retry_of") == snapshot["retry_of"]
                     and existing_child.get("kind") == parent.get("kind")
+                    and existing_child.get("operation", "install") == parent.get("operation", "install")
                     and existing_child.get("package") == parent.get("package")
                 ):
                     result["job"] = dict(existing_child)
@@ -241,7 +246,11 @@ def claim_install_retry(info):
                 raise RuntimeError("原安装重试回执损坏或缺失，未再次启动")
             existing = data.get(snapshot["id"])
             if isinstance(existing, dict):
-                if any(existing.get(field) != snapshot[field] for field in ("kind", "package", "retry_of")):
+                if any(
+                    (existing.get(field, "install") if field == "operation" else existing.get(field))
+                    != snapshot[field]
+                    for field in ("kind", "operation", "package", "retry_of")
+                ):
                     raise RuntimeError("依赖安装重试 ID 已绑定其他安装，未覆盖原回执")
                 result["job"] = dict(existing)
                 return None
