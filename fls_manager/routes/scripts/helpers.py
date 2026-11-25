@@ -327,16 +327,20 @@ def safe_extract_tar(tar, path):
     tar.extractall(path)
 
 
-def build_repo_pull_command(url, target, proxy_id):
+def build_repo_pull_command(url, target, proxy_id, *, progress=False):
     git_bin = shutil.which("git")
 
     if not git_bin:
         raise RuntimeError("未安装 git，请先安装 git")
 
+    args = ["clone"]
+    if progress:
+        args.append("--progress")
+    args.extend((url, str(target)))
     return build_git_command_with_github_proxy(
         git_bin,
         proxy_id,
-        ["clone", url, str(target)],
+        args,
         verify=True,
     )
 
