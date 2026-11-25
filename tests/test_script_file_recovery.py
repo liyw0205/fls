@@ -403,7 +403,14 @@ class ScriptFileRecoveryTests(unittest.TestCase):
                 return unlink(path, *args, **kwargs)
 
             with patch.object(Path, "unlink", new=fail_old_unlink):
-                self.assertEqual(client.post(form["action"], data=form["data"], headers={"X-Token": TOKEN}).status_code, 503)
+                response = client.post(form["action"], data=form["data"], headers={"X-Token": TOKEN})
+            if response.status_code == 302:
+                # Filesystems without hard-link support use an atomic no-replace move.
+                destination = source.with_name("renamed.py")
+                self.assertFalse(source.exists())
+                self.assertEqual(destination.read_bytes(), b"print('script recovery')\n")
+                return
+            self.assertEqual(response.status_code, 503)
             destination = source.with_name("renamed.py")
             self.assertEqual(source.stat().st_ino, destination.stat().st_ino)
             models.mutate_tasks(lambda tasks: (tasks.append({"id": "new", "name": "New", "command": "task demo.py"}) or True))

@@ -1,3 +1,4 @@
+import errno
 import hashlib
 import json
 import os
@@ -16,6 +17,43 @@ class ScriptFileWriteError(RuntimeError):
     def __init__(self, message, saved=False):
         super().__init__(message)
         self.saved = saved
+
+
+class ScriptFileTooLarge(ValueError):
+    pass
+
+
+def _publish_new_script_file(temp_file, target):
+    link = getattr(os, "link", None)
+    if callable(link):
+        try:
+            link(temp_file, target)
+            return
+        except (OSError, NotImplementedError) as exc:
+            unsupported = {errno.ENOSYS, errno.EPERM, errno.EACCES}
+            unsupported.update(
+                value for value in (getattr(errno, "ENOTSUP", None), getattr(errno, "EOPNOTSUPP", None))
+                if value is not None
+            )
+            if not isinstance(exc, NotImplementedError) and exc.errno not in unsupported:
+                raise
+
+    # Reserve the destination exclusively on Android builds without hard-link support.
+    mode = stat.S_IMODE(temp_file.stat().st_mode)
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
+    fd = os.open(str(target), flags, mode)
+    reservation = os.fstat(fd)
+    try:
+        os.close(fd)
+        os.replace(temp_file, target)
+    except Exception:
+        try:
+            current = os.stat(target, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) == (reservation.st_dev, reservation.st_ino):
+                os.unlink(target)
+        except OSError:
+            pass
+        raise
 
 
 def script_file_target(rel):
@@ -38,7 +76,7 @@ def script_file_target(rel):
     return target
 
 
-def script_file_snapshot(target, rel):
+def script_file_snapshot(target, rel, max_bytes=None):
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
     fd = os.open(target, flags)
     try:
@@ -50,7 +88,11 @@ def script_file_snapshot(target, rel):
         os.close(fd)
         raise
     with fp:
-        data = fp.read()
+        if max_bytes is not None and metadata.st_size > max_bytes:
+            raise ScriptFileTooLarge("文件超过原生编辑上限")
+        data = fp.read(max_bytes + 1 if max_bytes is not None else -1)
+    if max_bytes is not None and len(data) > max_bytes:
+        raise ScriptFileTooLarge("文件超过原生编辑上限")
     signature = [str(rel), str(target), metadata.st_dev, metadata.st_ino, metadata.st_mtime_ns,
                  metadata.st_mode, metadata.st_uid, metadata.st_gid]
     revision = hashlib.sha256(json.dumps(signature).encode("utf-8") + b"\x00" + data).hexdigest()
@@ -84,7 +126,7 @@ def publish_script_file(target, rel, content, revision=None, metadata=None):
         if script_file_target(rel) != target:
             raise ScriptFileConflict("文件路径在保存期间已变更，未覆盖目标")
         if revision is None:
-            os.link(temp_file, target)
+            _publish_new_script_file(temp_file, target)
         else:
             if script_file_snapshot(target, rel)[1] != revision:
                 raise ScriptFileConflict("文件在保存期间已变更，未覆盖新内容，请合并草稿后重试")

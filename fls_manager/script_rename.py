@@ -190,8 +190,29 @@ def _move_no_replace(source, destination):
     if destination.exists() or destination.is_symlink():
         raise ScriptFileConflict("目标已存在，未覆盖目标")
     if source.is_file():
-        os.link(source, destination)
-        source.unlink()
+        moved = False
+        link = getattr(os, "link", None)
+        if callable(link):
+            try:
+                link(source, destination)
+            except OSError as exc:
+                moved = _move_file_without_hard_links(source, destination, exc)
+        else:
+            # Android's Python may omit os.link while libc still supports hard links.
+            libc = ctypes.CDLL(None, use_errno=True)
+            link = getattr(libc, "link", None)
+            try:
+                if link is None:
+                    raise OSError(errno.ENOSYS, "hard links are unavailable", str(destination))
+                link.argtypes = (ctypes.c_char_p, ctypes.c_char_p)
+                link.restype = ctypes.c_int
+                if link(os.fsencode(source), os.fsencode(destination)) != 0:
+                    code = ctypes.get_errno()
+                    raise OSError(code, os.strerror(code), str(destination))
+            except OSError as exc:
+                moved = _move_file_without_hard_links(source, destination, exc)
+        if not moved:
+            source.unlink()
     else:
         if os.name == "posix":
             libc = ctypes.CDLL(None, use_errno=True)
@@ -204,6 +225,49 @@ def _move_no_replace(source, destination):
                 if code not in (errno.ENOSYS, errno.EINVAL):
                     raise OSError(code, os.strerror(code), str(destination))
         source.rename(destination)
+
+
+def _move_file_without_hard_links(source, destination, cause):
+    unsupported = {errno.ENOSYS, errno.EPERM, errno.EACCES}
+    unsupported.update(
+        value for value in (getattr(errno, "ENOTSUP", None), getattr(errno, "EOPNOTSUPP", None))
+        if value is not None
+    )
+    if cause.errno not in unsupported:
+        raise cause
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is not None:
+        renameat2.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+        renameat2.restype = ctypes.c_int
+        result = renameat2(-100, os.fsencode(source), -100, os.fsencode(destination), 1)
+        if result == 0:
+            return True
+        code = ctypes.get_errno()
+        if code not in unsupported | {errno.EINVAL}:
+            raise OSError(code, os.strerror(code), str(destination))
+
+    # Last-resort filesystems without hard links or renameat2: reserve a new name,
+    # then replace only that reservation with the original inode.
+    mode = stat.S_IMODE(source.stat().st_mode)
+    fd = os.open(str(destination), os.O_CREAT | os.O_EXCL | os.O_WRONLY, mode)
+    reservation = os.fstat(fd)
+    os.close(fd)
+    try:
+        current = os.stat(destination, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != (reservation.st_dev, reservation.st_ino):
+            raise ScriptFileConflict("目标已被其他文件占用，未覆盖目标")
+        os.replace(source, destination)
+    except Exception:
+        try:
+            current = os.stat(destination, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) == (reservation.st_dev, reservation.st_ino):
+                os.unlink(destination)
+        except OSError:
+            pass
+        raise
+    return True
 
 
 def _validate_task_states(record, tasks, source, destination, rollback):
