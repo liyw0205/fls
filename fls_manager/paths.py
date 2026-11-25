@@ -46,6 +46,7 @@ SCHEDULER_STATE_FILE = DATA_DIR / "scheduler_state.json"
 NOTIFY_HISTORY_FILE = DATA_DIR / "notify_history.json"
 PROXY_DIAGNOSTICS_FILE = DATA_DIR / "proxy_diagnostics.json"
 SCRIPT_DEBUG_RUNS_FILE = DATA_DIR / "script_debug_runs.json"
+SCRIPT_PULL_JOBS_FILE = DATA_DIR / "script_pull_jobs.json"
 SCRIPT_RENAME_FILE = DATA_DIR / "script_renames.json"
 PID_FILE = DATA_DIR / "fls-manager.pid"
 
