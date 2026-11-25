@@ -797,7 +797,7 @@ def api_online_scripts_install(script_id):
     if target.exists() and not force:
         return _api_install_rejected(
             request_id, "目标已存在，请确认覆盖后重试", 409,
-            retry_allowed=True, confirm_required=True, target=str(target),
+            retry_allowed=True, confirm_required=True, target_exists=True,
         )
 
     active_id, active_info = active_online_install_for_script(script_id)

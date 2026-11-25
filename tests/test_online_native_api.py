@@ -80,6 +80,14 @@ class OnlineNativeApiTests(unittest.TestCase):
                     "/api/online-scripts/install-options/alpha?q=Demo",
                     headers={"X-Token": TOKEN},
                 )
+                secret_search = app.test_client().get(
+                    "/api/online-scripts/install-options/alpha?q=env-secret",
+                    headers={"X-Token": TOKEN},
+                )
+                value_search = app.test_client().get(
+                    "/api/online-scripts/install-options/alpha?q=us-east",
+                    headers={"X-Token": TOKEN},
+                )
 
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json["total"], 1)
@@ -87,6 +95,8 @@ class OnlineNativeApiTests(unittest.TestCase):
             self.assertEqual(task["index"], 1)
             self.assertEqual(task["variable_names"], ["API_TOKEN", "REGION"])
             self.assertTrue(task["valid"])
+            self.assertEqual(secret_search.json["total"], 0)
+            self.assertEqual(value_search.json["total"], 0)
             serialized = response.get_data(as_text=True)
             for secret in ("env-secret", "us-east", "proxy-secret", "password@example.invalid"):
                 self.assertNotIn(secret, serialized)

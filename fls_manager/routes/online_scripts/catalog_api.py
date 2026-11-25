@@ -262,9 +262,10 @@ def api_online_scripts_install_options(script_id):
             (index, task) for index, task in indexed
             if query in "\n".join((
                 str(index), str(task.get("name") or ""), str(task.get("cron") or ""),
-                str(task.get("command") or ""), str(task.get("remark") or ""),
+                mask_sensitive_text(task.get("command") or ""),
+                mask_sensitive_text(task.get("remark") or ""),
                 str(task.get("config_path") or ""),
-                "\n".join(f"{key}={value}" for key, value in online_task_cron_vars(task).items()),
+                "\n".join(str(key) for key in online_task_cron_vars(task)),
             )).lower()
         ]
     total = len(indexed)

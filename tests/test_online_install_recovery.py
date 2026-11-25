@@ -1382,6 +1382,9 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
                 )
                 self.assertEqual(confirmation.status_code, 409)
                 self.assertTrue(confirmation.get_json()["confirm_required"])
+                self.assertTrue(confirmation.get_json()["target_exists"])
+                self.assertNotIn("target", confirmation.get_json())
+                self.assertNotIn(str(target), confirmation.get_data(as_text=True))
                 self.assertIsNone(get_online_install_job(request_id))
                 forced = client.post(
                     "/api/online-scripts/install/demo",
