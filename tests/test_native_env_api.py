@@ -145,6 +145,28 @@ class NativeEnvApiTests(unittest.TestCase):
                 self.assertEqual(client.get("/api/env/" + path, headers=self.headers).status_code, 400)
             self.assertEqual(models.load_global_env(), before)
 
+    def test_missing_and_corrupt_receipts_do_not_claim_success(self):
+        with isolated_app() as (app, base):
+            from fls_manager import models
+            self.seed()
+            client = app.test_client()
+            data = self.data()
+            path = "/api/env/requests/" + data["request_id"]
+            self.assertEqual(self.get(client, path)["state"], "missing")
+            self.assertEqual(self.post(client, data).status_code, 200)
+            receipt = base / "data/global_env_requests" / (data["request_id"] + ".json")
+            record = json.loads(receipt.read_text())
+            record.pop("after")
+            receipt.write_text(json.dumps(record))
+            result = client.get(path, headers=self.headers)
+            self.assertEqual(result.status_code, 503)
+            self.assertNotEqual(result.get_json().get("saved"), True)
+            before = models.load_global_env()
+            record.update(after="a" * 64, state="prepared")
+            receipt.write_text(json.dumps(record))
+            self.assertEqual(self.get(client, path)["state"], "unknown")
+            self.assertEqual(models.load_global_env(), before)
+
 
 if __name__ == "__main__":
     unittest.main()

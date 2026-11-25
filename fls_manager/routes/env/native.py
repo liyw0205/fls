@@ -177,7 +177,13 @@ def native_env_request(request_id):
             if (not isinstance(record, dict) or record.get("request_id") != request_id
                 or record.get("state") not in ("completed", "prepared", "failed")
                 or record.get("scope") not in ("all", "keys")
-                or not isinstance(record.get("keys"), list)):
+                or record.get("action") not in ("new", "edit", "delete", "replace", "import")
+                or not isinstance(record.get("keys"), list)
+                or any(not isinstance(key, str) for key in record["keys"])
+                or any(not isinstance(record.get(key), str) or not re.fullmatch(r"[a-f0-9]{64}", record[key])
+                       for key in ("before", "after", "input_version"))
+                or any(type(record.get(key)) is not int or record[key] < 0
+                       for key in ("changed_count", "skipped_count"))):
                 raise ValueError
             actual = env_version(load_global_env(), None if record["scope"] == "all" else record["keys"])
             saved = True if record["state"] == "completed" or actual == record.get("after") else (
