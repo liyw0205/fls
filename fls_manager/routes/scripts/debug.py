@@ -90,6 +90,7 @@ def _debug_rows(raw):
 
         normalized_row = {
             "id": debug_id,
+            "request_id": _debug_text(row.get("request_id")),
             "script": _debug_text(row.get("script")),
             "rel": _debug_text(row.get("rel")),
             "log_file": _debug_text(row.get("log_file")),
@@ -145,6 +146,7 @@ def _debug_snapshot(info):
     status = _debug_status(info)
     return {
         "id": _debug_text(info.get("id")),
+        "request_id": _debug_text(info.get("request_id")),
         "script": _debug_text(info.get("script")),
         "rel": _debug_text(info.get("rel")),
         "log_file": _debug_text(info.get("log_file")),
@@ -327,15 +329,21 @@ def scripts_debug_run(rel_path):
 
 
 def _scripts_debug_run(rel_path):
-    back_url = get_back_url("/pull")
-
     try:
-        target = script_safe_path(rel_path)
-    except Exception as e:
+        info = _start_script_debug_run(rel_path)
+    except ValueError as e:
         return f"路径非法：{h(e)}", 400
-
-    if not target.exists() or not target.is_file():
+    except FileNotFoundError:
         abort(404)
+    return redirect(
+        f"/scripts/debug-log/{info['id']}?back={quote(get_back_url('/pull'))}"
+    )
+
+
+def _start_script_debug_run(rel_path, request_id="", require_persist=False):
+    target = script_safe_path(rel_path)
+    if not target.exists() or not target.is_file():
+        raise FileNotFoundError
 
     rel = script_rel_path(target)
 
@@ -348,6 +356,7 @@ def _scripts_debug_run(rel_path):
     created_at = now_str()
     info = {
         "id": debug_id,
+        "request_id": request_id,
         "script": str(target),
         "rel": rel,
         "log_file": str(log_file),
@@ -362,7 +371,14 @@ def _scripts_debug_run(rel_path):
     }
     with SCRIPT_DEBUG_LOCK:
         SCRIPT_DEBUG_RUNNING[debug_id] = info
-        _persist_debug_safely(info)
+        try:
+            if require_persist:
+                persist_script_debug(info)
+            else:
+                _persist_debug_safely(info)
+        except Exception:
+            SCRIPT_DEBUG_RUNNING.pop(debug_id, None)
+            raise
 
     log_fp = None
 
@@ -377,18 +393,11 @@ def _scripts_debug_run(rel_path):
         env["FLS_SCRIPT_DEBUG_FILE"] = str(target)
         env["FLS_TASK_PROCESS_NAME"] = (TASK_PROCESS_PREFIX + safe_name(f"script-debug-{target.name}"))[:120]
 
-        display_cmd = cmd_info.get("display_cmd", cmd_info.get("cmd"))
-
         header = (
             f"===== 脚本调试运行 =====\n"
             f"时间: {now_str()}\n"
             f"调试ID: {debug_id}\n"
-            f"脚本: {target}\n"
-            f"相对路径: {rel}\n"
-            f"命令: {task['command']}\n"
-            f"工作目录: {cmd_info.get('cwd')}\n"
-            f"实际启动命令: {display_cmd}\n"
-            f"日志文件: {log_file}\n"
+            f"脚本: {rel}\n"
             f"============================================================\n"
         )
 
@@ -446,7 +455,7 @@ def _scripts_debug_run(rel_path):
             })
             _persist_debug_safely(info)
 
-    return redirect(f"/scripts/debug-log/{debug_id}?back={quote(back_url)}")
+    return dict(info)
 
 
 @bp.route("/scripts/debug-stop/<debug_id>", methods=["POST"])
