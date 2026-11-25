@@ -1,8 +1,10 @@
 import json
+import uuid
 import stat
 from datetime import datetime
 
 from flask import jsonify, request
+from werkzeug.datastructures import MultiDict
 
 from . import bp
 from .files import _guard_file_mutation
@@ -16,6 +18,15 @@ from ...script_files import (
     publish_script_file,
     script_file_snapshot,
     script_file_target,
+)
+from ...script_rename import (
+    RENAME_TERMINAL,
+    begin_script_rename,
+    get_script_rename,
+    rename_preview,
+    resume_script_rename,
+    validate_new_name,
+    validate_rename_updates,
 )
 
 
@@ -80,6 +91,65 @@ def _current_file(path, target):
         return _file_payload(path, content, revision, metadata)
     except (OSError, UnicodeDecodeError, ValueError):
         return None
+
+
+def _rename_preview(path, new_name):
+    source = script_file_target(path)
+    validate_new_name(new_name)
+    if not source.exists():
+        raise FileNotFoundError
+    destination = script_file_target(
+        (source.with_name(new_name)).relative_to(SCRIPT_DIR.resolve()).as_posix(),
+    )
+    if source == destination:
+        raise ValueError("新名称与当前名称相同")
+    if destination.exists() or destination.is_symlink():
+        raise ScriptFileConflict("目标已存在，未覆盖文件或任务")
+    _guard_file_mutation(source)
+    _guard_file_mutation(destination)
+    references, revision = rename_preview(source, destination)
+    return source, destination, references, revision
+
+
+def _rename_operation_payload(record):
+    from ...models import load_tasks
+
+    source = script_file_target(record["source"])
+    destination = script_file_target(record["destination"])
+    tasks = {task["id"]: task for task in load_tasks()}
+    states = []
+    for update in record.get("updates", []):
+        task = tasks.get(update["id"])
+        if task is None:
+            state = "missing"
+        else:
+            values = {key: task.get(key, "") for key in ("command", "config_path")}
+            state = "updated" if values == update["after"] else (
+                "unchanged" if values == update["before"] else "conflict"
+            )
+        states.append({"task_id": update["id"], "state": state})
+    return {
+        "id": record["id"],
+        "source": record["source"],
+        "destination": record["destination"],
+        "status": record.get("status", "unknown"),
+        "finished": record.get("status") in RENAME_TERMINAL,
+        "updated_at": record.get("updated_at", ""),
+        "actual": {
+            "source_exists": source.exists(),
+            "destination_exists": destination.exists(),
+            "tasks": states,
+        },
+    }
+
+
+def _rename_identifier(value):
+    if not isinstance(value, str) or len(value) != 32:
+        return False
+    try:
+        return uuid.UUID(hex=value).hex == value
+    except ValueError:
+        return False
 
 
 @bp.route("/api/scripts/tree")
@@ -293,6 +363,195 @@ def api_script_file():
         "changed": saved_content != current_content,
         "file": _file_payload(path, saved_content, saved_revision, saved_metadata),
     })
+
+
+@bp.route("/api/scripts/rename/preview")
+def api_script_rename_preview():
+    raw_path = request.args.get("path", "")
+    new_name = request.args.get("new_name", "")
+    try:
+        with TASKS_MUTATION_LOCK:
+            source, destination, references, revision = _rename_preview(raw_path, new_name)
+    except FileNotFoundError:
+        return _error("源文件或目录不存在", 404, "not_found")
+    except ScriptFileConflict:
+        return _error("路径已存在待恢复操作或目标名称已占用", 409, "rename_conflict")
+    except ValueError:
+        return _error("脚本路径或新名称无效", 400, "invalid_path_or_name")
+    except OSError:
+        return _error("重命名预览读取失败", 500, "preview_failed")
+    return _response({
+        "ok": True,
+        "preview": {
+            "source": script_rel_path(source),
+            "destination": script_rel_path(destination),
+            "revision": revision,
+            "references": references,
+        },
+    })
+
+
+@bp.route("/api/scripts/rename", methods=["POST"])
+def api_script_rename():
+    data, error = _json_body()
+    if error is not None:
+        return error
+    if set(data) != {"path", "new_name", "revision", "operation_id", "references"}:
+        return _error("请求字段无效", 400, "invalid_body")
+    raw_path = data.get("path")
+    new_name = data.get("new_name")
+    revision = data.get("revision")
+    operation_id = data.get("operation_id")
+    raw_references = data.get("references")
+    if (
+        not isinstance(raw_path, str)
+        or not isinstance(new_name, str)
+        or not isinstance(revision, str)
+        or len(revision) != 64
+        or any(char not in "0123456789abcdef" for char in revision)
+        or not _rename_identifier(operation_id)
+        or not isinstance(raw_references, list)
+    ):
+        return _error("路径、名称、revision、operation_id 或任务引用无效", 400, "invalid_body")
+
+    form = MultiDict()
+    desired = {}
+    for reference in raw_references:
+        if (
+            not isinstance(reference, dict)
+            or set(reference) != {"task_id", "command", "config_path"}
+            or not all(isinstance(reference.get(key), str) for key in ("task_id", "command", "config_path"))
+            or not reference["task_id"]
+            or reference["task_id"] in desired
+        ):
+            return _error("任务引用格式无效", 400, "invalid_references")
+        task_id = reference["task_id"]
+        command = reference["command"]
+        config_path = reference["config_path"]
+        desired[task_id] = {"command": command, "config_path": config_path}
+        form.add("task_id", task_id)
+        form[f"command_{task_id}"] = command
+        form[f"config_{task_id}"] = config_path
+
+    try:
+        with TASKS_MUTATION_LOCK:
+            source = script_file_target(raw_path)
+            validate_new_name(new_name)
+            destination = script_file_target(
+                source.with_name(new_name).relative_to(SCRIPT_DIR.resolve()).as_posix(),
+            )
+            source_rel = script_rel_path(source)
+            destination_rel = script_rel_path(destination)
+            existing = get_script_rename(operation_id)
+            if existing:
+                recorded = {item["id"]: item["after"] for item in existing.get("updates", [])}
+                if (
+                    existing["source"] != source_rel
+                    or existing["destination"] != destination_rel
+                    or recorded != desired
+                ):
+                    return _error("operation_id 已用于其他重命名请求", 409, "operation_conflict")
+                return _response({
+                    "ok": True,
+                    "replayed": True,
+                    "operation": _rename_operation_payload(existing),
+                }, 200 if existing.get("status") in RENAME_TERMINAL else 202)
+
+            source, destination, references, current_revision = _rename_preview(raw_path, new_name)
+            if revision != current_revision:
+                return _response({
+                    "ok": False,
+                    "code": "rename_revision_conflict",
+                    "msg": "文件或任务引用已变更，请重新检查改名影响",
+                    "preview": {
+                        "source": script_rel_path(source),
+                        "destination": script_rel_path(destination),
+                        "revision": current_revision,
+                        "references": references,
+                    },
+                }, 409)
+            updates = validate_rename_updates(references, form, source, destination)
+            record = begin_script_rename(source, destination, operation_id, updates)
+    except FileNotFoundError:
+        return _error("源文件或目录不存在", 404, "not_found")
+    except ScriptFileConflict:
+        record = get_script_rename(operation_id)
+        if record:
+            return _response({
+                "ok": False,
+                "code": "rename_recovery_required",
+                "msg": "重命名未完整结束，可检查状态后继续或回滚",
+                "operation": _rename_operation_payload(record),
+            }, 503)
+        return _error("文件、任务或调试状态冲突，未开始重命名", 409, "rename_conflict")
+    except ValueError:
+        return _error("任务引用无效或仍包含旧路径，未执行重命名", 400, "invalid_references")
+    except OSError:
+        return _error("重命名操作状态未知，请读取操作状态后再处理", 503, "rename_result_unknown")
+    except Exception:
+        record = get_script_rename(operation_id)
+        if record:
+            return _response({
+                "ok": False,
+                "code": "rename_recovery_required",
+                "msg": "重命名未完整结束，可检查状态后继续或回滚",
+                "operation": _rename_operation_payload(record),
+            }, 503)
+        return _error("重命名失败，未完成文件或任务变更", 500, "rename_failed")
+    return _response({
+        "ok": True,
+        "operation": _rename_operation_payload(record),
+    }, 200 if record.get("status") in RENAME_TERMINAL else 202)
+
+
+@bp.route("/api/scripts/rename/<operation_id>")
+def api_script_rename_status(operation_id):
+    if not _rename_identifier(operation_id):
+        return _error("operation_id 无效", 400, "invalid_operation_id")
+    try:
+        with TASKS_MUTATION_LOCK:
+            record = get_script_rename(operation_id)
+            if not record:
+                return _error("重命名记录不存在", 404, "not_found")
+            operation = _rename_operation_payload(record)
+    except (OSError, ValueError, RuntimeError):
+        return _error("重命名状态读取失败", 500, "status_read_failed")
+    return _response({"ok": True, "operation": operation})
+
+
+@bp.route("/api/scripts/rename/<operation_id>/recovery", methods=["POST"])
+def api_script_rename_recovery(operation_id):
+    if not _rename_identifier(operation_id):
+        return _error("operation_id 无效", 400, "invalid_operation_id")
+    data, error = _json_body()
+    if error is not None:
+        return error
+    if set(data) != {"action"} or data.get("action") not in ("resume", "rollback"):
+        return _error("action 必须是 resume 或 rollback", 400, "invalid_action")
+    try:
+        with TASKS_MUTATION_LOCK:
+            record = get_script_rename(operation_id)
+            if not record:
+                return _error("重命名记录不存在", 404, "not_found")
+            record = resume_script_rename(record, rollback=data["action"] == "rollback")
+            operation = _rename_operation_payload(record)
+    except ScriptFileConflict:
+        record = get_script_rename(operation_id)
+        return _response({
+            "ok": False,
+            "code": "rename_conflict",
+            "msg": "当前文件或任务状态与恢复记录冲突，请检查后再试",
+            **({"operation": _rename_operation_payload(record)} if record else {}),
+        }, 409)
+    except Exception:
+        record = get_script_rename(operation_id)
+        return _response({
+            "ok": False,
+            "code": "rename_result_unknown",
+            "msg": "恢复结果未知，请重新读取状态确认",
+            **({"operation": _rename_operation_payload(record)} if record else {}),
+        }, 503)
+    return _response({"ok": True, "operation": operation}, 200 if operation["finished"] else 202)
 
 
 bp.add_url_rule("/api/scripts/files", view_func=api_script_tree, methods=["GET"])

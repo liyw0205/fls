@@ -245,6 +245,121 @@ class NativeScriptFilesApiTests(unittest.TestCase):
             self.assertFalse(target.exists())
             self.assertEqual(list(target.parent.glob(".fls-script-*.tmp")), [])
 
+    def test_native_rename_preview_commit_replay_and_status(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.models import save_tasks
+            from fls_manager.native_sessions import create_native_session
+
+            scripts = base_dir / "scripts"
+            (scripts / "demo.py").write_text("print('demo')\n", encoding="utf-8")
+            save_tasks([{
+                "id": "linked",
+                "name": "Linked task",
+                "command": "task demo.py",
+                "config_path": "demo.py",
+            }])
+            with app.app_context():
+                session_id, csrf_token, _max_age = create_native_session(
+                    TOKEN, remember=True, verified=True,
+                )
+            client = app.test_client()
+            client.set_cookie("fls_native_session", session_id)
+            headers = {"X-CSRF-Token": csrf_token}
+
+            preview = client.get(
+                "/api/scripts/rename/preview",
+                query_string={"path": "demo.py", "new_name": "renamed.py"},
+                headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(preview.status_code, 200, preview.json)
+            self.assertEqual(preview.json["preview"]["destination"], "renamed.py")
+            reference = preview.json["preview"]["references"][0]
+            self.assertEqual(reference["id"], "linked")
+            self.assertEqual(reference["after"]["command"], "task renamed.py")
+            self.assertNotIn(str(scripts), preview.get_data(as_text=True))
+
+            body = {
+                "path": "demo.py",
+                "new_name": "renamed.py",
+                "revision": preview.json["preview"]["revision"],
+                "operation_id": "a" * 32,
+                "references": [{
+                    "task_id": "linked",
+                    "command": reference["after"]["command"],
+                    "config_path": reference["after"]["config_path"],
+                }],
+            }
+            missing_csrf = client.post("/api/scripts/rename", json=body)
+            self.assertEqual(missing_csrf.status_code, 400)
+            self.assertTrue((scripts / "demo.py").exists())
+
+            renamed = client.post("/api/scripts/rename", json=body, headers=headers)
+            self.assertEqual(renamed.status_code, 200, renamed.json)
+            self.assertFalse((scripts / "demo.py").exists())
+            self.assertTrue((scripts / "renamed.py").exists())
+            self.assertEqual(renamed.json["operation"]["status"], "succeeded")
+            self.assertEqual(renamed.json["operation"]["actual"]["tasks"], [
+                {"task_id": "linked", "state": "updated"},
+            ])
+            replayed = client.post("/api/scripts/rename", json=body, headers=headers)
+            self.assertEqual(replayed.status_code, 200)
+            self.assertTrue(replayed.json["replayed"])
+            status = client.get(f"/api/scripts/rename/{'a' * 32}")
+            self.assertEqual(status.status_code, 200)
+            self.assertTrue(status.json["operation"]["finished"])
+
+    def test_native_rename_revision_conflict_and_recovery_after_scheduler_failure(self):
+        with isolated_app() as (app, base_dir):
+            from fls_manager.native_sessions import create_native_session
+
+            scripts = base_dir / "scripts"
+            (scripts / "demo.py").write_text("print('demo')\n", encoding="utf-8")
+            with app.app_context():
+                session_id, csrf_token, _max_age = create_native_session(
+                    TOKEN, remember=True, verified=True,
+                )
+            client = app.test_client()
+            client.set_cookie("fls_native_session", session_id)
+            headers = {"X-CSRF-Token": csrf_token}
+            preview = client.get(
+                "/api/scripts/rename/preview?path=demo.py&new_name=renamed.py",
+                headers={"X-Token": TOKEN},
+            ).json["preview"]
+            (scripts / "demo.py").write_text("print('external edit')\n", encoding="utf-8")
+            stale = client.post("/api/scripts/rename", json={
+                "path": "demo.py",
+                "new_name": "renamed.py",
+                "revision": preview["revision"],
+                "operation_id": "b" * 32,
+                "references": [],
+            }, headers=headers)
+            self.assertEqual(stale.status_code, 409)
+            self.assertEqual(stale.json["code"], "rename_revision_conflict")
+            self.assertTrue((scripts / "demo.py").exists())
+
+            current = stale.json["preview"]
+            with patch("fls_manager.scheduler.reload_scheduler", side_effect=RuntimeError("offline")):
+                uncertain = client.post("/api/scripts/rename", json={
+                    "path": "demo.py",
+                    "new_name": "renamed.py",
+                    "revision": current["revision"],
+                    "operation_id": "c" * 32,
+                    "references": [],
+                }, headers=headers)
+            self.assertEqual(uncertain.status_code, 503)
+            self.assertEqual(uncertain.json["code"], "rename_recovery_required")
+            self.assertEqual(uncertain.json["operation"]["status"], "tasks_saved")
+            self.assertTrue((scripts / "renamed.py").exists())
+            self.assertFalse((scripts / "demo.py").exists())
+
+            recovered = client.post(
+                f"/api/scripts/rename/{'c' * 32}/recovery",
+                json={"action": "resume"},
+                headers=headers,
+            )
+            self.assertEqual(recovered.status_code, 200, recovered.json)
+            self.assertEqual(recovered.json["operation"]["status"], "succeeded")
+
 
 if __name__ == "__main__":
     unittest.main()
