@@ -1,3 +1,4 @@
+import ctypes
 import errno
 import hashlib
 import json
@@ -40,6 +41,14 @@ class _PullTooLarge(Exception):
     pass
 
 
+class _PullPersistenceError(Exception):
+    pass
+
+
+class _PullPathChanged(Exception):
+    pass
+
+
 def _response(payload, status=200):
     response = jsonify(payload)
     response.status_code = status
@@ -60,18 +69,136 @@ def _clean_temp(target, job_id):
         pass
 
 
-def _target_matches(job):
+def _open_script_parent(relative):
+    target = script_file_target(relative)
+    name = target.name
+    if os.open not in getattr(os, "supports_dir_fd", set()) or not hasattr(os, "O_DIRECTORY"):
+        metadata = target.parent.stat(follow_symlinks=False)
+        return target, None, name, (metadata.st_dev, metadata.st_ino)
+
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0)
+    root = SCRIPT_DIR.resolve()
+    fd = os.open(str(root), flags)
     try:
-        target = script_file_target(job["path"])
-        if target.is_symlink() or not target.is_file():
+        relative_parent = target.parent.relative_to(root)
+        for part in relative_parent.parts:
+            next_fd = os.open(
+                part,
+                flags | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=fd,
+            )
+            os.close(fd)
+            fd = next_fd
+    except Exception:
+        os.close(fd)
+        raise
+    metadata = os.fstat(fd)
+    return target, fd, name, (metadata.st_dev, metadata.st_ino)
+
+
+def _temp_name(job_id):
+    return f".fls-pull-{job_id}.tmp"
+
+
+def _open_temp(target, parent_fd, job_id):
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
+    name = _temp_name(job_id)
+    if parent_fd is not None:
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        return os.open(name, flags, 0o600, dir_fd=parent_fd), name
+    return os.open(str(target.with_name(name)), flags, 0o600), name
+
+
+def _open_staged(target, parent_fd, name):
+    if parent_fd is not None:
+        return os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)
+    return os.open(str(target.with_name(name)), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+
+
+def _unlink_at(target, parent_fd, name):
+    try:
+        if parent_fd is not None:
+            os.unlink(name, dir_fd=parent_fd)
+        else:
+            target.with_name(name).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _renameat2_no_replace(source, destination, parent_fd):
+    if os.name != "posix":
+        return False
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        return False
+    renameat2.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    renameat2.restype = ctypes.c_int
+    at_fdcwd = -100
+    source_fd = at_fdcwd if parent_fd is None else parent_fd
+    destination_fd = at_fdcwd if parent_fd is None else parent_fd
+    result = renameat2(
+        source_fd,
+        os.fsencode(source),
+        destination_fd,
+        os.fsencode(destination),
+        1,
+    )
+    if result == 0:
+        return True
+    code = ctypes.get_errno()
+    unsupported = {
+        errno.ENOSYS,
+        errno.EINVAL,
+        getattr(errno, "ENOTSUP", errno.EINVAL),
+        getattr(errno, "EOPNOTSUPP", errno.EINVAL),
+    }
+    if code in unsupported:
+        return False
+    raise OSError(code, os.strerror(code), str(destination))
+
+
+def _target_matches(job):
+    parent_fd = None
+    try:
+        target, parent_fd, _target_name, parent_identity = _open_script_parent(job["path"])
+        expected_identity = (job.get("target_dev"), job.get("target_ino"))
+        if not all(type(value) is int for value in expected_identity):
             return False
+
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+        if parent_fd is None:
+            fd = os.open(target, flags)
+        else:
+            fd = os.open(target.name, flags, dir_fd=parent_fd)
         digest = hashlib.sha256()
-        with target.open("rb") as stream:
+        with os.fdopen(fd, "rb") as stream:
+            metadata = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or (metadata.st_dev, metadata.st_ino) != expected_identity
+            ):
+                return False
             for chunk in iter(lambda: stream.read(128 * 1024), b""):
                 digest.update(chunk)
-        return digest.hexdigest() == job.get("sha256")
+        return (
+            digest.hexdigest() == job.get("sha256")
+            and _script_path_still_matches(job["path"], target, parent_fd, parent_identity)
+        )
     except (OSError, KeyError, ValueError):
         return False
+    finally:
+        if parent_fd is not None:
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
 
 
 def _save_locked():
@@ -134,6 +261,8 @@ def _ensure_loaded():
                 "downloaded_bytes": max(0, _int(row.get("downloaded_bytes"), 0)),
                 "total_bytes": _optional_nonnegative_int(row.get("total_bytes")),
                 "sha256": str(row.get("sha256") or ""),
+                "target_dev": row.get("target_dev") if type(row.get("target_dev")) is int else None,
+                "target_ino": row.get("target_ino") if type(row.get("target_ino")) is int else None,
                 "error_code": str(row.get("error_code") or "")[:80],
                 "created_at": str(row.get("created_at") or ""),
                 "updated_at": str(row.get("updated_at") or ""),
@@ -205,41 +334,77 @@ def _update(job_id, *, persist=True, **updates):
         job.update(updates)
         job["updated_at"] = now_str()
         if persist:
-            _save_locked()
+            try:
+                _save_locked()
+            except Exception as exc:
+                raise _PullPersistenceError from exc
         return dict(job)
 
 
-def _publish_no_replace(temp, target):
+def _publish_no_replace(target, parent_fd, temp_name, target_name):
     link = getattr(os, "link", None)
     if callable(link):
         try:
-            link(temp, target)
-            temp.unlink()
+            if parent_fd is not None and os.link in getattr(os, "supports_dir_fd", set()):
+                os.link(
+                    temp_name,
+                    target_name,
+                    src_dir_fd=parent_fd,
+                    dst_dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+            elif parent_fd is None:
+                temp = target.with_name(temp_name)
+                os.link(temp, target, follow_symlinks=False)
+            else:
+                raise NotImplementedError
+            if parent_fd is not None:
+                os.unlink(temp_name, dir_fd=parent_fd)
+            else:
+                target.with_name(temp_name).unlink()
             return
         except (OSError, NotImplementedError) as exc:
-            unsupported = {errno.ENOSYS, errno.EPERM, errno.EACCES}
+            unsupported = {errno.ENOSYS, errno.EPERM, errno.EACCES, errno.EINVAL}
             unsupported.update(
                 value for value in (getattr(errno, "ENOTSUP", None), getattr(errno, "EOPNOTSUPP", None))
                 if value is not None
             )
             if not isinstance(exc, NotImplementedError) and getattr(exc, "errno", None) not in unsupported:
                 raise
+    source = temp_name if parent_fd is not None else target.with_name(temp_name)
+    destination = target_name if parent_fd is not None else target
+    if _renameat2_no_replace(source, destination, parent_fd):
+        return
+    if os.name == "nt":
+        os.rename(target.with_name(temp_name), target)
+        return
+    raise OSError(errno.ENOTSUP, "atomic no-replace publish is unavailable", str(target))
 
-    mode = stat.S_IMODE(temp.stat().st_mode)
-    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
-    fd = os.open(str(target), flags, mode)
-    reservation = os.fstat(fd)
-    os.close(fd)
+
+def _script_path_still_matches(relative, target, parent_fd, parent_identity):
     try:
-        os.replace(temp, target)
-    except Exception:
-        try:
-            current = os.stat(target, follow_symlinks=False)
-            if (current.st_dev, current.st_ino) == (reservation.st_dev, reservation.st_ino):
-                os.unlink(target)
-        except OSError:
-            pass
-        raise
+        if script_file_target(relative) != target:
+            return False
+        metadata = target.parent.stat(follow_symlinks=False)
+        current_identity = (metadata.st_dev, metadata.st_ino)
+        if parent_fd is not None:
+            opened = os.fstat(parent_fd)
+            return current_identity == (opened.st_dev, opened.st_ino) == parent_identity
+        return current_identity == parent_identity
+    except (OSError, ValueError):
+        return False
+
+
+def _unlink_published_if_same(target, parent_fd, name, identity):
+    try:
+        if parent_fd is not None:
+            current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        else:
+            current = target.stat(follow_symlinks=False)
+        if (current.st_dev, current.st_ino) == identity:
+            _unlink_at(target, parent_fd, name)
+    except OSError:
+        pass
 
 
 def _run_pull(job_id, url, proxy_id):
@@ -251,9 +416,16 @@ def _run_pull(job_id, url, proxy_id):
 
     response = None
     target = None
+    parent_fd = None
+    parent_identity = None
+    temp_name = _temp_name(job_id)
+    target_name = None
+    temp_created = False
     try:
-        target = script_file_target(job["path"])
-        temp = target.with_name(f".fls-pull-{job_id}.tmp")
+        try:
+            target, parent_fd, target_name, parent_identity = _open_script_parent(job["path"])
+        except (OSError, ValueError) as exc:
+            raise _PullPathChanged from exc
         if cancel.is_set():
             raise _PullCancelled
         real_url = github_proxy_url(url, proxy_id)
@@ -274,11 +446,8 @@ def _run_pull(job_id, url, proxy_id):
         except (TypeError, ValueError):
             total = None
 
-        fd = os.open(
-            str(temp),
-            os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0),
-            0o600,
-        )
+        fd, temp_name = _open_temp(target, parent_fd, job_id)
+        temp_created = True
         downloaded = 0
         saved_at = time.monotonic()
         with os.fdopen(fd, "wb") as output:
@@ -306,35 +475,72 @@ def _run_pull(job_id, url, proxy_id):
         if total is not None and total != downloaded:
             total = None
         digest = hashlib.sha256()
-        with temp.open("rb") as staged:
+        staged_fd = _open_staged(target, parent_fd, temp_name)
+        with os.fdopen(staged_fd, "rb") as staged:
             for chunk in iter(lambda: staged.read(128 * 1024), b""):
                 digest.update(chunk)
+            staged_metadata = os.fstat(staged.fileno())
+        target_identity = (staged_metadata.st_dev, staged_metadata.st_ino)
         _update(
             job_id,
             status="publishing",
             total_bytes=total,
             downloaded_bytes=downloaded,
             sha256=digest.hexdigest(),
+            target_dev=target_identity[0],
+            target_ino=target_identity[1],
         )
         with SCRIPT_PULL_LOCK:
             if cancel.is_set():
                 raise _PullCancelled
-            if script_file_target(job["path"]) != target or target.parent.is_symlink():
-                raise ValueError("invalid_path")
-            _publish_no_replace(temp, target)
+            if not _script_path_still_matches(job["path"], target, parent_fd, parent_identity):
+                raise _PullPathChanged
+            _publish_no_replace(target, parent_fd, temp_name, target_name)
+            temp_created = False
+            try:
+                if parent_fd is not None:
+                    published_metadata = os.stat(
+                        target_name,
+                        dir_fd=parent_fd,
+                        follow_symlinks=False,
+                    )
+                else:
+                    published_metadata = target.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise _PullPathChanged from exc
+            if (
+                (published_metadata.st_dev, published_metadata.st_ino) != target_identity
+                or not _script_path_still_matches(job["path"], target, parent_fd, parent_identity)
+            ):
+                _unlink_published_if_same(target, parent_fd, target_name, target_identity)
+                raise _PullPathChanged
             current = SCRIPT_PULL_JOBS[job_id]
             current.update(status="complete", error_code="", total_bytes=total, downloaded_bytes=downloaded)
             current["updated_at"] = now_str()
-            _save_locked()
+            try:
+                _save_locked()
+            except Exception as exc:
+                raise _PullPersistenceError from exc
     except _PullCancelled:
-        _finish_or_fail(job_id, target, "cancelled", "")
+        _finish_or_fail(job_id, target, "cancelled", "", parent_fd=parent_fd, temp_name=temp_name)
     except _PullTooLarge:
-        _finish_or_fail(job_id, target, "failed", "too_large")
+        _finish_or_fail(job_id, target, "failed", "too_large", parent_fd=parent_fd, temp_name=temp_name)
     except FileExistsError:
-        _finish_or_fail(job_id, target, "failed", "target_exists")
+        _finish_or_fail(job_id, target, "failed", "target_exists", parent_fd=parent_fd, temp_name=temp_name)
+    except _PullPathChanged:
+        _finish_or_fail(job_id, target, "failed", "path_changed", parent_fd=parent_fd, temp_name=temp_name)
+    except _PullPersistenceError:
+        _finish_or_fail(job_id, target, "failed", "job_persistence_failed", parent_fd=parent_fd, temp_name=temp_name)
     except Exception:
-        _finish_or_fail(job_id, target, "failed", "download_failed")
+        _finish_or_fail(job_id, target, "failed", "download_failed", parent_fd=parent_fd, temp_name=temp_name)
     finally:
+        if temp_created and target is not None:
+            _unlink_at(target, parent_fd, temp_name)
+        if parent_fd is not None:
+            try:
+                os.close(parent_fd)
+            except OSError:
+                pass
         if response is not None:
             try:
                 response.close()
@@ -344,18 +550,24 @@ def _run_pull(job_id, url, proxy_id):
             SCRIPT_PULL_CANCEL.pop(job_id, None)
 
 
-def _finish_or_fail(job_id, target, status, error_code):
+def _finish_or_fail(job_id, target, status, error_code, *, parent_fd=None, temp_name=None):
+    if target is not None and temp_name is not None:
+        _unlink_at(target, parent_fd, temp_name)
     with SCRIPT_PULL_LOCK:
         job = SCRIPT_PULL_JOBS.get(job_id)
         published = bool(target and job and job.get("sha256") and _target_matches(job))
-    if published:
-        _update(job_id, status="complete", error_code="")
-        if target is not None:
-            _clean_temp(target, job_id)
-        return
-    if target is not None:
-        _clean_temp(target, job_id)
-    _update(job_id, status=status, error_code=error_code)
+        if job is None:
+            return
+        job.update(
+            status="complete" if published else status,
+            error_code="" if published else error_code,
+            updated_at=now_str(),
+        )
+        try:
+            _save_locked()
+        except Exception:
+            if not published:
+                job.update(status="unknown", error_code="job_persistence_failed")
 
 
 def _json_body():
@@ -569,7 +781,13 @@ def api_script_pull_cancel(job_id):
         cancel = SCRIPT_PULL_CANCEL.get(job_id)
         if cancel is None:
             return _error("作业状态无法确认，请检查目标文件", 409, "state_unknown")
-        cancel.set()
+        previous_status = job.get("status")
+        previous_updated = job.get("updated_at")
         job.update(status="cancelling", updated_at=now_str())
-        _save_locked()
+        try:
+            _save_locked()
+        except Exception:
+            job.update(status=previous_status, updated_at=previous_updated)
+            return _error("取消状态无法保存，作业未取消", 503, "job_persistence_failed")
+        cancel.set()
         return _response({"ok": True, "job": _payload(job)}, 202)

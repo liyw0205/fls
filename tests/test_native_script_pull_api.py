@@ -198,7 +198,114 @@ class NativeScriptPullApiTests(unittest.TestCase):
             self.assertFalse(target.exists())
             self.assertEqual(list(target.parent.glob(".fls-pull-*.tmp")), [])
 
-    def test_restart_recovers_publish_receipt_only_when_target_hash_matches(self):
+    def test_cancel_is_not_applied_when_job_state_cannot_be_persisted(self):
+        with isolated_app() as (app, base):
+            import fls_manager.routes.scripts.native_pull as native_pull
+
+            entered = threading.Event()
+            release = threading.Event()
+
+            class BlockingResponse(FakeResponse):
+                def iter_content(self, chunk_size):
+                    yield b"partial"
+                    entered.set()
+                    release.wait(2)
+                    yield b"finish"
+
+            client = app.test_client()
+            response = BlockingResponse([], 13)
+            with patch.object(
+                native_pull, "requests", SimpleNamespace(get=lambda *args, **kwargs: response),
+            ):
+                accepted = self._submit(client)
+                job_id = accepted.json["job"]["id"]
+                self.assertTrue(entered.wait(2))
+                with patch.object(native_pull, "_save_locked", side_effect=OSError("disk unavailable")):
+                    cancel = client.post(
+                        f"/api/scripts/pull/{job_id}/cancel",
+                        headers={"X-Token": TOKEN},
+                    )
+                self.assertEqual(cancel.status_code, 503)
+                self.assertEqual(cancel.json["code"], "job_persistence_failed")
+                self.assertFalse(native_pull.SCRIPT_PULL_CANCEL[job_id].is_set())
+                release.set()
+                result = self._wait(client, job_id, {"complete"})
+
+            self.assertEqual(result["status"], "complete")
+            self.assertEqual((base / "scripts" / "script.py").read_bytes(), b"partialfinish")
+
+    def test_same_content_created_by_another_publisher_is_not_claimed(self):
+        with isolated_app() as (app, base):
+            import fls_manager.routes.scripts.native_pull as native_pull
+
+            body = b"same content"
+            target = base / "scripts" / "script.py"
+
+            def competing_publish(*_args):
+                target.write_bytes(body)
+                raise FileExistsError("target created by another publisher")
+
+            client = app.test_client()
+            with patch.object(
+                native_pull, "requests", SimpleNamespace(get=lambda *args, **kwargs: FakeResponse([body], len(body))),
+            ), patch.object(native_pull, "_publish_no_replace", side_effect=competing_publish):
+                accepted = self._submit(client)
+                failed = self._wait(client, accepted.json["job"]["id"], {"failed"})
+
+            self.assertEqual(failed["error_code"], "target_exists")
+            self.assertEqual(target.read_bytes(), body)
+
+    def test_parent_symlink_swap_does_not_publish_outside_original_directory(self):
+        with isolated_app() as (app, base):
+            import fls_manager.routes.scripts.native_pull as native_pull
+
+            scripts = base / "scripts"
+            parent = scripts / "nested"
+            moved = scripts / "nested-moved"
+            external = base / "external"
+            parent.mkdir()
+            external.mkdir()
+
+            def swap_parent(*_args, **_kwargs):
+                parent.rename(moved)
+                parent.symlink_to(external, target_is_directory=True)
+                return FakeResponse([b"must not publish"], 15)
+
+            client = app.test_client()
+            with patch.object(native_pull, "requests", SimpleNamespace(get=swap_parent)):
+                accepted = self._submit(client, path="nested/script.py")
+                failed = self._wait(client, accepted.json["job"]["id"], {"failed"})
+
+            self.assertEqual(failed["error_code"], "path_changed")
+            self.assertFalse((external / "script.py").exists())
+            self.assertFalse((moved / "script.py").exists())
+            self.assertEqual(list(moved.glob(".fls-pull-*.tmp")), [])
+
+    def test_replaced_parent_directory_is_not_mistaken_for_original_target(self):
+        with isolated_app() as (app, base):
+            import fls_manager.routes.scripts.native_pull as native_pull
+
+            scripts = base / "scripts"
+            parent = scripts / "nested"
+            moved = scripts / "nested-moved"
+            parent.mkdir()
+
+            def replace_parent(*_args, **_kwargs):
+                parent.rename(moved)
+                parent.mkdir()
+                return FakeResponse([b"must not publish"], 15)
+
+            client = app.test_client()
+            with patch.object(native_pull, "requests", SimpleNamespace(get=replace_parent)):
+                accepted = self._submit(client, path="nested/script.py")
+                failed = self._wait(client, accepted.json["job"]["id"], {"failed"})
+
+            self.assertEqual(failed["error_code"], "path_changed")
+            self.assertFalse((parent / "script.py").exists())
+            self.assertFalse((moved / "script.py").exists())
+            self.assertEqual(list(moved.glob(".fls-pull-*.tmp")), [])
+
+    def test_restart_recovers_publish_receipt_only_when_target_identity_and_hash_match(self):
         with isolated_app() as (app, base):
             import fls_manager.routes.scripts.native_pull as native_pull
 
@@ -217,6 +324,8 @@ class NativeScriptPullApiTests(unittest.TestCase):
                 "downloaded_bytes": 9,
                 "total_bytes": 9,
                 "sha256": hashlib.sha256(b"published").hexdigest(),
+                "target_dev": target.stat().st_dev,
+                "target_ino": target.stat().st_ino,
                 "error_code": "",
                 "created_at": "2026-11-25 00:00:00",
                 "updated_at": "2026-11-25 00:00:00",
@@ -229,6 +338,25 @@ class NativeScriptPullApiTests(unittest.TestCase):
 
             self.assertEqual(status.json["job"]["status"], "complete")
             self.assertEqual(target.read_bytes(), b"published")
+
+            row["target_ino"] += 1
+            (base / "data" / "script_pull_jobs.json").write_text(json.dumps([row]), encoding="utf-8")
+            native_pull.SCRIPT_PULL_INITIALIZED = False
+            native_pull.SCRIPT_PULL_JOBS.clear()
+            status = client.get(f"/api/scripts/pull/{job_id}", headers={"X-Token": TOKEN})
+
+            self.assertEqual(status.json["job"]["status"], "unknown")
+            self.assertEqual(status.json["job"]["error_code"], "worker_interrupted")
+
+            row["target_ino"] = target.stat().st_ino
+            row["sha256"] = hashlib.sha256(b"different").hexdigest()
+            (base / "data" / "script_pull_jobs.json").write_text(json.dumps([row]), encoding="utf-8")
+            native_pull.SCRIPT_PULL_INITIALIZED = False
+            native_pull.SCRIPT_PULL_JOBS.clear()
+            status = client.get(f"/api/scripts/pull/{job_id}", headers={"X-Token": TOKEN})
+
+            self.assertEqual(status.json["job"]["status"], "unknown")
+            self.assertEqual(status.json["job"]["error_code"], "worker_interrupted")
 
     def test_restart_recovery_marks_interrupted_download_unknown_and_cleans_temp(self):
         with isolated_app() as (app, base):
