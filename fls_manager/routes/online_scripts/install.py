@@ -187,6 +187,13 @@ def _start_install_job(
             "running": True,
             "status": "准备中",
             "phase": "prepared",
+            "download_progress": {
+                "state": "pending",
+                "kind": "raw" if item.get("type") == "raw" else "git" if item.get("type") == "repo" else "unknown",
+                "downloaded_bytes": 0,
+                "total_bytes": None,
+                "updated_at": now_str(),
+            },
             "start_time": time.time(),
             "returncode": None,
             "error": "",
@@ -911,6 +918,24 @@ def _retry_unstarted_install_receipt(install_id):
 @bp.route("/online-scripts/install-start-retry/<install_id>", methods=["POST"])
 def online_scripts_install_start_retry(install_id):
     return _retry_unstarted_install_receipt(install_id)
+
+
+@bp.route("/api/online-scripts/install-start-retry/<install_id>", methods=["POST"])
+def api_online_scripts_install_start_retry(install_id):
+    if not re.fullmatch(r"[a-f0-9]{32}", install_id or ""):
+        return jsonify(ok=False, request_id=install_id, msg="在线脚本安装请求标识无效"), 400
+    result = _retry_unstarted_install_receipt(install_id)
+    if isinstance(result, tuple):
+        return _api_install_start_result(result, install_id)
+    info = get_online_install_job(install_id)
+    if not info:
+        return jsonify(ok=False, request_id=install_id, msg="原安装启动回执不可见，请查询安装历史"), 503
+    phase, message = _api_install_display_state(info)
+    return jsonify(
+        ok=True, request_id=install_id, install_id=install_id,
+        status=info.get("status"), phase=phase, running=bool(info.get("running")),
+        msg=message, log_url=url_for("online_scripts.api_online_install_log", install_id=install_id),
+    ), 200
 
 
 def _install_confirmation(
@@ -1657,6 +1682,120 @@ def online_scripts_install_retry(install_id):
             selected_task_indexes=selected_task_indexes,
             retry_of=install_id,
         )
+    finally:
+        with ONLINE_INSTALL_LOCK:
+            ONLINE_INSTALL_RETRYING.discard(install_id)
+
+
+@bp.route("/api/online-scripts/install-retry/<install_id>", methods=["POST"])
+def api_online_scripts_install_retry(install_id):
+    if not re.fullmatch(r"[a-f0-9]{32}", install_id or ""):
+        return jsonify(ok=False, request_id=install_id, msg="在线脚本安装请求标识无效"), 400
+    data = request.get_json(silent=True) if request.is_json else request.form
+    if not isinstance(data, dict) and not hasattr(data, "get"):
+        return jsonify(ok=False, request_id=install_id, msg="请求 JSON 必须为对象"), 400
+    try:
+        force = _api_flag(data, "force")
+    except ValueError as exc:
+        return jsonify(ok=False, request_id=install_id, msg=str(exc)), 400
+    try:
+        info = get_online_install_job(install_id)
+    except Exception:
+        return jsonify(ok=False, request_id=install_id, msg="安装记录无法读取"), 500
+    if not info:
+        return jsonify(ok=False, request_id=install_id, msg="安装记录不存在"), 404
+    if info.get("running"):
+        return jsonify(ok=False, request_id=install_id, msg="安装仍在运行，请等待或先停止"), 409
+    if info.get("scheduler_reload_pending"):
+        return jsonify(ok=False, request_id=install_id, msg="请先恢复任务调度", scheduler_reload_required=True), 409
+    if info.get("status") not in ("结果未知", "失败", "超时", "已停止", "启动失败"):
+        return jsonify(ok=False, request_id=install_id, msg="当前安装状态不允许重试"), 409
+
+    with ONLINE_INSTALL_LOCK:
+        try:
+            info = get_online_install_job(install_id)
+        except Exception:
+            return jsonify(ok=False, request_id=install_id, msg="安装记录无法读取"), 500
+        if not info:
+            return jsonify(ok=False, request_id=install_id, msg="安装记录不存在"), 404
+        recovery = info.get("task_recovery") or {}
+        if recovery.get("pending"):
+            return jsonify(ok=False, request_id=install_id, msg="请先核实原任务导入结果"), 409
+        relation = online_install_retry_relation(info)
+        if relation.get("retry_relation_error"):
+            return jsonify(ok=False, request_id=install_id, msg=relation["retry_relation_error"]), 409
+        existing_child = str(info.get("retried_by") or "")
+        if existing_child:
+            child = get_online_install_job(existing_child)
+            if child and child.get("retry_of") == install_id:
+                return jsonify(
+                    ok=True, replayed=True, request_id=existing_child, install_id=existing_child,
+                    retry_of=install_id, status=child.get("status"), running=bool(child.get("running")),
+                    log_url=url_for("online_scripts.api_online_install_log", install_id=existing_child),
+                ), 200
+            return jsonify(ok=False, request_id=install_id, msg="原安装已关联重试记录，请从历史查询"), 409
+        active_id, _active = active_online_install_for_script(info.get("script_id"))
+        if active_id:
+            return jsonify(ok=False, request_id=install_id, install_id=active_id, msg="该脚本仍有安装正在运行"), 409
+        if install_id in ONLINE_INSTALL_RETRYING:
+            return jsonify(ok=False, request_id=install_id, msg="安装重试正在提交，请稍后查询原记录"), 409
+        ONLINE_INSTALL_RETRYING.add(install_id)
+
+    try:
+        script_id = str(info.get("script_id") or "").strip()
+        try:
+            item = get_online_script(script_id)
+        except Exception:
+            return jsonify(ok=False, request_id=install_id, msg="在线脚本目录无法读取"), 500
+        if not item:
+            return jsonify(ok=False, request_id=install_id, msg="脚本已不在缓存中，请先同步脚本源"), 409
+        try:
+            online_script_target(item)
+            import_task = bool(info.get("import_task"))
+            enable_task = bool(info.get("enable_task")) and import_task
+            selected_task_indexes = validated_install_retry_task_indexes(item, info) if import_task else []
+            if import_task:
+                validate_online_task_import(item, selected_task_indexes)
+        except Exception:
+            return jsonify(ok=False, request_id=install_id, msg="原安装选项已失效，请重新选择"), 409
+        proxy_id = str(data.get("proxy_id", info.get("proxy_id")) or "").strip()
+        try:
+            validate_proxy_id(proxy_id)
+        except ValueError as exc:
+            return jsonify(ok=False, request_id=install_id, msg=str(exc)), 400
+        except Exception:
+            return jsonify(ok=False, request_id=install_id, msg="代理配置无法读取"), 500
+        target = online_script_target(item)
+        if target.exists() and not force:
+            return jsonify(
+                ok=False, request_id=install_id, confirm_required=True,
+                target_exists=True, msg="重试将覆盖已有脚本文件，请明确确认后继续",
+            ), 409
+
+        result = _start_install_job(
+            script_id=script_id, item=item, proxy_id=proxy_id,
+            import_task=import_task, force=force, enable_task=enable_task,
+            selected_task_indexes=selected_task_indexes, retry_of=install_id,
+        )
+        converted = _api_install_start_result(result, install_id)
+        if isinstance(converted, tuple):
+            return converted
+        location = getattr(converted, "location", "") or ""
+        match = re.search(r"/online-scripts/log/([a-f0-9]{32})", location)
+        if not match:
+            return jsonify(ok=False, request_id=install_id, msg="安装重试已提交，请查询原安装历史"), 503
+        child_id = match.group(1)
+        child = get_online_install_job(child_id)
+        if not child:
+            return jsonify(
+                ok=False, accepted=True, request_id=child_id, install_id=child_id,
+                retry_of=install_id, msg="重试已受理，但状态暂不可见，请查询安装历史",
+            ), 503
+        return jsonify(
+            ok=True, request_id=child_id, install_id=child_id, retry_of=install_id,
+            status=child.get("status"), phase=child.get("phase"), running=bool(child.get("running")),
+            log_url=url_for("online_scripts.api_online_install_log", install_id=child_id),
+        ), 200
     finally:
         with ONLINE_INSTALL_LOCK:
             ONLINE_INSTALL_RETRYING.discard(install_id)

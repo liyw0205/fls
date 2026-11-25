@@ -14,12 +14,69 @@ from ...online_scripts.constants import (
     get_online_refresh_state,
 )
 from ...online_scripts.logs import online_refresh_log_file
+from ...sensitive import mask_sensitive_text
 from ...paths import LOG_DIR
 
 
 RECOVERY_STATUSES = {"结果未知", "失败", "超时", "已停止", "启动失败"}
 REFRESH_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 REFRESH_TERMINAL_STATUSES = {"已完成", "部分完成", "失败", "结果未知", "已确认发布", "已确认未发布", "超时", "已停止", "启动失败"}
+
+
+def _api_download_progress(info):
+    progress = (info or {}).get("download_progress")
+    if not isinstance(progress, dict):
+        return {
+            "state": "unknown", "kind": "unknown", "downloaded_bytes": None,
+            "total_bytes": None, "percent": None, "updated_at": "",
+        }
+    kind = progress.get("kind") if progress.get("kind") in ("raw", "git", "unknown") else "unknown"
+    state = progress.get("state") if progress.get("state") in (
+        "pending", "downloading", "indeterminate", "complete", "cancelled", "failed",
+    ) else "unknown"
+    downloaded = progress.get("downloaded_bytes")
+    total = progress.get("total_bytes")
+    if type(downloaded) is not int or downloaded < 0:
+        downloaded = None
+    if type(total) is not int or total < 0 or kind != "raw":
+        total = None
+    percent = None
+    if kind == "raw" and total is not None and downloaded is not None:
+        percent = 100 if total == 0 and state == "complete" else (
+            0 if total == 0 else min(100, int(downloaded * 100 / total))
+        )
+    return {
+        "state": state,
+        "kind": kind,
+        "downloaded_bytes": downloaded if kind == "raw" else None,
+        "total_bytes": total,
+        "percent": percent,
+        "updated_at": str(progress.get("updated_at") or "")[:40],
+    }
+
+
+def _api_no_store(payload, status=200):
+    response = jsonify(payload)
+    response.status_code = status
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def _api_install_history_item(info):
+    fields = (
+        "id", "script_id", "script_name", "proxy_id", "import_task", "enable_task",
+        "selected_task_indexes", "force", "retry_of", "retried_by", "running", "status",
+        "phase", "start_time", "returncode", "scheduler_reload_pending", "updated_at",
+    )
+    result = {field: info.get(field) for field in fields}
+    result["error"] = mask_sensitive_text(info.get("error") or "")[:2000]
+    result["scheduler_reload_error"] = mask_sensitive_text(info.get("scheduler_reload_error") or "")[:1000]
+    result["download_progress"] = _api_download_progress(info)
+    result["retry_parent_id"] = str(info.get("retry_parent_id") or "")
+    result["retry_child_id"] = str(info.get("retry_child_id") or "")
+    result["retry_relation_error"] = mask_sensitive_text(info.get("retry_relation_error") or "")[:500]
+    result["log_url"] = url_for("online_scripts.api_online_install_log", install_id=info.get("id"))
+    return result
 
 
 def _install_log_file(info):
@@ -406,7 +463,7 @@ def _install_error(info):
     phase_warning = _install_phase_warning(info)
     if phase_warning and phase_warning not in errors[0]:
         errors.append(phase_warning)
-    return "；".join(filter(None, errors))
+    return mask_sensitive_text("；".join(filter(None, errors)))[:2000]
 
 
 def _install_recovery(info):
@@ -424,6 +481,7 @@ def _install_recovery(info):
         return {
             "available": True,
             "action": url_for("online_scripts.online_scripts_install_start_retry", install_id=info.get("id")),
+            "api_action": url_for("online_scripts.api_online_scripts_install_start_retry", install_id=info.get("id")),
             "label": "沿原请求重试启动",
         }
     if not (info or {}).get("running") and ((info or {}).get("task_recovery") or {}).get("pending"):
@@ -524,6 +582,7 @@ def _install_recovery(info):
         "available": True,
         "script_id": script_id,
         "action": url_for("online_scripts.online_scripts_install_retry", install_id=info.get("id")),
+        "api_action": url_for("online_scripts.api_online_scripts_install_retry", install_id=info.get("id")),
         "label": "重试安装",
     }
 
@@ -610,10 +669,10 @@ def api_online_install_history():
         return jsonify(ok=False, msg="安装历史在分页期间发生变化，请重新读取完整历史"), 409
     limit = int(request.args.get("limit", 50))
     offset = int(request.args.get("offset", 0))
-    return jsonify(
-        ok=True, items=items, total=total, offset=offset, limit=limit,
+    return _api_no_store(
+        dict(ok=True, items=[_api_install_history_item(item) for item in items], total=total, offset=offset, limit=limit,
         has_more=offset + len(items) < total,
-        snapshot=snapshot,
+        snapshot=snapshot),
     )
 
 
@@ -672,20 +731,23 @@ def api_online_install_log(install_id):
         "error": _install_error(info),
         "install_error": _install_error(info),
         "state_url": url_for("online_scripts.api_online_install_log", install_id=install_id, state_only="1"),
+        "download_progress": _api_download_progress(info),
     }
     if info.get("recovery_persistence_error") or info.get("stop_receipt_confirmation_required"):
         payload["persistence_error"] = True
     if info.get("stop_receipt_confirmation_required"):
         payload["stop_receipt_confirmation_required"] = True
     if isinstance(info.get("stop_warning"), str) and info["stop_warning"]:
-        payload["stop_warning"] = info["stop_warning"]
+        payload["stop_warning"] = mask_sensitive_text(info["stop_warning"])[:1000]
     payload.update(online_install_retry_relation(info))
     if info.get("scheduler_reload_pending"):
         payload["scheduler_reload_pending"] = True
-        payload["scheduler_reload_error"] = info.get("scheduler_reload_error") or ""
+        payload["scheduler_reload_error"] = mask_sensitive_text(
+            info.get("scheduler_reload_error") or "",
+        )[:1000]
     if request.args.get("state_only") == "1":
         payload["recovery"] = recovery
-        return jsonify(payload)
+        return _api_no_store(payload)
     consistency = verify_install_outputs(info)
     if consistency.get("checked"):
         payload["consistency"] = consistency
@@ -703,7 +765,7 @@ def api_online_install_log(install_id):
         # historical 200 response for existing polling clients while exposing
         # the real missing-log status in the JSON payload.
         response_status = 200 if failure_status == 404 else failure_status
-        return jsonify(payload), response_status
+        return _api_no_store(payload, response_status)
 
     payload.update(log_file=str(log_file), log=tail_file(str(log_file), lines))
     if str(payload["log"]).startswith("读取日志失败:"):
@@ -715,8 +777,8 @@ def api_online_install_log(install_id):
             log="",
             recovery_url="/online-scripts/install-history",
         )
-        return jsonify(payload), 500
-    return jsonify(payload)
+        return _api_no_store(payload, 500)
+    return _api_no_store(payload)
 
 
 @bp.route("/online-scripts/log/<install_id>")

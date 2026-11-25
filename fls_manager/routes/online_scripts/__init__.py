@@ -1,6 +1,7 @@
 from .bp import bp
 
 from . import pages
+from . import catalog_api
 from . import refresh
 from . import source_json
 from . import task_link

@@ -1524,6 +1524,7 @@ def _install_snapshot(info):
         "running",
         "status",
         "phase",
+        "download_progress",
         "target_path",
         "target_fingerprint",
         "tasks_fingerprint",
@@ -1611,6 +1612,22 @@ def _bounded_online_install_jobs(data, allow_protected_overflow=False):
 def _validate_install_job_record(install_id, info):
     if not isinstance(install_id, str) or not isinstance(info, dict) or info.get("id") != install_id:
         raise RuntimeError("在线脚本安装记录损坏，未覆盖原文件：记录标识不一致")
+
+    progress = info.get("download_progress")
+    if progress is not None:
+        if (
+            not isinstance(progress, dict)
+            or progress.get("state") not in ("pending", "downloading", "indeterminate", "complete", "cancelled", "failed")
+            or progress.get("kind") not in ("raw", "git", "unknown")
+            or type(progress.get("downloaded_bytes")) is not int
+            or progress["downloaded_bytes"] < 0
+            or (progress.get("total_bytes") is not None and (
+                type(progress.get("total_bytes")) is not int
+                or progress["total_bytes"] < progress["downloaded_bytes"]
+            ))
+            or not isinstance(progress.get("updated_at"), str)
+        ):
+            raise RuntimeError("在线脚本安装记录损坏，未覆盖原文件：下载进度结构无效")
 
     recovery = info.get("task_recovery")
     if recovery is None:

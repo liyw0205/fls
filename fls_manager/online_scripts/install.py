@@ -1,12 +1,13 @@
-import os
+import errno
 import hashlib
 import json
-import time
-import signal
+import os
 import shutil
+import signal
 import stat
-import threading
 import subprocess
+import threading
+import time
 import uuid
 from contextlib import closing
 
@@ -83,6 +84,38 @@ def _require_install_phase(info, phase):
         raise RuntimeError(f"安装阶段 {phase} 回执未能确认保存，未开始后续操作")
 
 
+def _update_download_progress(install_id, state, kind, downloaded_bytes=0, total_bytes=None, *, force=False):
+    downloaded_bytes = max(0, int(downloaded_bytes or 0))
+    if total_bytes is not None:
+        total_bytes = max(0, int(total_bytes))
+        if downloaded_bytes > total_bytes:
+            total_bytes = None
+            if state == "downloading":
+                state = "indeterminate"
+    with ONLINE_INSTALL_LOCK:
+        info = ONLINE_INSTALL_RUNNING.get(install_id)
+        if not isinstance(info, dict):
+            return
+        info["download_progress"] = {
+            "state": state,
+            "kind": kind,
+            "downloaded_bytes": downloaded_bytes,
+            "total_bytes": total_bytes,
+            "updated_at": now_str(),
+        }
+        current = time.monotonic()
+        last_saved = float(info.get("_progress_saved_at") or 0)
+        if not force and current - last_saved < 0.5:
+            return
+        info["_progress_saved_at"] = current
+        try:
+            persist_online_install(info)
+            info.pop("download_progress_persistence_error", None)
+        except Exception as exc:
+            # Progress is observational; a write failure must not interrupt the install.
+            info["download_progress_persistence_error"] = str(exc)[:300]
+
+
 def _fingerprint_file(path):
     digest = hashlib.sha256()
     with open(path, "rb") as stream:
@@ -90,6 +123,42 @@ def _fingerprint_file(path):
             digest.update(chunk)
     stat_result = os.stat(path)
     return {"kind": "file", "size": stat_result.st_size, "sha256": digest.hexdigest()}
+
+
+def _publish_new_file(temp_file, target):
+    link = getattr(os, "link", None)
+    if callable(link):
+        try:
+            link(temp_file, target)
+            return
+        except (OSError, NotImplementedError) as exc:
+            if isinstance(exc, NotImplementedError):
+                pass
+            else:
+                unsupported = {errno.ENOSYS, errno.EPERM}
+                unsupported.update(
+                    value for value in (getattr(errno, "ENOTSUP", None), getattr(errno, "EOPNOTSUPP", None))
+                    if value is not None
+                )
+                if exc.errno not in unsupported:
+                    raise
+
+    # Some Android Python builds omit os.link. Reserve the destination exclusively,
+    # then atomically replace that reservation with the completed temporary file.
+    mode = stat.S_IMODE(temp_file.stat().st_mode)
+    fd = os.open(str(target), os.O_CREAT | os.O_EXCL | os.O_WRONLY, mode)
+    reservation = os.fstat(fd)
+    os.close(fd)
+    try:
+        os.replace(temp_file, target)
+    except Exception:
+        try:
+            current = os.stat(target, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) == (reservation.st_dev, reservation.st_ino):
+                os.unlink(target)
+        except OSError:
+            pass
+        raise
 
 
 def _fingerprint_path(path):
@@ -448,6 +517,14 @@ def download_online_script_logged(item, proxy_id, log_file, force=False, install
                 proxies=requests_proxy_dict(proxy_id),
             )) as r:
                 r.raise_for_status()
+                content_length = str(r.headers.get("Content-Length") or "").strip()
+                total_bytes = int(content_length) if content_length.isdecimal() else None
+                downloaded_bytes = 0
+                progress_state = "downloading" if total_bytes is not None else "indeterminate"
+                if install_id:
+                    _update_download_progress(
+                        install_id, progress_state, "raw", downloaded_bytes, total_bytes, force=True,
+                    )
                 with temp_file.open("xb") as f:
                     temp_created = True
                     for chunk in r.iter_content(chunk_size=1024 * 128):
@@ -455,8 +532,20 @@ def download_online_script_logged(item, proxy_id, log_file, force=False, install
                             raise InstallStopped("安装已停止")
                         if chunk:
                             f.write(chunk)
+                            downloaded_bytes += len(chunk)
+                            if install_id:
+                                current_total = total_bytes if total_bytes is None or downloaded_bytes <= total_bytes else None
+                                current_state = "downloading" if current_total is not None else "indeterminate"
+                                _update_download_progress(
+                                    install_id, current_state, "raw", downloaded_bytes, current_total,
+                                )
                     f.flush()
                     os.fsync(f.fileno())
+                if install_id:
+                    final_total = total_bytes if total_bytes is not None and downloaded_bytes == total_bytes else None
+                    _update_download_progress(
+                        install_id, "complete", "raw", downloaded_bytes, final_total, force=True,
+                    )
 
             if target.exists():
                 temp_file.chmod(stat.S_IMODE(target.stat().st_mode))
@@ -470,7 +559,7 @@ def download_online_script_logged(item, proxy_id, log_file, force=False, install
                 if force:
                     os.replace(temp_file, target)
                 else:
-                    os.link(temp_file, target)
+                    _publish_new_file(temp_file, target)
         finally:
             if temp_created:
                 try:
@@ -488,6 +577,8 @@ def download_online_script_logged(item, proxy_id, log_file, force=False, install
 
         env = os.environ.copy()
         env = apply_proxy_env(env, proxy_id)
+        if install_id:
+            _update_download_progress(install_id, "indeterminate", "git", 0, None, force=True)
 
         if target.exists():
             if not (target / ".git").exists():
@@ -540,6 +631,8 @@ def download_online_script_logged(item, proxy_id, log_file, force=False, install
             )
 
         append_log(log_file, f"仓库下载/更新完成：{target}")
+        if install_id:
+            _update_download_progress(install_id, "complete", "git", 0, None, force=True)
         return target
 
     raise RuntimeError("未知脚本类型")
@@ -587,6 +680,8 @@ def install_worker(
             validate_online_task_import(item, selected_task_indexes)
 
         _require_install_phase(info, "downloading")
+        item_type = "raw" if item.get("type") == "raw" else "git" if item.get("type") == "repo" else "unknown"
+        _update_download_progress(install_id, "pending", item_type, 0, None, force=True)
         target = download_online_script_logged(
             item=item,
             proxy_id=proxy_id,
@@ -707,6 +802,15 @@ def install_worker(
             # Logging after a committed terminal result must not overwrite that result.
             if not info.get("running"):
                 return
+            progress = info.get("download_progress") or {}
+            if (
+                info.get("phase") == "downloading"
+                and progress.get("state") in ("downloading", "indeterminate")
+            ):
+                progress = dict(progress)
+                progress["state"] = "cancelled" if stopped else "failed"
+                progress["updated_at"] = now_str()
+                info["download_progress"] = progress
             info.update({
                 "running": False,
                 "phase": (
