@@ -1,6 +1,57 @@
 from ._common import *
 
 
+@bp.route("/api/logs")
+def api_logs():
+    q = request.args.get("q", "").strip().lower()
+    if len(q) > 200:
+        return jsonify({"ok": False, "msg": "q 长度不能超过 200"}), 400
+    try:
+        page = int(request.args.get("page", "1"))
+        limit = int(request.args.get("limit", "30"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "msg": "page 和 limit 必须是整数"}), 400
+    if page < 1 or limit < 1 or limit > 100:
+        return jsonify({"ok": False, "msg": "page 必须大于 0，limit 必须在 1 到 100 之间"}), 400
+
+    items = []
+    for group, files in load_log_groups().items():
+        for path in files:
+            if q and q not in group.lower() and q not in path.name.lower():
+                continue
+            try:
+                safe_path = safe_log_file(path.name)
+                info = safe_path.stat()
+            except (OSError, ValueError):
+                continue
+            items.append({
+                "filename": safe_path.name,
+                "group": str(group)[:512],
+                "size_bytes": max(0, int(info.st_size)),
+                "modified_at": datetime.fromtimestamp(info.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                "modified_timestamp": info.st_mtime,
+            })
+    items.sort(key=lambda item: (item["modified_timestamp"], item["filename"]), reverse=True)
+    total = len(items)
+    pages = max(1, ceil(total / limit))
+    page = min(page, pages)
+    start = (page - 1) * limit
+    visible = items[start:start + limit]
+    for item in visible:
+        item.pop("modified_timestamp", None)
+    response = jsonify({
+        "ok": True,
+        "items": visible,
+        "page": page,
+        "limit": limit,
+        "total": total,
+        "pages": pages,
+        "query": q,
+    })
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @bp.route("/logs")
 def logs_page():
     q = request.args.get("q", "").strip().lower()

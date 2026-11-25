@@ -10,6 +10,7 @@ from flask import abort, redirect, url_for, request, Response, jsonify
 
 from ...paths import LOG_DIR
 from ...logs import parse_task_name_from_log, tail_file
+from ...sensitive import mask_sensitive_text
 from ...utils import h, get_back_url
 from ...ui.layout import layout
 from ...ui.log_controls import log_controls

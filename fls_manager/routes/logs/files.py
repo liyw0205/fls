@@ -147,10 +147,41 @@ def api_logfile(filename):
             content_type="text/plain; charset=utf-8",
         )
 
-    return Response(
-        tail_file(str(file_path), lines),
-        mimetype="text/plain; charset=utf-8"
+    json_format = request.args.get("format") == "json"
+    if json_format:
+        if lines < 1 or lines > 5000:
+            return jsonify({"ok": False, "msg": "lines 必须在 1 到 5000 之间"}), 400
+    text = tail_file(str(file_path), lines)
+    if json_format:
+        response = jsonify({"ok": True, "filename": file_path.name, "lines": lines, "log": text})
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    return Response(text, mimetype="text/plain; charset=utf-8")
+
+
+@bp.route("/api/logfile/<filename>/download")
+def api_logfile_download(filename):
+    file_path = safe_log_file(filename)
+    try:
+        size = file_path.stat().st_size
+    except OSError:
+        abort(404)
+    if size > 8 * 1024 * 1024:
+        return jsonify({"ok": False, "msg": "日志文件超过 8 MB 下载限制，请使用日志筛选查看"}), 413
+    try:
+        raw_content = file_path.read_bytes()
+    except OSError:
+        abort(404)
+    if len(raw_content) > 8 * 1024 * 1024:
+        return jsonify({"ok": False, "msg": "日志文件超过 8 MB 下载限制，请使用日志筛选查看"}), 413
+    content = mask_sensitive_text(raw_content.decode("utf-8", errors="replace"))
+    response = Response(content, mimetype="text/plain; charset=utf-8")
+    quoted_filename = quote(file_path.name)
+    response.headers["Content-Disposition"] = (
+        f"attachment; filename=\"{quoted_filename}\"; filename*=UTF-8''{quoted_filename}"
     )
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @bp.route("/logfile/delete/<filename>", methods=["POST"])

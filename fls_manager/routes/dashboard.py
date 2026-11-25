@@ -25,6 +25,7 @@ from ..ui.components import table_card, page_header, section, data_toolbar, empt
 from ..utils import h, get_back_url
 from ..paths import BASE_DIR, DATA_DIR, LOG_DIR, SCRIPT_DIR
 from ..config import get_host, get_port, fls_get_admin_token, panel_now, get_panel_timezone_text
+from ..sensitive import mask_sensitive_text
 from ..state import PANEL_START_TIME, PANEL_START_STR
 from ..constants import MAIN_PROCESS_NAME, TASK_PROCESS_PREFIX
 from ..scheduler import get_scheduler_state, reload_scheduler
@@ -360,11 +361,107 @@ def _history_export_bytes(items):
 
 def _history_export_response(body):
     filename = datetime.now().strftime("fls-history-%Y%m%d-%H%M%S.csv")
-    return Response(
+    response = Response(
         body,
         mimetype="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def _history_api_item(item):
+    def text_value(key, limit):
+        value = mask_sensitive_text(item.get(key) or "")
+        return value[:limit]
+
+    def integer_value(key, default=0):
+        value = item.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) else default
+
+    return {
+        "id": text_value("id", 128),
+        "task_id": text_value("task_id", 128),
+        "task_name": text_value("task_name", 512),
+        "command": text_value("command", 4096),
+        "status": text_value("status", 64),
+        "start_at": text_value("start_at", 64),
+        "end_at": text_value("end_at", 64),
+        "duration_seconds": integer_value("duration_seconds"),
+        "return_code": integer_value("return_code") if item.get("return_code") is not None else None,
+        "source": text_value("source", 128),
+        "retry_attempt": integer_value("retry_attempt"),
+        "max_retries": integer_value("max_retries"),
+        "message": text_value("message", 4096),
+    }
+
+
+def _history_api_filters():
+    q = request.args.get("q", "").strip()
+    status = request.args.get("status", "").strip()
+    if len(q) > 200:
+        return None, (jsonify({"ok": False, "msg": "q 长度不能超过 200"}), 400)
+    allowed_statuses = {item[0] for item in HISTORY_STATUS_OPTIONS}
+    if status not in allowed_statuses:
+        return None, (jsonify({"ok": False, "msg": "未知运行历史状态"}), 400)
+    return (q, status), None
+
+
+@bp.route("/api/history")
+def api_history():
+    filters, error = _history_api_filters()
+    if error:
+        return error
+    q, status = filters
+    try:
+        page = int(request.args.get("page", "1"))
+        limit = int(request.args.get("limit", "30"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "msg": "page 和 limit 必须是整数"}), 400
+    if page < 1 or limit < 1 or limit > 100:
+        return jsonify({"ok": False, "msg": "page 必须大于 0，limit 必须在 1 到 100 之间"}), 400
+
+    _count_probe, total = query_task_history(
+        q=q,
+        status=status,
+        limit=1,
+        offset=0,
+    )
+    pages = max(1, ceil(total / limit))
+    page = min(page, pages)
+    items, _total = query_task_history(
+        q=q,
+        status=status,
+        limit=limit,
+        offset=(page - 1) * limit,
+    )
+    response = jsonify({
+        "ok": True,
+        "items": [_history_api_item(item) for item in items],
+        "page": page,
+        "limit": limit,
+        "total": total,
+        "pages": pages,
+        "query": q,
+        "status": status,
+    })
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@bp.route("/api/history/export")
+def api_history_export():
+    filters, error = _history_api_filters()
+    if error:
+        return error
+    q, status = filters
+    items, total = query_task_history(q=q, status=status, limit=5000)
+    if total > 5000:
+        return jsonify({"ok": False, "msg": "导出最多支持 5000 条记录，请缩小筛选范围"}), 413
+    body = _history_export_bytes([_history_api_item(item) for item in items])
+    if len(body) > 8 * 1024 * 1024:
+        return jsonify({"ok": False, "msg": "导出文件超过 8 MB，请缩小筛选范围"}), 413
+    return _history_export_response(body)
 
 
 def panel_cpu_peak_slot():
