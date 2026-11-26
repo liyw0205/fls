@@ -215,7 +215,7 @@ class ScriptImportRecoveryTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertIn('仓库导入成功', response.get_data(as_text=True))
             self.assertTrue((base / 'scripts' / 'repo' / '.git').is_dir())
-            self.assertEqual((base / 'scripts' / 'repo' / 'README.md').read_bytes(), b'fixture repository\n')
+            self.assertEqual((base / 'scripts' / 'repo' / 'README.md').read_text(encoding='utf-8'), 'fixture repository\n')
             self.assertEqual(list((base / 'scripts').glob('.fls-repo-*')), [])
             ScriptDirectoryJobTests().assert_restore_available()
 
