@@ -75,7 +75,8 @@ def apply_notification(data, *, load_tasks, save_config, sender=None):
     return payload, status
 
 
-def mutate_notification(data, *, load_tasks, save_config):
+def mutate_notification(data, *, load_tasks, save_config, native=False, intent_key=None):
+    from .notify_native import fingerprint, native_input, read_receipt, resolve_values
     def result(message, status, saved=False, **extra):
         return {"ok": status == 200, "msg": message, "saved": saved, "resolved": saved is not None, **extra}, status
     if not isinstance(data, dict):
@@ -95,7 +96,13 @@ def mutate_notification(data, *, load_tasks, save_config):
     if action == "new":
         version = None
     values = {"action": action, "item_id": item_id, "version": version}
-    if saving:
+    native_intent = None
+    if native:
+        try:
+            native_intent = native_input(data)
+        except (ValueError, TypeError) as exc:
+            return result(str(exc), 400)
+    if saving and not native:
         try:
             values["item"] = notification_values(data)
         except ValueError as exc:
@@ -106,6 +113,8 @@ def mutate_notification(data, *, load_tasks, save_config):
         values["test"] = test in (True, "1")
         if values["test"] and not values["item"]["enabled"]:
             return result("停用通知不能发送测试，请启用或仅保存", 400)
+    elif saving:
+        values["test"] = False
     if action == "default":
         ids = data.get("default_ids")
         if not isinstance(ids, list) or any(not isinstance(value, str) or not value for value in ids):
@@ -119,14 +128,19 @@ def mutate_notification(data, *, load_tasks, save_config):
     confirm = data.get("confirm_retry", False)
     if not (type(confirm) is bool or isinstance(confirm, str) and confirm in ("0", "1")):
         return result("恢复确认无效", 400)
-    intent = proxy_version(values)
+    intent = fingerprint(native_intent, intent_key) if native else proxy_version(values)
     target_id = uuid.uuid5(uuid.NAMESPACE_URL, "fls-notify:" + request_id).hex if action == "new" else item_id
-    operation_scope = action + ":" + target_id if saving else ""
+    operation_scope = action + ":" + target_id if saving or native else ""
     path = DATA_DIR / "notify_requests" / (request_id + ".json")
     with TASKS_MUTATION_LOCK, storage_transaction():
         record = None
+        def write_record():
+            if native:
+                record["signature"] = fingerprint({k: v for k, v in record.items() if k != "signature"}, intent_key)
+            write_json(path, record)
+
         def saved_result(message, status):
-            extra = {"item_id": target_id} if saving else {}
+            extra = {"item_id": target_id, "action": action} if saving or native else {}
             if saving and values["test"]:
                 extra["test_request"] = {"item_id": target_id, "version": record["after"],
                     "request_id": uuid.uuid5(uuid.NAMESPACE_URL, "fls-notify-save-test:" + request_id).hex}
@@ -135,7 +149,7 @@ def mutate_notification(data, *, load_tasks, save_config):
         def complete(status=200, message="通知设置已保存"):
             record["state"] = "completed"
             try:
-                write_json(path, record)
+                write_record()
             except Exception:
                 return saved_result("通知已保存，结果记录失败，请查询原提交", 503)
             return saved_result(message, status)
@@ -145,14 +159,18 @@ def mutate_notification(data, *, load_tasks, save_config):
             except FileNotFoundError:
                 pass
             else:
+                if ("intent_kind" in record if isinstance(record, dict) else False) != native:
+                    return result("提交标识属于另一接口，请查询原提交", 409, None)
+                if native:
+                    record = read_receipt(request_id, intent_key)
                 if (not isinstance(record, dict) or record.get("request_id") != request_id
                     or record.get("state") not in ("prepared", "failed", "completed")
                     or any(not isinstance(record.get(key), str) or not re.fullmatch(r"[a-f0-9]{64}", record[key])
                            for key in ("intent", "before", "after"))):
                     raise RuntimeError("通知操作记录损坏")
-                if saving and (record.get("scope") != operation_scope or not isinstance(record.get("updated_at"), str)):
+                if (saving or native) and (record.get("scope") != operation_scope or not isinstance(record.get("updated_at"), str)):
                     raise RuntimeError("通知保存记录损坏")
-                if record["intent"] != intent and not (saving and record["state"] == "failed" and record.get("scope") == operation_scope):
+                if record["intent"] != intent and not (not native and saving and record["state"] == "failed" and record.get("scope") == operation_scope):
                     return result("提交标识已用于其他操作，请先查询原提交", 409, None)
                 if record["state"] == "completed":
                     return saved_result("通知操作已完成，未重复执行", 200)
@@ -165,7 +183,7 @@ def mutate_notification(data, *, load_tasks, save_config):
                 if actual == record["after"] and record["intent"] == intent:
                     return complete()
                 if actual != record["before"]:
-                    return result("原提交结果无法确认，通知设置已变化，请核对后重新选择", 409, None, resolved=True,
+                    return result("原提交结果无法确认，通知设置已变化，请核对后重新选择", 409, None, resolved=not native,
                                   **({"current": item, "current_version": actual, "conflict": True} if saving else {}))
                 if record["state"] == "prepared" and confirm not in (True, "1"):
                     return result("上次通知操作中断，请核对后确认重试", 409, None, confirm_required=True)
@@ -175,7 +193,12 @@ def mutate_notification(data, *, load_tasks, save_config):
                 return result("新建目标已存在，请核对原提交结果", 409, None)
             if action != "new" and actual != version:
                 return result("通知设置或默认选择已变化，未覆盖，请重新选择", 409,
-                              **({"current": item, "current_version": actual, "conflict": True} if saving else {}))
+                              **({"current": item, "current_version": actual, "conflict": True} if saving or native else {}))
+            if native and saving:
+                try:
+                    values["item"] = resolve_values(item, data)
+                except (ValueError, TypeError) as exc:
+                    return result(str(exc), 400)
             desired = dict(cfg)
             if action == "default":
                 enabled_ids = {item["id"] for item in items if item.get("enabled", True)}
@@ -204,15 +227,18 @@ def mutate_notification(data, *, load_tasks, save_config):
                 else:
                     desired["notify_items"] = [dict(item, enabled=values["enabled"]) if action == "toggle" and item["id"] == item_id else item
                                                for item in items if action != "delete" or item["id"] != item_id]
-            if saving and record and record["intent"] == intent and notification_version(desired, scope) != record["after"]:
-                return result("原提交目标内容已变化，请核对后重新选择", 409, None, resolved=True, conflict=True,
+            if (saving or native) and record and record["intent"] == intent and notification_version(desired, scope) != record["after"]:
+                return result("原提交目标内容已变化，请核对后重新选择", 409, None, resolved=not native, conflict=True,
                               current=item, current_version=actual)
             record = {"request_id": request_id, "intent": intent, "state": "prepared", "before": actual,
                       "after": notification_version(desired, scope)}
             if saving:
                 record.update(scope=operation_scope, updated_at=stamp)
+            if native:
+                record.update(scope=operation_scope, updated_at=record.get("updated_at", now_str()),
+                              intent_kind="hmac-sha256-v1", input_version="" if action == "new" else version)
             try:
-                write_json(path, record)
+                write_record()
             except Exception:
                 return result("请求记录保存失败，通知未更改，请确认后重试", 500, confirm_required=True)
             try:
@@ -225,7 +251,7 @@ def mutate_notification(data, *, load_tasks, save_config):
                     return result("通知保存结果未知，请查询原提交", 500, None)
                 record["state"] = "failed"
                 try:
-                    write_json(path, record)
+                    write_record()
                 except Exception:
                     return result("通知未保存，恢复记录写入失败，请确认后重试", 500, confirm_required=True)
                 return result("通知保存失败，原设置未更改，请重试", 500)
