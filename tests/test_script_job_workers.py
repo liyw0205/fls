@@ -13,7 +13,7 @@ from tests.test_ui_route_components import TOKEN, isolated_app
 
 
 WORKER = r'''
-import importlib, io, json, os, pathlib, subprocess, sys, threading, time
+import faulthandler, importlib, io, json, os, pathlib, subprocess, sys, threading, time
 from types import SimpleNamespace
 from fls_manager.app import create_app
 from fls_manager.paths import BASE_DIR
@@ -22,6 +22,7 @@ module = importlib.import_module('fls_manager.routes.scripts.' + {
     'pull':'native_pull', 'repo-pull':'native_repo_pull', 'import':'native_import',
 }[kind])
 started, release = (BASE_DIR / (label + suffix) for suffix in ('.started', '.release'))
+faulthandler.dump_traceback_later(12, repeat=True)
 def pause():
     started.touch()
     deadline = time.monotonic() + 40
@@ -42,11 +43,16 @@ if kind == 'pull':
 elif kind == 'repo-pull':
     def command(url, target, proxy_id, progress):
         target = str(pathlib.Path(target).resolve())
+        trace = BASE_DIR / (label + '.git-trace')
+        result = BASE_DIR / (label + '.git-result')
         code = (
             'import pathlib,subprocess,sys,time\n'
             f'pathlib.Path({str(started)!r}).touch()\n'
             f'while not pathlib.Path({str(release)!r}).exists():time.sleep(.01)\n'
-            f'sys.exit(subprocess.call(["git","clone","--no-hardlinks",{str(BASE_DIR / "source")!r},{target!r}]))\n'
+            f'pathlib.Path({str(trace)!r}).write_text("released")\n'
+            f'result=subprocess.run(["git","clone","--no-hardlinks",{str(BASE_DIR / "source")!r},{target!r}],capture_output=True,timeout=10)\n'
+            f'pathlib.Path({str(result)!r}).write_bytes(str(result.returncode).encode()+b"\\n"+result.stderr)\n'
+            'sys.exit(result.returncode)\n'
         )
         return [sys.executable, '-u', '-c', code]
     module.build_repo_pull_command = command
@@ -127,6 +133,14 @@ class ScriptJobWorkerTests(unittest.TestCase):
             try:
                 self.assertEqual(rpc('get', '/api/scripts/' + kind + '-history')[0], 200)
                 yield process, rpc
+            except BaseException:
+                errors.seek(0)
+                print('WORKER_DIAGNOSTICS', kind, label, errors.read().decode(errors='replace'))
+                for diagnostic in base.glob('*.git-*'):
+                    print(diagnostic.name, diagnostic.read_text(errors='replace'))
+                for diagnostic in (base / 'scripts').rglob('.process-*.json'):
+                    print(diagnostic.name, diagnostic.read_text(errors='replace'))
+                raise
             finally:
                 (base / (label + '.release')).touch()
                 if process.poll() is None:
