@@ -149,7 +149,7 @@ class DependencyProcess:
     @property
     def identity(self):
         if self._job is not None:
-            return {"kind": "windows_job", "name": self._job.name}
+            return {"kind": "windows_job", "name": self._job.name, "pid": self._process.pid}
         return {"kind": "posix_group", "pid": self._process.pid}
 
     def start(self):

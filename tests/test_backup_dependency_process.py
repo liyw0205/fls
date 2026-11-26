@@ -20,16 +20,17 @@ def process_exited(pid):
         api = ctypes.WinDLL("kernel32", use_last_error=True)
         api.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
         api.OpenProcess.restype = wintypes.HANDLE
-        api.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        api.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        api.WaitForSingleObject.restype = wintypes.DWORD
         api.CloseHandle.argtypes = [wintypes.HANDLE]
-        handle = api.OpenProcess(0x1000, False, pid)
+        handle = api.OpenProcess(0x100000, False, pid)
         if not handle:
             return ctypes.get_last_error() == 87
         try:
-            code = wintypes.DWORD()
-            if not api.GetExitCodeProcess(handle, ctypes.byref(code)):
+            result = api.WaitForSingleObject(handle, 0)
+            if result == 0xFFFFFFFF:
                 raise ctypes.WinError(ctypes.get_last_error())
-            return code.value != 259
+            return result == 0
         finally:
             api.CloseHandle(handle)
     status = Path(f"/proc/{pid}/stat")
@@ -131,8 +132,8 @@ class BackupDependencyProcessTests(unittest.TestCase):
             self.assertTrue(marker.exists(), "owner exited before its command started")
             for pid in json.loads(marker.read_text()):
                 self.assert_exited(pid)
+            self.assert_exited(identity["pid"])
             if os.name == "posix":
-                self.assert_exited(identity["pid"])
                 import fcntl
                 fd = os.open(workspace / "owner.lock", os.O_RDWR)
                 try:

@@ -1484,6 +1484,7 @@ def _read_native_restore(request_id):
         or guard.get("kind") == "windows_job" and (
             not isinstance(guard.get("name"), str)
             or not re.fullmatch(r"Local\\FLSBackupDependencies_[a-f0-9]{32}", guard["name"])
+            or type(guard.get("pid")) is not int or guard["pid"] <= 1
         )
     ):
         raise RuntimeError("依赖执行身份无效")
