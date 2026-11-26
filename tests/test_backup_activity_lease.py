@@ -36,7 +36,7 @@ class BackupActivityLeaseTests(unittest.TestCase):
         with tempfile.TemporaryFile(mode="w+b") as output, tempfile.TemporaryFile(mode="w+b") as errors:
             process = subprocess.Popen(
                 [sys.executable, "-c", script], stdin=subprocess.PIPE, stdout=output, stderr=errors,
-                text=True,
+                text=True, env=dict(os.environ, PYTHONIOENCODING="utf-8"),
             )
             try:
                 deadline = time.monotonic() + 15
@@ -210,7 +210,7 @@ class BackupActivityLeaseTests(unittest.TestCase):
             )
             with tempfile.TemporaryFile(mode="w+b") as output, tempfile.TemporaryFile(mode="w+b") as errors:
                 process = subprocess.Popen([sys.executable, "-c", script], stdin=subprocess.PIPE, stdout=output,
-                                           stderr=errors, text=True)
+                                           stderr=errors, text=True, env=dict(os.environ, PYTHONIOENCODING="utf-8"))
                 try:
                     deadline = time.monotonic() + 15
                     while process.poll() is None and time.monotonic() < deadline:
