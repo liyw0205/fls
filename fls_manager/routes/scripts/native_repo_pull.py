@@ -120,6 +120,18 @@ def _remove_tree_contents(directory_fd):
             os.unlink(name, dir_fd=directory_fd)
 
 
+def _remove_readonly(function, path, error):
+    exc = error[1]
+    if os.name != "nt" or not isinstance(exc, PermissionError) or function not in (os.unlink, os.rmdir):
+        raise exc
+    metadata = os.lstat(path)
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    if not attributes & stat.FILE_ATTRIBUTE_READONLY or attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        raise exc
+    os.chmod(path, metadata.st_mode | stat.S_IWRITE)
+    function(path)
+
+
 def _remove_entry(target, parent_fd, name, expected_identity=None):
     try:
         if parent_fd is not None:
@@ -150,7 +162,7 @@ def _remove_entry(target, parent_fd, name, expected_identity=None):
         if expected_identity is not None and (metadata.st_dev, metadata.st_ino) != expected_identity:
             return False
         if stat.S_ISDIR(metadata.st_mode):
-            shutil.rmtree(path)
+            shutil.rmtree(path, onerror=_remove_readonly)
         else:
             path.unlink()
         return True
@@ -627,7 +639,8 @@ def _run_clone(job_id, url, proxy_id, target, parent_fd, parent_identity, cancel
             elif process is not None and process.stderr is not None:
                 process.stderr.close()
             if created_stage and target is not None:
-                _remove_entry(target, parent_fd, stage, stage_identity)
+                if not _remove_entry(target, parent_fd, stage, stage_identity):
+                    outcome = ("unknown", "cleanup_failed")
         finally:
             if parent_fd is not None:
                 try:
@@ -658,7 +671,8 @@ def _finish_or_fail(job_id, target, parent_fd, status, error_code):
         if current is None:
             return
         snapshot = dict(current)
-    published = bool(target is not None and snapshot.get("head") is not None and _repo_target_matches(snapshot))
+    published = bool(error_code != "cleanup_failed" and target is not None
+                     and snapshot.get("head") is not None and _repo_target_matches(snapshot))
     with SCRIPT_REPO_PULL_LOCK:
         job = SCRIPT_REPO_PULL_JOBS.get(job_id)
         if job is None:

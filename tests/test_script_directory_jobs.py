@@ -2,6 +2,7 @@ import contextlib
 import importlib
 import io
 import os
+import stat
 import sys
 import threading
 import unittest
@@ -363,3 +364,41 @@ class ScriptDirectoryJobTests(unittest.TestCase):
                 process.stdin.flush()
                 process.wait(timeout=10)
                 self.assert_restore_available()
+
+    def test_readonly_git_stage_is_removed_without_touching_replaced_directory(self):
+        with isolated_app() as (_, base):
+            module = self.module("repo-pull")
+            target = base / "scripts" / "repo"
+            stage = target.parent / ".fls-repo-test.tmp"
+            stage.mkdir()
+            item = stage / "readonly-object"
+            item.write_bytes(b"object")
+            item.chmod(stat.S_IREAD)
+            identity = stage.stat()
+            expected = (identity.st_dev, identity.st_ino)
+            try:
+                self.assertFalse(module._remove_entry(target, None, stage.name, (expected[0], expected[1] + 1)))
+                self.assertTrue(item.exists())
+                self.assertTrue(module._remove_entry(target, None, stage.name, expected))
+                self.assertFalse(stage.exists())
+            finally:
+                if item.exists():
+                    item.chmod(stat.S_IREAD | stat.S_IWRITE)
+
+    def test_failed_git_stage_cleanup_reports_unknown_instead_of_complete(self):
+        with isolated_app() as (app, base), self.fake_network("repo-pull", base):
+            module = self.module("repo-pull")
+            queued = []
+            with patch.object(threading.Thread, "start", autospec=True, side_effect=queued.append):
+                accepted = self.submit(app.test_client(), "repo-pull")
+            try:
+                with patch.object(module, "_remove_entry", return_value=False):
+                    queued[0].run()
+                result = app.test_client().get("/api/scripts/repo-pull/" + accepted.json["job"]["id"],
+                                               headers={"X-Token": TOKEN})
+                self.assertEqual(result.json["job"]["status"], "unknown", result.json)
+                self.assertEqual(result.json["job"]["error_code"], "cleanup_failed")
+            finally:
+                stage = module._stage_name(accepted.json["job"]["id"])
+                self.assertTrue(module._remove_entry(base / "scripts" / "repo", None, stage))
+            self.assert_restore_available()
