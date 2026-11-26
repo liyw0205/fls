@@ -42,6 +42,9 @@ class DirectoryJobLock:
         return self._path(job_id)
 
     def __enter__(self):
+        return self._enter(refresh=True)
+
+    def _enter(self, *, refresh):
         depth = getattr(self.local, "depth", 0)
         if depth:
             self.mutex.acquire()
@@ -60,7 +63,8 @@ class DirectoryJobLock:
                         raise PanelStorageBusy()
                     time.sleep(0.01)
             self.local.depth = 1
-            self.refresh()
+            if refresh:
+                self.refresh()
             self.local.fd, self.local.access = fd, access
             return self
         except BaseException:
@@ -69,6 +73,15 @@ class DirectoryJobLock:
             self.mutex.release()
             access.__exit__(None, None, None)
             raise
+
+    @contextmanager
+    def retirement(self):
+        # Releasing identities must share the history lock with other workers' probes.
+        self._enter(refresh=False)
+        try:
+            yield
+        finally:
+            self.__exit__(None, None, None)
 
     def __exit__(self, *error):
         self.local.depth -= 1
@@ -125,14 +138,28 @@ class DirectoryJobOwner:
         self.lock, self.job_id, self.fd = lock, job_id, fd
 
     def close(self):
-        with self.lock.mutex:
-            if self.fd is None:
-                return
-            fd, self.fd = self.fd, None
-            self.lock.owners.pop(self.job_id, None)
+        if self.fd is None:
+            return
+        try:
+            with self.lock.retirement():
+                self._retire()
+                with self.lock.probe(self.job_id):
+                    pass
+        except PanelStorageBusy:
+            # Retire the gate but leave deletion to a later serialized probe.
+            with self.lock.mutex:
+                self._retire()
+
+    def _retire(self):
+        if self.fd is None:
+            return
+        fd, self.fd = self.fd, None
+        self.lock.owners.pop(self.job_id, None)
+        try:
+            os.lseek(fd, 1, os.SEEK_SET)
+            os.write(fd, b"0")
+        finally:
             release_process_lease(fd)
-            with self.lock.probe(self.job_id):
-                pass
 
 
 class DirectoryJobCancel(threading.Event):

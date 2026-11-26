@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import Mock, patch
 
 from tests import test_native_script_repo_pull_api as repo_tests
 from tests.test_ui_route_components import TOKEN, isolated_app
@@ -80,6 +81,12 @@ try:
     for line in sys.stdin:
         command = json.loads(line)
         if command['method'] == 'quit': break
+        if command['method'] == 'hold-history':
+            lock = getattr(module, {'pull':'SCRIPT_PULL_LOCK', 'repo-pull':'SCRIPT_REPO_PULL_LOCK', 'import':'SCRIPT_IMPORT_LOCK'}[kind])
+            with lock:
+                pause()
+            print('FLS_RESULT ' + json.dumps([200, {'released':True}]), flush=True)
+            continue
         if command['method'] == 'submit':
             body = command['data']
             if kind == 'import':
@@ -298,6 +305,90 @@ class ScriptJobWorkerTests(unittest.TestCase):
             response = app.test_client().get('/api/scripts/import-history', headers={'X-Token': TOKEN})
             self.assertEqual(response.status_code, 200)
             self.assertFalse(receiving.exists())
+
+    def test_owner_retirement_waits_for_another_workers_history_probe(self):
+        with isolated_app() as (_, base):
+            from fls_manager.routes.scripts.native_import import SCRIPT_IMPORT_LOCK
+
+            owner = SCRIPT_IMPORT_LOCK.claim('f' * 32)
+            entered, retired = threading.Event(), threading.Event()
+            results, errors = [], []
+
+            def retire():
+                entered.set()
+                try:
+                    owner.close()
+                    retired.set()
+                except BaseException as exc:
+                    errors.append(exc)
+
+            with self.worker(base, 'import', 'observer') as (_, observer):
+                def hold():
+                    try:
+                        results.append(observer('hold-history'))
+                    except BaseException as exc:
+                        errors.append(exc)
+
+                probing = threading.Thread(target=hold)
+                closing = threading.Thread(target=retire)
+                probing.start()
+                try:
+                    self.wait_started(base, 'observer')
+                    closing.start()
+                    self.assertTrue(entered.wait(3))
+                    self.assertFalse(retired.wait(.2))
+                    self.assertIsNotNone(owner.fd)
+                    self.assertTrue(SCRIPT_IMPORT_LOCK.lease_path('f' * 32).exists())
+                finally:
+                    (base / 'observer.release').touch()
+                    probing.join(20)
+                    if closing.ident is not None:
+                        closing.join(20)
+                    owner.close()
+                self.assertFalse(probing.is_alive())
+                self.assertFalse(closing.is_alive())
+                self.assertEqual(errors, [])
+                self.assertEqual(results, [[200, {'released': True}]])
+                self.assertTrue(retired.is_set())
+                self.assertFalse(SCRIPT_IMPORT_LOCK.lease_path('f' * 32).exists())
+
+    def test_owner_retirement_does_not_require_readable_job_history(self):
+        with isolated_app():
+            from fls_manager.directory_jobs import DirectoryJobLock
+
+            refresh = Mock(side_effect=RuntimeError('broken history'))
+            lock = DirectoryJobLock('test', refresh)
+            owner = lock.claim('f' * 32)
+            owner.close()
+            owner.close()
+            self.assertIsNone(owner.fd)
+            self.assertEqual(lock.owners, {})
+            self.assertFalse(lock.lease_path('f' * 32).exists())
+            refresh.assert_not_called()
+
+    def test_busy_history_retires_owner_without_deleting_a_probes_lock_file(self):
+        with isolated_app():
+            from fls_manager.backup_lease import release_process_lease, try_process_lease
+            from fls_manager.data_access import PanelStorageBusy
+            from fls_manager.directory_jobs import DirectoryJobLock
+
+            lock = DirectoryJobLock('test', lambda: None)
+            owner = lock.claim('f' * 32)
+            path = lock.lease_path('f' * 32)
+            with patch.object(lock, 'retirement', side_effect=PanelStorageBusy):
+                owner.close()
+            owner.close()
+            self.assertIsNone(owner.fd)
+            self.assertEqual(lock.owners, {})
+            self.assertEqual(path.read_bytes()[1:], b'0')
+            lease = try_process_lease(path, create=False)
+            try:
+                self.assertIsNotNone(lease)
+            finally:
+                release_process_lease(lease)
+            with lock.probe('f' * 32) as active:
+                self.assertFalse(active)
+            self.assertFalse(path.exists())
 
     def test_other_worker_cannot_remove_upload_before_admission_receipt_exists(self):
         with isolated_app() as (_, base):
