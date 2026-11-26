@@ -1017,7 +1017,20 @@ def _rollback_runtime_identity_files(source_data, destination_data, moved):
         moved.pop()
 
 
-def _commit_restore_directories(entries, *, preserve_runtime_identity=False):
+def _commit_restore_directories(entries, *, preserve_runtime_identity=False, request_id=None):
+    if request_id is not None:
+        from ... import backup_commit
+        if not preserve_runtime_identity:
+            raise RuntimeError("journaled restore requires runtime identity protection")
+        names = set()
+        for entry in entries:
+            if entry["target"] == DATA_DIR:
+                names.update(_runtime_identity_names(DATA_DIR, entry["staged"]))
+        try:
+            backup_commit.commit(BASE_DIR, request_id, entries, names)
+        except backup_commit.DirectoryCommitError as exc:
+            raise BackupRestoreWriteError(str(exc), exc.live_state_unchanged) from exc
+        return
     try:
         for entry in entries:
             target = entry["target"]

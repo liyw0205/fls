@@ -23,6 +23,8 @@ from .actions import submit_backup_creation, submit_backup_cancellation
 from .dependency_process import DependencyProcess, cleanup_previous_process
 from ...storage import storage_transaction, write_json
 from ...sensitive import mask_sensitive_text
+from ... import backup_commit
+from ...backup_lease import try_process_lease as _try_process_lease, release_process_lease as _release_process_lease
 
 NATIVE_PREFIX = "/api/backup/native"
 NATIVE_BODY_LIMIT = 4096
@@ -68,47 +70,6 @@ class PreflightStorageError(RuntimeError):
 
 class PreflightStartError(RuntimeError):
     pass
-
-
-def _try_process_lease(path, *, create=True):
-    path = Path(path)
-    if path.is_symlink():
-        raise RuntimeError("备份恢复进程锁无效")
-    flags = os.O_RDWR | (os.O_CREAT if create else 0) | getattr(os, "O_NOFOLLOW", 0)
-    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
-    fd = os.open(path, flags, 0o600)
-    if not stat.S_ISREG(os.fstat(fd).st_mode):
-        os.close(fd)
-        raise RuntimeError("备份恢复进程锁必须是普通文件")
-    try:
-        if os.name == "nt":
-            import msvcrt
-            if create and os.fstat(fd).st_size == 0:
-                os.write(fd, b"\0")
-            os.lseek(fd, 0, os.SEEK_SET)
-            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return fd
-    except (OSError, BlockingIOError):
-        os.close(fd)
-        return None
-
-
-def _release_process_lease(fd):
-    if fd is None:
-        return
-    try:
-        if os.name == "nt":
-            import msvcrt
-            os.lseek(fd, 0, os.SEEK_SET)
-            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(fd, fcntl.LOCK_UN)
-    finally:
-        os.close(fd)
 
 
 def _process_lease_held(path):
@@ -1583,6 +1544,7 @@ def _native_restore_payload(record):
         "phase": phase,
         "active": active,
         "committed": phase == "restored",
+        "directory_recovery_required": not active and backup_commit.recovery_required(backup.BASE_DIR, record["request_id"]),
         "live_state_unchanged": record["live_state_unchanged"] or interrupted_before_commit,
         "restore_outcome_unknown": state == "unknown" or phase == "unknown",
         "error": _bounded_text(
@@ -1741,6 +1703,9 @@ def api_backup_native_create_restore():
             if restore_lease_fd is None:
                 return _error("restore_busy", "另一面板进程正在执行恢复，请等待后查询", 409)
             _mark_restore_lease(restore_lease_fd, request_id, "restore")
+
+            if backup_commit.pending(backup.BASE_DIR):
+                return _error("directory_recovery_required", "先完成原恢复请求的目录现场恢复", 409)
 
             preflight = _read_preflight_record(preflight_id)
             if preflight is None:
@@ -1911,7 +1876,7 @@ def _run_native_restore(app, request_id, process_lease_fd=None):
             with RESTORE_LOCK, models.COLLECTION_MUTATION_LOCK, models.TASKS_MUTATION_LOCK, storage_transaction(), NATIVE_SESSION_LOCK:
                 _restore_record_update(request_id, state="committing", live_state_unchanged=False)
                 commit_attempted = True
-                legacy_restore._commit_restore_directories(staged, preserve_runtime_identity=True)
+                legacy_restore._commit_restore_directories(staged, preserve_runtime_identity=True, request_id=request_id)
                 directories_restored = True
                 _restore_record_update(request_id, state="restored", live_state_unchanged=False,
                                        scheduler_state="pending" if "data" in record["restore_items"] else "not_required",
@@ -1938,6 +1903,16 @@ def _run_native_restore(app, request_id, process_lease_fd=None):
         except Exception:
             pass
     finally:
+        try:
+            transaction = backup_commit.read(backup.BASE_DIR, request_id)
+            record = _read_native_restore(request_id)
+            if transaction is not None and record is not None and (
+                transaction["outcome"] == "restored" and record["state"] == "restored"
+                or transaction["outcome"] == "not_applied" and record["state"] == "failed" and record["live_state_unchanged"]
+            ):
+                backup_commit.finish(backup.BASE_DIR, request_id)
+        except Exception:
+            pass
         for entry in staged:
             if not entry.get("preserve_workspace"):
                 shutil.rmtree(entry["workspace"], ignore_errors=True)
@@ -2048,6 +2023,8 @@ def api_backup_native_resolve_restore(request_id):
             process_lease_fd = _try_process_lease(RESTORE_PROCESS_LOCK_PATH)
             if process_lease_fd is None:
                 return _error("restore_still_active", "另一面板进程仍在执行恢复，不能人工确认结果", 409)
+            if backup_commit.pending(backup.BASE_DIR):
+                return _error("directory_recovery_required", "先恢复并核对持久记录中的目录现场", 409)
             record = _read_native_restore(request_id)
             if record is None:
                 return _error("restore_not_found", "恢复请求不存在", 404)
@@ -2079,6 +2056,48 @@ def api_backup_native_resolve_restore(request_id):
             return _error("restore_unavailable", "恢复结果确认未能持久保存，请查询原请求", 503)
         finally:
             _release_process_lease(process_lease_fd)
+
+
+@bp.route(NATIVE_PREFIX + "/restores/<request_id>/recover-directories", methods=["POST"])
+def api_backup_native_recover_directories(request_id):
+    if not REQUEST_ID_RE.fullmatch(request_id):
+        return _error("invalid_request_id", "恢复请求标识无效", 400)
+    body, error = _json_body({"confirm"}, {"confirm"})
+    if error:
+        return error
+    if body["confirm"] is not True:
+        return _error("confirmation_required", "必须确认恢复原目录现场", 400)
+    from ... import models
+    from ...native_sessions import NATIVE_SESSION_LOCK
+    fd = None
+    with RESTORE_LOCK:
+        try:
+            fd = _try_process_lease(RESTORE_PROCESS_LOCK_PATH)
+            if fd is None or request_id in RESTORE_ACTIVE:
+                return _error("restore_still_active", "恢复仍在执行，请等待后查询原请求", 409)
+            record = _read_native_restore(request_id)
+            if record is None:
+                return _error("restore_not_found", "恢复请求不存在", 404)
+            transaction = backup_commit.read(backup.BASE_DIR, request_id)
+            if transaction is None:
+                return _native_restore_response(record, replayed=True)
+            if sorted(entry["target"] for entry in transaction["entries"]) != sorted(record["restore_items"]):
+                return _error("restore_identity_conflict", "目录现场与原恢复范围不一致", 409)
+            with models.COLLECTION_MUTATION_LOCK, models.TASKS_MUTATION_LOCK, storage_transaction(), NATIVE_SESSION_LOCK:
+                outcome = backup_commit.recover(backup.BASE_DIR, request_id)
+                restored = outcome == "restored"
+                record = _restore_record_update(
+                    request_id, state="restored" if restored else "failed", live_state_unchanged=not restored,
+                    scheduler_state="pending" if restored and "data" in record["restore_items"] else "not_required",
+                    dependency_state="pending" if restored and record["restore_dependencies"] else "not_requested",
+                    error="" if restored else "中断的目录恢复已回滚，原目录与实例身份已恢复；未执行后续处理",
+                )
+                backup_commit.finish(backup.BASE_DIR, request_id)
+                return _native_restore_response(record)
+        except Exception:
+            return _error("directory_recovery_unavailable", "目录现场尚未恢复完成；记录和副本保留，请查询原请求", 503)
+        finally:
+            _release_process_lease(fd)
 
 
 def _restore_followup_record(request_id):
@@ -2125,6 +2144,8 @@ def _claim_restore_followup(request_id, kind, operation_id, confirm_retry):
         return None, None, _error("restore_busy", "另一恢复或后续处理正在执行，请查询原请求", 409)
     claimed = False
     try:
+        if backup_commit.pending(backup.BASE_DIR):
+            return None, None, _error("directory_recovery_required", "先完成原恢复请求的目录现场恢复", 409)
         # Another process may have completed an operation since the first read.
         record, response = _restore_followup_record(request_id)
         if response:

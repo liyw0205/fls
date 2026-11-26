@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 
+from .backup_commit import recover_at_startup
+
 def detect_base_dir():
     env_dir = os.environ.get("FLS_BASE_DIR", "").strip()
     if env_dir:
@@ -30,6 +32,8 @@ def detect_base_dir():
         return (home / "fls").resolve()
 
 BASE_DIR = detect_base_dir()
+recover_at_startup(BASE_DIR)
+
 DATA_DIR = BASE_DIR / "data"
 LOG_DIR = BASE_DIR / "log"
 SCRIPT_DIR = BASE_DIR / "scripts"

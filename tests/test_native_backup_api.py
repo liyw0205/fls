@@ -345,6 +345,40 @@ class NativeBackupApiTests(unittest.TestCase):
             self.assertTrue(replay.json["replayed"])
             self.assertEqual((backup.DATA_DIR / "config.json").read_text(encoding="utf-8"), '{"later":true}')
 
+    def test_restore_directory_transaction_survives_terminal_receipt_failure(self):
+        with isolated_app() as (app, base):
+            from fls_manager import backup_commit
+            from fls_manager.routes.backup import native_api
+
+            client = self.client(app)
+            preflight_id, request_id = "3" * 32, "4" * 32
+            prepared = self.submit_preflight(client, preflight_id)
+            self.assertEqual(prepared.status_code, 200, prepared.json)
+            digest = prepared.json["preflight"]["archive_sha256"]
+            write = native_api._write_native_restore
+
+            def fail_terminal_record(record):
+                if record["state"] == "restored":
+                    raise OSError("terminal receipt failed")
+                return write(record)
+
+            with patch.object(native_api, "_write_native_restore", side_effect=fail_terminal_record), patch.object(
+                threading.Thread, "start", autospec=True, side_effect=lambda thread: thread.run(),
+            ):
+                response = self.submit_restore(client, request_id, preflight_id, digest)
+            self.assertEqual(response.status_code, 202, response.json)
+            self.assertEqual(response.json["restore"]["state"], "unknown")
+            self.assertTrue(response.json["restore"]["directory_recovery_required"])
+            self.assertEqual(backup_commit.read(base, request_id)["outcome"], "restored")
+            self.assertEqual((base / "data/config.json").read_bytes(), b'{"theme":"dark"}')
+            response = client.post(
+                f"/api/backup/native/restores/{request_id}/recover-directories",
+                json={"confirm": True}, headers=self.headers(),
+            )
+            self.assertEqual(response.status_code, 200, response.json)
+            self.assertEqual(response.json["restore"]["state"], "restored")
+            self.assertEqual(backup_commit.pending(base), [])
+
     def test_native_restore_requires_explicit_data_confirmation_and_binds_preflight(self):
         with isolated_app() as (app, base):
             client = self.client(app)
