@@ -72,9 +72,9 @@ class PreflightStartError(RuntimeError):
     pass
 
 
-def _process_lease_held(path):
+def _process_lease_held(path, *, shared=False):
     try:
-        fd = _try_process_lease(path, create=False)
+        fd = _try_process_lease(path, create=False, shared=shared)
     except FileNotFoundError:
         return False
     if fd is None:
@@ -92,7 +92,7 @@ def _mark_restore_lease(fd, request_id, kind, operation_id=""):
 
 
 def _restore_lease_matches(record, kind):
-    if not _process_lease_held(RESTORE_PROCESS_LOCK_PATH):
+    if not _process_lease_held(RESTORE_PROCESS_LOCK_PATH, shared=True):
         return False
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     try:
@@ -1756,7 +1756,7 @@ def api_backup_native_create_restore():
                 required += _directory_bytes(backup.DATA_DIR if item == "data" else backup.SCRIPT_DIR)
             if shutil.disk_usage(backup.BASE_DIR).free < required:
                 return _error("insufficient_restore_storage", "面板剩余空间不足，未提交恢复", 507)
-            if not backup.try_begin_restore_activity():
+            if not backup.try_begin_restore_activity(process_lease_fd=restore_lease_fd):
                 _release_process_lease(restore_lease_fd)
                 restore_lease_fd = None
                 return _error("restore_busy", "备份或恢复作业正在运行，请等待后重试", 409)

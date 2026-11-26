@@ -20,6 +20,8 @@ from urllib.parse import quote
 from flask import request, Response, redirect, url_for, jsonify, abort
 
 from ...paths import BASE_DIR, DATA_DIR, SCRIPT_DIR, LOG_DIR
+from ... import backup_commit
+from ...backup_lease import try_process_lease, release_process_lease
 from ...storage import mutate_json, storage_transaction, write_json
 from ...ui.layout import layout
 from ...ui.components import page_header, empty_table_row
@@ -36,6 +38,9 @@ BACKUP_RESTORE_REQUEST_LOCK = threading.RLock()
 BACKUP_ACTIVITY_CONDITION = threading.Condition(threading.RLock())
 ACTIVE_BACKUP_WORKERS = 0
 RESTORE_ACTIVE = False
+BACKUP_ACTIVITY_LEASE = None
+RESTORE_ACTIVITY_LEASE = None
+BACKUP_ACTIVITY_LOCK_PATH = BASE_DIR / ".backup_native_restore.lock"
 BACKUP_JOB_LIMIT = 100
 BACKUP_DIRECTORY_FD_SUPPORTED = os.open in os.supports_dir_fd and hasattr(os, "O_DIRECTORY")
 BACKUP_DEPENDENCY_TIMEOUT_SECONDS = 120
@@ -77,33 +82,86 @@ class BackupArchivePublishUnknown(RuntimeError):
     pass
 
 
-def begin_backup_activity():
-    global ACTIVE_BACKUP_WORKERS
-    with BACKUP_ACTIVITY_CONDITION:
-        while RESTORE_ACTIVE:
-            BACKUP_ACTIVITY_CONDITION.wait()
+def _try_begin_backup_activity():
+    global ACTIVE_BACKUP_WORKERS, BACKUP_ACTIVITY_LEASE
+    if RESTORE_ACTIVE:
+        return False
+    lease = None
+    if not ACTIVE_BACKUP_WORKERS:
+        lease = try_process_lease(BACKUP_ACTIVITY_LOCK_PATH, shared=True)
+        if lease is None:
+            return False
+    try:
+        if backup_commit.pending(BASE_DIR):
+            raise BackupJobStartError("先完成原恢复请求的目录现场恢复，再创建备份")
         ACTIVE_BACKUP_WORKERS += 1
+        if lease is not None:
+            BACKUP_ACTIVITY_LEASE = lease
+            lease = None
+        return True
+    finally:
+        release_process_lease(lease)
+
+
+def begin_backup_activity():
+    with BACKUP_ACTIVITY_CONDITION:
+        while not _try_begin_backup_activity():
+            BACKUP_ACTIVITY_CONDITION.wait(timeout=0.1)
 
 
 def end_backup_activity():
-    global ACTIVE_BACKUP_WORKERS
+    global ACTIVE_BACKUP_WORKERS, BACKUP_ACTIVITY_LEASE
     with BACKUP_ACTIVITY_CONDITION:
         ACTIVE_BACKUP_WORKERS = max(0, ACTIVE_BACKUP_WORKERS - 1)
+        if not ACTIVE_BACKUP_WORKERS:
+            lease, BACKUP_ACTIVITY_LEASE = BACKUP_ACTIVITY_LEASE, None
+            release_process_lease(lease)
         BACKUP_ACTIVITY_CONDITION.notify_all()
 
 
-def try_begin_restore_activity():
-    global RESTORE_ACTIVE
+def try_begin_restore_activity(*, process_lease_fd=None):
+    global RESTORE_ACTIVE, RESTORE_ACTIVITY_LEASE
     with BACKUP_ACTIVITY_CONDITION:
         if RESTORE_ACTIVE or ACTIVE_BACKUP_WORKERS:
             return False
-        RESTORE_ACTIVE = True
-        return True
+        lease = None
+        # Native workers already own this lease and release it themselves.
+        if process_lease_fd is None:
+            lease = try_process_lease(BACKUP_ACTIVITY_LOCK_PATH)
+            if lease is None:
+                return False
+        try:
+            if backup_commit.pending(BASE_DIR):
+                return False
+            if lease is not None:
+                # Legacy work must not advertise a previous native lease owner.
+                os.ftruncate(lease, 1)
+                RESTORE_ACTIVITY_LEASE, lease = lease, None
+            RESTORE_ACTIVE = True
+            return True
+        finally:
+            release_process_lease(lease)
+
+
+def restore_activity_active():
+    with BACKUP_ACTIVITY_CONDITION:
+        if RESTORE_ACTIVE:
+            return True
+        try:
+            lease = try_process_lease(BACKUP_ACTIVITY_LOCK_PATH, create=False, shared=True)
+        except FileNotFoundError:
+            return False
+        if lease is None:
+            return True
+        release_process_lease(lease)
+        return False
 
 
 def end_restore_activity():
-    global RESTORE_ACTIVE
+    global RESTORE_ACTIVE, RESTORE_ACTIVITY_LEASE
     with BACKUP_ACTIVITY_CONDITION:
+        lease, RESTORE_ACTIVITY_LEASE = RESTORE_ACTIVITY_LEASE, None
+        release_process_lease(lease)
         RESTORE_ACTIVE = False
         BACKUP_ACTIVITY_CONDITION.notify_all()
 
@@ -823,7 +881,6 @@ def create_backup_worker(job_id, items, cancel_event, reserved=False):
 
 
 def start_backup_job(items, *, job_id=None):
-    global ACTIVE_BACKUP_WORKERS
     job_id = job_id or uuid.uuid4().hex
 
     with BACKUP_JOB_LOCK:
@@ -834,9 +891,13 @@ def start_backup_job(items, *, job_id=None):
         cancel_event = threading.Event()
         now = now_str()
         with BACKUP_ACTIVITY_CONDITION:
-            if RESTORE_ACTIVE:
-                raise BackupJobStartError("正在恢复备份，请恢复结束后重试")
-            ACTIVE_BACKUP_WORKERS += 1
+            try:
+                if not _try_begin_backup_activity():
+                    raise BackupJobStartError("正在恢复备份，请恢复结束后重试")
+            except BackupJobStartError:
+                raise
+            except Exception as exc:
+                raise BackupJobStartError("备份执行门禁无法确认，任务未启动") from exc
         BACKUP_JOBS[job_id] = {
             "id": job_id,
             "items": list(items or []),

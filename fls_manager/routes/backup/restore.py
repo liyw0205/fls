@@ -1,5 +1,4 @@
 from ._common import *
-from . import _common as backup_state
 import hashlib
 import json
 import re
@@ -634,7 +633,7 @@ def api_backup_restore_history():
                         if not _restore_request_identity_matches(record, archived):
                             raise RuntimeError("归档回执与原恢复请求身份不一致")
                         continue
-                    if record["state"] == "committing" and not backup_state.RESTORE_ACTIVE:
+                    if record["state"] == "committing" and not restore_activity_active():
                         record["state"] = "unknown"
                         record["restore_outcome_unknown"] = True
                         _save_restore_request(record)
@@ -668,7 +667,7 @@ def api_backup_restore_history():
                     "limit": limit,
                     "offset": offset,
                     "has_more": offset + len(items) < total,
-                    "active": bool(backup_state.RESTORE_ACTIVE),
+                    "active": restore_activity_active(),
                     "maintenance_error": "；".join(dict.fromkeys(filter(None, maintenance_notices))),
                 },
                 maintenance,
@@ -692,7 +691,7 @@ def api_backup_restore_request(request_id):
                 if record and not _restore_request_identity_matches(record, archived):
                     raise RuntimeError("归档回执与原恢复请求身份不一致")
                 record = archived
-            if record and record["state"] == "committing" and not backup_state.RESTORE_ACTIVE:
+            if record and record["state"] == "committing" and not restore_activity_active():
                 record["state"] = "unknown"
                 record["restore_outcome_unknown"] = True
                 try:
@@ -778,15 +777,17 @@ def backup_restore_maintenance_ack():
 def _reload_restore_scheduler(request_id):
     if not re.fullmatch(r"[a-f0-9]{32}", request_id):
         return {"ok": False, "request_id": request_id, "msg": "恢复请求标识无效"}, 400
+    reserved = False
     try:
+        if not try_begin_restore_activity():
+            return {"ok": False, "request_id": request_id, "msg": "备份、恢复或目录现场待处理，请完成后重试"}, 409
+        reserved = True
         with models.TASKS_MUTATION_LOCK, storage_transaction(), BACKUP_RESTORE_REQUEST_LOCK:
             record = _read_restore_request(request_id)
             if not record:
                 return {"ok": False, "request_id": request_id, "msg": "恢复请求不存在"}, 404
             if record["state"] not in ("restored", "unknown"):
                 return {"ok": False, "request_id": request_id, "msg": "恢复请求尚未结束，请稍后查询"}, 409
-            if backup_state.RESTORE_ACTIVE:
-                return {"ok": False, "request_id": request_id, "msg": "正在恢复目录，请恢复结束后重试"}, 409
             reload_required = record.get("scheduler_reload_required", False) or (
                 record["state"] == "unknown" and not record.get("scheduler_reloaded", False)
             )
@@ -833,6 +834,9 @@ def _reload_restore_scheduler(request_id):
             "reload_url": f"/api/backup/restore/{request_id}/reload",
             "msg": f"调度器重载未确认：{exc}。请查询原恢复请求后重试。",
         }, 503
+    finally:
+        if reserved:
+            end_restore_activity()
 
 
 @bp.route("/backup/restore/<request_id>/reload", methods=["POST"])
@@ -1186,7 +1190,7 @@ def backup_import():
                         return restore_error("该恢复请求标识已绑定其他文件或恢复范围，未覆盖任何目录。请明确开始新的恢复请求。", 409,
                                              request_id=request_id, request_conflict=True)
                     if restore_record["state"] in ("restored", "unknown", "committing"):
-                        if restore_record["state"] == "committing" and not backup_state.RESTORE_ACTIVE:
+                        if restore_record["state"] == "committing" and not restore_activity_active():
                             restore_record["state"] = "unknown"
                             restore_record["restore_outcome_unknown"] = True
                             try:
@@ -1317,9 +1321,6 @@ def backup_import():
             for entry in staged:
                 if not entry["preserve_workspace"]:
                     shutil.rmtree(entry["workspace"], ignore_errors=True)
-
-        end_restore_activity()
-        restore_reserved = False
 
         restored = [label for _source, _target, _keep, label in restore_sources]
 

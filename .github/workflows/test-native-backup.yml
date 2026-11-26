@@ -39,6 +39,7 @@ jobs:
         run: >-
           python -m pytest -q
           tests/test_backup_dependency_process.py
+          tests/test_backup_activity_lease.py
           tests/test_backup_directory_commit.py
           tests/test_native_backup_directory_recovery.py
           tests/test_native_backup_api.py
@@ -69,6 +70,10 @@ jobs:
         env:
           PYTHONPATH: .
         run: python -m pytest -q tests/test_native_backup_api.py -k 'process_lease or rereads or preflight_stages or archive_target'
+      - name: Verify shared backups and exclusive Web/native restore across workers
+        env:
+          PYTHONPATH: .
+        run: python -m pytest -q tests/test_backup_activity_lease.py
       - name: Verify interrupted directory commit and startup recovery
         env:
           PYTHONPATH: .
