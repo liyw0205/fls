@@ -19,7 +19,7 @@ from fls_manager.process_tree import WindowsJob, _posix_group_running
 
 
 class DirectoryProcess:
-    def __init__(self, command, *, workspace, cwd, env, lease_path, pass_fds=()):
+    def __init__(self, command, *, workspace, cwd, env, lease_path, pass_fds=(), job_lease_path=None):
         if os.name != "nt" and not (
             os.name == "posix" and Path("/proc").is_dir()
             and all(hasattr(os, name) for name in ("waitid", "WNOWAIT", "WNOHANG", "CLD_EXITED"))
@@ -30,6 +30,7 @@ class DirectoryProcess:
         self._configuration = {
             "command": command, "cwd": str(cwd), "lease_path": str(lease_path),
             "pass_fds": list(pass_fds),
+            "job_lease_path": str(job_lease_path) if job_lease_path is not None else None,
         }
         options = {"pass_fds": tuple(pass_fds)} if os.name == "posix" else {}
         self._process = subprocess.Popen(
@@ -111,8 +112,18 @@ def _supervise(result_path):
         raise ValueError("invalid file job configuration")
     configuration = json.loads(raw)
     inherited = tuple(configuration["pass_fds"])
+    job_lease = None
+    if configuration.get("job_lease_path"):
+        job_lease = try_process_lease(configuration["job_lease_path"], create=False, shared=True)
+        if job_lease is None:
+            raise RuntimeError("file job identity is no longer active")
+        os.lseek(job_lease, 1, os.SEEK_SET)
+        if os.read(job_lease, 1) != b"1":
+            release_process_lease(job_lease)
+            raise RuntimeError("file job identity has been retired")
     lease = try_process_lease(configuration["lease_path"], shared=True)
     if lease is None:
+        release_process_lease(job_lease)
         raise RuntimeError("directory restore is active")
     disconnected = threading.Event()
     process = None
@@ -190,6 +201,7 @@ def _supervise(result_path):
         finally:
             for fd in inherited:
                 os.close(fd)
+            release_process_lease(job_lease)
             release_process_lease(lease)
 
 

@@ -39,6 +39,61 @@ class DirectoryProcessTests(unittest.TestCase):
             time.sleep(0.01)
         self.assertTrue(process_exited(pid), f"process {pid} did not exit")
 
+    def test_supervisor_keeps_job_identity_after_original_owner_releases_it(self):
+        with isolated_app() as (_, base):
+            from fls_manager.directory_jobs import DirectoryJobLock
+
+            lock = DirectoryJobLock("test", lambda: None)
+            owner = lock.claim("f" * 32)
+            process = self.make_process(base, [sys.executable, "-c", "import time;time.sleep(60)"],
+                                        job_lease_path=lock.lease_path("f" * 32))
+            try:
+                process.start()
+                owner.close()
+                with lock.probe("f" * 32) as active:
+                    self.assertTrue(active)
+                process.stop()
+                with lock.probe("f" * 32) as active:
+                    self.assertFalse(active)
+            finally:
+                process.stop()
+                process.stderr.close()
+                owner.close()
+
+    def test_retired_job_identity_rejects_late_supervisor_start(self):
+        with isolated_app() as (_, base):
+            from fls_manager.directory_jobs import DirectoryJobLock
+
+            lock = DirectoryJobLock("test", lambda: None)
+            owner = lock.claim("f" * 32)
+            marker = base / "command-started"
+            process = self.make_process(base, [
+                sys.executable, "-c", f"from pathlib import Path;Path({str(marker)!r}).touch()",
+            ], job_lease_path=lock.lease_path("f" * 32))
+            try:
+                owner.close()
+                with self.assertRaises(RuntimeError):
+                    process.start()
+                self.assertFalse(marker.exists())
+                self.assert_lease_available(base)
+            finally:
+                process.stop()
+                process.stderr.close()
+                owner.close()
+
+            lock.lease_path("f" * 32).write_bytes(b"00")
+            process = self.make_process(base, [
+                sys.executable, "-c", f"from pathlib import Path;Path({str(marker)!r}).touch()",
+            ], job_lease_path=lock.lease_path("f" * 32))
+            try:
+                with self.assertRaises(RuntimeError):
+                    process.start()
+                self.assertFalse(marker.exists())
+                self.assert_lease_available(base)
+            finally:
+                process.stop()
+                process.stderr.close()
+
     def test_start_gate_and_constructor_stop_never_execute_the_command(self):
         with isolated_app() as (_, base):
             marker = base / "started"

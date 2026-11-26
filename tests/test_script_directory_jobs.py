@@ -150,7 +150,7 @@ class ScriptDirectoryJobTests(unittest.TestCase):
 
     def test_persistence_constructor_and_start_failures_release_leases_and_staging(self):
         for kind in KINDS:
-            for failure in ("persistence", "constructor", "start", "start_and_receipt"):
+            for failure in ("identity", "persistence", "constructor", "start", "start_and_receipt"):
                 with self.subTest(kind=kind, failure=failure), isolated_app() as (app, base):
                     module = self.module(kind)
                     client = app.test_client()
@@ -167,7 +167,13 @@ class ScriptDirectoryJobTests(unittest.TestCase):
                                 return result
 
                             stack.enter_context(patch.object(module, "_open_script_parent", side_effect=open_parent))
-                        if failure == "persistence":
+                        if failure == "identity":
+                            job_lock = getattr(module, {
+                                "pull": "SCRIPT_PULL_LOCK", "repo-pull": "SCRIPT_REPO_PULL_LOCK",
+                                "import": "SCRIPT_IMPORT_LOCK",
+                            }[kind])
+                            stack.enter_context(patch.object(job_lock, "claim", side_effect=OSError("full")))
+                        elif failure == "persistence":
                             stack.enter_context(patch.object(module, "_save_locked", side_effect=OSError("full")))
                         elif failure == "constructor":
                             stack.enter_context(patch.object(threading, "Thread", side_effect=RuntimeError("unavailable")))

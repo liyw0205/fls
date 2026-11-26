@@ -1,6 +1,5 @@
 import errno
 import hashlib
-import json
 import os
 import queue
 import re
@@ -16,7 +15,10 @@ from flask import request
 
 from . import bp
 from .helpers import build_repo_pull_command
-from ...directory_jobs import directory_job_operation, start_directory_job
+from ...directory_jobs import (
+    DirectoryJobCancel, DirectoryJobLock, directory_job_operation,
+    directory_job_rows, start_directory_job,
+)
 from ...directory_process import DirectoryProcess
 from .native_pull import (
     SCRIPT_PULL_ID_RE,
@@ -39,7 +41,7 @@ SCRIPT_REPO_PULL_HISTORY_LIMIT = 200
 SCRIPT_REPO_PULL_ACTIVE_LIMIT = 2
 SCRIPT_REPO_PULL_ACTIVE = ("pending", "cloning", "publishing", "cancelling")
 SCRIPT_REPO_PULL_TERMINAL = ("complete", "failed", "cancelled", "unknown")
-SCRIPT_REPO_PULL_LOCK = threading.RLock()
+SCRIPT_REPO_PULL_LOCK = DirectoryJobLock("repo-pull", lambda: _refresh_locked())
 SCRIPT_REPO_PULL_JOBS = {}
 SCRIPT_REPO_PULL_CANCEL = {}
 SCRIPT_REPO_PULL_INITIALIZED = False
@@ -281,82 +283,71 @@ def _save_locked():
 def _ensure_loaded():
     global SCRIPT_REPO_PULL_INITIALIZED
     with SCRIPT_REPO_PULL_LOCK:
-        if SCRIPT_REPO_PULL_INITIALIZED:
-            return
-        try:
-            raw = json.loads(SCRIPT_REPO_PULL_JOBS_FILE.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            raw = []
-        except (OSError, ValueError) as exc:
-            raise RuntimeError("仓库拉取记录无法读取，未覆盖原记录") from exc
-        if not isinstance(raw, list):
-            raise RuntimeError("仓库拉取记录不是列表，未覆盖原记录")
-
-        SCRIPT_REPO_PULL_JOBS.clear()
-        for row in raw[:SCRIPT_REPO_PULL_HISTORY_LIMIT]:
-            if not isinstance(row, dict):
-                continue
-            job_id = str(row.get("id") or "")
-            request_id = str(row.get("request_id") or "")
-            if not SCRIPT_PULL_ID_RE.fullmatch(job_id) or not SCRIPT_PULL_ID_RE.fullmatch(request_id):
-                continue
-            status = str(row.get("status") or "unknown")
-            if status in SCRIPT_REPO_PULL_ACTIVE:
-                if status == "publishing" and _repo_target_matches(row):
-                    status = "complete"
-                else:
-                    status = "unknown"
-                    try:
-                        target = script_file_target(row.get("path", ""))
-                        parent_fd = None
-                        try:
-                            target, parent_fd, _name, _identity = _open_script_parent(row.get("path", ""))
-                            stage_identity = (
-                                row.get("stage_dev"),
-                                row.get("stage_ino"),
-                            )
-                            if all(type(value) is int for value in stage_identity):
-                                _remove_entry(
-                                    target,
-                                    parent_fd,
-                                    _stage_name(job_id),
-                                    stage_identity,
-                                )
-                        finally:
-                            if parent_fd is not None:
-                                os.close(parent_fd)
-                    except (OSError, ValueError):
-                        pass
-                    row = dict(row, error_code="worker_interrupted")
-            if status not in SCRIPT_REPO_PULL_TERMINAL:
-                status = "unknown"
-            normalized = {
-                "id": job_id,
-                "request_id": request_id,
-                "fingerprint": str(row.get("fingerprint") or ""),
-                "kind": "repo",
-                "path": str(row.get("path") or ""),
-                "source_host": str(row.get("source_host") or "")[:255],
-                "status": status,
-                "phase": str(row.get("phase") or "unknown")[:32],
-                "current": _optional_nonnegative_int(row.get("current")),
-                "total": _optional_nonnegative_int(row.get("total")),
-                "target_dev": row.get("target_dev") if type(row.get("target_dev")) is int else None,
-                "target_ino": row.get("target_ino") if type(row.get("target_ino")) is int else None,
-                "stage_dev": row.get("stage_dev") if type(row.get("stage_dev")) is int else None,
-                "stage_ino": row.get("stage_ino") if type(row.get("stage_ino")) is int else None,
-                "head": str(row.get("head") or "")[:64],
-                "error_code": str(row.get("error_code") or "")[:80],
-                "created_at": str(row.get("created_at") or ""),
-                "updated_at": str(row.get("updated_at") or ""),
-            }
-            SCRIPT_REPO_PULL_JOBS[job_id] = normalized
-        try:
-            _save_locked()
-        except Exception as exc:
-            SCRIPT_REPO_PULL_JOBS.clear()
-            raise RuntimeError("仓库拉取记录无法保存，未覆盖原记录") from exc
         SCRIPT_REPO_PULL_INITIALIZED = True
+
+
+def _refresh_locked():
+    loaded = {}
+    for row in directory_job_rows(SCRIPT_REPO_PULL_JOBS_FILE, SCRIPT_REPO_PULL_LOCK, SCRIPT_REPO_PULL_JOBS, SCRIPT_REPO_PULL_CANCEL):
+        if not isinstance(row, dict):
+            continue
+        job_id = str(row.get("id") or "")
+        request_id = str(row.get("request_id") or "")
+        if not SCRIPT_PULL_ID_RE.fullmatch(job_id) or not SCRIPT_PULL_ID_RE.fullmatch(request_id):
+            continue
+        status = str(row.get("status") or "unknown")
+        if status in SCRIPT_REPO_PULL_ACTIVE and not row["_worker_active"]:
+            if status == "publishing" and _repo_target_matches(row):
+                status = "complete"
+            else:
+                status = "unknown"
+                try:
+                    target = script_file_target(row.get("path", ""))
+                    parent_fd = None
+                    try:
+                        target, parent_fd, _name, _identity = _open_script_parent(row.get("path", ""))
+                        stage_identity = (
+                            row.get("stage_dev"),
+                            row.get("stage_ino"),
+                        )
+                        if all(type(value) is int for value in stage_identity):
+                            _remove_entry(
+                                target,
+                                parent_fd,
+                                _stage_name(job_id),
+                                stage_identity,
+                            )
+                    finally:
+                        if parent_fd is not None:
+                            os.close(parent_fd)
+                except (OSError, ValueError):
+                    pass
+                row = dict(row, error_code="worker_interrupted")
+        if status not in SCRIPT_REPO_PULL_TERMINAL + SCRIPT_REPO_PULL_ACTIVE:
+            status = "unknown"
+        normalized = {
+            "id": job_id,
+            "request_id": request_id,
+            "fingerprint": str(row.get("fingerprint") or ""),
+            "kind": "repo",
+            "path": str(row.get("path") or ""),
+            "source_host": str(row.get("source_host") or "")[:255],
+            "status": status,
+            "phase": str(row.get("phase") or "unknown")[:32],
+            "current": _optional_nonnegative_int(row.get("current")),
+            "total": _optional_nonnegative_int(row.get("total")),
+            "target_dev": row.get("target_dev") if type(row.get("target_dev")) is int else None,
+            "target_ino": row.get("target_ino") if type(row.get("target_ino")) is int else None,
+            "stage_dev": row.get("stage_dev") if type(row.get("stage_dev")) is int else None,
+            "stage_ino": row.get("stage_ino") if type(row.get("stage_ino")) is int else None,
+            "head": str(row.get("head") or "")[:64],
+            "error_code": str(row.get("error_code") or "")[:80],
+            "created_at": str(row.get("created_at") or ""),
+            "updated_at": str(row.get("updated_at") or ""),
+        }
+        loaded[job_id] = normalized
+    SCRIPT_REPO_PULL_JOBS.clear()
+    SCRIPT_REPO_PULL_JOBS.update(loaded)
 
 
 def _optional_nonnegative_int(value):
@@ -393,6 +384,8 @@ def _update(job_id, *, persist=True, **updates):
         job = SCRIPT_REPO_PULL_JOBS.get(job_id)
         if job is None:
             return None
+        if job.get("status") == "cancelling" and updates.get("status", "cancelling") in SCRIPT_REPO_PULL_ACTIVE:
+            updates.update(status="cancelling", phase="cancelling")
         job.update(updates)
         job["updated_at"] = now_str()
         if persist:
@@ -482,6 +475,7 @@ def _run_clone(job_id, url, proxy_id, target, parent_fd, parent_identity, cancel
         process = DirectoryProcess(
             command, workspace=stage_path, cwd=str(SCRIPT_DIR), env=env,
             lease_path=BASE_DIR / ".backup_native_restore.lock",
+            job_lease_path=SCRIPT_REPO_PULL_LOCK.lease_path(job_id),
             pass_fds=(parent_fd,) if parent_fd is not None else (),
         )
         reader = threading.Thread(
@@ -759,13 +753,17 @@ def api_script_repo_pull_submit():
             "updated_at": now_str(),
         }
         SCRIPT_REPO_PULL_JOBS[job_id] = job
-        cancel = threading.Event()
+        owner = None
+        cancel = DirectoryJobCancel(SCRIPT_REPO_PULL_LOCK)
         SCRIPT_REPO_PULL_CANCEL[job_id] = cancel
         try:
+            owner = SCRIPT_REPO_PULL_LOCK.claim(job_id)
             _save_locked()
         except Exception:
             SCRIPT_REPO_PULL_JOBS.pop(job_id, None)
             SCRIPT_REPO_PULL_CANCEL.pop(job_id, None)
+            if owner is not None:
+                owner.close()
             if parent_fd is not None:
                 os.close(parent_fd)
             return _error("作业回执无法保存，未开始克隆", 503, "job_persistence_failed")
@@ -774,8 +772,10 @@ def api_script_repo_pull_submit():
                 _start_repo_worker,
                 args=(job_id, url, proxy_id, relative, target, parent_fd, parent_identity),
                 name=f"fls-repo-pull-{job_id[:8]}",
+                owner=owner,
             )
         except Exception:
+            owner.close()
             SCRIPT_REPO_PULL_CANCEL.pop(job_id, None)
             job.update(status="failed", phase="failed", error_code="worker_start_failed", updated_at=now_str())
             if parent_fd is not None:
@@ -850,8 +850,6 @@ def api_script_repo_pull_cancel(job_id):
         if job.get("status") not in SCRIPT_REPO_PULL_ACTIVE:
             return _error("作业已结束，不能取消", 409, "not_cancellable")
         cancel = SCRIPT_REPO_PULL_CANCEL.get(job_id)
-        if cancel is None:
-            return _error("作业状态无法确认，请检查目标目录", 409, "state_unknown")
         previous_status, previous_phase, previous_updated = (
             job.get("status"), job.get("phase"), job.get("updated_at"),
         )
@@ -861,7 +859,8 @@ def api_script_repo_pull_cancel(job_id):
         except Exception:
             job.update(status=previous_status, phase=previous_phase, updated_at=previous_updated)
             return _error("取消状态无法保存，作业未取消", 503, "job_persistence_failed")
-        cancel.set()
+        if cancel is not None:
+            cancel.set()
         return _response({"ok": True, "job": _payload(job)}, 202)
 
 

@@ -5,7 +5,6 @@ import json
 import os
 import re
 import stat
-import threading
 import time
 import uuid
 from urllib.parse import urlparse
@@ -14,7 +13,10 @@ from flask import jsonify, request
 
 from . import bp
 from .helpers import requests
-from ...directory_jobs import directory_job_operation, start_directory_job
+from ...directory_jobs import (
+    DirectoryJobCancel, DirectoryJobLock, directory_job_operation,
+    directory_job_rows, start_directory_job,
+)
 from ...paths import SCRIPT_DIR, SCRIPT_PULL_JOBS_FILE
 from ...models import load_proxies
 from ...proxy import github_proxy_url, requests_proxy_dict, validate_proxy_id
@@ -28,7 +30,7 @@ SCRIPT_PULL_ACTIVE_LIMIT = 4
 SCRIPT_PULL_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 SCRIPT_PULL_ACTIVE = ("pending", "downloading", "publishing", "cancelling")
 SCRIPT_PULL_TERMINAL = ("complete", "failed", "cancelled", "unknown")
-SCRIPT_PULL_LOCK = threading.RLock()
+SCRIPT_PULL_LOCK = DirectoryJobLock("pull", lambda: _refresh_locked())
 SCRIPT_PULL_JOBS = {}
 SCRIPT_PULL_CANCEL = {}
 SCRIPT_PULL_INITIALIZED = False
@@ -220,61 +222,51 @@ def _save_locked():
 def _ensure_loaded():
     global SCRIPT_PULL_INITIALIZED
     with SCRIPT_PULL_LOCK:
-        if SCRIPT_PULL_INITIALIZED:
-            return
-        try:
-            raw = json.loads(SCRIPT_PULL_JOBS_FILE.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            raw = []
-        except (OSError, ValueError) as exc:
-            raise RuntimeError("脚本拉取记录无法读取，未覆盖原记录") from exc
-        if not isinstance(raw, list):
-            raise RuntimeError("脚本拉取记录不是列表，未覆盖原记录")
-        rows = raw
-        for row in rows[:SCRIPT_PULL_HISTORY_LIMIT]:
-            if not isinstance(row, dict):
-                continue
-            job_id = str(row.get("id") or "")
-            request_id = str(row.get("request_id") or "")
-            if not SCRIPT_PULL_ID_RE.fullmatch(job_id) or not SCRIPT_PULL_ID_RE.fullmatch(request_id):
-                continue
-            status = str(row.get("status") or "unknown")
-            if status in SCRIPT_PULL_ACTIVE:
-                if status == "publishing" and _target_matches(row):
-                    status = "complete"
-                else:
-                    status = "unknown"
-                    row = dict(row, error_code="worker_interrupted")
-                    try:
-                        _clean_temp(script_file_target(row.get("path", "")), job_id)
-                    except ValueError:
-                        pass
-            if status not in SCRIPT_PULL_TERMINAL:
-                status = "unknown"
-            normalized = {
-                "id": job_id,
-                "request_id": request_id,
-                "fingerprint": str(row.get("fingerprint") or ""),
-                "kind": "file",
-                "path": str(row.get("path") or ""),
-                "source_host": str(row.get("source_host") or "")[:255],
-                "status": status,
-                "downloaded_bytes": max(0, _int(row.get("downloaded_bytes"), 0)),
-                "total_bytes": _optional_nonnegative_int(row.get("total_bytes")),
-                "sha256": str(row.get("sha256") or ""),
-                "target_dev": row.get("target_dev") if type(row.get("target_dev")) is int else None,
-                "target_ino": row.get("target_ino") if type(row.get("target_ino")) is int else None,
-                "error_code": str(row.get("error_code") or "")[:80],
-                "created_at": str(row.get("created_at") or ""),
-                "updated_at": str(row.get("updated_at") or ""),
-            }
-            SCRIPT_PULL_JOBS[job_id] = normalized
-        try:
-            _save_locked()
-        except Exception as exc:
-            SCRIPT_PULL_JOBS.clear()
-            raise RuntimeError("脚本拉取记录无法保存，未覆盖原记录") from exc
         SCRIPT_PULL_INITIALIZED = True
+
+
+def _refresh_locked():
+    loaded = {}
+    for row in directory_job_rows(SCRIPT_PULL_JOBS_FILE, SCRIPT_PULL_LOCK, SCRIPT_PULL_JOBS, SCRIPT_PULL_CANCEL):
+        if not isinstance(row, dict):
+            continue
+        job_id = str(row.get("id") or "")
+        request_id = str(row.get("request_id") or "")
+        if not SCRIPT_PULL_ID_RE.fullmatch(job_id) or not SCRIPT_PULL_ID_RE.fullmatch(request_id):
+            continue
+        status = str(row.get("status") or "unknown")
+        if status in SCRIPT_PULL_ACTIVE and not row["_worker_active"]:
+            if status == "publishing" and _target_matches(row):
+                status = "complete"
+            else:
+                status = "unknown"
+                row = dict(row, error_code="worker_interrupted")
+                try:
+                    _clean_temp(script_file_target(row.get("path", "")), job_id)
+                except ValueError:
+                    pass
+        if status not in SCRIPT_PULL_TERMINAL + SCRIPT_PULL_ACTIVE:
+            status = "unknown"
+        normalized = {
+            "id": job_id,
+            "request_id": request_id,
+            "fingerprint": str(row.get("fingerprint") or ""),
+            "kind": "file",
+            "path": str(row.get("path") or ""),
+            "source_host": str(row.get("source_host") or "")[:255],
+            "status": status,
+            "downloaded_bytes": max(0, _int(row.get("downloaded_bytes"), 0)),
+            "total_bytes": _optional_nonnegative_int(row.get("total_bytes")),
+            "sha256": str(row.get("sha256") or ""),
+            "target_dev": row.get("target_dev") if type(row.get("target_dev")) is int else None,
+            "target_ino": row.get("target_ino") if type(row.get("target_ino")) is int else None,
+            "error_code": str(row.get("error_code") or "")[:80],
+            "created_at": str(row.get("created_at") or ""),
+            "updated_at": str(row.get("updated_at") or ""),
+        }
+        loaded[job_id] = normalized
+    SCRIPT_PULL_JOBS.clear()
+    SCRIPT_PULL_JOBS.update(loaded)
 
 
 def _int(value, default):
@@ -332,6 +324,8 @@ def _update(job_id, *, persist=True, **updates):
         job = SCRIPT_PULL_JOBS.get(job_id)
         if not job:
             return None
+        if job.get("status") == "cancelling" and updates.get("status", "cancelling") in SCRIPT_PULL_ACTIVE:
+            updates["status"] = "cancelling"
         job.update(updates)
         job["updated_at"] = now_str()
         if persist:
@@ -688,21 +682,27 @@ def api_script_pull_submit():
             "updated_at": now_str(),
         }
         SCRIPT_PULL_JOBS[job_id] = job
-        cancel = threading.Event()
+        owner = None
+        cancel = DirectoryJobCancel(SCRIPT_PULL_LOCK)
         SCRIPT_PULL_CANCEL[job_id] = cancel
         try:
+            owner = SCRIPT_PULL_LOCK.claim(job_id)
             _save_locked()
         except Exception:
             SCRIPT_PULL_JOBS.pop(job_id, None)
             SCRIPT_PULL_CANCEL.pop(job_id, None)
+            if owner is not None:
+                owner.close()
             return _error("作业回执无法保存，未开始下载", 503, "job_persistence_failed")
         try:
             start_directory_job(
                 _run_pull,
                 args=(job_id, url, proxy_id),
                 name=f"fls-script-pull-{job_id[:8]}",
+                owner=owner,
             )
         except Exception:
+            owner.close()
             SCRIPT_PULL_CANCEL.pop(job_id, None)
             job.update(status="failed", error_code="worker_start_failed", updated_at=now_str())
             try:
@@ -786,8 +786,6 @@ def api_script_pull_cancel(job_id):
         if job.get("status") not in SCRIPT_PULL_ACTIVE:
             return _error("作业已结束，不能取消", 409, "not_cancellable")
         cancel = SCRIPT_PULL_CANCEL.get(job_id)
-        if cancel is None:
-            return _error("作业状态无法确认，请检查目标文件", 409, "state_unknown")
         previous_status = job.get("status")
         previous_updated = job.get("updated_at")
         job.update(status="cancelling", updated_at=now_str())
@@ -796,5 +794,6 @@ def api_script_pull_cancel(job_id):
         except Exception:
             job.update(status=previous_status, updated_at=previous_updated)
             return _error("取消状态无法保存，作业未取消", 503, "job_persistence_failed")
-        cancel.set()
+        if cancel is not None:
+            cancel.set()
         return _response({"ok": True, "job": _payload(job)}, 202)

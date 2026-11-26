@@ -6,9 +6,9 @@ import re
 import shutil
 import stat
 import tarfile
-import threading
 import uuid
 import zipfile
+from contextlib import ExitStack
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from flask import jsonify, request
@@ -16,7 +16,10 @@ from werkzeug.exceptions import RequestEntityTooLarge
 
 from . import bp
 from .native_pull import SCRIPT_PULL_ID_RE, _renameat2_no_replace
-from ...directory_jobs import directory_job_operation, start_directory_job
+from ...directory_jobs import (
+    DirectoryJobCancel, DirectoryJobLock, directory_job_operation,
+    directory_job_rows, start_directory_job,
+)
 from ...paths import DATA_DIR, SCRIPT_DIR, SCRIPT_IMPORT_JOBS_FILE
 from ...script_files import script_file_target
 from ...storage import write_json
@@ -31,7 +34,7 @@ SCRIPT_IMPORT_ACTIVE_LIMIT = 2
 SCRIPT_IMPORT_ACTIVE = ("pending", "processing", "publishing", "cancelling")
 SCRIPT_IMPORT_TERMINAL = ("complete", "failed", "cancelled", "unknown")
 _WINDOWS_RESERVED_NAME_RE = re.compile(r"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$", re.IGNORECASE)
-SCRIPT_IMPORT_LOCK = threading.RLock()
+SCRIPT_IMPORT_LOCK = DirectoryJobLock("import", lambda: _refresh_locked())
 SCRIPT_IMPORT_JOBS = {}
 SCRIPT_IMPORT_CANCEL = {}
 SCRIPT_IMPORT_INITIALIZED = False
@@ -380,6 +383,8 @@ def _update(job_id, *, persist=True, **updates):
         job = SCRIPT_IMPORT_JOBS.get(job_id)
         if job is None:
             return None
+        if job.get("status") == "cancelling" and updates.get("status", "cancelling") in SCRIPT_IMPORT_ACTIVE:
+            updates.update(status="cancelling", phase="cancelling")
         job.update(updates)
         job["updated_at"] = now_str()
         if persist:
@@ -423,65 +428,58 @@ def _cleanup_job_artifacts(job):
 def _ensure_loaded():
     global SCRIPT_IMPORT_INITIALIZED
     with SCRIPT_IMPORT_LOCK:
-        if SCRIPT_IMPORT_INITIALIZED:
-            return
-        try:
-            raw = json.loads(SCRIPT_IMPORT_JOBS_FILE.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            raw = []
-        except (OSError, ValueError) as exc:
-            raise RuntimeError("脚本导入记录无法读取，未覆盖原记录") from exc
-        if not isinstance(raw, list):
-            raise RuntimeError("脚本导入记录格式无效，未覆盖原记录")
-        SCRIPT_IMPORT_JOBS.clear()
-        for row in raw[:SCRIPT_IMPORT_HISTORY_LIMIT]:
-            if not isinstance(row, dict):
-                continue
-            job_id = str(row.get("id") or "")
-            request_id = str(row.get("request_id") or "")
-            if not SCRIPT_PULL_ID_RE.fullmatch(job_id) or not SCRIPT_PULL_ID_RE.fullmatch(request_id):
-                continue
-            status = str(row.get("status") or "unknown")
-            if status in SCRIPT_IMPORT_ACTIVE:
-                status = "unknown"
-                row = dict(row, error_code="worker_interrupted")
-                _cleanup_job_artifacts(row)
-            if status not in SCRIPT_IMPORT_TERMINAL:
-                status = "unknown"
-            try:
-                target = script_file_target(row.get("path", ""))
-                relative = target.relative_to(SCRIPT_DIR.resolve()).as_posix()
-            except (OSError, ValueError):
-                continue
-            SCRIPT_IMPORT_JOBS[job_id] = {
-                "id": job_id,
-                "request_id": request_id,
-                "fingerprint": str(row.get("fingerprint") or ""),
-                "kind": str(row.get("kind") or "file"),
-                "path": relative,
-                "source_host": "local-upload",
-                "status": status,
-                "phase": str(row.get("phase") or status)[:32],
-                "uploaded_bytes": _nonnegative_int(row.get("uploaded_bytes")),
-                "processed_bytes": _nonnegative_int(row.get("processed_bytes")),
-                "total_bytes": _optional_nonnegative_int(row.get("total_bytes")),
-                "total_files": _optional_nonnegative_int(row.get("total_files")),
-                "error_code": str(row.get("error_code") or "")[:80],
-                "created_at": str(row.get("created_at") or ""),
-                "updated_at": str(row.get("updated_at") or ""),
-            }
-        try:
-            _save_locked()
-        except Exception as exc:
-            SCRIPT_IMPORT_JOBS.clear()
-            raise RuntimeError("脚本导入记录无法保存，未覆盖原记录") from exc
-        for artifact in DATA_DIR.glob(".script-import-*.upload"):
-            if SCRIPT_PULL_ID_RE.fullmatch(artifact.name[len(".script-import-"):-len(".upload")]):
-                try:
-                    artifact.unlink()
-                except OSError:
-                    pass
         SCRIPT_IMPORT_INITIALIZED = True
+
+
+def _refresh_locked():
+    loaded = {}
+    for row in directory_job_rows(SCRIPT_IMPORT_JOBS_FILE, SCRIPT_IMPORT_LOCK, SCRIPT_IMPORT_JOBS, SCRIPT_IMPORT_CANCEL):
+        if not isinstance(row, dict):
+            continue
+        job_id = str(row.get("id") or "")
+        request_id = str(row.get("request_id") or "")
+        if not SCRIPT_PULL_ID_RE.fullmatch(job_id) or not SCRIPT_PULL_ID_RE.fullmatch(request_id):
+            continue
+        status = str(row.get("status") or "unknown")
+        if status in SCRIPT_IMPORT_ACTIVE and not row["_worker_active"]:
+            status = "unknown"
+            row = dict(row, error_code="worker_interrupted")
+            _cleanup_job_artifacts(row)
+        if status not in SCRIPT_IMPORT_TERMINAL + SCRIPT_IMPORT_ACTIVE:
+            status = "unknown"
+        try:
+            target = script_file_target(row.get("path", ""))
+            relative = target.relative_to(SCRIPT_DIR.resolve()).as_posix()
+        except (OSError, ValueError):
+            continue
+        loaded[job_id] = {
+            "id": job_id,
+            "request_id": request_id,
+            "fingerprint": str(row.get("fingerprint") or ""),
+            "kind": str(row.get("kind") or "file"),
+            "path": relative,
+            "source_host": "local-upload",
+            "status": status,
+            "phase": str(row.get("phase") or status)[:32],
+            "uploaded_bytes": _nonnegative_int(row.get("uploaded_bytes")),
+            "processed_bytes": _nonnegative_int(row.get("processed_bytes")),
+            "total_bytes": _optional_nonnegative_int(row.get("total_bytes")),
+            "total_files": _optional_nonnegative_int(row.get("total_files")),
+            "error_code": str(row.get("error_code") or "")[:80],
+            "created_at": str(row.get("created_at") or ""),
+            "updated_at": str(row.get("updated_at") or ""),
+        }
+    SCRIPT_IMPORT_JOBS.clear()
+    SCRIPT_IMPORT_JOBS.update(loaded)
+    for artifact in DATA_DIR.glob(".script-import-*.upload"):
+        job_id = artifact.name[len(".script-import-"):-len(".upload")]
+        if job_id not in loaded and SCRIPT_PULL_ID_RE.fullmatch(job_id):
+            with SCRIPT_IMPORT_LOCK.probe(job_id) as active:
+                if not active:
+                    try:
+                        artifact.unlink()
+                    except OSError:
+                        pass
 
 
 def _nonnegative_int(value):
@@ -698,100 +696,100 @@ def api_script_import_submit():
     upload_id = uuid.uuid4().hex
     staged_upload = _upload_path(upload_id)
     try:
-        upload_fd = os.open(
-            staged_upload,
-            os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0),
-            0o600,
-        )
-        with os.fdopen(upload_fd, "wb") as output:
-            total = 0
-            digest = hashlib.sha256()
-            while True:
-                chunk = upload.stream.read(128 * 1024)
-                if not chunk:
-                    break
-                total += len(chunk)
-                if total > SCRIPT_IMPORT_MAX_BYTES:
-                    raise _ImportTooLarge
-                digest.update(chunk)
-                output.write(chunk)
-            output.flush()
-            os.fsync(output.fileno())
-    except _ImportTooLarge:
-        staged_upload.unlink(missing_ok=True)
-        return _error("上传文件超过 64 MiB 限制", 413, "too_large")
-    except RequestEntityTooLarge:
-        staged_upload.unlink(missing_ok=True)
-        return _error("上传文件超过 64 MiB 限制", 413, "too_large")
-    except Exception:
-        staged_upload.unlink(missing_ok=True)
-        return _error("无法暂存上传文件", 500, "upload_staging_failed")
-
-    fingerprint = hashlib.sha256(
-        json.dumps([relative, kind, filename, digest.hexdigest()], ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
-    ).hexdigest()
-    with SCRIPT_IMPORT_LOCK:
-        previous = next(
-            (item for item in SCRIPT_IMPORT_JOBS.values() if item.get("request_id") == request_id),
-            None,
-        )
-        if previous is not None:
-            staged_upload.unlink(missing_ok=True)
-            if previous.get("fingerprint") != fingerprint:
-                return _error("request_id 已用于不同请求", 409, "request_id_conflict")
-            return _response({"ok": True, "job": _payload(previous, replayed=True)}, 200)
-        if os.path.lexists(target):
-            staged_upload.unlink(missing_ok=True)
-            message = "目标已存在，未覆盖现有文件" if kind == "file" else "压缩包目标目录已存在，请选择新目录"
-            return _error(message, 409, "target_exists")
-        if sum(item.get("status") in SCRIPT_IMPORT_ACTIVE for item in SCRIPT_IMPORT_JOBS.values()) >= SCRIPT_IMPORT_ACTIVE_LIMIT:
-            staged_upload.unlink(missing_ok=True)
-            return _error("脚本导入作业过多，请等待当前作业结束", 429, "too_many_active_jobs")
-        job_id = upload_id
-        final_upload = _upload_path(job_id)
-        staged_upload.rename(final_upload)
-        job = {
-            "id": job_id,
-            "request_id": request_id,
-            "fingerprint": fingerprint,
-            "kind": kind,
-            "path": relative,
-            "status": "pending",
-            "phase": "queued",
-            "uploaded_bytes": total,
-            "processed_bytes": 0,
-            "total_bytes": total,
-            "total_files": None,
-            "error_code": "",
-            "created_at": now_str(),
-            "updated_at": now_str(),
-        }
-        SCRIPT_IMPORT_JOBS[job_id] = job
-        cancel = threading.Event()
-        SCRIPT_IMPORT_CANCEL[job_id] = cancel
+        upload_owner = SCRIPT_IMPORT_LOCK.claim(upload_id)
+    except (OSError, RuntimeError):
+        return _error("上传身份无法保存，未开始暂存", 503, "job_persistence_failed")
+    with ExitStack() as cleanup:
+        cleanup.callback(upload_owner.close)
+        cleanup.callback(staged_upload.unlink, missing_ok=True)
         try:
-            _save_locked()
-        except Exception:
-            SCRIPT_IMPORT_JOBS.pop(job_id, None)
-            SCRIPT_IMPORT_CANCEL.pop(job_id, None)
-            final_upload.unlink(missing_ok=True)
-            return _error("作业回执无法保存，未开始导入", 503, "job_persistence_failed")
-        try:
-            start_directory_job(
-                _run_import,
-                args=(job_id,),
-                name=f"fls-script-import-{job_id[:8]}",
+            upload_fd = os.open(
+                staged_upload,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0),
+                0o600,
             )
+            with os.fdopen(upload_fd, "wb") as output:
+                total = 0
+                digest = hashlib.sha256()
+                while True:
+                    chunk = upload.stream.read(128 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > SCRIPT_IMPORT_MAX_BYTES:
+                        raise _ImportTooLarge
+                    digest.update(chunk)
+                    output.write(chunk)
+                output.flush()
+                os.fsync(output.fileno())
+        except _ImportTooLarge:
+            return _error("上传文件超过 64 MiB 限制", 413, "too_large")
+        except RequestEntityTooLarge:
+            return _error("上传文件超过 64 MiB 限制", 413, "too_large")
         except Exception:
-            SCRIPT_IMPORT_CANCEL.pop(job_id, None)
-            job.update(status="failed", phase="failed", error_code="worker_start_failed", updated_at=now_str())
-            final_upload.unlink(missing_ok=True)
+            return _error("无法暂存上传文件", 500, "upload_staging_failed")
+
+        fingerprint = hashlib.sha256(
+            json.dumps([relative, kind, filename, digest.hexdigest()], ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+        ).hexdigest()
+        with SCRIPT_IMPORT_LOCK:
+            previous = next(
+                (item for item in SCRIPT_IMPORT_JOBS.values() if item.get("request_id") == request_id),
+                None,
+            )
+            if previous is not None:
+                if previous.get("fingerprint") != fingerprint:
+                    return _error("request_id 已用于不同请求", 409, "request_id_conflict")
+                return _response({"ok": True, "job": _payload(previous, replayed=True)}, 200)
+            if os.path.lexists(target):
+                message = "目标已存在，未覆盖现有文件" if kind == "file" else "压缩包目标目录已存在，请选择新目录"
+                return _error(message, 409, "target_exists")
+            if sum(item.get("status") in SCRIPT_IMPORT_ACTIVE for item in SCRIPT_IMPORT_JOBS.values()) >= SCRIPT_IMPORT_ACTIVE_LIMIT:
+                return _error("脚本导入作业过多，请等待当前作业结束", 429, "too_many_active_jobs")
+            job_id = upload_id
+            job = {
+                "id": job_id,
+                "request_id": request_id,
+                "fingerprint": fingerprint,
+                "kind": kind,
+                "path": relative,
+                "status": "pending",
+                "phase": "queued",
+                "uploaded_bytes": total,
+                "processed_bytes": 0,
+                "total_bytes": total,
+                "total_files": None,
+                "error_code": "",
+                "created_at": now_str(),
+                "updated_at": now_str(),
+            }
+            SCRIPT_IMPORT_JOBS[job_id] = job
+            owner = upload_owner
+            cancel = DirectoryJobCancel(SCRIPT_IMPORT_LOCK)
+            SCRIPT_IMPORT_CANCEL[job_id] = cancel
             try:
                 _save_locked()
             except Exception:
-                job.update(status="unknown", phase="unknown", error_code="job_persistence_failed")
-            return _response({"ok": False, "job": _payload(job)}, 503)
-    return _response({"ok": True, "job": _payload(job)}, 202)
+                SCRIPT_IMPORT_JOBS.pop(job_id, None)
+                SCRIPT_IMPORT_CANCEL.pop(job_id, None)
+                return _error("作业回执无法保存，未开始导入", 503, "job_persistence_failed")
+            try:
+                start_directory_job(
+                    _run_import,
+                    args=(job_id,),
+                    name=f"fls-script-import-{job_id[:8]}",
+                    owner=owner,
+                )
+            except Exception:
+                SCRIPT_IMPORT_CANCEL.pop(job_id, None)
+                job.update(status="failed", phase="failed", error_code="worker_start_failed", updated_at=now_str())
+                try:
+                    _save_locked()
+                except Exception:
+                    job.update(status="unknown", phase="unknown", error_code="job_persistence_failed")
+                return _response({"ok": False, "job": _payload(job)}, 503)
+        cleanup.pop_all()
+        return _response({"ok": True, "job": _payload(job)}, 202)
 
 
 @bp.route("/api/scripts/import/<job_id>")
@@ -842,8 +840,6 @@ def api_script_import_cancel(job_id):
         if job.get("status") not in ("pending", "processing"):
             return _error("作业已进入发布或结束阶段，不能取消", 409, "not_cancellable")
         cancel = SCRIPT_IMPORT_CANCEL.get(job_id)
-        if cancel is None:
-            return _error("作业状态无法确认，请检查目标路径", 409, "state_unknown")
         previous = (job.get("status"), job.get("phase"), job.get("updated_at"))
         job.update(status="cancelling", phase="cancelling", updated_at=now_str())
         try:
@@ -851,5 +847,6 @@ def api_script_import_cancel(job_id):
         except Exception:
             job.update(status=previous[0], phase=previous[1], updated_at=previous[2])
             return _error("取消状态无法保存，作业未取消", 503, "job_persistence_failed")
-        cancel.set()
+        if cancel is not None:
+            cancel.set()
         return _response({"ok": True, "job": _payload(job)}, 202)
