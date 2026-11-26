@@ -379,7 +379,7 @@ class NativeBackupApiTests(unittest.TestCase):
                         stack.enter_context(patch.object(native_api, "_write_native_restore", side_effect=reject_failure_receipt))
                     response = self.submit_restore(client, request_id, preflight_id, digest)
 
-                self.assertEqual(response.status_code, 503)
+                self.assertEqual(response.status_code, 503, response.json)
                 self.assertFalse(backup.RESTORE_ACTIVE)
                 self.assertNotIn(request_id, native_api.RESTORE_ACTIVE)
                 self.assertNotIn(preflight_id, native_api.PREFLIGHT_RETAINED_FOR_RESTORE)
@@ -862,11 +862,14 @@ class NativeBackupApiTests(unittest.TestCase):
             client = self.client(app)
             preflight_id, request_id, operation_id = "3" * 32, "4" * 32, "5" * 32
             prepared = self.submit_preflight(client, preflight_id)
+            self.assertEqual(prepared.json["preflight"]["status"], "ready", prepared.json)
             with patch.object(threading.Thread, "start", autospec=True, side_effect=lambda thread: thread.run()):
-                self.submit_restore(
+                restored = self.submit_restore(
                     client, request_id, preflight_id, prepared.json["preflight"]["archive_sha256"],
                     restore_dependencies=True,
                 )
+            self.assertEqual(restored.status_code, 200, restored.json)
+            self.assertEqual(restored.json["restore"]["state"], "restored", restored.json)
             script = (
                 "import json,sys\n"
                 "from flask import Flask\n"
@@ -920,8 +923,11 @@ class NativeBackupApiTests(unittest.TestCase):
             client = self.client(app)
             preflight_id, request_id = "3" * 32, "4" * 32
             prepared = self.submit_preflight(client, preflight_id)
+            self.assertEqual(prepared.json["preflight"]["status"], "ready", prepared.json)
             with patch.object(threading.Thread, "start", autospec=True, side_effect=lambda thread: thread.run()):
-                self.submit_restore(client, request_id, preflight_id, prepared.json["preflight"]["archive_sha256"])
+                restored = self.submit_restore(client, request_id, preflight_id, prepared.json["preflight"]["archive_sha256"])
+            self.assertEqual(restored.status_code, 200, restored.json)
+            self.assertEqual(restored.json["restore"]["state"], "restored", restored.json)
             script = (
                 "import json,sys\n"
                 "from flask import Flask\n"
@@ -944,7 +950,7 @@ class NativeBackupApiTests(unittest.TestCase):
                     while stdout.seek(0, 2) == 0 and process.poll() is None and time.monotonic() < deadline:
                         time.sleep(0.01)
                     stdout.seek(0)
-                    self.assertEqual(stdout.readline(), b"ready\n")
+                    self.assertEqual(stdout.readline().rstrip(b"\r\n"), b"ready")
                     with patch("fls_manager.scheduler.reload_scheduler") as reload_scheduler:
                         result = client.post(f"/api/backup/native/restores/{request_id}/scheduler-reload", json={
                             "operation_id": "5" * 32, "confirm_retry": False,
