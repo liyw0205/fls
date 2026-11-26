@@ -5,7 +5,7 @@ from . import _common as backup
 from ...storage import storage_transaction, write_json
 
 
-def submit_backup_deletion(data):
+def submit_backup_deletion(data, *, missing_is_unknown=False):
     def result(message, status, **extra):
         return {"ok": status == 200, "msg": message, **extra}, status
 
@@ -24,6 +24,8 @@ def submit_backup_deletion(data):
             try:
                 current = backup.backup_entry_stat(directory, filename)
             except FileNotFoundError:
+                if missing_is_unknown:
+                    return result("备份文件在删除前消失，结果无法确认", 503, deleted=None)
                 return result("原备份已不存在，未重复删除", 200, deleted=True)
             if not backup.stat.S_ISREG(current.st_mode):
                 return result("备份文件不是常规文件，未删除", 400, deleted=False)
@@ -35,6 +37,8 @@ def submit_backup_deletion(data):
                 try:
                     actual = backup.backup_entry_stat(directory, filename)
                 except FileNotFoundError:
+                    if missing_is_unknown:
+                        return result("删除结果无法确认，请刷新列表核对", 503, deleted=None)
                     return result("原备份已删除，删除确认异常", 200, deleted=True)
                 except OSError:
                     return result("删除结果无法确认，请刷新列表核对，不要直接重复删除", 503, deleted=None)
