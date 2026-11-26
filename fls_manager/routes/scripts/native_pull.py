@@ -14,6 +14,7 @@ from flask import jsonify, request
 
 from . import bp
 from .helpers import requests
+from ...directory_jobs import directory_job_operation, start_directory_job
 from ...paths import SCRIPT_DIR, SCRIPT_PULL_JOBS_FILE
 from ...models import load_proxies
 from ...proxy import github_proxy_url, requests_proxy_dict, validate_proxy_id
@@ -610,6 +611,7 @@ def _request_fingerprint(url, path, proxy_id):
 
 
 @bp.route("/api/scripts/pull", methods=["POST"])
+@directory_job_operation
 def api_script_pull_submit():
     try:
         _ensure_loaded()
@@ -694,23 +696,25 @@ def api_script_pull_submit():
             SCRIPT_PULL_JOBS.pop(job_id, None)
             SCRIPT_PULL_CANCEL.pop(job_id, None)
             return _error("作业回执无法保存，未开始下载", 503, "job_persistence_failed")
-        thread = threading.Thread(
-            target=_run_pull,
-            args=(job_id, url, proxy_id),
-            daemon=True,
-            name=f"fls-script-pull-{job_id[:8]}",
-        )
         try:
-            thread.start()
+            start_directory_job(
+                _run_pull,
+                args=(job_id, url, proxy_id),
+                name=f"fls-script-pull-{job_id[:8]}",
+            )
         except Exception:
             SCRIPT_PULL_CANCEL.pop(job_id, None)
             job.update(status="failed", error_code="worker_start_failed", updated_at=now_str())
-            _save_locked()
+            try:
+                _save_locked()
+            except Exception:
+                job.update(status="unknown", error_code="job_persistence_failed")
             return _response({"ok": False, "job": _payload(job)}, 503)
     return _response({"ok": True, "job": _payload(job)}, 202)
 
 
 @bp.route("/api/scripts/pull/<job_id>")
+@directory_job_operation
 def api_script_pull_status(job_id):
     try:
         _ensure_loaded()
@@ -724,6 +728,7 @@ def api_script_pull_status(job_id):
 
 
 @bp.route("/api/scripts/pull-history")
+@directory_job_operation
 def api_script_pull_history():
     try:
         _ensure_loaded()
@@ -745,6 +750,7 @@ def api_script_pull_history():
 
 
 @bp.route("/api/scripts/pull-options")
+@directory_job_operation
 def api_script_pull_options():
     try:
         proxies = load_proxies()
@@ -765,6 +771,7 @@ def api_script_pull_options():
 
 
 @bp.route("/api/scripts/pull/<job_id>/cancel", methods=["POST"])
+@directory_job_operation
 def api_script_pull_cancel(job_id):
     try:
         _ensure_loaded()

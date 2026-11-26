@@ -17,6 +17,7 @@ from flask import request
 
 from . import bp
 from .helpers import build_repo_pull_command
+from ...directory_jobs import directory_job_operation, start_directory_job
 from .native_pull import (
     SCRIPT_PULL_ID_RE,
     _error,
@@ -454,13 +455,7 @@ def _run_clone(job_id, url, proxy_id, target, parent_fd, parent_identity, cancel
     output_queue = queue.Queue()
     created_stage = False
     stage_identity = None
-
-    def finish(status, error_code):
-        nonlocal created_stage
-        if created_stage:
-            _remove_entry(target, parent_fd, stage, stage_identity)
-            created_stage = False
-        _finish_or_fail(job_id, target, parent_fd, status, error_code)
+    outcome = None
 
     try:
         if cancel.is_set():
@@ -610,40 +605,39 @@ def _run_clone(job_id, url, proxy_id, target, parent_fd, parent_identity, cancel
             ):
                 _remove_entry(target, parent_fd, target.name, (staged.st_dev, staged.st_ino))
                 raise _RepoPathChanged
-            job = SCRIPT_REPO_PULL_JOBS[job_id]
-            job.update(status="complete", phase="complete", error_code="", updated_at=now_str())
-            try:
-                _save_locked()
-            except Exception as exc:
-                raise _RepoPersistenceError from exc
+            outcome = ("complete", "")
     except _RepoCancelled:
-        finish("cancelled", "")
+        outcome = ("cancelled", "")
     except FileExistsError:
-        finish("failed", "target_exists")
+        outcome = ("failed", "target_exists")
     except _RepoPathChanged:
-        finish("failed", "path_changed")
+        outcome = ("failed", "path_changed")
     except _RepoCloneFailed:
-        finish("failed", "clone_failed")
+        outcome = ("failed", "clone_failed")
     except _RepoPersistenceError:
-        if process is not None:
-            _stop_process(process)
-        finish("failed", "job_persistence_failed")
+        outcome = ("failed", "job_persistence_failed")
     except Exception:
-        if process is not None:
-            _stop_process(process)
-        finish("failed", "clone_failed")
+        outcome = ("failed", "clone_failed")
     finally:
-        if reader is not None and reader.is_alive():
-            reader.join(timeout=1)
-        if created_stage and target is not None:
-            _remove_entry(target, parent_fd, stage, stage_identity)
-        if parent_fd is not None:
-            try:
-                os.close(parent_fd)
-            except OSError:
-                pass
-        with SCRIPT_REPO_PULL_LOCK:
-            SCRIPT_REPO_PULL_CANCEL.pop(job_id, None)
+        try:
+            if process is not None:
+                _stop_process(process)
+            if reader is not None and reader.ident is not None:
+                reader.join()
+            elif process is not None and process.stderr is not None:
+                process.stderr.close()
+            if created_stage and target is not None:
+                _remove_entry(target, parent_fd, stage, stage_identity)
+        finally:
+            if parent_fd is not None:
+                try:
+                    os.close(parent_fd)
+                except OSError:
+                    pass
+            with SCRIPT_REPO_PULL_LOCK:
+                SCRIPT_REPO_PULL_CANCEL.pop(job_id, None)
+        if outcome is not None:
+            _finish_or_fail(job_id, target, None, *outcome)
 
 
 def _open_dir_at(target, parent_fd, name):
@@ -693,6 +687,7 @@ def _safe_repo_url(raw):
 
 
 @bp.route("/api/scripts/repo-pull", methods=["POST"])
+@directory_job_operation
 def api_script_repo_pull_submit():
     try:
         _ensure_loaded()
@@ -782,20 +777,21 @@ def api_script_repo_pull_submit():
             if parent_fd is not None:
                 os.close(parent_fd)
             return _error("作业回执无法保存，未开始克隆", 503, "job_persistence_failed")
-        thread = threading.Thread(
-            target=_start_repo_worker,
-            args=(job_id, url, proxy_id, relative, target, parent_fd, parent_identity),
-            daemon=True,
-            name=f"fls-repo-pull-{job_id[:8]}",
-        )
         try:
-            thread.start()
+            start_directory_job(
+                _start_repo_worker,
+                args=(job_id, url, proxy_id, relative, target, parent_fd, parent_identity),
+                name=f"fls-repo-pull-{job_id[:8]}",
+            )
         except Exception:
             SCRIPT_REPO_PULL_CANCEL.pop(job_id, None)
             job.update(status="failed", phase="failed", error_code="worker_start_failed", updated_at=now_str())
-            _save_locked()
             if parent_fd is not None:
                 os.close(parent_fd)
+            try:
+                _save_locked()
+            except Exception:
+                job.update(status="unknown", phase="unknown", error_code="job_persistence_failed")
             return _response({"ok": False, "job": _payload(job)}, 503)
     return _response({"ok": True, "job": _payload(job)}, 202)
 
@@ -811,6 +807,7 @@ def _start_repo_worker(job_id, url, proxy_id, relative, target, parent_fd, paren
 
 
 @bp.route("/api/scripts/repo-pull/<job_id>")
+@directory_job_operation
 def api_script_repo_pull_status(job_id):
     try:
         _ensure_loaded()
@@ -824,6 +821,7 @@ def api_script_repo_pull_status(job_id):
 
 
 @bp.route("/api/scripts/repo-pull-history")
+@directory_job_operation
 def api_script_repo_pull_history():
     try:
         _ensure_loaded()
@@ -845,6 +843,7 @@ def api_script_repo_pull_history():
 
 
 @bp.route("/api/scripts/repo-pull/<job_id>/cancel", methods=["POST"])
+@directory_job_operation
 def api_script_repo_pull_cancel(job_id):
     try:
         _ensure_loaded()

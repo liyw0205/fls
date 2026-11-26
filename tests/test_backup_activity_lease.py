@@ -19,6 +19,11 @@ class BackupActivityLeaseTests(unittest.TestCase):
     @contextlib.contextmanager
     def holder(self, mode, *, hard_exit=False):
         setup, cleanup = {
+            "file_job": (
+                "from fls_manager.directory_jobs import directory_job\n"
+                "job=directory_job()\njob.__enter__()",
+                "job.__exit__(None,None,None)",
+            ),
             "backup": ("backup.begin_backup_activity()", "backup.end_backup_activity()"),
             "legacy": ("assert backup.try_begin_restore_activity()", "backup.end_restore_activity()"),
             "native": (

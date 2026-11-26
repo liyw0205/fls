@@ -43,6 +43,10 @@ jobs:
           tests/test_backup_dependency_process.py
           tests/test_backup_activity_lease.py
           tests/test_backup_data_access.py
+          tests/test_script_directory_jobs.py
+          tests/test_native_script_pull_api.py
+          tests/test_native_script_repo_pull_api.py
+          tests/test_native_script_import_api.py
           tests/test_backup_directory_commit.py
           tests/test_native_backup_directory_recovery.py
           tests/test_native_backup_api.py
@@ -88,6 +92,10 @@ jobs:
         env:
           PYTHONPATH: .
         run: python -m pytest -q tests/test_backup_data_access.py tests/test_auth_backup.py -k 'BackupDataAccess or native_login or native_logout or native_resend or native_totp'
+      - name: Verify script job admission, handoff and cleanup against directory restore
+        env:
+          PYTHONPATH: .
+        run: python -m pytest -q tests/test_script_directory_jobs.py tests/test_native_script_repo_pull_api.py tests/test_native_script_import_api.py
       - name: Verify interrupted directory commit and startup recovery
         env:
           PYTHONPATH: .

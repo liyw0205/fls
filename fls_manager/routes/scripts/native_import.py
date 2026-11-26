@@ -16,6 +16,7 @@ from werkzeug.exceptions import RequestEntityTooLarge
 
 from . import bp
 from .native_pull import SCRIPT_PULL_ID_RE, _renameat2_no_replace
+from ...directory_jobs import directory_job_operation, start_directory_job
 from ...paths import DATA_DIR, SCRIPT_DIR, SCRIPT_IMPORT_JOBS_FILE
 from ...script_files import script_file_target
 from ...storage import write_json
@@ -544,6 +545,7 @@ def _run_import(job_id):
     target = None
     parent_fd = None
     staged = None
+    terminal = None
     try:
         target = script_file_target(snapshot["path"])
         if cancel.is_set():
@@ -574,7 +576,7 @@ def _run_import(job_id):
             if not _parent_matches(target, parent_fd, parent_identity):
                 raise ValueError("目标目录已变化")
             _publish_file_no_replace(staged, target, parent_fd)
-            _update(job_id, status="complete", phase="complete", processed_bytes=total, error_code="")
+            terminal = dict(status="complete", phase="complete", processed_bytes=total, error_code="")
         else:
             target, parent_fd, parent_identity = _open_parent(snapshot["path"])
             if parent_fd is None:
@@ -614,18 +616,18 @@ def _run_import(job_id):
                 target,
                 parent_fd,
             )
-            _update(
-                job_id, status="complete", phase="complete", processed_bytes=total_bytes,
+            terminal = dict(
+                status="complete", phase="complete", processed_bytes=total_bytes,
                 total_files=total_files, error_code="",
             )
     except _ImportCancelled:
-        _update(job_id, status="cancelled", phase="cancelled", error_code="cancelled")
+        terminal = dict(status="cancelled", phase="cancelled", error_code="cancelled")
     except _ImportTooLarge:
-        _update(job_id, status="failed", phase="failed", error_code="too_large")
+        terminal = dict(status="failed", phase="failed", error_code="too_large")
     except FileExistsError:
-        _update(job_id, status="failed", phase="failed", error_code="target_exists")
+        terminal = dict(status="failed", phase="failed", error_code="target_exists")
     except Exception:
-        _update(job_id, status="failed", phase="failed", error_code="import_failed")
+        terminal = dict(status="failed", phase="failed", error_code="import_failed")
     finally:
         try:
             _upload_path(job_id).unlink(missing_ok=True)
@@ -640,9 +642,17 @@ def _run_import(job_id):
                 pass
         with SCRIPT_IMPORT_LOCK:
             SCRIPT_IMPORT_CANCEL.pop(job_id, None)
+            if terminal is not None:
+                try:
+                    _update(job_id, **terminal)
+                except Exception:
+                    SCRIPT_IMPORT_JOBS[job_id].update(
+                        status="unknown", phase="unknown", error_code="job_persistence_failed",
+                    )
 
 
 @bp.route("/api/scripts/import", methods=["POST"])
+@directory_job_operation
 def api_script_import_submit():
     try:
         _ensure_loaded()
@@ -766,24 +776,26 @@ def api_script_import_submit():
             SCRIPT_IMPORT_CANCEL.pop(job_id, None)
             final_upload.unlink(missing_ok=True)
             return _error("作业回执无法保存，未开始导入", 503, "job_persistence_failed")
-        worker = threading.Thread(
-            target=_run_import,
-            args=(job_id,),
-            daemon=True,
-            name=f"fls-script-import-{job_id[:8]}",
-        )
         try:
-            worker.start()
+            start_directory_job(
+                _run_import,
+                args=(job_id,),
+                name=f"fls-script-import-{job_id[:8]}",
+            )
         except Exception:
             SCRIPT_IMPORT_CANCEL.pop(job_id, None)
             job.update(status="failed", phase="failed", error_code="worker_start_failed", updated_at=now_str())
-            _save_locked()
             final_upload.unlink(missing_ok=True)
+            try:
+                _save_locked()
+            except Exception:
+                job.update(status="unknown", phase="unknown", error_code="job_persistence_failed")
             return _response({"ok": False, "job": _payload(job)}, 503)
     return _response({"ok": True, "job": _payload(job)}, 202)
 
 
 @bp.route("/api/scripts/import/<job_id>")
+@directory_job_operation
 def api_script_import_status(job_id):
     try:
         _ensure_loaded()
@@ -797,6 +809,7 @@ def api_script_import_status(job_id):
 
 
 @bp.route("/api/scripts/import-history")
+@directory_job_operation
 def api_script_import_history():
     try:
         _ensure_loaded()
@@ -814,6 +827,7 @@ def api_script_import_history():
 
 
 @bp.route("/api/scripts/import/<job_id>/cancel", methods=["POST"])
+@directory_job_operation
 def api_script_import_cancel(job_id):
     try:
         _ensure_loaded()
