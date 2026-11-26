@@ -10,6 +10,8 @@ from werkzeug.datastructures import MultiDict
 from . import bp
 from .files import _guard_file_mutation
 from .helpers import script_rel_path
+from ...directory_jobs import directory_job_operation
+from ...data_access import PanelStorageBusy
 from ...models import TASKS_MUTATION_LOCK
 from ...paths import SCRIPT_DIR
 from ...script_files import (
@@ -183,6 +185,7 @@ def _assert_script_not_running(target, references):
 
 
 @bp.route("/api/scripts/tree")
+@directory_job_operation
 def api_script_tree():
     raw_path = request.args.get("path", "")
     query = request.args.get("q", "").strip().casefold()
@@ -247,6 +250,7 @@ def api_script_tree():
 
 
 @bp.route("/api/scripts/delete/preview")
+@directory_job_operation
 def api_script_delete_preview():
     raw_path = request.args.get("path", "")
     try:
@@ -266,6 +270,7 @@ def api_script_delete_preview():
 
 
 @bp.route("/api/scripts/file", methods=["GET", "PUT", "POST", "DELETE"])
+@directory_job_operation
 def api_script_file():
     if request.method == "GET":
         raw_path = request.args.get("path")
@@ -460,6 +465,7 @@ def api_script_file():
 
 
 @bp.route("/api/scripts/rename/preview")
+@directory_job_operation
 def api_script_rename_preview():
     raw_path = request.args.get("path", "")
     new_name = request.args.get("new_name", "")
@@ -486,6 +492,7 @@ def api_script_rename_preview():
 
 
 @bp.route("/api/scripts/rename", methods=["POST"])
+@directory_job_operation
 def api_script_rename():
     data, error = _json_body()
     if error is not None:
@@ -582,6 +589,8 @@ def api_script_rename():
         return _error("任务引用无效或仍包含旧路径，未执行重命名", 400, "invalid_references")
     except OSError:
         return _error("重命名操作状态未知，请读取操作状态后再处理", 503, "rename_result_unknown")
+    except PanelStorageBusy:
+        raise
     except Exception:
         record = get_script_rename(operation_id)
         if record:
@@ -599,6 +608,7 @@ def api_script_rename():
 
 
 @bp.route("/api/scripts/rename/<operation_id>")
+@directory_job_operation
 def api_script_rename_status(operation_id):
     if not _rename_identifier(operation_id):
         return _error("operation_id 无效", 400, "invalid_operation_id")
@@ -608,12 +618,15 @@ def api_script_rename_status(operation_id):
             if not record:
                 return _error("重命名记录不存在", 404, "not_found")
             operation = _rename_operation_payload(record)
+    except PanelStorageBusy:
+        raise
     except (OSError, ValueError, RuntimeError):
         return _error("重命名状态读取失败", 500, "status_read_failed")
     return _response({"ok": True, "operation": operation})
 
 
 @bp.route("/api/scripts/rename/<operation_id>/recovery", methods=["POST"])
+@directory_job_operation
 def api_script_rename_recovery(operation_id):
     if not _rename_identifier(operation_id):
         return _error("operation_id 无效", 400, "invalid_operation_id")
@@ -637,6 +650,8 @@ def api_script_rename_recovery(operation_id):
             "msg": "当前文件或任务状态与恢复记录冲突，请检查后再试",
             **({"operation": _rename_operation_payload(record)} if record else {}),
         }, 409)
+    except PanelStorageBusy:
+        raise
     except Exception:
         record = get_script_rename(operation_id)
         return _response({

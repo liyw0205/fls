@@ -10,6 +10,7 @@ import stat
 from pathlib import Path
 
 from .paths import SCRIPT_DIR, SCRIPT_RENAME_FILE
+from .data_access import PanelStorageBusy
 from .script_files import script_file_target, ScriptFileConflict
 from .storage import storage_transaction, write_json
 from .utils import now_str
@@ -391,6 +392,8 @@ def resume_script_rename(record, rollback=False):
         save_script_rename(record)
         try:
             reload_scheduler()
+        except PanelStorageBusy:
+            raise
         except Exception as e:
             record["error"] = f"文件和任务引用已更新，但调度器重载失败：{e}"
             save_script_rename(record)

@@ -1,4 +1,5 @@
 import io
+import sys
 import tarfile
 import unittest
 import zipfile
@@ -151,7 +152,7 @@ class ScriptImportRecoveryTests(unittest.TestCase):
             from fls_manager.routes.scripts import pull
 
             with patch.object(pull, "build_repo_pull_command", return_value=["git", "clone"]), \
-                    patch.object(pull.subprocess, "check_call", side_effect=OSError("fixture clone interrupted")):
+                    patch.object(pull, "DirectoryProcess", side_effect=OSError("fixture clone interrupted")):
                 response = app.test_client().post(
                     "/pull/fetch",
                     data={
@@ -173,17 +174,16 @@ class ScriptImportRecoveryTests(unittest.TestCase):
         with isolated_app() as (app, base):
             from fls_manager.routes.scripts import pull
 
-            def fake_clone(command, cwd, env):
-                target = Path(command[-1])
-                target.mkdir(parents=True)
-                (target / "README.md").write_text("ready\n", encoding="utf-8")
+            def fake_clone(_url, target, _proxy):
+                command = (
+                    "from pathlib import Path\n"
+                    f"target=Path({str(target)!r})\n"
+                    "target.mkdir(parents=True)\n"
+                    "(target/'README.md').write_text('ready\\n',encoding='utf-8')\n"
+                )
+                return [sys.executable, "-c", command]
 
-            with patch.object(
-                pull,
-                "build_repo_pull_command",
-                side_effect=lambda _url, target, _proxy: ["git", "clone", str(target)],
-            ), \
-                    patch.object(pull.subprocess, "check_call", side_effect=fake_clone):
+            with patch.object(pull, "build_repo_pull_command", side_effect=fake_clone):
                 response = app.test_client().post(
                     "/pull/fetch",
                     data={
@@ -198,6 +198,41 @@ class ScriptImportRecoveryTests(unittest.TestCase):
             self.assertIn("仓库导入成功", response.get_data(as_text=True))
             self.assertEqual((base / "scripts" / "repo" / "README.md").read_text(encoding="utf-8"), "ready\n")
             self.assertEqual(list((base / "scripts").glob(".fls-repo-*")), [])
+
+    def test_web_clone_runs_real_local_git_under_supervision(self):
+        with isolated_app() as (app, base):
+            from fls_manager.routes.scripts import pull
+            from tests.test_native_script_repo_pull_api import NativeScriptRepoPullApiTests
+            from tests.test_script_directory_jobs import ScriptDirectoryJobTests
+
+            source = NativeScriptRepoPullApiTests()._source_repo(base).parent
+            with patch.object(pull, "build_repo_pull_command", side_effect=lambda _url, target, _proxy: [
+                "git", "clone", "--no-hardlinks", str(source), str(target),
+            ]):
+                response = app.test_client().post('/pull/fetch', data={
+                    'url': 'https://example.invalid/repo.git', 'filename': 'repo', 'pull_type': 'repo',
+                }, headers={'X-Token': TOKEN})
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('仓库导入成功', response.get_data(as_text=True))
+            self.assertTrue((base / 'scripts' / 'repo' / '.git').is_dir())
+            self.assertEqual((base / 'scripts' / 'repo' / 'README.md').read_bytes(), b'fixture repository\n')
+            self.assertEqual(list((base / 'scripts').glob('.fls-repo-*')), [])
+            ScriptDirectoryJobTests().assert_restore_available()
+
+    def test_web_clone_nonzero_exit_does_not_publish_and_releases_restore_lease(self):
+        with isolated_app() as (app, base):
+            from fls_manager.routes.scripts import pull
+            from tests.test_script_directory_jobs import ScriptDirectoryJobTests
+
+            with patch.object(pull, 'build_repo_pull_command', return_value=[sys.executable, '-c', 'raise SystemExit(7)']):
+                response = app.test_client().post('/pull/fetch', data={
+                    'url': 'https://example.invalid/repo.git', 'filename': 'repo', 'pull_type': 'repo',
+                }, headers={'X-Token': TOKEN})
+            self.assertEqual(response.status_code, 200)
+            self.assertIn('脚本导入失败', response.get_data(as_text=True))
+            self.assertFalse((base / 'scripts' / 'repo').exists())
+            self.assertEqual(list((base / 'scripts').glob('.fls-repo-*')), [])
+            ScriptDirectoryJobTests().assert_restore_available()
 
 
 if __name__ == "__main__":

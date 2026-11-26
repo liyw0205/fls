@@ -1,5 +1,6 @@
 import shutil
 import uuid
+from contextlib import ExitStack
 
 from flask import request, redirect, abort, Response
 
@@ -14,6 +15,8 @@ from .helpers import (
 )
 
 from ...paths import SCRIPT_DIR
+from ...directory_jobs import directory_job, directory_job_operation
+from ...data_access import PanelStorageBusy
 from ...models import TASKS_MUTATION_LOCK
 from ...script_files import (
     ScriptFileConflict, ScriptFileWriteError, script_file_target,
@@ -47,6 +50,7 @@ def _guard_file_mutation(target):
 
 
 @bp.route("/pull/new", methods=["GET", "POST"])
+@directory_job_operation
 def scripts_new():
     current_rel = request.args.get("p", "").strip().strip("/")
     msg = ""
@@ -86,6 +90,8 @@ def scripts_new():
                     publish_script_file(target, rel, content)
 
             return redirect(script_url(current_rel))
+        except PanelStorageBusy:
+            raise
         except Exception as e:
             msg = f"新建失败：{e}。下一步：检查名称、目标路径和文件权限后重试"
             status = 409 if isinstance(e, (FileExistsError, ScriptFileConflict)) else (400 if isinstance(e, ValueError) else 500)
@@ -142,6 +148,7 @@ def scripts_new():
 
 
 @bp.route("/scripts/view", methods=["GET", "POST"])
+@directory_job_operation
 def scripts_view():
     raw = request.args.get("path", "").strip()
     posted_content = request.form.get("content", "") if request.method == "POST" else None
@@ -169,11 +176,15 @@ def scripts_view():
                 saved = True
                 current_content, revision, metadata = script_file_snapshot(target, raw)
                 msg = "保存成功"
+    except PanelStorageBusy:
+        raise
     except ScriptFileConflict as e:
         status = 409
         msg = str(e)
         try:
             current_content, revision, _metadata = script_file_snapshot(target, raw)
+        except PanelStorageBusy:
+            raise
         except Exception as read_error:
             return _file_error(f"{msg}；当前文件读取失败：{read_error}", posted_content)
     except ScriptFileWriteError as e:
@@ -240,6 +251,7 @@ def scripts_view():
 
 
 @bp.route("/scripts/rename", methods=["GET", "POST"])
+@directory_job_operation
 def scripts_rename():
     raw = request.args.get("path", "").strip()
     msg = ""
@@ -280,11 +292,15 @@ def scripts_rename():
                 if request.form.get("confirm") not in (None, "", "0"):
                     raise ValueError("确认选择无效，未更改文件或任务")
                 confirmed = True
+    except PanelStorageBusy:
+        raise
     except FileNotFoundError:
         return _file_error("源文件不存在，请从脚本列表重新打开或完成待恢复重命名。", new_name, 404)
     except Exception as e:
         try:
             record = get_script_rename(operation_id)
+        except PanelStorageBusy:
+            raise
         except Exception:
             record = None
         if record:
@@ -347,6 +363,8 @@ def _rename_recovery_page(record, message="", status=200):
             values = {key: task.get(key, "") for key in ("command", "config_path")} if task else None
             state = "已更新" if values == update["after"] else ("仍为原引用" if values == update["before"] else "已删除或发生冲突")
             actual += f"；任务 {update['id']}：{state}"
+    except PanelStorageBusy:
+        raise
     except Exception as e:
         actual = f"实际文件/任务状态读取失败：{e}"
     actions = ""
@@ -369,6 +387,7 @@ def json_text(update):
 
 
 @bp.route("/scripts/rename-recovery/<operation_id>", methods=["GET", "POST"])
+@directory_job_operation
 def scripts_rename_recovery(operation_id):
     try:
         with TASKS_MUTATION_LOCK:
@@ -381,9 +400,13 @@ def scripts_rename_recovery(operation_id):
                     return _rename_recovery_page(record, "恢复选择无效，未更改文件或任务。", 400)
                 try:
                     resume_script_rename(record, rollback=action == "rollback")
+                except PanelStorageBusy:
+                    raise
                 except Exception as e:
                     return _rename_recovery_page(record, f"恢复未完成：{e}。请检查当前文件和任务后重试。", 409 if isinstance(e, ValueError) else 503)
                 return redirect("/pull")
+    except PanelStorageBusy:
+        raise
     except Exception as e:
         from werkzeug.exceptions import HTTPException
         if isinstance(e, HTTPException):
@@ -394,27 +417,39 @@ def scripts_rename_recovery(operation_id):
 
 @bp.route("/scripts/download/<path:rel_path>")
 def scripts_download(rel_path):
-    target = script_safe_path(rel_path)
+    resources = ExitStack()
+    try:
+        resources.enter_context(directory_job())
+        target = script_safe_path(rel_path)
+        if not target.exists() or target.is_dir():
+            abort(404)
+        source = resources.enter_context(open(target, "rb"))
 
-    if not target.exists() or target.is_dir():
-        abort(404)
+        def generate():
+            try:
+                while True:
+                    data = source.read(1024 * 1024)
+                    if not data:
+                        break
+                    yield data
+            finally:
+                resources.close()
 
-    def generate():
-        with open(target, "rb") as f:
-            while True:
-                data = f.read(1024 * 1024)
-                if not data:
-                    break
-                yield data
-
-    return Response(
-        generate(),
-        mimetype="application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{target.name}"'},
-    )
+        response = Response(
+            generate(),
+            mimetype="application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{target.name}"'},
+        )
+        # WSGI may close the response without ever starting its generator.
+        response.call_on_close(resources.close)
+        return response
+    except BaseException:
+        resources.close()
+        raise
 
 
 @bp.route("/scripts/delete/<path:rel_path>", methods=["POST"])
+@directory_job_operation
 def scripts_delete(rel_path):
     target = script_safe_path(rel_path)
 
@@ -430,6 +465,8 @@ def scripts_delete(rel_path):
                 shutil.rmtree(target)
             else:
                 target.unlink()
+    except PanelStorageBusy:
+        raise
     except Exception as e:
         return _file_error(f"删除失败：{e}。请检查文件状态后重试。", status=409 if isinstance(e, ValueError) else 500)
 

@@ -468,6 +468,58 @@ class DirectoryProcessTests(unittest.TestCase):
                 for pid in ready["children"] + [ready["supervisor"]]:
                     self.assert_exited(pid)
 
+    def test_web_clone_owner_hard_exit_reaps_tree_before_restore(self):
+        with isolated_app() as (_, base):
+            marker = base / "web-children.json"
+            command = (
+                "import json,os,pathlib,subprocess,sys,time\n"
+                "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'])\n"
+                f"pathlib.Path({str(marker)!r}).write_text(json.dumps([os.getpid(),child.pid]))\n"
+                "time.sleep(60)\n"
+            )
+            owner = (
+                "import json,pathlib,sys,threading,time\n"
+                "from fls_manager.app import create_app\n"
+                "from fls_manager.routes.scripts import pull\n"
+                "processes=[]\noriginal=pull.DirectoryProcess\n"
+                "def spawn(*args,**kwargs):\n"
+                " process=original(*args,**kwargs)\n processes.append(process)\n return process\n"
+                "pull.DirectoryProcess=spawn\n"
+                f"pull.build_repo_pull_command=lambda *args,**kwargs:[sys.executable,'-c',{command!r}]\n"
+                "app=create_app()\n"
+                "def request():\n"
+                " app.test_client().post('/pull/fetch',data={\n"
+                "  'url':'https://example.invalid/repo.git','filename':'repo','pull_type':'repo'},\n"
+                f"  headers={{'X-Token':{TOKEN!r}}})\n"
+                "threading.Thread(target=request,daemon=True).start()\n"
+                "deadline=time.monotonic()+10\n"
+                f"while not pathlib.Path({str(marker)!r}).exists() and time.monotonic()<deadline:time.sleep(0.01)\n"
+                f"children=json.loads(pathlib.Path({str(marker)!r}).read_text())\n"
+                "print('OWNER_READY '+json.dumps({'supervisor':processes[0].pid,'children':children}),flush=True)\n"
+                "sys.stdin.readline()\n"
+            )
+            from fls_manager.backup_lease import release_process_lease, try_process_lease
+
+            with self.paused_owner(owner) as (process, ready):
+                self.assertIsNone(try_process_lease(base / ".backup_native_restore.lock"))
+                process.kill()
+                process.wait(timeout=10)
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline:
+                    fd = try_process_lease(base / ".backup_native_restore.lock")
+                    if fd is not None:
+                        try:
+                            self.assertTrue(all(process_exited(pid) for pid in ready["children"]))
+                        finally:
+                            release_process_lease(fd)
+                        break
+                    time.sleep(0.01)
+                else:
+                    self.fail("Web clone supervisor did not finish cleanup")
+                for pid in ready["children"] + [ready["supervisor"]]:
+                    self.assert_exited(pid)
+            self.assertFalse((base / "scripts" / "repo").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

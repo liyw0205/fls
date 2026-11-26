@@ -21,7 +21,10 @@ from .helpers import (
     fetch_file_bytes,
 )
 
-from ...paths import SCRIPT_DIR
+from ...paths import BASE_DIR, SCRIPT_DIR
+from ...directory_jobs import directory_job_operation
+from ...data_access import PanelStorageBusy
+from ...directory_process import DirectoryProcess
 from ...utils import h
 from ...ui.components import message_card, page_header_card
 from ...ui.layout import layout
@@ -192,17 +195,25 @@ def _clone_repo_atomic(url, target, proxy_id, env):
     staging_parent = Path(tempfile.mkdtemp(prefix=".fls-repo-", dir=str(target.parent)))
     staged = staging_parent / "repo"
     published = False
+    process = None
     try:
-        subprocess.check_call(
-            build_repo_pull_command(url, staged, proxy_id),
-            cwd=str(SCRIPT_DIR),
-            env=env,
+        command = build_repo_pull_command(url, staged, proxy_id)
+        process = DirectoryProcess(
+            command, workspace=staging_parent, cwd=SCRIPT_DIR,
+            env=dict(env, GIT_TERMINAL_PROMPT="0", GIT_ASKPASS=""),
+            lease_path=BASE_DIR / ".backup_native_restore.lock", stdout=None, stderr=None,
         )
+        process.start()
+        return_code = process.wait()
+        if return_code != 0:
+            raise subprocess.CalledProcessError(return_code, command)
         if os.path.lexists(target):
             raise FileExistsError(f"目标目录已存在：{target}")
         os.replace(staged, target)
         published = True
     finally:
+        if process is not None:
+            process.stop()
         shutil.rmtree(staging_parent, ignore_errors=True)
         if not published:
             for directory in missing_parents:
@@ -213,6 +224,7 @@ def _clone_repo_atomic(url, target, proxy_id, env):
 
 
 @bp.route("/pull/fetch", methods=["GET", "POST"])
+@directory_job_operation
 def pull_fetch():
     current_rel = request.args.get("p", "").strip().strip("/")
     msg = ""
@@ -261,6 +273,8 @@ def pull_fetch():
                     msg_kind = "success"
                     msg_strong = True
 
+            except PanelStorageBusy:
+                raise
             except Exception as e:
                 msg = f"脚本导入失败：{e}。下一步：检查 URL、代理和目标路径后重试"
                 msg_kind = "error"
@@ -319,6 +333,7 @@ def pull_fetch():
 
 
 @bp.route("/pull/import", methods=["GET", "POST"])
+@directory_job_operation
 def pull_import():
     current_rel = request.args.get("p", "").strip().strip("/")
     msg = ""
@@ -374,6 +389,8 @@ def pull_import():
                     msg_kind = "success"
                     msg_strong = True
 
+            except PanelStorageBusy:
+                raise
             except Exception as e:
                 msg = f"导入失败：{e}。下一步：检查文件格式、解压路径和权限后重试"
                 msg_kind = "error"
