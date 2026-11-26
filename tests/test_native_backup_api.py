@@ -1,6 +1,10 @@
 import contextlib
+import io
+import tarfile
 import threading
+import time
 import unittest
+import zipfile
 from unittest.mock import patch
 
 from tests.test_bulk_workflows import TOKEN
@@ -13,6 +17,232 @@ class NativeBackupApiTests(unittest.TestCase):
 
     def headers(self):
         return {"X-Token": TOKEN}
+
+    def archive(self, members=None):
+        members = members or {
+            "fls/data/config.json": b'{"theme":"dark"}',
+            "fls/scripts/example.py": b"print('ok')\n",
+            "fls/data/requirements.txt": b"requests==2.0\n",
+        }
+        output = io.BytesIO()
+        with tarfile.open(fileobj=output, mode="w:gz") as archive:
+            for name, content in members.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(content)
+                archive.addfile(info, io.BytesIO(content))
+        return output.getvalue()
+
+    def zip_archive(self, members):
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for name, content in members.items():
+                archive.writestr(name, content)
+        return output.getvalue()
+
+    def submit_preflight(self, client, request_id, content=None, filename="full.tar.gz"):
+        content = self.archive() if content is None else content
+        response = client.post(
+            "/api/backup/native/preflights",
+            data={
+                "preflight_id": request_id,
+                "file": (io.BytesIO(content), filename),
+            },
+            headers=self.headers(),
+            content_type="multipart/form-data",
+        )
+        if response.status_code == 202:
+            return self.wait_preflight(client, request_id)
+        return response
+
+    def wait_preflight(self, client, request_id):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            response = client.get(
+                f"/api/backup/native/preflights/{request_id}", headers=self.headers(),
+            )
+            state = response.json.get("preflight", {}).get("status")
+            if state not in ("uploading", "checking"):
+                return response
+            time.sleep(0.01)
+        self.fail("preflight worker did not reach a terminal state")
+
+    def test_preflight_stages_and_validates_archive_without_touching_live_data(self):
+        with isolated_app() as (app, base):
+            from fls_manager.routes.backup import native_api
+            from fls_manager.paths import CONFIG_FILE
+            CONFIG_FILE.write_text('{"live":true}', encoding="utf-8")
+            request_id = "a" * 32
+            content = self.archive()
+            response = self.submit_preflight(self.client(app), request_id, content)
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.json["ok"])
+            result = response.json["preflight"]
+            self.assertEqual(result["status"], "ready")
+            self.assertEqual(result["items"], ["data", "scripts"])
+            self.assertEqual(result["dependency_files"], ["requirements.txt"])
+            self.assertIn("data_restore_may_change_panel_access", result["warnings"])
+            self.assertEqual(result["archive_size_bytes"], len(content))
+            self.assertEqual(result["archive_sha256"], __import__("hashlib").sha256(content).hexdigest())
+            self.assertEqual(CONFIG_FILE.read_text(encoding="utf-8"), '{"live":true}')
+            staged = base / ".backup_native_staging" / f"{request_id}.archive"
+            self.assertEqual(staged.read_bytes(), content)
+            record = base / ".backup_native_preflights" / f"{request_id}.json"
+            before = (record.read_bytes(), staged.read_bytes())
+            queried = self.client(app).get(
+                f"/api/backup/native/preflights/{request_id}", headers=self.headers(),
+            )
+            self.assertEqual(queried.status_code, 200)
+            self.assertEqual(queried.headers["Cache-Control"], "no-store")
+            self.assertEqual((record.read_bytes(), staged.read_bytes()), before)
+            replay = self.submit_preflight(self.client(app), request_id, content)
+            self.assertEqual(replay.status_code, 200)
+            self.assertTrue(replay.json["preflight"]["replayed"])
+            conflicting = self.submit_preflight(
+                self.client(app), request_id,
+                self.archive({"fls/data/config.json": b"different"}),
+            )
+            self.assertEqual(conflicting.status_code, 409)
+            self.assertEqual(conflicting.json["code"], "preflight_id_conflict")
+
+    def test_preflight_rejects_unsafe_archive_and_removes_partial_snapshot(self):
+        with isolated_app() as (app, base):
+            request_id = "b" * 32
+            response = self.submit_preflight(
+                self.client(app), request_id,
+                self.archive({"fls/data/config.json": b"ok", "../outside": b"bad"}),
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json["preflight"]["error_code"], "unsafe_archive_entry")
+            self.assertFalse((base / ".backup_native_staging" / f"{request_id}.archive").exists())
+            queried = self.client(app).get(
+                f"/api/backup/native/preflights/{request_id}", headers=self.headers(),
+            )
+            self.assertEqual(queried.json["preflight"]["status"], "failed")
+
+    def test_preflight_inspects_zip_archives(self):
+        with isolated_app() as (app, _):
+            content = self.zip_archive({
+                "fls/data/config.json": b'{"theme":"dark"}',
+                "fls/scripts/example.py": b"print('ok')\n",
+            })
+            response = self.submit_preflight(
+                self.client(app), "0" * 32, content, filename="full.zip",
+            )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json["preflight"]["status"], "ready")
+            self.assertEqual(response.json["preflight"]["format"], "zip")
+            self.assertEqual(response.json["preflight"]["items"], ["data", "scripts"])
+
+    def test_preflight_rejects_declared_expansion_when_disk_space_is_insufficient(self):
+        with isolated_app() as (app, base):
+            from fls_manager.routes.backup import native_api
+            request_id = "6" * 32
+            with patch.object(
+                native_api.shutil,
+                "disk_usage",
+                return_value=type("Usage", (), {"free": 0, "total": 0, "used": 0})(),
+            ):
+                response = self.submit_preflight(self.client(app), request_id)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json["preflight"]["error_code"], "insufficient_storage")
+            self.assertFalse((base / ".backup_native_staging" / f"{request_id}.archive").exists())
+
+    def test_preflight_can_cancel_an_active_check_and_cleans_the_snapshot(self):
+        with isolated_app() as (app, base):
+            from fls_manager.routes.backup import native_api
+            client = self.client(app)
+            request_id = "8" * 32
+            entered = threading.Event()
+
+            def wait_for_cancel(archive_path, suffix, work_dir, cancel_event):
+                entered.set()
+                if not cancel_event.wait(2):
+                    raise AssertionError("cancel signal was not delivered")
+                raise ValueError("preflight_cancelled")
+
+            with patch.object(native_api, "_inspect_preflight_archive", side_effect=wait_for_cancel):
+                content = self.archive()
+                response = client.post(
+                    "/api/backup/native/preflights",
+                    data={"preflight_id": request_id, "file": (io.BytesIO(content), "full.tar.gz")},
+                    headers=self.headers(), content_type="multipart/form-data",
+                )
+                self.assertEqual(response.status_code, 202)
+                self.assertTrue(entered.wait(2))
+                conflicting = client.post(
+                    "/api/backup/native/preflights",
+                    data={"preflight_id": request_id, "file": (io.BytesIO(self.archive({"fls/data/config.json": b"different"})), "full.tar.gz")},
+                    headers=self.headers(), content_type="multipart/form-data",
+                )
+                self.assertEqual(conflicting.status_code, 409)
+                self.assertEqual(conflicting.json["code"], "preflight_id_conflict")
+                cancelled = client.post(
+                    f"/api/backup/native/preflights/{request_id}/cancel", headers=self.headers(),
+                )
+                self.assertEqual(cancelled.status_code, 202)
+                result = self.wait_preflight(client, request_id)
+
+            self.assertEqual(result.json["preflight"]["status"], "cancelled")
+            self.assertEqual(result.json["preflight"]["error_code"], "preflight_cancelled")
+            self.assertFalse((base / ".backup_native_staging" / f"{request_id}.archive").exists())
+
+    def test_preflight_reports_orphaned_check_as_unknown_without_mutation(self):
+        with isolated_app() as (app, base):
+            from fls_manager.routes.backup import native_api
+            request_id = "9" * 32
+            native_api._ensure_private_directory(native_api.PREFLIGHT_DIR)
+            native_api._ensure_private_directory(native_api.PREFLIGHT_ARCHIVE_DIR)
+            record = {
+                "request_id": request_id, "state": "checking", "filename": "full.tar.gz",
+                "archive_format": "tar.gz", "archive_size_bytes": 3, "archive_sha256": "a" * 64,
+                "items": [], "entry_count": 0, "expanded_bytes": 0, "dependency_files": [],
+                "warnings": [], "error_code": "", "created_at": 1, "expires_at": 4_000_000_000,
+                "retention_until": 5_000_000_000,
+            }
+            native_api._write_preflight_record(request_id, record)
+            archive_path = base / ".backup_native_staging" / f"{request_id}.archive"
+            archive_path.write_bytes(b"abc")
+            before = (native_api._preflight_record_path(request_id).read_bytes(), archive_path.read_bytes())
+
+            result = self.client(app).get(
+                f"/api/backup/native/preflights/{request_id}", headers=self.headers(),
+            )
+
+            self.assertEqual(result.json["preflight"]["status"], "unknown")
+            self.assertFalse(result.json["preflight"]["active"])
+            self.assertEqual((native_api._preflight_record_path(request_id).read_bytes(), archive_path.read_bytes()), before)
+
+    def test_expired_preflight_get_does_not_rewrite_or_delete_evidence(self):
+        with isolated_app() as (app, base):
+            from fls_manager.routes.backup import native_api
+            request_id = "7" * 32
+            self.submit_preflight(self.client(app), request_id)
+            record_path = base / ".backup_native_preflights" / f"{request_id}.json"
+            archive_path = base / ".backup_native_staging" / f"{request_id}.archive"
+            before = (record_path.read_bytes(), archive_path.read_bytes())
+            with patch.object(native_api.time, "time", return_value=2_000_000_000):
+                response = self.client(app).get(
+                    f"/api/backup/native/preflights/{request_id}", headers=self.headers(),
+                )
+            self.assertEqual(response.json["preflight"]["status"], "expired")
+            self.assertEqual((record_path.read_bytes(), archive_path.read_bytes()), before)
+
+    def test_preflight_enforces_archive_limits_and_retained_snapshot_capacity(self):
+        with isolated_app() as (app, base):
+            from fls_manager.routes.backup import _common as backup
+            client = self.client(app)
+            with patch.object(backup, "MAX_BACKUP_UPLOAD_BYTES", 32):
+                too_large = self.submit_preflight(client, "c" * 32, b"x" * 128)
+            self.assertEqual(too_large.status_code, 413)
+            self.assertEqual(too_large.json["preflight"]["error_code"], "archive_limit_exceeded")
+            for request_id in ("d" * 32, "e" * 32):
+                ready = self.submit_preflight(client, request_id)
+                self.assertEqual(ready.status_code, 200)
+            full = self.submit_preflight(client, "f" * 32)
+            self.assertEqual(full.status_code, 429)
+            self.assertEqual(full.json["code"], "preflight_capacity")
+            self.assertFalse((base / ".backup_native_staging" / f"{'f' * 32}.archive").exists())
 
     @contextlib.contextmanager
     def inline_worker(self):

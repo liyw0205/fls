@@ -1,10 +1,18 @@
+import hashlib
 import json
 import os
 import re
+import shutil
 import stat
+import tarfile
+import tempfile
+import threading
+import time
+import zipfile
 from contextlib import contextmanager
+from pathlib import Path
 
-from flask import jsonify, request, send_file
+from flask import current_app, jsonify, request, send_file
 
 from . import bp
 from . import _common as backup
@@ -20,6 +28,28 @@ REQUEST_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 JOB_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 DELETE_RECEIPT_LIMIT = 4096
 DELETE_RECEIPT_DIR = backup.BASE_DIR / ".backup_native_delete_requests"
+PREFLIGHT_DIR = backup.BASE_DIR / ".backup_native_preflights"
+PREFLIGHT_ARCHIVE_DIR = backup.BASE_DIR / ".backup_native_staging"
+PREFLIGHT_WORK_DIR = backup.BASE_DIR / ".backup_native_work"
+PREFLIGHT_TTL_SECONDS = 60 * 60
+PREFLIGHT_TERMINAL_RETENTION_SECONDS = 24 * 60 * 60
+PREFLIGHT_ACTIVE_LIMIT = 2
+PREFLIGHT_EXECUTION_LIMIT = 1
+PREFLIGHT_RECORD_LIMIT = 1000
+PREFLIGHT_RECORD_BYTES = 16 * 1024
+PREFLIGHT_ID_RE = REQUEST_ID_RE
+PREFLIGHT_LOCK = threading.RLock()
+PREFLIGHT_ACTIVE = set()
+PREFLIGHT_CANCEL_EVENTS = {}
+PREFLIGHT_FORMATS = (".tar.gz", ".tgz", ".tar", ".zip")
+
+
+class PreflightStorageError(RuntimeError):
+    pass
+
+
+class PreflightStartError(RuntimeError):
+    pass
 
 
 def _response(payload, status=200):
@@ -242,6 +272,421 @@ def _read_delete_receipt(request_id):
     return receipt
 
 
+def _preflight_record_path(preflight_id):
+    if not PREFLIGHT_ID_RE.fullmatch(str(preflight_id or "")):
+        raise ValueError("备份预检查标识无效")
+    return PREFLIGHT_DIR / (preflight_id + ".json")
+
+
+def _preflight_archive_path(preflight_id):
+    if not PREFLIGHT_ID_RE.fullmatch(str(preflight_id or "")):
+        raise ValueError("备份预检查标识无效")
+    return PREFLIGHT_ARCHIVE_DIR / (preflight_id + ".archive")
+
+
+def _ensure_private_directory(path):
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise RuntimeError("备份预检查存储目录无效")
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
+
+
+def _read_preflight_record(preflight_id):
+    path = _preflight_record_path(preflight_id)
+    if PREFLIGHT_DIR.is_symlink() or path.is_symlink():
+        raise RuntimeError("备份预检查回执无效")
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(info.st_mode) or info.st_size > PREFLIGHT_RECORD_BYTES:
+        raise RuntimeError("备份预检查回执无效")
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_object)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise RuntimeError("备份预检查回执损坏") from exc
+    allowed_states = {"uploading", "checking", "ready", "failed", "cancelled", "expired"}
+    if (not isinstance(record, dict) or record.get("request_id") != preflight_id
+        or record.get("state") not in allowed_states
+        or type(record.get("created_at")) is not int
+        or type(record.get("expires_at")) is not int
+        or type(record.get("retention_until")) is not int
+        or type(record.get("archive_size_bytes")) is not int
+        or record["archive_size_bytes"] < 0
+        or (record.get("archive_sha256", "") != ""
+            and not re.fullmatch(r"[a-f0-9]{64}", str(record.get("archive_sha256"))))
+        or record.get("archive_format") not in ("tar.gz", "tgz", "tar", "zip")):
+        raise RuntimeError("备份预检查回执损坏")
+    try:
+        _, expected_suffix = _preflight_archive_filename(record.get("filename"))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("备份预检查回执损坏") from exc
+    if expected_suffix.lstrip(".") != record["archive_format"]:
+        raise RuntimeError("备份预检查回执损坏")
+    items = record.get("items", [])
+    if (not isinstance(items, list) or len(items) > 2
+        or any(item not in ("data", "scripts") for item in items)
+        or len(items) != len(set(items))):
+        raise RuntimeError("备份预检查回执损坏")
+    for field in ("entry_count", "expanded_bytes"):
+        value = record.get(field, 0)
+        if type(value) is not int or value < 0:
+            raise RuntimeError("备份预检查回执损坏")
+    for field in ("filename", "archive_format", "error_code"):
+        if not isinstance(record.get(field, ""), str) or len(record.get(field, "")) > 255:
+            raise RuntimeError("备份预检查回执损坏")
+    allowed_errors = {
+        "", "archive_limit_exceeded", "insufficient_storage", "unsupported_format",
+        "invalid_filename", "missing_backup_scope", "unsafe_archive_entry", "empty_archive",
+        "preflight_cancelled", "preflight_start_failed", "invalid_archive", "preflight_failed",
+    }
+    if record.get("error_code", "") not in allowed_errors:
+        raise RuntimeError("备份预检查回执损坏")
+    if record["state"] == "ready" and (
+        record["archive_size_bytes"] < 1
+        or not record.get("archive_sha256")
+        or not record["items"]
+    ):
+        raise RuntimeError("备份预检查回执损坏")
+    dependencies = record.get("dependency_files", [])
+    warnings = record.get("warnings", [])
+    if (not isinstance(dependencies, list) or len(dependencies) > 100
+        or any(item not in ("requirements.txt", "dependencies.txt") for item in dependencies)
+        or not isinstance(warnings, list) or len(warnings) > 10
+        or any(item not in ("data_restore_may_change_panel_access", "contains_native_session_store")
+               for item in warnings)):
+        raise RuntimeError("备份预检查回执损坏")
+    return record
+
+
+def _write_preflight_record(preflight_id, record):
+    _ensure_private_directory(PREFLIGHT_DIR)
+    path = _preflight_record_path(preflight_id)
+    if path.is_symlink():
+        raise RuntimeError("备份预检查回执无效")
+    write_json(path, record)
+
+
+def _preflight_payload(record):
+    state = record["state"]
+    active = record["request_id"] in PREFLIGHT_ACTIVE
+    if state in ("uploading", "checking") and not active:
+        state = "unknown"
+    return {
+        "preflight_id": record["request_id"],
+        "request_id": record["request_id"],
+        "status": state,
+        "active": active,
+        "cancel_allowed": active and record["state"] in ("uploading", "checking"),
+        "filename": record.get("filename", ""),
+        "format": record.get("archive_format", ""),
+        "archive_size_bytes": record.get("archive_size_bytes", 0),
+        "archive_sha256": record.get("archive_sha256", ""),
+        "items": list(record.get("items", [])),
+        "entry_count": record.get("entry_count", 0),
+        "expanded_bytes": record.get("expanded_bytes", 0),
+        "dependency_files": list(record.get("dependency_files", [])),
+        "warnings": list(record.get("warnings", [])),
+        "error_code": record.get("error_code", ""),
+        "created_at": record["created_at"],
+        "expires_at": record["expires_at"],
+    }
+
+
+def _preflight_archive_filename(filename):
+    if (not isinstance(filename, str) or not filename or len(filename) > 255
+        or filename != filename.strip() or "/" in filename or "\\" in filename or ":" in filename
+        or any(ord(char) < 32 or ord(char) == 127 for char in filename)):
+        raise ValueError("invalid_filename")
+    lowered = filename.lower()
+    for suffix in PREFLIGHT_FORMATS:
+        if lowered.endswith(suffix):
+            return filename, suffix
+    raise ValueError("unsupported_format")
+
+
+def _validate_archive_member_path(name, root):
+    normalized = str(name or "").replace("\\", "/")
+    if ("\x00" in normalized or any(ord(char) < 32 for char in normalized)
+        or any(part == ".." for part in normalized.split("/"))):
+        raise ValueError("unsafe_archive_entry")
+    try:
+        backup._archive_member_target(root, normalized)
+    except (RuntimeError, ValueError, OSError) as exc:
+        raise ValueError("unsafe_archive_entry") from exc
+
+
+def _copy_preflight_member(source, target, cancel_event):
+    written = 0
+    with target.open("xb") as destination:
+        while True:
+            if cancel_event and cancel_event.is_set():
+                raise ValueError("preflight_cancelled")
+            chunk = source.read(1024 * 1024)
+            if not chunk:
+                break
+            destination.write(chunk)
+            written += len(chunk)
+            if written > backup.MAX_BACKUP_EXTRACTED_BYTES:
+                raise backup.BackupLimitExceeded("archive exceeds extraction limit")
+    return written
+
+
+def _extract_preflight_archive(archive_path, suffix, extracted, cancel_event):
+    expanded = 0
+
+    def extract_members(archive, members, name_for, is_directory, open_member):
+        nonlocal expanded
+        for member in members:
+            if cancel_event and cancel_event.is_set():
+                raise ValueError("preflight_cancelled")
+            name = name_for(member)
+            _validate_archive_member_path(name, extracted)
+            target = backup._archive_member_target(extracted, name)
+            if is_directory(member):
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            source = open_member(archive, member)
+            if source is None:
+                raise ValueError("invalid_archive")
+            with source:
+                member_size = _copy_preflight_member(source, target, cancel_event)
+            expanded += member_size
+            if expanded > backup.MAX_BACKUP_EXTRACTED_BYTES:
+                raise backup.BackupLimitExceeded("archive exceeds extraction limit")
+            declared_size = member.size if isinstance(member, tarfile.TarInfo) else member.file_size
+            if member_size != declared_size:
+                raise ValueError("invalid_archive")
+
+    if suffix in (".tar.gz", ".tgz", ".tar"):
+        mode = "r:" if suffix == ".tar" else "r:gz"
+        with tarfile.open(archive_path, mode) as archive:
+            extract_members(
+                archive,
+                archive.getmembers(),
+                lambda member: member.name,
+                lambda member: member.isdir(),
+                lambda current, member: current.extractfile(member),
+            )
+    else:
+        with zipfile.ZipFile(archive_path, "r") as archive:
+            extract_members(
+                archive,
+                archive.infolist(),
+                lambda member: member.filename,
+                lambda member: member.is_dir(),
+                lambda current, member: current.open(member, "r"),
+            )
+
+
+def _inspect_preflight_archive(archive_path, suffix, work_dir, cancel_event=None):
+    if cancel_event and cancel_event.is_set():
+        raise ValueError("preflight_cancelled")
+    declared_entries, declared_bytes = _archive_declared_limits(archive_path, suffix, cancel_event)
+    free_bytes = shutil.disk_usage(work_dir).free
+    if free_bytes < declared_bytes + min(backup.MAX_BACKUP_UPLOAD_BYTES, 64 * 1024 * 1024):
+        raise PreflightStorageError("insufficient preflight storage")
+    extracted = work_dir / "extracted"
+    extracted.mkdir(mode=0o700)
+    if cancel_event and cancel_event.is_set():
+        raise ValueError("preflight_cancelled")
+    _extract_preflight_archive(archive_path, suffix, extracted, cancel_event)
+    if cancel_event and cancel_event.is_set():
+        raise ValueError("preflight_cancelled")
+
+    root = backup.find_backup_root(extracted)
+    if root is None:
+        raise ValueError("missing_backup_scope")
+    items = [item for item in ("data", "scripts") if (root / item).is_dir()]
+    if not items:
+        raise ValueError("missing_backup_scope")
+
+    entries = 0
+    expanded_bytes = 0
+    dependency_files = set()
+    has_native_sessions = False
+    for current, directories, files in os.walk(extracted, followlinks=False):
+        for name in directories:
+            entry = os.path.join(current, name)
+            info = os.lstat(entry)
+            if not stat.S_ISDIR(info.st_mode):
+                raise ValueError("unsafe_archive_entry")
+        for name in files:
+            entry = os.path.join(current, name)
+            info = os.lstat(entry)
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError("unsafe_archive_entry")
+            entries += 1
+            expanded_bytes += info.st_size
+            if expanded_bytes > backup.MAX_BACKUP_EXTRACTED_BYTES:
+                raise backup.BackupLimitExceeded("archive exceeds extraction limit")
+            if name in ("requirements.txt", "dependencies.txt"):
+                dependency_files.add(name)
+            relative = os.path.relpath(entry, root).replace(os.sep, "/")
+            if relative == "data/native_sessions.sqlite3" or relative.startswith("data/native_sessions.sqlite3-"):
+                has_native_sessions = True
+    if entries > declared_entries or expanded_bytes != declared_bytes:
+        raise ValueError("invalid_archive")
+
+    warnings = []
+    if "data" in items:
+        warnings.append("data_restore_may_change_panel_access")
+    if has_native_sessions:
+        warnings.append("contains_native_session_store")
+    return {
+        "items": items,
+        "entry_count": declared_entries,
+        "expanded_bytes": expanded_bytes,
+        "dependency_files": sorted(dependency_files),
+        "warnings": warnings,
+    }
+
+
+def _archive_declared_limits(archive_path, suffix, cancel_event=None):
+    entries = 0
+    expanded = 0
+    if suffix in (".tar.gz", ".tgz", ".tar"):
+        mode = "r:gz" if suffix != ".tar" else "r:"
+        with tarfile.open(archive_path, mode) as archive:
+            members = archive.getmembers()
+            if len(members) > backup.MAX_BACKUP_ARCHIVE_ENTRIES:
+                raise backup.BackupLimitExceeded("archive exceeds entry limit")
+            root = Path(tempfile.gettempdir()) / "fls-archive-preflight-root"
+            for member in members:
+                if cancel_event and cancel_event.is_set():
+                    raise ValueError("preflight_cancelled")
+                _validate_archive_member_path(member.name, root)
+                if member.size < 0:
+                    raise ValueError("unsafe_archive_entry")
+                if member.issym() or member.islnk() or not (member.isfile() or member.isdir()):
+                    raise ValueError("unsafe_archive_entry")
+                entries += 1
+                expanded += member.size
+                if expanded > backup.MAX_BACKUP_EXTRACTED_BYTES:
+                    raise backup.BackupLimitExceeded("archive exceeds extraction limit")
+    else:
+        with zipfile.ZipFile(archive_path, "r") as archive:
+            members = archive.infolist()
+            if len(members) > backup.MAX_BACKUP_ARCHIVE_ENTRIES:
+                raise backup.BackupLimitExceeded("archive exceeds entry limit")
+            root = Path(tempfile.gettempdir()) / "fls-archive-preflight-root"
+            for member in members:
+                if cancel_event and cancel_event.is_set():
+                    raise ValueError("preflight_cancelled")
+                _validate_archive_member_path(member.filename, root)
+                mode = (int(member.external_attr or 0) >> 16) & 0xFFFF
+                file_type = stat.S_IFMT(mode)
+                if file_type not in (0, stat.S_IFREG, stat.S_IFDIR):
+                    raise ValueError("unsafe_archive_entry")
+                entries += 1
+                expanded += member.file_size
+                if expanded > backup.MAX_BACKUP_EXTRACTED_BYTES:
+                    raise backup.BackupLimitExceeded("archive exceeds extraction limit")
+    return entries, expanded
+
+
+def _preflight_error_code(exc):
+    if isinstance(exc, PreflightStartError):
+        return "preflight_start_failed"
+    if isinstance(exc, backup.BackupLimitExceeded):
+        return "archive_limit_exceeded"
+    if isinstance(exc, PreflightStorageError):
+        return "insufficient_storage"
+    if isinstance(exc, ValueError):
+        allowed = {
+            "unsupported_format", "invalid_filename", "missing_backup_scope",
+            "unsafe_archive_entry", "empty_archive", "preflight_cancelled",
+        }
+        return str(exc) if str(exc) in allowed else "invalid_archive"
+    if isinstance(exc, (OSError, EOFError, tarfile.TarError, zipfile.BadZipFile, RuntimeError)):
+        return "invalid_archive"
+    return "preflight_failed"
+
+
+def _run_preflight_check(app, preflight_id, suffix, archive_path, cancel_event):
+    record = None
+    work_dir = None
+    error_code = ""
+    inspected = None
+    with app.app_context():
+        try:
+            with PREFLIGHT_LOCK:
+                record = _read_preflight_record(preflight_id)
+            if record is None or record["state"] != "checking":
+                raise RuntimeError("preflight request is no longer checking")
+            if cancel_event.is_set():
+                raise ValueError("preflight_cancelled")
+            work_dir = Path(tempfile.mkdtemp(prefix=preflight_id + "-", dir=str(PREFLIGHT_WORK_DIR)))
+            inspected = _inspect_preflight_archive(archive_path, suffix, work_dir, cancel_event)
+            if cancel_event.is_set():
+                raise ValueError("preflight_cancelled")
+        except Exception as exc:
+            error_code = _preflight_error_code(exc)
+        finally:
+            if work_dir is not None:
+                shutil.rmtree(work_dir, ignore_errors=True)
+            try:
+                with PREFLIGHT_LOCK:
+                    record = _read_preflight_record(preflight_id)
+                    if record is not None and record["state"] == "checking":
+                        if error_code:
+                            _preflight_archive_path(preflight_id).unlink(missing_ok=True)
+                            record["state"] = "cancelled" if error_code == "preflight_cancelled" else "failed"
+                            record["error_code"] = error_code
+                        else:
+                            record.update(inspected)
+                            record["state"] = "ready"
+                            record["error_code"] = ""
+                        _write_preflight_record(preflight_id, record)
+            except Exception:
+                pass
+            finally:
+                with PREFLIGHT_LOCK:
+                    PREFLIGHT_ACTIVE.discard(preflight_id)
+                    PREFLIGHT_CANCEL_EVENTS.pop(preflight_id, None)
+
+
+def _expire_preflight_records(now):
+    if PREFLIGHT_DIR.is_symlink() or PREFLIGHT_ARCHIVE_DIR.is_symlink():
+        raise RuntimeError("备份预检查存储目录无效")
+    if not PREFLIGHT_DIR.exists():
+        return 0
+    records = sorted(PREFLIGHT_DIR.glob("*.json"))
+    if len(records) > PREFLIGHT_RECORD_LIMIT:
+        raise RuntimeError("备份预检查历史超过安全读取上限")
+    expired = 0
+    for path in records:
+        preflight_id = path.stem
+        if not PREFLIGHT_ID_RE.fullmatch(preflight_id):
+            raise RuntimeError("备份预检查历史包含无效记录")
+        record = _read_preflight_record(preflight_id)
+        if record is None:
+            continue
+        if preflight_id in PREFLIGHT_ACTIVE:
+            continue
+        if record["state"] in ("expired", "failed", "cancelled"):
+            if record["retention_until"] <= now:
+                _preflight_archive_path(preflight_id).unlink(missing_ok=True)
+                path.unlink(missing_ok=True)
+            continue
+        if record["expires_at"] <= now:
+            archive_path = _preflight_archive_path(preflight_id)
+            if archive_path.is_symlink():
+                raise RuntimeError("备份预检查暂存文件无效")
+            archive_path.unlink(missing_ok=True)
+            record["state"] = "expired"
+            record["error_code"] = "preflight_expired"
+            record["retention_until"] = now + PREFLIGHT_TERMINAL_RETENTION_SECONDS
+            _write_preflight_record(preflight_id, record)
+            expired += 1
+    return expired
+
+
 def _delete_request_payload(request_id, receipt):
     deleted = receipt["state"] == "deleted"
     return {
@@ -307,6 +752,21 @@ def _request_payload(request_id, receipt, jobs):
     }
 
 
+def _fingerprint_upload(upload):
+    digest = hashlib.sha256()
+    size = 0
+    while True:
+        chunk = upload.stream.read(1024 * 1024)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > backup.MAX_BACKUP_UPLOAD_BYTES:
+            raise backup.BackupLimitExceeded("archive exceeds upload limit")
+        digest.update(chunk)
+    upload.stream.seek(0)
+    return size, digest.hexdigest()
+
+
 @bp.route(NATIVE_PREFIX + "/capabilities")
 def api_backup_native_capabilities():
     return _response({
@@ -318,7 +778,241 @@ def api_backup_native_capabilities():
         "entry_limit": backup.MAX_BACKUP_ARCHIVE_ENTRIES,
         "job_page_limit": 100,
         "file_page_limit": 100,
+        "preflight_enabled": True,
+        "preflight_limit": 2,
+        "preflight_ttl_seconds": PREFLIGHT_TTL_SECONDS,
+        "restore_enabled": False,
     })
+
+
+@bp.route(NATIVE_PREFIX + "/preflights", methods=["POST"])
+def api_backup_native_create_preflight():
+    if request.mimetype != "multipart/form-data":
+        return _error("multipart_required", "归档必须通过 multipart 文件上传", 415)
+    if request.content_length is None:
+        return _error("content_length_required", "上传请求必须声明内容长度", 411)
+    if request.content_length > backup.MAX_BACKUP_UPLOAD_BYTES + 256 * 1024:
+        return _error("upload_too_large", "备份文件超过面板有效上传上限", 413)
+    try:
+        if len(request.files) != 1 or len(request.files.getlist("file")) != 1:
+            return _error("invalid_upload", "必须恰好上传一个归档文件", 400)
+        if set(request.files) != {"file"} or set(request.form) != {"preflight_id"}:
+            return _error("invalid_upload", "上传字段无效或重复", 400)
+        ids = request.form.getlist("preflight_id")
+        if len(ids) != 1 or not REQUEST_ID_RE.fullmatch(ids[0]):
+            return _error("invalid_preflight_id", "预检查请求标识无效", 400)
+        preflight_id = ids[0]
+        upload = request.files["file"]
+        filename, suffix = _preflight_archive_filename(upload.filename or "")
+    except (AttributeError, TypeError, ValueError):
+        return _error("invalid_upload", "上传字段无效", 400)
+
+    now = int(time.time())
+    existing_ready = None
+    existing_checking = None
+    with PREFLIGHT_LOCK:
+        try:
+            _expire_preflight_records(now)
+            existing = _read_preflight_record(preflight_id)
+        except Exception:
+            return _error("preflight_unavailable", "预检查存储无法安全读取", 503)
+        if existing is not None:
+            payload = _preflight_payload(existing)
+            if existing["filename"] != filename:
+                return _error("preflight_id_conflict", "该预检查标识已绑定另一个文件", 409)
+            if existing["state"] == "ready":
+                existing_ready = existing
+            elif existing["state"] == "checking":
+                existing_checking = existing
+            elif existing["state"] == "uploading":
+                return _error("preflight_in_progress", "原预检查仍在接收文件，请查询原请求状态", 409)
+            elif existing_ready is None:
+                return _error("preflight_id_conflict", "该预检查标识已使用，请创建新的预检查", 409)
+        if existing_ready is not None or existing_checking is not None:
+            archive_path = None
+        else:
+            archive_path = _preflight_archive_path(preflight_id)
+        if existing_ready is not None or existing_checking is not None:
+            pass
+        else:
+            retained_count = 0
+            if PREFLIGHT_DIR.exists():
+                for path in PREFLIGHT_DIR.glob("*.json"):
+                    if not path.is_file() or path.is_symlink():
+                        return _error("preflight_unavailable", "预检查历史包含无效记录", 503)
+                    try:
+                        prior = _read_preflight_record(path.stem)
+                    except Exception:
+                        return _error("preflight_unavailable", "预检查历史无法安全读取", 503)
+                    if (prior is not None and prior["state"] in ("uploading", "checking", "ready")
+                        and prior["expires_at"] > now):
+                        retained_count += 1
+            if retained_count >= PREFLIGHT_ACTIVE_LIMIT:
+                return _error("preflight_capacity", "已有两个未过期预检查，请先完成恢复或等待预检查过期", 429)
+            if len(PREFLIGHT_ACTIVE) >= PREFLIGHT_EXECUTION_LIMIT:
+                return _error("preflight_busy", "当前预检查任务正在运行，请稍后重试", 429)
+            try:
+                _ensure_private_directory(PREFLIGHT_DIR)
+                _ensure_private_directory(PREFLIGHT_ARCHIVE_DIR)
+                _ensure_private_directory(PREFLIGHT_WORK_DIR)
+                if archive_path.exists() or archive_path.is_symlink():
+                    return _error("preflight_evidence_exists", "存在未确认的预检查暂存文件，请检查存储后重试", 503)
+                record = {
+                    "request_id": preflight_id,
+                    "state": "uploading",
+                    "filename": filename,
+                    "archive_format": suffix.lstrip("."),
+                    "archive_size_bytes": 0,
+                    "archive_sha256": "",
+                    "items": [],
+                    "entry_count": 0,
+                    "expanded_bytes": 0,
+                    "dependency_files": [],
+                    "warnings": [],
+                    "error_code": "",
+                    "created_at": now,
+                    "expires_at": now + PREFLIGHT_TTL_SECONDS,
+                    "retention_until": now + PREFLIGHT_TTL_SECONDS + PREFLIGHT_TERMINAL_RETENTION_SECONDS,
+                }
+                _write_preflight_record(preflight_id, record)
+                PREFLIGHT_CANCEL_EVENTS[preflight_id] = threading.Event()
+                PREFLIGHT_ACTIVE.add(preflight_id)
+            except Exception:
+                return _error("preflight_unavailable", "无法为预检查分配暂存空间", 503)
+
+    if existing_ready is not None:
+        try:
+            size, digest = _fingerprint_upload(upload)
+        except backup.BackupLimitExceeded:
+            return _error("upload_too_large", "备份文件超过面板有效上传上限", 413)
+        if size != existing_ready["archive_size_bytes"] or digest != existing_ready["archive_sha256"]:
+            return _error("preflight_id_conflict", "该预检查标识已绑定另一份归档", 409)
+        payload = _preflight_payload(existing_ready)
+        payload["replayed"] = True
+        return _response({"ok": True, "preflight": payload})
+
+    if existing_checking is not None:
+        try:
+            size, digest = _fingerprint_upload(upload)
+        except backup.BackupLimitExceeded:
+            return _error("upload_too_large", "备份文件超过面板有效上传上限", 413)
+        if size != existing_checking["archive_size_bytes"] or digest != existing_checking["archive_sha256"]:
+            return _error("preflight_id_conflict", "该预检查标识已绑定另一份归档", 409)
+        with PREFLIGHT_LOCK:
+            try:
+                latest = _read_preflight_record(preflight_id)
+            except Exception:
+                return _error("preflight_unavailable", "预检查结果无法安全读取", 503)
+        if latest is None:
+            return _error("preflight_not_found", "备份预检查不存在", 404)
+        payload = _preflight_payload(latest)
+        payload["replayed"] = True
+        return _response(
+            {"ok": True, "accepted": payload["active"], "preflight": payload},
+            202 if payload["active"] else 200,
+        )
+
+    archive_created = False
+    try:
+        digest = hashlib.sha256()
+        size = 0
+        cancel_event = PREFLIGHT_CANCEL_EVENTS[preflight_id]
+        with archive_path.open("xb") as destination:
+            archive_created = True
+            while True:
+                if cancel_event.is_set():
+                    raise ValueError("preflight_cancelled")
+                chunk = upload.stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > backup.MAX_BACKUP_UPLOAD_BYTES:
+                    raise backup.BackupLimitExceeded("archive exceeds upload limit")
+                digest.update(chunk)
+                destination.write(chunk)
+            destination.flush()
+            os.fsync(destination.fileno())
+        if size == 0:
+            raise ValueError("empty_archive")
+        record.update(archive_size_bytes=size, archive_sha256=digest.hexdigest(), state="checking")
+        with PREFLIGHT_LOCK:
+            _write_preflight_record(preflight_id, record)
+        app = current_app._get_current_object()
+        worker = threading.Thread(
+            target=_run_preflight_check,
+            args=(app, preflight_id, suffix, archive_path, cancel_event),
+            name="backup-preflight-" + preflight_id[:8],
+            daemon=True,
+        )
+        try:
+            worker.start()
+        except Exception as exc:
+            raise PreflightStartError("preflight worker could not start") from exc
+    except Exception as exc:
+        error_code = _preflight_error_code(exc)
+        try:
+            with PREFLIGHT_LOCK:
+                if archive_created:
+                    archive_path.unlink(missing_ok=True)
+                record["state"] = "cancelled" if error_code == "preflight_cancelled" else "failed"
+                record["error_code"] = error_code
+                _write_preflight_record(preflight_id, record)
+        except Exception:
+            pass
+        finally:
+            with PREFLIGHT_LOCK:
+                PREFLIGHT_ACTIVE.discard(preflight_id)
+                PREFLIGHT_CANCEL_EVENTS.pop(preflight_id, None)
+        status_code = (
+            413 if error_code == "archive_limit_exceeded"
+            else 507 if error_code == "insufficient_storage"
+            else 503 if error_code in ("preflight_start_failed", "preflight_failed")
+            else 422
+        )
+        return _response({"ok": False, "preflight": _preflight_payload(record)}, status_code)
+    return _response({
+        "ok": True,
+        "accepted": True,
+        "preflight": _preflight_payload(record),
+    }, 202)
+
+
+@bp.route(NATIVE_PREFIX + "/preflights/<preflight_id>")
+def api_backup_native_preflight(preflight_id):
+    if not REQUEST_ID_RE.fullmatch(preflight_id):
+        return _error("invalid_preflight_id", "备份预检查标识无效", 400)
+    try:
+        with PREFLIGHT_LOCK:
+            record = _read_preflight_record(preflight_id)
+            if record is None:
+                return _error("preflight_not_found", "备份预检查不存在", 404)
+            payload = _preflight_payload(record)
+            if (record["expires_at"] <= int(time.time())
+                and record["state"] not in ("expired", "failed", "cancelled")):
+                payload["status"] = record["state"] if payload["active"] else "expired"
+    except Exception:
+        return _error("preflight_unavailable", "备份预检查状态无法读取", 503)
+    return _response({"ok": True, "preflight": payload})
+
+
+@bp.route(NATIVE_PREFIX + "/preflights/<preflight_id>/cancel", methods=["POST"])
+def api_backup_native_cancel_preflight(preflight_id):
+    if not REQUEST_ID_RE.fullmatch(preflight_id):
+        return _error("invalid_preflight_id", "备份预检查标识无效", 400)
+    with PREFLIGHT_LOCK:
+        try:
+            record = _read_preflight_record(preflight_id)
+        except Exception:
+            return _error("preflight_unavailable", "备份预检查状态无法读取", 503)
+        if record is None:
+            return _error("preflight_not_found", "备份预检查不存在", 404)
+        cancel_event = PREFLIGHT_CANCEL_EVENTS.get(preflight_id)
+        if (record["state"] not in ("uploading", "checking")
+            or preflight_id not in PREFLIGHT_ACTIVE or cancel_event is None):
+            return _error("preflight_not_active", "预检查已不在可取消阶段", 409)
+        cancel_event.set()
+        payload = _preflight_payload(record)
+    return _response({"ok": True, "accepted": True, "preflight": payload}, 202)
 
 
 @bp.route(NATIVE_PREFIX + "/files")
