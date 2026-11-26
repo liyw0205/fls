@@ -963,17 +963,27 @@ def save_global_env(env):
     write_json(GLOBAL_ENV_FILE, normalize_env_map(env))
 
 
-def load_proxies():
+def load_proxies(*, read_only=False):
     result = {}
     def normalize(data):
         if not isinstance(data, list) or any(not isinstance(item, dict) for item in data):
             raise RuntimeError("代理文件不是有效列表，未覆盖原文件，请修复或恢复备份")
+        if read_only and any(not isinstance(item.get("id"), str) or not item["id"].strip() for item in data):
+            raise RuntimeError("代理标识缺失，请修复文件后重试")
         proxies, changed = _normalize_list(data, normalize_proxy)
         if len({p["id"] for p in proxies}) != len(proxies):
             raise RuntimeError("代理标识重复，请修复文件后重试")
         result["proxies"] = proxies
         return proxies if changed else None
-    mutate_json(PROXY_FILE, [], normalize, strict=True)
+    if read_only:
+        with storage_transaction():
+            try:
+                raw = json.loads(PROXY_FILE.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                raw = []
+            normalize(raw)
+    else:
+        mutate_json(PROXY_FILE, [], normalize, strict=True)
     return result["proxies"]
 
 
