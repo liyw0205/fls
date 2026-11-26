@@ -5,6 +5,7 @@ import os
 import re
 import secrets
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 
@@ -19,6 +20,7 @@ NATIVE_SESSION_SECONDS = 3600
 NATIVE_SESSION_REMEMBER_SECONDS = 14 * 24 * 3600
 NATIVE_SESSION_FILE = DATA_DIR / "native_sessions.sqlite3"
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{40,64}$")
+NATIVE_SESSION_LOCK = threading.RLock()
 
 
 def _token_fingerprint(token):
@@ -60,12 +62,13 @@ def _connect():
 
 @contextmanager
 def _database():
-    connection = _connect()
-    try:
-        with connection:
-            yield connection
-    finally:
-        connection.close()
+    with NATIVE_SESSION_LOCK:
+        connection = _connect()
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
 
 def create_native_session(token, remember=False, verified=False):

@@ -1,11 +1,18 @@
 import contextlib
 import io
+import json
+import os
+import signal
+import subprocess
+import sys
 import tarfile
+import tempfile
 import threading
 import time
 import unittest
 import zipfile
 from unittest.mock import patch
+from pathlib import Path
 
 from tests.test_bulk_workflows import TOKEN
 from tests.test_notify_action_recovery import isolated_app
@@ -65,6 +72,28 @@ class NativeBackupApiTests(unittest.TestCase):
                 return response
             time.sleep(0.01)
         self.fail("preflight worker did not reach a terminal state")
+
+    def submit_restore(self, client, request_id, preflight_id, digest, items=("data",), **values):
+        body = {
+            "request_id": request_id,
+            "preflight_id": preflight_id,
+            "archive_sha256": digest,
+            "restore_items": list(items),
+            "restore_dependencies": False,
+            "confirm_data_impact": "data" in items,
+        }
+        body.update(values)
+        return client.post("/api/backup/native/restores", json=body, headers=self.headers())
+
+    def wait_restore(self, client, request_id):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            response = client.get(f"/api/backup/native/restores/{request_id}", headers=self.headers())
+            state = response.json.get("restore", {}).get("state")
+            if state not in ("accepted", "extracting", "staging", "committing"):
+                return response
+            time.sleep(0.01)
+        self.fail("restore worker did not reach a terminal state")
 
     def test_preflight_stages_and_validates_archive_without_touching_live_data(self):
         with isolated_app() as (app, base):
@@ -243,6 +272,763 @@ class NativeBackupApiTests(unittest.TestCase):
             self.assertEqual(full.status_code, 429)
             self.assertEqual(full.json["code"], "preflight_capacity")
             self.assertFalse((base / ".backup_native_staging" / f"{'f' * 32}.archive").exists())
+
+    def test_native_restore_is_async_idempotent_and_preserves_runtime_identity(self):
+        with isolated_app() as (app, base):
+            from fls_manager.routes.backup import _common as backup
+            from fls_manager.routes.backup import native_api
+            client = self.client(app)
+            backup.DATA_DIR.mkdir(parents=True, exist_ok=True)
+            (backup.DATA_DIR / "config.json").write_text('{"live":true}', encoding="utf-8")
+            (backup.DATA_DIR / "secret_key.txt").write_text("live-instance-key", encoding="utf-8")
+            (backup.DATA_DIR / "native_sessions.sqlite3").write_bytes(b"live-session-db")
+            (backup.DATA_DIR / "native_sessions.sqlite3-wal").write_bytes(b"live-session-wal")
+            live_requests = backup.DATA_DIR / "proxy_requests"
+            live_requests.mkdir()
+            (live_requests / ("f" * 32 + ".json")).write_text('{"live":"receipt"}', encoding="utf-8")
+            content = self.archive({
+                "fls/data/config.json": b'{"restored":true}',
+                "fls/data/secret_key.txt": b"attacker-instance-key",
+                "fls/data/native_sessions.sqlite3": b"attacker-session-db",
+                "fls/data/proxy_requests/" + "f" * 32 + ".json": b'{"archive":"receipt"}',
+                "fls/scripts/example.py": b"print('restored')\n",
+            })
+            preflight_id = "1" * 32
+            prepared = self.submit_preflight(client, preflight_id, content)
+            self.assertEqual(prepared.status_code, 200)
+            digest = prepared.json["preflight"]["archive_sha256"]
+            request_id = "2" * 32
+
+            with patch.object(threading.Thread, "start", autospec=True, side_effect=lambda thread: thread.run()):
+                response = self.submit_restore(client, request_id, preflight_id, digest)
+
+            self.assertEqual(response.status_code, 200)
+            restored = response.json["restore"]
+            self.assertEqual(restored["state"], "restored")
+            self.assertTrue(restored["committed"])
+            self.assertEqual(restored["scheduler"]["state"], "pending")
+            self.assertEqual((backup.DATA_DIR / "config.json").read_text(encoding="utf-8"), '{"restored":true}')
+            self.assertEqual((backup.DATA_DIR / "secret_key.txt").read_text(encoding="utf-8"), "live-instance-key")
+            self.assertEqual((backup.DATA_DIR / "native_sessions.sqlite3").read_bytes(), b"live-session-db")
+            self.assertEqual((backup.DATA_DIR / "native_sessions.sqlite3-wal").read_bytes(), b"live-session-wal")
+            self.assertEqual(
+                (backup.DATA_DIR / "proxy_requests" / ("f" * 32 + ".json")).read_text(encoding="utf-8"),
+                '{"live":"receipt"}',
+            )
+            self.assertTrue((backup.SCRIPT_DIR / "example.py").exists() is False)
+            self.assertTrue((base / ".backup_native_restores" / f"{request_id}.json").is_file())
+
+            receipt = native_api._native_restore_path(request_id).read_bytes()
+            queried = client.get(f"/api/backup/native/restores/{request_id}", headers=self.headers())
+            history = client.get("/api/backup/native/restores?limit=10&offset=0", headers=self.headers())
+            self.assertEqual(queried.status_code, 200)
+            self.assertEqual(queried.headers["Cache-Control"], "no-store")
+            self.assertEqual(history.json["total"], 1)
+            self.assertEqual(receipt, native_api._native_restore_path(request_id).read_bytes())
+
+            (backup.DATA_DIR / "config.json").write_text('{"later":true}', encoding="utf-8")
+            replay = self.submit_restore(client, request_id, preflight_id, digest)
+            self.assertEqual(replay.status_code, 200)
+            self.assertTrue(replay.json["replayed"])
+            self.assertEqual((backup.DATA_DIR / "config.json").read_text(encoding="utf-8"), '{"later":true}')
+
+    def test_native_restore_requires_explicit_data_confirmation_and_binds_preflight(self):
+        with isolated_app() as (app, base):
+            client = self.client(app)
+            preflight_id = "3" * 32
+            prepared = self.submit_preflight(client, preflight_id)
+            digest = prepared.json["preflight"]["archive_sha256"]
+            missing_confirmation = self.submit_restore(
+                client, "4" * 32, preflight_id, digest, confirm_data_impact=False,
+            )
+            self.assertEqual(missing_confirmation.status_code, 400)
+            self.assertFalse((base / ".backup_native_restores").exists())
+
+            invalid_scope = self.submit_restore(
+                client, "5" * 32, preflight_id, "f" * 64,
+            )
+            self.assertEqual(invalid_scope.status_code, 409)
+            self.assertFalse((base / ".backup_native_restores").exists())
+
+    def test_restore_start_failures_release_activity_and_process_lease_even_if_receipt_write_fails(self):
+        for failure in ("construct", "start", "failed_receipt"):
+            with self.subTest(failure=failure), isolated_app() as (app, _):
+                from fls_manager.routes.backup import _common as backup
+                from fls_manager.routes.backup import native_api
+
+                client = self.client(app)
+                preflight_id, request_id = "3" * 32, "4" * 32
+                prepared = self.submit_preflight(client, preflight_id)
+                digest = prepared.json["preflight"]["archive_sha256"]
+                backup.DATA_DIR.mkdir(parents=True, exist_ok=True)
+                (backup.DATA_DIR / "config.json").write_bytes(b"live-config")
+                live_config = (backup.DATA_DIR / "config.json").read_bytes()
+                write = native_api._write_native_restore
+
+                def reject_failure_receipt(record):
+                    if record["state"] == "failed":
+                        raise OSError("receipt storage unavailable")
+                    return write(record)
+
+                with contextlib.ExitStack() as stack:
+                    if failure == "construct":
+                        stack.enter_context(patch.object(native_api.threading, "Thread", side_effect=RuntimeError("no thread")))
+                    else:
+                        stack.enter_context(patch.object(threading.Thread, "start", side_effect=RuntimeError("no worker")))
+                    if failure == "failed_receipt":
+                        stack.enter_context(patch.object(native_api, "_write_native_restore", side_effect=reject_failure_receipt))
+                    response = self.submit_restore(client, request_id, preflight_id, digest)
+
+                self.assertEqual(response.status_code, 503)
+                self.assertFalse(backup.RESTORE_ACTIVE)
+                self.assertNotIn(request_id, native_api.RESTORE_ACTIVE)
+                self.assertNotIn(preflight_id, native_api.PREFLIGHT_RETAINED_FOR_RESTORE)
+                lease = native_api._try_process_lease(native_api.RESTORE_PROCESS_LOCK_PATH)
+                self.assertIsNotNone(lease)
+                native_api._release_process_lease(lease)
+                self.assertEqual((backup.DATA_DIR / "config.json").read_bytes(), live_config)
+                queried = client.get(f"/api/backup/native/restores/{request_id}", headers=self.headers())
+                self.assertEqual(queried.json["restore"]["state"], "failed")
+                self.assertTrue(queried.json["restore"]["live_state_unchanged"])
+
+    def test_restore_get_maps_orphaned_mutation_to_unknown_without_writes(self):
+        with isolated_app() as (app, base):
+            from fls_manager.routes.backup import native_api
+            native_api._ensure_private_directory(native_api.RESTORE_DIR)
+            request_id = "6" * 32
+            record = {
+                "version": 1, "request_id": request_id, "preflight_id": "7" * 32,
+                "archive_sha256": "a" * 64, "archive_size_bytes": 12, "filename": "full.tar.gz",
+                "restore_items": ["data"], "restore_dependencies": False,
+                "state": "committing", "live_state_unchanged": False,
+                "scheduler_state": "pending", "scheduler_operation_id": "", "scheduler_error": "",
+                "dependency_state": "not_requested", "dependency_operation_id": "",
+                "dependency_error": "", "dependency_output": "", "error": "",
+                "created_at": 1, "updated_at": 2,
+            }
+            native_api._write_native_restore(record)
+            path = base / ".backup_native_restores" / f"{request_id}.json"
+            before = path.read_bytes()
+
+            result = self.client(app).get(
+                f"/api/backup/native/restores/{request_id}", headers=self.headers(),
+            )
+
+            self.assertEqual(result.status_code, 200, result.json)
+            self.assertEqual(result.json["restore"]["state"], "unknown")
+            self.assertTrue(result.json["restore"]["restore_outcome_unknown"])
+            self.assertEqual(path.read_bytes(), before)
+
+            resolved = self.client(app).post(
+                f"/api/backup/native/restores/{request_id}/resolve",
+                json={"outcome": "not_applied", "confirm": True},
+                headers=self.headers(),
+            )
+            self.assertEqual(resolved.status_code, 200)
+            self.assertEqual(resolved.json["restore"]["state"], "failed")
+            self.assertTrue(resolved.json["restore"]["live_state_unchanged"])
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["operator_resolution"], "not_applied")
+
+    def test_restore_lease_blocks_new_mutations_and_preserves_read_only_active_status(self):
+        with isolated_app() as (app, _):
+            from fls_manager.routes.backup import native_api
+
+            client = self.client(app)
+            preflight_id, request_id = "3" * 32, "4" * 32
+            prepared = self.submit_preflight(client, preflight_id)
+            digest = prepared.json["preflight"]["archive_sha256"]
+            with patch.object(threading.Thread, "start", autospec=True, side_effect=lambda thread: thread.run()):
+                self.submit_restore(client, request_id, preflight_id, digest)
+            native_api._restore_record_update(request_id, state="committing")
+            path = native_api._native_restore_path(request_id)
+            before = path.read_bytes()
+            lease = native_api._try_process_lease(native_api.RESTORE_PROCESS_LOCK_PATH)
+            self.assertIsNotNone(lease)
+            native_api._mark_restore_lease(lease, request_id, "restore")
+            try:
+                result = client.get(f"/api/backup/native/restores/{request_id}", headers=self.headers())
+                self.assertTrue(result.json["restore"]["active"])
+                self.assertEqual(result.json["restore"]["state"], "committing")
+                resolved = client.post(
+                    f"/api/backup/native/restores/{request_id}/resolve",
+                    json={"outcome": "not_applied", "confirm": True}, headers=self.headers(),
+                )
+                self.assertEqual(resolved.status_code, 409)
+                new = self.submit_restore(client, "5" * 32, preflight_id, digest)
+                self.assertEqual(new.status_code, 409)
+                self.assertEqual(new.json["code"], "restore_busy")
+                self.assertEqual(path.read_bytes(), before)
+            finally:
+                native_api._release_process_lease(lease)
+            result = client.get(f"/api/backup/native/restores/{request_id}", headers=self.headers())
+            self.assertEqual(result.json["restore"]["state"], "unknown")
+            self.assertFalse(result.json["restore"]["committed"])
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_restore_archive_retention_survives_expiry_and_lost_in_memory_references(self):
+        for state, dependencies in (("unknown", False), ("restored", True)):
+            with self.subTest(state=state), isolated_app() as (app, _):
+                from fls_manager.routes.backup import native_api
+
+                client = self.client(app)
+                preflight_id, request_id = "3" * 32, "4" * 32
+                prepared = self.submit_preflight(client, preflight_id)
+                digest = prepared.json["preflight"]["archive_sha256"]
+                with patch.object(threading.Thread, "start", autospec=True, side_effect=lambda thread: thread.run()):
+                    self.submit_restore(
+                        client, request_id, preflight_id, digest, restore_dependencies=dependencies,
+                    )
+                native_api._restore_record_update(request_id, state=state)
+                preflight = native_api._read_preflight_record(preflight_id)
+                preflight["expires_at"] = int(time.time()) - 1
+                native_api._write_preflight_record(preflight_id, preflight)
+                snapshot = native_api._preflight_archive_path(preflight_id)
+                original = snapshot.read_bytes()
+
+                with patch.object(native_api, "PREFLIGHT_RETAINED_FOR_RESTORE", set()):
+                    self.assertEqual(native_api._expire_preflight_records(int(time.time())), 0)
+                    self.assertEqual(snapshot.read_bytes(), original)
+                    second = self.submit_preflight(client, "5" * 32)
+                    self.assertEqual(second.json["preflight"]["status"], "ready")
+                    third = self.submit_preflight(client, "6" * 32)
+                    self.assertEqual(third.status_code, 429)
+                    self.assertEqual(third.json["code"], "preflight_capacity")
+
+                native_api._restore_record_update(
+                    request_id, state="restored", dependency_state="succeeded" if dependencies else "not_requested",
+                )
+                self.assertEqual(native_api._expire_preflight_records(int(time.time())), 1)
+                self.assertFalse(snapshot.exists())
+                expired = client.get(f"/api/backup/native/preflights/{preflight_id}", headers=self.headers())
+                self.assertEqual(expired.status_code, 200)
+                self.assertEqual(expired.json["preflight"]["status"], "expired")
+
+    def test_native_restore_maintenance_get_is_read_only(self):
+        with isolated_app() as (app, base):
+            from fls_manager.routes.backup import restore
+            event_id = "b" * 32
+            state = {
+                "version": 1,
+                "event_id": event_id,
+                "required": False,
+                "fingerprint": "c" * 64,
+                "target_digest": "d" * 64,
+                "kind": "publication",
+                "acknowledged": False,
+            }
+            restore.BACKUP_RESTORE_REQUESTS_DIR.mkdir(parents=True)
+            restore._write_restore_archive_maintenance_state(state)
+            path = base / ".backup_restore_requests" / restore.RESTORE_ARCHIVE_MAINTENANCE_NAME
+            before = path.read_bytes()
+
+            response = self.client(app).get(
+                "/api/backup/native/restore-maintenance", headers=self.headers(),
+            )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json["maintenance"]["event_id"], event_id)
+            self.assertFalse(response.json["maintenance"]["required"])
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_restore_scheduler_reload_is_an_independent_confirmed_operation(self):
+        with isolated_app() as (app, _):
+            from fls_manager.routes.backup import _common as backup
+            client = self.client(app)
+            preflight_id = "8" * 32
+            prepared = self.submit_preflight(client, preflight_id)
+            digest = prepared.json["preflight"]["archive_sha256"]
+            request_id = "9" * 32
+            with patch.object(threading.Thread, "start", autospec=True, side_effect=lambda thread: thread.run()):
+                restored = self.submit_restore(client, request_id, preflight_id, digest)
+            self.assertEqual(restored.json["restore"]["scheduler"]["state"], "pending")
+            restored_config = (backup.DATA_DIR / "config.json").read_bytes()
+
+            first_action = {"operation_id": "a" * 32, "confirm_retry": False}
+            with patch("fls_manager.scheduler.reload_scheduler", side_effect=RuntimeError("scheduler unavailable")):
+                failed = client.post(
+                    f"/api/backup/native/restores/{request_id}/scheduler-reload",
+                    json=first_action, headers=self.headers(),
+                )
+            self.assertEqual(failed.status_code, 503)
+            self.assertEqual(failed.json["restore"]["scheduler"]["state"], "failed")
+            self.assertEqual((backup.DATA_DIR / "config.json").read_bytes(), restored_config)
+
+            retry = {"operation_id": "b" * 32, "confirm_retry": False}
+            rejected = client.post(
+                f"/api/backup/native/restores/{request_id}/scheduler-reload",
+                json=retry, headers=self.headers(),
+            )
+            self.assertEqual(rejected.status_code, 409)
+            retry["confirm_retry"] = True
+            with patch("fls_manager.scheduler.reload_scheduler") as reload_scheduler:
+                succeeded = client.post(
+                    f"/api/backup/native/restores/{request_id}/scheduler-reload",
+                    json=retry, headers=self.headers(),
+                )
+            self.assertEqual(succeeded.status_code, 200)
+            self.assertEqual(succeeded.json["restore"]["scheduler"]["state"], "succeeded")
+            reload_scheduler.assert_called_once()
+            with patch("fls_manager.scheduler.reload_scheduler") as reload_scheduler:
+                old_replay = client.post(
+                    f"/api/backup/native/restores/{request_id}/scheduler-reload",
+                    json=dict(first_action, confirm_retry=True), headers=self.headers(),
+                )
+            self.assertEqual(old_replay.status_code, 200)
+            self.assertTrue(old_replay.json["replayed"])
+            self.assertEqual(old_replay.json["operation"]["state"], "failed")
+            self.assertEqual(old_replay.json["restore"]["scheduler"]["operation_id"], retry["operation_id"])
+            reload_scheduler.assert_not_called()
+
+    def test_restore_dependency_install_runs_separately_with_bounded_output(self):
+        with isolated_app() as (app, _):
+            from fls_manager.routes.backup import native_api
+            client = self.client(app)
+            preflight_id = "c" * 32
+            prepared = self.submit_preflight(client, preflight_id)
+            digest = prepared.json["preflight"]["archive_sha256"]
+            request_id = "d" * 32
+            real_start = threading.Thread.start
+
+            def run_restore_inline(thread):
+                if thread.name.endswith("-output-" + request_id[:8]):
+                    return real_start(thread)
+                return thread.run()
+
+            with patch.object(threading.Thread, "start", autospec=True, side_effect=run_restore_inline):
+                restored = self.submit_restore(
+                    client, request_id, preflight_id, digest,
+                    restore_dependencies=True,
+                )
+                self.assertEqual(restored.status_code, 200)
+                self.assertEqual(restored.json["restore"]["dependencies"]["state"], "pending")
+
+                class CompletedProcess:
+                    def __init__(self, *args, **kwargs):
+                        self.stdout = io.BytesIO(b"Installing dependencies\n")
+                        self.identity = {"kind": "posix_group", "pid": 12345}
+
+                    def start(self):
+                        pass
+
+                    def wait(self, timeout=None):
+                        return 0
+
+                    def poll(self):
+                        return 0
+
+                    def kill(self):
+                        raise AssertionError("completed dependency process must not be killed")
+
+                with patch.object(native_api, "DependencyProcess", CompletedProcess), patch.object(
+                    native_api, "_stop_restore_dependency_process",
+                ) as stop_process:
+                    result = client.post(
+                        f"/api/backup/native/restores/{request_id}/dependencies",
+                        json={"operation_id": "e" * 32, "confirm_retry": False},
+                        headers=self.headers(),
+                    )
+
+            self.assertEqual(result.status_code, 200, result.json)
+            state = result.json["restore"]["dependencies"]
+            self.assertEqual(state["state"], "succeeded")
+            self.assertIn("Installing dependencies", state["output"])
+            self.assertLessEqual(len(state["output"].encode("utf-8")), native_api.RESTORE_DEPENDENCY_OUTPUT_LIMIT)
+            stop_process.assert_called_once()
+
+    def test_restore_output_is_limited_by_utf8_bytes_and_scrubs_credentials(self):
+        with isolated_app() as (_, _):
+            from fls_manager.routes.backup import native_api
+
+            result = native_api._bounded_text("中" * 20000, 32768)
+            self.assertLessEqual(len(result.encode("utf-8")), 32768)
+            sanitized = native_api._bounded_text(
+                "https://user:password@example.com/index?token=private-token password=private-password", 1000,
+            )
+            self.assertNotIn("private-token", sanitized)
+            self.assertNotIn("private-password", sanitized)
+            self.assertNotIn("user:password", sanitized)
+            output = bytearray()
+            stream = io.BytesIO(
+                b"normal output\npassword=" + b"x" * 40000 + b"\n"
+                + b"token=private-token\n" + "中\n".encode("utf-8") * 20000,
+            )
+            native_api._drain_restore_dependency_output(stream, output, threading.Lock())
+            self.assertTrue(stream.closed)
+            self.assertLessEqual(len(output), native_api.RESTORE_DEPENDENCY_OUTPUT_LIMIT)
+            self.assertNotIn(b"private-token", output)
+            self.assertNotIn(b"x" * 100, output)
+
+    def test_dependency_cleanup_is_explicit_idempotent_and_keeps_lease_until_receipt_saved(self):
+        with isolated_app() as (app, _):
+            from fls_manager.routes.backup import native_api
+
+            client = self.client(app)
+            preflight_id, request_id, operation_id = "3" * 32, "4" * 32, "5" * 32
+            prepared = self.submit_preflight(client, preflight_id)
+            real_start = threading.Thread.start
+
+            def start(thread):
+                return real_start(thread) if "-output-" in thread.name else thread.run()
+
+            class Process:
+                def __init__(self, *args, **kwargs):
+                    self.stdout = io.BytesIO(b"completed output\n")
+                    self.identity = {"kind": "posix_group", "pid": 12345}
+                    self.stop_attempts = 0
+
+                def start(self):
+                    pass
+
+                def wait(self, timeout):
+                    return 0
+
+                def stop(self, timeout):
+                    self.stop_attempts += 1
+                    if self.stop_attempts == 1:
+                        raise PermissionError("process cleanup temporarily unavailable")
+
+            path = f"/api/backup/native/restores/{request_id}"
+            with patch.object(threading.Thread, "start", autospec=True, side_effect=start):
+                self.submit_restore(
+                    client, request_id, preflight_id, prepared.json["preflight"]["archive_sha256"],
+                    restore_dependencies=True,
+                )
+                with patch.object(native_api, "DependencyProcess", side_effect=Process) as create_process:
+                    submitted = client.post(path + "/dependencies", json={
+                        "operation_id": operation_id, "confirm_retry": False,
+                    }, headers=self.headers())
+                    self.assertEqual(submitted.status_code, 200, submitted.json)
+                    self.assertTrue(submitted.json["restore"]["dependencies"]["cleanup_required"])
+                    self.assertEqual(submitted.json["restore"]["dependencies"]["state"], "unknown")
+                    saved_before = native_api._native_restore_path(request_id).read_bytes()
+                    with patch.object(native_api, "_cleanup_dependency_resources") as cleanup:
+                        queried = client.get(path, headers=self.headers())
+                        cleanup.assert_not_called()
+                    self.assertTrue(queried.json["restore"]["dependencies"]["cleanup_required"])
+                    self.assertEqual(native_api._native_restore_path(request_id).read_bytes(), saved_before)
+                    self.assertIsNone(native_api._try_process_lease(native_api.RESTORE_PROCESS_LOCK_PATH))
+                    rejected = client.post(path + "/dependencies", json={
+                        "operation_id": "6" * 32, "confirm_retry": True,
+                    }, headers=self.headers())
+                    self.assertEqual(rejected.status_code, 409)
+                    self.assertEqual(rejected.json["code"], "restore_busy")
+                    wrong = client.post(path + "/dependencies/cleanup", json={
+                        "operation_id": "6" * 32,
+                    }, headers=self.headers())
+                    self.assertEqual(wrong.status_code, 409)
+                    write = native_api._write_native_restore
+
+                    def fail_success(record):
+                        if not record.get("dependency_cleanup_pending", False):
+                            raise OSError("cleanup receipt storage unavailable")
+                        return write(record)
+
+                    with patch.object(native_api, "_write_native_restore", side_effect=fail_success):
+                        failed = client.post(path + "/dependencies/cleanup", json={
+                            "operation_id": operation_id,
+                        }, headers=self.headers())
+                    self.assertEqual(failed.status_code, 503, failed.json)
+                    self.assertIn(request_id, native_api.RESTORE_DEPENDENCY_CLEANUP)
+                    self.assertIsNone(native_api._try_process_lease(native_api.RESTORE_PROCESS_LOCK_PATH))
+                    completed = client.post(path + "/dependencies/cleanup", json={
+                        "operation_id": operation_id,
+                    }, headers=self.headers())
+                    self.assertEqual(completed.status_code, 200, completed.json)
+                    self.assertFalse(completed.json["restore"]["dependencies"]["cleanup_required"])
+                    self.assertEqual(completed.json["restore"]["dependencies"]["state"], "succeeded")
+                    self.assertNotIn(request_id, native_api.RESTORE_DEPENDENCY_CLEANUP)
+                    replayed = client.post(path + "/dependencies/cleanup", json={
+                        "operation_id": operation_id,
+                    }, headers=self.headers())
+                    self.assertEqual(replayed.status_code, 200)
+                    self.assertTrue(replayed.json["replayed"])
+                    create_process.assert_called_once()
+                    lease = native_api._try_process_lease(native_api.RESTORE_PROCESS_LOCK_PATH)
+                    self.assertIsNotNone(lease)
+                    native_api._release_process_lease(lease)
+
+    def test_dependency_reader_failure_cannot_report_success(self):
+        with isolated_app() as (app, _):
+            from fls_manager.routes.backup import native_api
+
+            client = self.client(app)
+            preflight_id, request_id = "3" * 32, "4" * 32
+            prepared = self.submit_preflight(client, preflight_id)
+            real_start = threading.Thread.start
+
+            def start(thread):
+                return real_start(thread) if "-output-" in thread.name else thread.run()
+
+            class BrokenStream(io.BytesIO):
+                def read1(self, size):
+                    raise OSError("stream failed")
+
+            class Process:
+                def __init__(self, *args, **kwargs):
+                    self.stdout = BrokenStream()
+                    self.identity = {"kind": "posix_group", "pid": 12345}
+
+                def start(self):
+                    pass
+
+                def wait(self, timeout):
+                    return 0
+
+                def stop(self, timeout):
+                    pass
+
+            with patch.object(threading.Thread, "start", autospec=True, side_effect=start):
+                self.submit_restore(
+                    client, request_id, preflight_id, prepared.json["preflight"]["archive_sha256"],
+                    restore_dependencies=True,
+                )
+                with patch.object(native_api, "DependencyProcess", Process):
+                    result = client.post(f"/api/backup/native/restores/{request_id}/dependencies", json={
+                        "operation_id": "5" * 32, "confirm_retry": False,
+                    }, headers=self.headers())
+            self.assertEqual(result.status_code, 200, result.json)
+            self.assertEqual(result.json["restore"]["dependencies"]["state"], "failed")
+            self.assertIn("输出读取中断", result.json["restore"]["dependencies"]["error"])
+            self.assertFalse(result.json["restore"]["dependencies"]["cleanup_required"])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX dependency restart recovery")
+    def test_dependency_cleanup_after_restart_never_restarts_installation_or_deletes_replaced_workspace(self):
+        with isolated_app() as (app, _):
+            from fls_manager.routes.backup import native_api
+
+            client = self.client(app)
+            preflight_id, request_id, operation_id = "3" * 32, "4" * 32, "5" * 32
+            prepared = self.submit_preflight(client, preflight_id)
+            real_start, real_process = threading.Thread.start, native_api.DependencyProcess
+
+            def start(thread):
+                return real_start(thread) if "-output-" in thread.name else thread.run()
+
+            def command(_command, **kwargs):
+                return real_process([sys.executable, "-c", "print('installation finished')"], **kwargs)
+
+            path = f"/api/backup/native/restores/{request_id}"
+            with patch.object(threading.Thread, "start", autospec=True, side_effect=start):
+                self.submit_restore(
+                    client, request_id, preflight_id, prepared.json["preflight"]["archive_sha256"],
+                    restore_dependencies=True,
+                )
+                with patch.object(native_api, "DependencyProcess", side_effect=command), patch.object(
+                    native_api.shutil, "rmtree", side_effect=PermissionError("workspace currently unavailable"),
+                ):
+                    response = client.post(path + "/dependencies", json={
+                        "operation_id": operation_id, "confirm_retry": False,
+                    }, headers=self.headers())
+            self.assertTrue(response.json["restore"]["dependencies"]["cleanup_required"])
+            record = native_api._read_native_restore(request_id)
+            entry = native_api.RESTORE_DEPENDENCY_CLEANUP.pop(request_id)
+            native_api._release_process_lease(entry["lease_fd"])
+            workspace = native_api.PREFLIGHT_WORK_DIR / record["dependency_workspace"]["name"]
+            original = workspace.with_name(workspace.name + "-original")
+            workspace.rename(original)
+            workspace.mkdir()
+            sentinel = workspace / "keep.txt"
+            sentinel.write_text("replacement must survive")
+            with patch.object(native_api, "DependencyProcess") as no_install:
+                queried = client.get(path, headers=self.headers())
+                self.assertTrue(queried.json["restore"]["dependencies"]["cleanup_required"])
+                failed = client.post(path + "/dependencies/cleanup", json={
+                    "operation_id": operation_id,
+                }, headers=self.headers())
+                self.assertEqual(failed.status_code, 503, failed.json)
+                self.assertEqual(sentinel.read_text(), "replacement must survive")
+                self.assertTrue(original.is_dir())
+                sentinel.unlink()
+                workspace.rmdir()
+                original.rename(workspace)
+                completed = client.post(path + "/dependencies/cleanup", json={
+                    "operation_id": operation_id,
+                }, headers=self.headers())
+                no_install.assert_not_called()
+            self.assertEqual(completed.status_code, 200, completed.json)
+            dependencies = completed.json["restore"]["dependencies"]
+            self.assertFalse(dependencies["cleanup_required"])
+            self.assertEqual(dependencies["state"], "unknown")
+            self.assertEqual(dependencies["operation_id"], operation_id)
+            self.assertFalse(workspace.exists())
+            lease = native_api._try_process_lease(native_api.RESTORE_PROCESS_LOCK_PATH)
+            self.assertIsNotNone(lease)
+            native_api._release_process_lease(lease)
+
+    def test_followup_process_lease_protects_live_state_and_replays_without_mutation(self):
+        with isolated_app() as (app, base):
+            from fls_manager.routes.backup import native_api
+
+            client = self.client(app)
+            preflight_id, request_id, operation_id = "3" * 32, "4" * 32, "5" * 32
+            prepared = self.submit_preflight(client, preflight_id)
+            with patch.object(threading.Thread, "start", autospec=True, side_effect=lambda thread: thread.run()):
+                self.submit_restore(
+                    client, request_id, preflight_id, prepared.json["preflight"]["archive_sha256"],
+                    restore_dependencies=True,
+                )
+            script = (
+                "import json,sys\n"
+                "from flask import Flask\n"
+                "from fls_manager.routes.backup import native_api as api\n"
+                "with Flask('lease-test').app_context():\n"
+                f" record,fd,response=api._claim_restore_followup({request_id!r},'scheduler',{operation_id!r},False)\n"
+                " print(json.dumps({'claimed':fd is not None}),flush=True)\n"
+                " if fd is not None:\n"
+                "  sys.stdin.readline()\n"
+                f"  api._restore_record_update({request_id!r},scheduler_state='succeeded')\n"
+                "  api._release_process_lease(fd)\n"
+            )
+            with tempfile.TemporaryFile(mode="w+b") as stdout:
+                process = subprocess.Popen([sys.executable, "-c", script], stdin=subprocess.PIPE, stdout=stdout, stderr=subprocess.PIPE)
+                try:
+                    deadline = time.monotonic() + 10
+                    while stdout.seek(0, 2) == 0 and process.poll() is None and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    stdout.seek(0)
+                    self.assertEqual(json.loads(stdout.readline()), {"claimed": True})
+                    self.assertIsNone(process.poll())
+                    before = native_api._native_restore_path(request_id).read_bytes()
+                    path = f"/api/backup/native/restores/{request_id}"
+                    queried = client.get(path, headers=self.headers())
+                    self.assertEqual(queried.json["restore"]["scheduler"]["state"], "running")
+                    replayed = client.post(path + "/scheduler-reload", json={
+                        "operation_id": operation_id, "confirm_retry": False,
+                    }, headers=self.headers())
+                    self.assertTrue(replayed.json["replayed"])
+                    self.assertEqual(replayed.json["operation"]["state"], "running")
+                    for endpoint in ("dependencies", "scheduler-reload"):
+                        rejected = client.post(path + "/" + endpoint, json={
+                            "operation_id": "6" * 32, "confirm_retry": True,
+                        }, headers=self.headers())
+                        self.assertEqual(rejected.status_code, 409, rejected.json)
+                        self.assertEqual(rejected.json["code"], "restore_busy")
+                    self.assertEqual(native_api._native_restore_path(request_id).read_bytes(), before)
+                    _, stderr = process.communicate(b"finish\n", timeout=10)
+                    self.assertEqual(process.returncode, 0, stderr)
+                    record = native_api._read_native_restore(request_id)
+                    self.assertEqual(record["operations"][operation_id]["state"], "succeeded")
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                    process.communicate(timeout=10)
+
+    def test_followup_rereads_receipt_after_another_process_completes_before_lock(self):
+        with isolated_app() as (app, _):
+            from fls_manager.routes.backup import native_api
+
+            client = self.client(app)
+            preflight_id, request_id = "3" * 32, "4" * 32
+            prepared = self.submit_preflight(client, preflight_id)
+            with patch.object(threading.Thread, "start", autospec=True, side_effect=lambda thread: thread.run()):
+                self.submit_restore(client, request_id, preflight_id, prepared.json["preflight"]["archive_sha256"])
+            script = (
+                "import json,sys\n"
+                "from flask import Flask\n"
+                "from fls_manager.routes.backup import native_api as api\n"
+                "acquire=api._try_process_lease\n"
+                "def paused_acquire(path,**kwargs):\n"
+                " print('ready',flush=True)\n"
+                " sys.stdin.readline()\n"
+                " return acquire(path,**kwargs)\n"
+                "api._try_process_lease=paused_acquire\n"
+                "with Flask('race-test').app_context():\n"
+                f" record,fd,response=api._claim_restore_followup({request_id!r},'scheduler',{'6' * 32!r},False)\n"
+                " print(json.dumps({'claimed':fd is not None,'code':response.get_json()['code'] if response else ''}),flush=True)\n"
+                " if fd is not None: api._release_process_lease(fd)\n"
+            )
+            with tempfile.TemporaryFile(mode="w+b") as stdout:
+                process = subprocess.Popen([sys.executable, "-c", script], stdin=subprocess.PIPE, stdout=stdout, stderr=subprocess.PIPE)
+                try:
+                    deadline = time.monotonic() + 10
+                    while stdout.seek(0, 2) == 0 and process.poll() is None and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    stdout.seek(0)
+                    self.assertEqual(stdout.readline(), b"ready\n")
+                    with patch("fls_manager.scheduler.reload_scheduler") as reload_scheduler:
+                        result = client.post(f"/api/backup/native/restores/{request_id}/scheduler-reload", json={
+                            "operation_id": "5" * 32, "confirm_retry": False,
+                        }, headers=self.headers())
+                        self.assertEqual(result.status_code, 200, result.json)
+                        reload_scheduler.assert_called_once()
+                    before = native_api._native_restore_path(request_id).read_bytes()
+                    _, stderr = process.communicate(b"continue\n", timeout=10)
+                    self.assertEqual(process.returncode, 0, stderr)
+                    stdout.seek(0)
+                    lines = stdout.readlines()
+                    self.assertEqual(json.loads(lines[-1]), {"claimed": False, "code": "scheduler_retry_confirmation_required"})
+                    self.assertEqual(native_api._native_restore_path(request_id).read_bytes(), before)
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                    process.communicate(timeout=10)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX process-group integration")
+    def test_restore_dependency_timeout_and_exited_parent_reap_the_process_group(self):
+        for parent_exits in (False, True):
+            with self.subTest(parent_exits=parent_exits), isolated_app() as (app, base):
+                from fls_manager.routes.backup import native_api
+
+                client = self.client(app)
+                preflight_id, request_id = "3" * 32, "4" * 32
+                prepared = self.submit_preflight(client, preflight_id)
+                digest = prepared.json["preflight"]["archive_sha256"]
+                with patch.object(threading.Thread, "start", autospec=True, side_effect=lambda thread: thread.run()):
+                    self.submit_restore(client, request_id, preflight_id, digest, restore_dependencies=True)
+                child_pid_file = base / "dependency-child.pid"
+                script = (
+                    "import subprocess,sys,time,pathlib\n"
+                    "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'])\n"
+                    f"pathlib.Path({str(child_pid_file)!r}).write_text(str(child.pid))\n"
+                    "print('dependency child running', flush=True)\n"
+                    + ("" if parent_exits else "time.sleep(60)\n")
+                )
+                real_process, real_start = native_api.DependencyProcess, threading.Thread.start
+
+                def command(_command, **kwargs):
+                    return real_process([sys.executable, "-c", script], **kwargs)
+
+                def start(thread):
+                    if "-output-" in thread.name:
+                        return real_start(thread)
+                    return thread.run()
+
+                try:
+                    with patch.object(native_api, "DependencyProcess", side_effect=command), patch.object(
+                        threading.Thread, "start", autospec=True, side_effect=start,
+                    ), patch.object(native_api, "RESTORE_WORKER_TIMEOUT_SECONDS", 0.5):
+                        response = client.post(
+                            f"/api/backup/native/restores/{request_id}/dependencies",
+                            json={"operation_id": "5" * 32, "confirm_retry": False}, headers=self.headers(),
+                        )
+                    self.assertEqual(response.status_code, 200, response.json)
+                    expected_state = "succeeded" if parent_exits else "failed"
+                    self.assertEqual(response.json["restore"]["dependencies"]["state"], expected_state)
+                    self.assertIn("dependency child running", response.json["restore"]["dependencies"]["output"])
+                    child_pid = int(child_pid_file.read_text())
+                    state_path = Path(f"/proc/{child_pid}/stat")
+                    deadline = time.monotonic() + 2
+                    while state_path.exists() and time.monotonic() < deadline:
+                        if state_path.read_text().split(") ", 1)[1].split()[0] == "Z":
+                            break
+                        time.sleep(0.01)
+                    if state_path.exists():
+                        self.assertEqual(state_path.read_text().split(") ", 1)[1].split()[0], "Z")
+                    self.assertFalse(any(
+                        thread.is_alive() and "backup-native-restore-deps-output-" in thread.name
+                        for thread in threading.enumerate()
+                    ))
+                    self.assertNotIn(request_id, native_api.RESTORE_DEPENDENCY_ACTIVE)
+                    self.assertFalse(list(native_api.PREFLIGHT_WORK_DIR.glob("deps-*")))
+                    lease = native_api._try_process_lease(native_api.RESTORE_PROCESS_LOCK_PATH)
+                    self.assertIsNotNone(lease)
+                    native_api._release_process_lease(lease)
+                finally:
+                    if child_pid_file.exists():
+                        try:
+                            os.kill(int(child_pid_file.read_text()), signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
 
     @contextlib.contextmanager
     def inline_worker(self):

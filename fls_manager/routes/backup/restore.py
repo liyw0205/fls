@@ -954,7 +954,70 @@ def _stage_restore_directory(source, target, keep_backups=False):
     }
 
 
-def _commit_restore_directories(entries):
+_RUNTIME_IDENTITY_NAMES = frozenset({
+        "secret_key.txt", "backup_jobs.json", "task_history.json",
+        "task_history_index.sqlite3", "dependency_install_jobs.json",
+        "notify_history.json", "proxy_diagnostics.json", "script_debug_runs.json",
+        "script_pull_jobs.json", "script_repo_pull_jobs.json", "script_import_jobs.json",
+        "script_renames.json", "online_task_link_requests.json",
+        "online_task_import_requests.json", "online_install_jobs.json",
+        "online_script_refresh_requests.json", "config_apply_state.json",
+        "native_sessions.sqlite3", "native_notify_deliveries", "proxy_checks",
+        "proxy_checks_index.json", "online_script_refresh.json",
+        "online_script_refresh_failures", "fls_code.json", "scheduler_state.json",
+        "fls-manager.pid", "fls-manager.lock",
+})
+
+
+def _runtime_identity_names(source_data, destination_data):
+    names = set(_RUNTIME_IDENTITY_NAMES)
+    for directory in (source_data, destination_data):
+        if directory.is_dir() and not directory.is_symlink():
+            for path in directory.iterdir():
+                if (path.name.endswith(".sqlite3") or path.name.endswith(".sqlite3-wal")
+                    or path.name.endswith(".sqlite3-shm") or path.name.endswith(".sqlite3-journal")):
+                    names.add(path.name)
+                if path.name.endswith(("_requests", "_receipts", "_jobs.json", "_history.json")):
+                    names.add(path.name)
+    return sorted(names)
+
+
+def _move_runtime_identity_files(source_data, destination_data, moved):
+    source_data = Path(source_data)
+    destination_data = Path(destination_data)
+    names = _runtime_identity_names(source_data, destination_data)
+    live_names = []
+    for name in names:
+        source = source_data / name
+        try:
+            info = source.lstat()
+        except FileNotFoundError:
+            continue
+        if not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
+            raise RuntimeError("运行时身份文件类型无效")
+        live_names.append(name)
+
+    # Strip archived identities even when this instance has no matching state.
+    for name in names:
+        _remove_restore_path(destination_data / name)
+    for name in live_names:
+        os.replace(source_data / name, destination_data / name)
+        moved.append(name)
+
+
+def _rollback_runtime_identity_files(source_data, destination_data, moved):
+    # Only move identities transferred by this commit; never scan the archive back.
+    while moved:
+        name = moved[-1]
+        source = source_data / name
+        destination = destination_data / name
+        if destination.exists() or destination.is_symlink():
+            raise RuntimeError("回滚时原运行态路径被重新创建，保留恢复副本")
+        os.replace(source, destination)
+        moved.pop()
+
+
+def _commit_restore_directories(entries, *, preserve_runtime_identity=False):
     try:
         for entry in entries:
             target = entry["target"]
@@ -962,6 +1025,15 @@ def _commit_restore_directories(entries):
                 previous = entry["workspace"] / "previous"
                 os.replace(target, previous)
                 entry["previous"] = previous
+
+            if preserve_runtime_identity and target == DATA_DIR:
+                entry["runtime_identity_moves"] = []
+                previous = entry.get("previous")
+                _move_runtime_identity_files(
+                    previous if previous is not None else target,
+                    entry["staged"],
+                    entry["runtime_identity_moves"],
+                )
 
             os.replace(entry["staged"], target)
             entry["installed"] = True
@@ -972,6 +1044,11 @@ def _commit_restore_directories(entries):
             previous = entry.get("previous")
             try:
                 if previous is not None and (previous.exists() or previous.is_symlink()):
+                    if preserve_runtime_identity and target == DATA_DIR:
+                        source = target if entry.get("installed") else entry["staged"]
+                        _rollback_runtime_identity_files(
+                            source, previous, entry.get("runtime_identity_moves", []),
+                        )
                     if target.exists() or target.is_symlink():
                         _remove_restore_path(target)
                     os.replace(previous, target)

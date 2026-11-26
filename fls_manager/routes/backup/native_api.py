@@ -4,10 +4,13 @@ import os
 import re
 import shutil
 import stat
+import subprocess
+import sys
 import tarfile
 import tempfile
 import threading
 import time
+import uuid
 import zipfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -17,7 +20,9 @@ from flask import current_app, jsonify, request, send_file
 from . import bp
 from . import _common as backup
 from .actions import submit_backup_creation, submit_backup_cancellation
+from .dependency_process import DependencyProcess, cleanup_previous_process
 from ...storage import storage_transaction, write_json
+from ...sensitive import mask_sensitive_text
 
 NATIVE_PREFIX = "/api/backup/native"
 NATIVE_BODY_LIMIT = 4096
@@ -40,8 +45,21 @@ PREFLIGHT_RECORD_BYTES = 16 * 1024
 PREFLIGHT_ID_RE = REQUEST_ID_RE
 PREFLIGHT_LOCK = threading.RLock()
 PREFLIGHT_ACTIVE = set()
+PREFLIGHT_RETAINED_FOR_RESTORE = set()
 PREFLIGHT_CANCEL_EVENTS = {}
 PREFLIGHT_FORMATS = (".tar.gz", ".tgz", ".tar", ".zip")
+RESTORE_DIR = backup.BASE_DIR / ".backup_native_restores"
+RESTORE_RECORD_LIMIT = 1000
+RESTORE_RECORD_BYTES = 64 * 1024
+RESTORE_OPERATION_LIMIT = 16
+RESTORE_ACTIVE = set()
+RESTORE_LOCK = threading.RLock()
+RESTORE_DEPENDENCY_ACTIVE = set()
+RESTORE_DEPENDENCY_CLEANUP = {}
+RESTORE_DEPENDENCY_CLEANING = set()
+RESTORE_DEPENDENCY_OUTPUT_LIMIT = 32 * 1024
+RESTORE_WORKER_TIMEOUT_SECONDS = 30 * 60
+RESTORE_PROCESS_LOCK_PATH = backup.BASE_DIR / ".backup_native_restore.lock"
 
 
 class PreflightStorageError(RuntimeError):
@@ -50,6 +68,84 @@ class PreflightStorageError(RuntimeError):
 
 class PreflightStartError(RuntimeError):
     pass
+
+
+def _try_process_lease(path, *, create=True):
+    path = Path(path)
+    if path.is_symlink():
+        raise RuntimeError("备份恢复进程锁无效")
+    flags = os.O_RDWR | (os.O_CREAT if create else 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
+    fd = os.open(path, flags, 0o600)
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise RuntimeError("备份恢复进程锁必须是普通文件")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            if create and os.fstat(fd).st_size == 0:
+                os.write(fd, b"\0")
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd
+    except (OSError, BlockingIOError):
+        os.close(fd)
+        return None
+
+
+def _release_process_lease(fd):
+    if fd is None:
+        return
+    try:
+        if os.name == "nt":
+            import msvcrt
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def _process_lease_held(path):
+    try:
+        fd = _try_process_lease(path, create=False)
+    except FileNotFoundError:
+        return False
+    if fd is None:
+        return True
+    _release_process_lease(fd)
+    return False
+
+
+def _mark_restore_lease(fd, request_id, kind, operation_id=""):
+    encoded = b"\0" + json.dumps({"request_id": request_id, "kind": kind, "operation_id": operation_id}).encode("ascii")
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.write(fd, encoded)
+    os.ftruncate(fd, len(encoded))
+    os.fsync(fd)
+
+
+def _restore_lease_matches(record, kind):
+    if not _process_lease_held(RESTORE_PROCESS_LOCK_PATH):
+        return False
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(RESTORE_PROCESS_LOCK_PATH, flags)
+        with os.fdopen(fd, "rb") as source:
+            source.seek(1)
+            encoded = source.read(513)
+        if len(encoded) > 512:
+            return False
+        owner = json.loads(encoded)
+        return (owner.get("request_id") == record["request_id"] and owner.get("kind") == kind
+                and owner.get("operation_id") == (record.get(kind + "_operation_id", "") if kind != "restore" else ""))
+    except (OSError, ValueError, AttributeError):
+        return False
 
 
 def _response(payload, status=200):
@@ -342,7 +438,7 @@ def _read_preflight_record(preflight_id):
     allowed_errors = {
         "", "archive_limit_exceeded", "insufficient_storage", "unsupported_format",
         "invalid_filename", "missing_backup_scope", "unsafe_archive_entry", "empty_archive",
-        "preflight_cancelled", "preflight_start_failed", "invalid_archive", "preflight_failed",
+        "preflight_cancelled", "preflight_start_failed", "preflight_expired", "invalid_archive", "preflight_failed",
     }
     if record.get("error_code", "") not in allowed_errors:
         raise RuntimeError("备份预检查回执损坏")
@@ -659,6 +755,7 @@ def _expire_preflight_records(now):
     records = sorted(PREFLIGHT_DIR.glob("*.json"))
     if len(records) > PREFLIGHT_RECORD_LIMIT:
         raise RuntimeError("备份预检查历史超过安全读取上限")
+    retained = _restore_retained_preflight_ids()
     expired = 0
     for path in records:
         preflight_id = path.stem
@@ -667,7 +764,7 @@ def _expire_preflight_records(now):
         record = _read_preflight_record(preflight_id)
         if record is None:
             continue
-        if preflight_id in PREFLIGHT_ACTIVE:
+        if preflight_id in PREFLIGHT_ACTIVE or preflight_id in retained:
             continue
         if record["state"] in ("expired", "failed", "cancelled"):
             if record["retention_until"] <= now:
@@ -781,7 +878,7 @@ def api_backup_native_capabilities():
         "preflight_enabled": True,
         "preflight_limit": 2,
         "preflight_ttl_seconds": PREFLIGHT_TTL_SECONDS,
-        "restore_enabled": False,
+        "restore_enabled": True,
     })
 
 
@@ -836,6 +933,7 @@ def api_backup_native_create_preflight():
             pass
         else:
             retained_count = 0
+            retained_for_restore = _restore_retained_preflight_ids()
             if PREFLIGHT_DIR.exists():
                 for path in PREFLIGHT_DIR.glob("*.json"):
                     if not path.is_file() or path.is_symlink():
@@ -845,7 +943,7 @@ def api_backup_native_create_preflight():
                     except Exception:
                         return _error("preflight_unavailable", "预检查历史无法安全读取", 503)
                     if (prior is not None and prior["state"] in ("uploading", "checking", "ready")
-                        and prior["expires_at"] > now):
+                        and (prior["expires_at"] > now or prior["request_id"] in retained_for_restore)):
                         retained_count += 1
             if retained_count >= PREFLIGHT_ACTIVE_LIMIT:
                 return _error("preflight_capacity", "已有两个未过期预检查，请先完成恢复或等待预检查过期", 429)
@@ -1272,3 +1370,1167 @@ def api_backup_native_download(filename):
         return _error("file_not_found", "备份文件不存在，请刷新列表", 404)
     except (ValueError, OSError):
         return _error("file_unavailable", "备份文件已变化或无法读取，请刷新列表", 409)
+
+
+def _native_restore_path(request_id):
+    if not REQUEST_ID_RE.fullmatch(str(request_id or "")):
+        raise ValueError("invalid restore request id")
+    if RESTORE_DIR.is_symlink():
+        raise RuntimeError("恢复作业目录无效")
+    return RESTORE_DIR / (request_id + ".json")
+
+
+def _write_native_restore(record):
+    _ensure_private_directory(RESTORE_DIR)
+    path = _native_restore_path(record["request_id"])
+    temp = path.with_name(path.name + ".tmp")
+    if path.is_symlink() or temp.is_symlink():
+        raise RuntimeError("恢复作业回执无效")
+    encoded = json.dumps(record, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if len(encoded) > RESTORE_RECORD_BYTES:
+        raise RuntimeError("恢复作业回执超过安全大小")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
+    fd = os.open(temp, flags, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            fd = -1
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, path)
+        try:
+            directory_fd = os.open(RESTORE_DIR, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError:
+            pass
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        temp.unlink(missing_ok=True)
+
+
+def _read_native_restore(request_id):
+    path = _native_restore_path(request_id)
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(info.st_mode) or info.st_size > RESTORE_RECORD_BYTES:
+        raise RuntimeError("恢复作业回执无效")
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+        with os.fdopen(fd, "rb") as source:
+            opened = os.fstat(source.fileno())
+            if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(info, opened):
+                raise RuntimeError("恢复作业回执已变化")
+            encoded = source.read(RESTORE_RECORD_BYTES + 1)
+        if len(encoded) > RESTORE_RECORD_BYTES:
+            raise RuntimeError("恢复作业回执超过安全大小")
+        record = json.loads(encoded, object_pairs_hook=_unique_object)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise RuntimeError("恢复作业回执损坏") from exc
+    states = {"accepted", "extracting", "staging", "committing", "restored", "failed", "unknown"}
+    scheduler_states = {"not_required", "pending", "running", "succeeded", "failed", "unknown"}
+    dependency_states = {"not_requested", "pending", "running", "succeeded", "failed", "unknown"}
+    if (not isinstance(record, dict) or record.get("version") != 1
+        or record.get("request_id") != request_id
+        or not REQUEST_ID_RE.fullmatch(str(record.get("preflight_id") or ""))
+        or not re.fullmatch(r"[a-f0-9]{64}", str(record.get("archive_sha256") or ""))
+        or record.get("state") not in states
+        or record.get("scheduler_state") not in scheduler_states
+        or record.get("dependency_state") not in dependency_states
+        or record.get("restore_items") not in (["data"], ["scripts"], ["data", "scripts"])
+        or type(record.get("created_at")) is not int or record["created_at"] < 0
+        or type(record.get("updated_at")) is not int or record["updated_at"] < record["created_at"]
+        or type(record.get("restore_dependencies")) is not bool
+        or type(record.get("live_state_unchanged")) is not bool
+        or type(record.get("archive_size_bytes")) is not int
+        or record["archive_size_bytes"] < 1
+        or not isinstance(record.get("filename"), str) or len(record["filename"]) > 255
+        or not isinstance(record.get("error", ""), str) or len(record.get("error", "")) > 1000
+        or not isinstance(record.get("scheduler_error", ""), str) or len(record.get("scheduler_error", "")) > 1000
+        or not isinstance(record.get("dependency_error", ""), str) or len(record.get("dependency_error", "")) > 1000
+        or not isinstance(record.get("dependency_output", ""), str)
+        or len(record.get("dependency_output", "").encode("utf-8")) > RESTORE_DEPENDENCY_OUTPUT_LIMIT
+        or not isinstance(record.get("scheduler_operation_id", ""), str)
+        or record.get("scheduler_operation_id", "") and not REQUEST_ID_RE.fullmatch(record["scheduler_operation_id"])
+        or not isinstance(record.get("dependency_operation_id", ""), str)
+        or record.get("dependency_operation_id", "") and not REQUEST_ID_RE.fullmatch(record["dependency_operation_id"])):
+        raise RuntimeError("恢复作业回执结构无效")
+    operations = record.get("operations", {})
+    if not isinstance(operations, dict) or len(operations) > RESTORE_OPERATION_LIMIT:
+        raise RuntimeError("恢复后续操作历史无效")
+    for operation_id, operation in operations.items():
+        if (not REQUEST_ID_RE.fullmatch(operation_id) or not isinstance(operation, dict)
+            or operation.get("kind") not in ("scheduler", "dependency")
+            or operation.get("state") not in ("running", "succeeded", "failed", "unknown")
+            or not isinstance(operation.get("error"), str)
+            or len(operation["error"].encode("utf-8")) > 512
+            or type(operation.get("created_at")) is not int
+            or type(operation.get("updated_at")) is not int
+            or operation["updated_at"] < operation["created_at"]):
+            raise RuntimeError("恢复后续操作回执无效")
+    if type(record.get("dependency_cleanup_pending", False)) is not bool:
+        raise RuntimeError("依赖清理状态无效")
+    guard = record.get("dependency_guard")
+    if guard is not None and (
+        not isinstance(guard, dict)
+        or guard.get("kind") not in ("posix_group", "windows_job")
+        or guard.get("kind") == "posix_group" and (type(guard.get("pid")) is not int or guard["pid"] <= 1)
+        or guard.get("kind") == "windows_job" and (
+            not isinstance(guard.get("name"), str)
+            or not re.fullmatch(r"Local\\FLSBackupDependencies_[a-f0-9]{32}", guard["name"])
+        )
+    ):
+        raise RuntimeError("依赖执行身份无效")
+    workspace = record.get("dependency_workspace")
+    if workspace is not None and (
+        not isinstance(workspace, dict)
+        or not isinstance(workspace.get("name"), str)
+        or not re.fullmatch(r"deps-" + request_id[:8] + r"-[a-z0-9_]{1,64}", workspace["name"])
+        or type(workspace.get("device")) is not int or type(workspace.get("inode")) is not int
+    ):
+        raise RuntimeError("依赖工作目录身份无效")
+    return record
+
+
+def _native_restore_records():
+    if RESTORE_DIR.is_symlink():
+        raise RuntimeError("恢复作业目录无效")
+    records = []
+    for path in RESTORE_DIR.glob("*.json"):
+        if len(records) >= RESTORE_RECORD_LIMIT or not REQUEST_ID_RE.fullmatch(path.stem):
+            raise RuntimeError("恢复历史超过安全读取上限或包含无效回执")
+        record = _read_native_restore(path.stem)
+        if record is None:
+            raise RuntimeError("恢复历史在读取时发生变化")
+        records.append(record)
+    return records
+
+
+def _restore_retained_preflight_ids():
+    retained = set(PREFLIGHT_RETAINED_FOR_RESTORE)
+    for record in _native_restore_records():
+        if (record["state"] in ("accepted", "extracting", "staging", "committing", "unknown")
+            or record["state"] == "restored" and record["restore_dependencies"]
+            and record["dependency_state"] not in ("succeeded", "not_requested")):
+            retained.add(record["preflight_id"])
+    return retained
+
+
+def _dependency_cleanup_pending():
+    return bool(RESTORE_DEPENDENCY_CLEANUP) or any(
+        record.get("dependency_cleanup_pending", False) for record in _native_restore_records()
+    )
+
+
+def _restore_record_update(request_id, **changes):
+    with RESTORE_LOCK:
+        record = _read_native_restore(request_id)
+        if record is None:
+            raise RuntimeError("恢复作业回执不存在")
+        record.update(changes)
+        record["updated_at"] = int(time.time())
+        for kind in ("scheduler", "dependency"):
+            if kind + "_state" in changes:
+                operation = record.get("operations", {}).get(record.get(kind + "_operation_id"))
+                if operation is not None:
+                    operation.update(
+                        state=record[kind + "_state"],
+                        error=_bounded_text(record.get(kind + "_error", ""), 512),
+                        updated_at=record["updated_at"],
+                    )
+        _write_native_restore(record)
+        return record
+
+
+def _native_restore_payload(record):
+    active_states = {"accepted", "extracting", "staging", "committing"}
+    active = record["state"] in active_states and (
+        record["request_id"] in RESTORE_ACTIVE or _restore_lease_matches(record, "restore")
+    )
+    phase = record["state"]
+    interrupted_before_commit = not active and phase in ("accepted", "extracting", "staging")
+    state = "failed" if interrupted_before_commit else phase if active or phase not in active_states else "unknown"
+    scheduler_state = record["scheduler_state"]
+    if (scheduler_state == "running" and record["request_id"] not in RESTORE_SCHEDULER_ACTIVE
+        and not _restore_lease_matches(record, "scheduler")):
+        scheduler_state = "unknown"
+    dependency_state = record["dependency_state"]
+    if (dependency_state == "running" and record["request_id"] not in RESTORE_DEPENDENCY_ACTIVE
+        and not _restore_lease_matches(record, "dependency")):
+        dependency_state = "unknown"
+    cleanup_required = record["request_id"] in RESTORE_DEPENDENCY_CLEANUP or (
+        record.get("dependency_cleanup_pending", False) and record["request_id"] not in RESTORE_DEPENDENCY_ACTIVE
+        and (record["dependency_state"] != "running" or not _restore_lease_matches(record, "dependency"))
+    )
+    if cleanup_required:
+        dependency_state = "unknown"
+    return {
+        "request_id": record["request_id"],
+        "preflight_id": record["preflight_id"],
+        "filename": record["filename"],
+        "archive_sha256": record["archive_sha256"],
+        "archive_size_bytes": record["archive_size_bytes"],
+        "restore_items": list(record["restore_items"]),
+        "restore_dependencies": record["restore_dependencies"],
+        "state": state,
+        "phase": phase,
+        "active": active,
+        "committed": phase == "restored",
+        "live_state_unchanged": record["live_state_unchanged"] or interrupted_before_commit,
+        "restore_outcome_unknown": state == "unknown" or phase == "unknown",
+        "error": _bounded_text(
+            record.get("error", "") or ("面板进程在目录提交前中断；原目录未更改" if interrupted_before_commit else ""),
+            1000,
+        ),
+        "created_at": record["created_at"],
+        "updated_at": record["updated_at"],
+        "scheduler": {
+            "state": scheduler_state,
+            "required": "data" in record["restore_items"],
+            "operation_id": record.get("scheduler_operation_id", ""),
+            "error": _bounded_text(record.get("scheduler_error", ""), 1000),
+        },
+        "dependencies": {
+            "state": dependency_state,
+            "operation_id": record.get("dependency_operation_id", ""),
+            "error": _bounded_text(record.get("dependency_error", ""), 1000),
+            "output": _bounded_text(record.get("dependency_output", ""), RESTORE_DEPENDENCY_OUTPUT_LIMIT),
+            "cleanup_required": cleanup_required,
+        },
+    }
+
+
+def _bounded_text(value, limit):
+    if not isinstance(value, str):
+        return ""
+    value = value.replace(str(backup.BASE_DIR), "[面板]")
+    value = re.sub(r"(https?://)[^/@\s]+@", r"\1[redacted]@", value, flags=re.IGNORECASE)
+    value = mask_sensitive_text(value)
+    value = "".join(char for char in value if ord(char) >= 32 or char in "\n\t")
+    return value.encode("utf-8")[-limit:].decode("utf-8", errors="ignore")
+
+
+def _native_restore_identity_matches(record, preflight_id, digest, items, restore_dependencies):
+    return (record.get("preflight_id") == preflight_id
+        and record.get("archive_sha256") == digest
+        and record.get("restore_items") == items
+        and record.get("restore_dependencies") is restore_dependencies)
+
+
+def _fingerprint_preflight_archive(preflight_id, expected_size, expected_digest, destination=None):
+    if PREFLIGHT_ARCHIVE_DIR.is_symlink():
+        raise ValueError("preflight_archive_changed")
+    source_path = _preflight_archive_path(preflight_id)
+    info = source_path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_size != expected_size:
+        raise ValueError("preflight_archive_changed")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    source_fd = os.open(source_path, flags)
+    digest = hashlib.sha256()
+    size = 0
+    target = None
+    try:
+        opened = os.fstat(source_fd)
+        if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(info, opened):
+            raise ValueError("preflight_archive_changed")
+        if destination is not None:
+            target = destination.open("xb")
+        with os.fdopen(source_fd, "rb") as source:
+            source_fd = -1
+            while True:
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                digest.update(chunk)
+                if target is not None:
+                    target.write(chunk)
+            if target is not None:
+                target.flush()
+                os.fsync(target.fileno())
+    finally:
+        if source_fd >= 0:
+            os.close(source_fd)
+        if target is not None:
+            target.close()
+    actual = digest.hexdigest()
+    if size != expected_size or actual != expected_digest:
+        if destination is not None:
+            destination.unlink(missing_ok=True)
+        raise ValueError("preflight_archive_changed")
+    return size, actual
+
+
+def _directory_bytes(path):
+    path = Path(path)
+    if not path.exists():
+        return 0
+    if path.is_symlink() or not path.is_dir():
+        raise ValueError("live_restore_target_invalid")
+    total = 0
+    for current, directories, files in os.walk(path, followlinks=False):
+        for name in directories + files:
+            item = Path(current) / name
+            info = item.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                raise ValueError("live_restore_target_invalid")
+            if stat.S_ISREG(info.st_mode):
+                total += info.st_size
+            elif not stat.S_ISDIR(info.st_mode):
+                raise ValueError("live_restore_target_invalid")
+    return total
+
+
+def _restore_error_code(exc):
+    value = str(exc)
+    allowed = {
+        "preflight_not_found", "preflight_not_ready", "preflight_expired", "preflight_archive_changed",
+        "restore_scope_invalid", "dependency_file_missing", "insufficient_restore_storage",
+        "live_restore_target_invalid", "restore_busy", "restore_history_full", "restore_start_failed",
+    }
+    return value if value in allowed else "restore_failed"
+
+
+def _native_restore_response(record, status=200, *, replayed=False):
+    return _response({"ok": True, "restore": _native_restore_payload(record), "replayed": replayed}, status)
+
+
+@bp.route(NATIVE_PREFIX + "/restores", methods=["POST"])
+def api_backup_native_create_restore():
+    body, error = _json_body(
+        {"request_id", "preflight_id", "archive_sha256", "restore_items", "restore_dependencies", "confirm_data_impact"},
+        {"request_id", "preflight_id", "archive_sha256", "restore_items", "restore_dependencies", "confirm_data_impact"},
+    )
+    if error:
+        return error
+    request_id, preflight_id = body["request_id"], body["preflight_id"]
+    digest, items = body["archive_sha256"], body["restore_items"]
+    restore_dependencies = body["restore_dependencies"]
+    if not isinstance(request_id, str) or not REQUEST_ID_RE.fullmatch(request_id):
+        return _error("invalid_request_id", "恢复请求标识无效", 400)
+    if not isinstance(preflight_id, str) or not REQUEST_ID_RE.fullmatch(preflight_id):
+        return _error("invalid_preflight_id", "备份预检查标识无效", 400)
+    if not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest):
+        return _error("invalid_archive_sha256", "备份摘要无效", 400)
+    if (not isinstance(items, list) or not items or any(item not in ("data", "scripts") for item in items)
+        or len(items) != len(set(items)) or type(restore_dependencies) is not bool
+        or type(body["confirm_data_impact"]) is not bool):
+        return _error("invalid_restore_options", "恢复范围或选项无效", 400)
+    items = [item for item in ("data", "scripts") if item in items]
+    if "data" in items and body["confirm_data_impact"] is not True:
+        return _error("data_impact_confirmation_required", "恢复配置数据必须明确确认可能改变面板访问配置", 400)
+
+    restore_lease_fd = None
+    try:
+        with PREFLIGHT_LOCK, RESTORE_LOCK:
+            existing = _read_native_restore(request_id)
+            if existing is not None:
+                if not _native_restore_identity_matches(existing, preflight_id, digest, items, restore_dependencies):
+                    return _error("restore_id_conflict", "该恢复请求标识已绑定其他预检查或恢复范围", 409)
+                active = _native_restore_payload(existing)["active"]
+                return _native_restore_response(existing, 202 if active else 200, replayed=True)
+
+            restore_lease_fd = _try_process_lease(RESTORE_PROCESS_LOCK_PATH)
+            if restore_lease_fd is None:
+                return _error("restore_busy", "另一面板进程正在执行恢复，请等待后查询", 409)
+            _mark_restore_lease(restore_lease_fd, request_id, "restore")
+
+            preflight = _read_preflight_record(preflight_id)
+            if preflight is None:
+                return _error("preflight_not_found", "备份预检查不存在，请重新选择文件", 404)
+            if preflight["state"] != "ready":
+                return _error("preflight_not_ready", "备份预检查尚未成功，未恢复任何目录", 409)
+            if preflight["expires_at"] <= int(time.time()):
+                return _error("preflight_expired", "备份预检查已过期，请重新选择归档", 410)
+            if preflight["archive_sha256"] != digest or not set(items).issubset(preflight["items"]):
+                return _error("preflight_identity_conflict", "预检查摘要或恢复范围与原归档不一致", 409)
+            if restore_dependencies and not preflight["dependency_files"]:
+                return _error("dependency_file_missing", "归档中没有可恢复的依赖清单", 400)
+            _fingerprint_preflight_archive(preflight_id, preflight["archive_size_bytes"], digest)
+
+            if RESTORE_DIR.is_symlink():
+                return _error("restore_unavailable", "恢复作业目录无效", 503)
+            records = _native_restore_records()
+            if len(records) >= RESTORE_RECORD_LIMIT:
+                return _error("restore_history_full", "恢复历史达到安全保留上限，请先导出并清理旧历史", 429)
+            for prior in records:
+                if prior.get("dependency_cleanup_pending", False):
+                    return _error("dependency_cleanup_required", "原依赖作业尚需确认清理，请先查询并处理原恢复请求", 409)
+                if prior["preflight_id"] == preflight_id:
+                    return _error("preflight_already_used", "该预检查已绑定恢复请求；请查询原请求或重新预检查归档", 409)
+                unresolved = prior["state"] == "committing" or (
+                    prior["state"] == "unknown" and not prior["live_state_unchanged"]
+                )
+                if unresolved:
+                    if prior["request_id"] in RESTORE_ACTIVE:
+                        return _error("restore_busy", "另一项恢复作业正在运行，请等待其终态", 409)
+                    return _error(
+                        "restore_previous_unresolved",
+                        "先查询并人工确认未完成恢复请求的目录结果，不得自动启动新恢复",
+                        409,
+                    )
+                if prior["state"] in ("accepted", "extracting", "staging"):
+                    if prior["request_id"] in RESTORE_ACTIVE:
+                        return _error("restore_busy", "另一项恢复作业正在运行，请等待其终态", 409)
+                    prior.update(
+                        state="failed",
+                        live_state_unchanged=True,
+                        error="面板进程在目录提交前中断；原目录未更改",
+                        updated_at=int(time.time()),
+                    )
+                    _write_native_restore(prior)
+            required = preflight["expanded_bytes"] * 2 + 16 * 1024 * 1024
+            for item in items:
+                required += _directory_bytes(backup.DATA_DIR if item == "data" else backup.SCRIPT_DIR)
+            if shutil.disk_usage(backup.BASE_DIR).free < required:
+                return _error("insufficient_restore_storage", "面板剩余空间不足，未提交恢复", 507)
+            if not backup.try_begin_restore_activity():
+                _release_process_lease(restore_lease_fd)
+                restore_lease_fd = None
+                return _error("restore_busy", "备份或恢复作业正在运行，请等待后重试", 409)
+
+            now = int(time.time())
+            record = {
+                "version": 1,
+                "request_id": request_id,
+                "preflight_id": preflight_id,
+                "archive_sha256": digest,
+                "archive_size_bytes": preflight["archive_size_bytes"],
+                "filename": preflight["filename"],
+                "restore_items": items,
+                "restore_dependencies": restore_dependencies,
+                "state": "accepted",
+                "live_state_unchanged": True,
+                "scheduler_state": "pending" if "data" in items else "not_required",
+                "scheduler_operation_id": "",
+                "scheduler_error": "",
+                "dependency_state": "pending" if restore_dependencies else "not_requested",
+                "dependency_operation_id": "",
+                "dependency_error": "",
+                "dependency_output": "",
+                "error": "",
+                "created_at": now,
+                "updated_at": now,
+            }
+            try:
+                _write_native_restore(record)
+                RESTORE_ACTIVE.add(request_id)
+                PREFLIGHT_RETAINED_FOR_RESTORE.add(preflight_id)
+            except Exception:
+                PREFLIGHT_RETAINED_FOR_RESTORE.discard(preflight_id)
+                backup.end_restore_activity()
+                _release_process_lease(restore_lease_fd)
+                restore_lease_fd = None
+                raise
+
+        try:
+            app = current_app._get_current_object()
+            worker = threading.Thread(
+                target=_run_native_restore,
+                args=(app, request_id, restore_lease_fd),
+                name="backup-native-restore-" + request_id[:8],
+                daemon=True,
+            )
+            worker.start()
+            restore_lease_fd = None
+        except Exception:
+            try:
+                with RESTORE_LOCK:
+                    current = _read_native_restore(request_id)
+                    if current is not None:
+                        current.update(state="failed", error="恢复作业未能启动", updated_at=int(time.time()))
+                        _write_native_restore(current)
+            finally:
+                with RESTORE_LOCK:
+                    RESTORE_ACTIVE.discard(request_id)
+                    PREFLIGHT_RETAINED_FOR_RESTORE.discard(preflight_id)
+                backup.end_restore_activity()
+            return _error("restore_start_failed", "恢复作业无法启动，目录未更改", 503)
+        latest = _read_native_restore(request_id)
+        return _native_restore_response(latest or record, 202 if latest and latest["state"] in ("accepted", "extracting", "staging", "committing") else 200)
+    except ValueError as exc:
+        code = _restore_error_code(exc)
+        status = 507 if code == "insufficient_restore_storage" else 409 if code in ("preflight_archive_changed", "live_restore_target_invalid") else 503
+        return _error(code, "备份预检查已变化或面板存储状态不安全，未提交恢复", status)
+    except Exception:
+        return _error("restore_unavailable", "无法安全受理恢复请求；请查询原请求后再操作", 503)
+    finally:
+        _release_process_lease(restore_lease_fd)
+
+
+def _run_native_restore(app, request_id, process_lease_fd=None):
+    from . import restore as legacy_restore
+    from ... import models
+    from ...native_sessions import NATIVE_SESSION_LOCK
+
+    work_dir = None
+    staged = []
+    commit_attempted = False
+    directories_restored = False
+    try:
+        with app.app_context():
+            record = _read_native_restore(request_id)
+            if record is None:
+                raise RuntimeError("restore record disappeared")
+            _restore_record_update(request_id, state="extracting", error="")
+            preflight = _read_preflight_record(record["preflight_id"])
+            if preflight is None or preflight["archive_sha256"] != record["archive_sha256"]:
+                raise ValueError("preflight_archive_changed")
+            work_dir = Path(tempfile.mkdtemp(prefix="restore-" + request_id[:8] + "-", dir=str(PREFLIGHT_WORK_DIR)))
+            suffix = {"tar.gz": ".tar.gz", "tgz": ".tgz", "tar": ".tar", "zip": ".zip"}[preflight["archive_format"]]
+            archive_path = work_dir / ("source" + suffix)
+            _fingerprint_preflight_archive(
+                record["preflight_id"], record["archive_size_bytes"], record["archive_sha256"], archive_path,
+            )
+            extract_dir = work_dir / "extracted"
+            backup.extract_archive(archive_path, extract_dir)
+            root = backup.find_backup_root(extract_dir)
+            if root is None:
+                raise ValueError("restore_scope_invalid")
+            restore_sources = []
+            for item in record["restore_items"]:
+                source = root / item
+                if source.is_symlink() or not source.is_dir():
+                    raise ValueError("restore_scope_invalid")
+                restore_sources.append((source, backup.DATA_DIR if item == "data" else backup.SCRIPT_DIR, item == "data"))
+            dep_file = backup.find_dependency_file(extract_dir, root) if record["restore_dependencies"] else None
+            if record["restore_dependencies"] and dep_file is None:
+                raise ValueError("dependency_file_missing")
+
+            _restore_record_update(request_id, state="staging")
+            for source, target, keep_backups in restore_sources:
+                staged.append(legacy_restore._stage_restore_directory(source, target, keep_backups))
+
+            with RESTORE_LOCK, models.COLLECTION_MUTATION_LOCK, models.TASKS_MUTATION_LOCK, storage_transaction(), NATIVE_SESSION_LOCK:
+                _restore_record_update(request_id, state="committing", live_state_unchanged=False)
+                commit_attempted = True
+                legacy_restore._commit_restore_directories(staged, preserve_runtime_identity=True)
+                directories_restored = True
+                _restore_record_update(request_id, state="restored", live_state_unchanged=False,
+                                       scheduler_state="pending" if "data" in record["restore_items"] else "not_required",
+                                       dependency_state="pending" if record["restore_dependencies"] else "not_requested",
+                                       error="")
+    except legacy_restore.BackupRestoreWriteError as exc:
+        try:
+            _restore_record_update(
+                request_id,
+                state="failed" if exc.live_state_unchanged else "unknown",
+                live_state_unchanged=bool(exc.live_state_unchanged),
+                error=_bounded_text(str(exc), 1000),
+            )
+        except Exception:
+            pass
+    except Exception as exc:
+        try:
+            _restore_record_update(
+                request_id,
+                state="restored" if directories_restored else "unknown" if commit_attempted else "failed",
+                live_state_unchanged=not commit_attempted and not directories_restored,
+                error=_bounded_text(str(exc), 1000),
+            )
+        except Exception:
+            pass
+    finally:
+        for entry in staged:
+            if not entry.get("preserve_workspace"):
+                shutil.rmtree(entry["workspace"], ignore_errors=True)
+        if work_dir is not None:
+            shutil.rmtree(work_dir, ignore_errors=True)
+        with RESTORE_LOCK:
+            RESTORE_ACTIVE.discard(request_id)
+            try:
+                record = _read_native_restore(request_id)
+                PREFLIGHT_RETAINED_FOR_RESTORE.discard(record["preflight_id"] if record else "")
+            except Exception:
+                pass
+            backup.end_restore_activity()
+        _release_process_lease(process_lease_fd)
+
+
+RESTORE_SCHEDULER_ACTIVE = set()
+
+
+@bp.route(NATIVE_PREFIX + "/restores/<request_id>")
+def api_backup_native_restore(request_id):
+    if not REQUEST_ID_RE.fullmatch(request_id):
+        return _error("invalid_request_id", "恢复请求标识无效", 400)
+    try:
+        with RESTORE_LOCK:
+            record = _read_native_restore(request_id)
+            if record is None:
+                return _error("restore_not_found", "恢复请求不存在", 404)
+            payload = _native_restore_payload(record)
+    except Exception:
+        return _error("restore_unavailable", "恢复请求无法安全读取", 503)
+    return _response({"ok": True, "restore": payload})
+
+
+@bp.route(NATIVE_PREFIX + "/restores")
+def api_backup_native_restore_history():
+    args, error = _single_query({"limit", "offset"})
+    if error:
+        return error
+    try:
+        limit = int(args.get("limit", "25"))
+        offset = int(args.get("offset", "0"))
+    except (TypeError, ValueError):
+        return _error("invalid_page", "恢复历史分页参数无效", 400)
+    if not 1 <= limit <= 100 or not 0 <= offset <= 100000:
+        return _error("invalid_page", "恢复历史分页参数超出范围", 400)
+    try:
+        with RESTORE_LOCK:
+            records = [_native_restore_payload(record) for record in _native_restore_records()]
+            records.sort(key=lambda item: (item["updated_at"], item["request_id"]), reverse=True)
+            return _response({
+                "ok": True,
+                "items": records[offset:offset + limit],
+                "total": len(records),
+                "limit": limit,
+                "offset": offset,
+                "has_more": offset + limit < len(records),
+            })
+    except Exception:
+        return _error("restore_history_unavailable", "恢复历史无法完整读取，请修复回执后重试", 503)
+
+
+@bp.route(NATIVE_PREFIX + "/restore-maintenance")
+def api_backup_native_restore_maintenance():
+    from . import restore as legacy_restore
+    try:
+        state = legacy_restore._read_restore_archive_maintenance_state()
+        if state is None:
+            payload = {"ok": True, "maintenance": None}
+        else:
+            payload = {
+                "ok": True,
+                "maintenance": {
+                    "event_id": state["event_id"],
+                    "required": state["required"],
+                    "kind": state["kind"],
+                    "acknowledged": state.get("acknowledged", False),
+                    "notice": legacy_restore._restore_archive_maintenance_notice(state),
+                },
+            }
+        return _response(payload)
+    except Exception:
+        return _error("restore_maintenance_unavailable", "恢复归档维护状态无法读取，请修复回执后重试", 503)
+
+
+@bp.route(NATIVE_PREFIX + "/restore-maintenance/<event_id>/ack", methods=["POST"])
+def api_backup_native_ack_restore_maintenance(event_id):
+    body, error = _json_body(set(), set())
+    if error:
+        return error
+    from . import restore as legacy_restore
+    payload, status = legacy_restore._ack_restore_archive_maintenance(event_id)
+    return _response(payload, status)
+
+
+@bp.route(NATIVE_PREFIX + "/restores/<request_id>/resolve", methods=["POST"])
+def api_backup_native_resolve_restore(request_id):
+    if not REQUEST_ID_RE.fullmatch(request_id):
+        return _error("invalid_request_id", "恢复请求标识无效", 400)
+    body, error = _json_body({"outcome", "confirm"}, {"outcome", "confirm"})
+    if error:
+        return error
+    if body["outcome"] not in ("restored", "not_applied") or type(body["confirm"]) is not bool or not body["confirm"]:
+        return _error("invalid_resolution", "必须明确确认已检查的恢复结果", 400)
+    process_lease_fd = None
+    with RESTORE_LOCK:
+        try:
+            process_lease_fd = _try_process_lease(RESTORE_PROCESS_LOCK_PATH)
+            if process_lease_fd is None:
+                return _error("restore_still_active", "另一面板进程仍在执行恢复，不能人工确认结果", 409)
+            record = _read_native_restore(request_id)
+            if record is None:
+                return _error("restore_not_found", "恢复请求不存在", 404)
+            if request_id in RESTORE_ACTIVE:
+                return _error("restore_still_active", "恢复仍在执行，不能人工确认结果", 409)
+            if record["state"] not in ("accepted", "extracting", "staging", "committing", "unknown"):
+                return _error("restore_already_resolved", "恢复请求已有明确终态", 409)
+            if body["outcome"] == "restored":
+                record.update(
+                    state="restored",
+                    live_state_unchanged=False,
+                    scheduler_state="pending" if "data" in record["restore_items"] else "not_required",
+                    dependency_state="pending" if record["restore_dependencies"] else "not_requested",
+                    error="",
+                )
+            else:
+                record.update(
+                    state="failed",
+                    live_state_unchanged=True,
+                    scheduler_state="not_required",
+                    dependency_state="not_requested",
+                    error="用户确认检查后目录保持原状；未执行后续处理",
+                )
+            record["operator_resolution"] = body["outcome"]
+            record["updated_at"] = int(time.time())
+            _write_native_restore(record)
+            return _native_restore_response(record)
+        except Exception:
+            return _error("restore_unavailable", "恢复结果确认未能持久保存，请查询原请求", 503)
+        finally:
+            _release_process_lease(process_lease_fd)
+
+
+def _restore_followup_record(request_id):
+    record = _read_native_restore(request_id)
+    if record is None:
+        return None, _error("restore_not_found", "恢复请求不存在", 404)
+    if record["state"] not in ("restored", "unknown"):
+        return None, _error("restore_not_committed", "目录恢复尚未确认完成，不能执行后续处理", 409)
+    if record["state"] == "unknown":
+        return None, _error("restore_outcome_unknown", "恢复结果未知；检查目录后不要自动重提", 409)
+    return record, None
+
+
+def _replay_restore_followup(record, kind, operation_id):
+    operation = record.get("operations", {}).get(operation_id)
+    if operation is not None:
+        if operation["kind"] != kind:
+            return _error("operation_id_conflict", "操作标识已绑定另一种后续处理", 409)
+        snapshot = dict(operation, operation_id=operation_id)
+        if snapshot["state"] == "running" and (
+            record.get(kind + "_operation_id") != operation_id
+            or kind == "dependency" and record["request_id"] in RESTORE_DEPENDENCY_CLEANUP
+            or not _restore_lease_matches(record, kind)
+        ):
+            snapshot["state"] = "unknown"
+        return _response({
+            "ok": True, "replayed": True, "operation": snapshot,
+            "restore": _native_restore_payload(record),
+        })
+    if record.get(kind + "_operation_id") == operation_id:
+        return _native_restore_response(record, replayed=True)
+    return None
+
+
+def _claim_restore_followup(request_id, kind, operation_id, confirm_retry):
+    record, response = _restore_followup_record(request_id)
+    if response:
+        return None, None, response
+    response = _replay_restore_followup(record, kind, operation_id)
+    if response is not None:
+        return None, None, response
+    fd = _try_process_lease(RESTORE_PROCESS_LOCK_PATH)
+    if fd is None:
+        return None, None, _error("restore_busy", "另一恢复或后续处理正在执行，请查询原请求", 409)
+    claimed = False
+    try:
+        # Another process may have completed an operation since the first read.
+        record, response = _restore_followup_record(request_id)
+        if response:
+            return None, None, response
+        response = _replay_restore_followup(record, kind, operation_id)
+        if response is not None:
+            return None, None, response
+        operations = record.setdefault("operations", {})
+        if kind == "scheduler" and "data" not in record["restore_items"]:
+            return None, None, _error("scheduler_not_required", "本次仅恢复脚本，无需重载调度器", 409)
+        if kind == "dependency" and not record["restore_dependencies"]:
+            return None, None, _error("dependencies_not_requested", "恢复确认中未选择安装依赖", 409)
+        if record[kind + "_state"] in ("succeeded", "failed", "unknown", "running") and not confirm_retry:
+            return None, None, _error(kind + "_retry_confirmation_required", "请核对原结果并明确确认新的后续处理尝试", 409)
+        if len(operations) >= RESTORE_OPERATION_LIMIT:
+            return None, None, _error("restore_operation_capacity", "该恢复已达到后续操作保留上限，请检查面板维护状态", 429)
+        if _dependency_cleanup_pending():
+            return None, None, _error("dependency_cleanup_required", "原依赖作业尚需清理；清理确认前不能开始新的后续处理", 409)
+        if kind == "dependency":
+            preflight = _read_preflight_record(record["preflight_id"])
+            if (preflight is None or preflight["state"] != "ready"
+                or preflight["archive_sha256"] != record["archive_sha256"]):
+                return None, None, _error("dependency_archive_unavailable", "恢复所引用的依赖归档不可用，请检查原请求", 409)
+        _mark_restore_lease(fd, request_id, kind, operation_id)
+        now = int(time.time())
+        for prior in operations.values():
+            if prior["state"] == "running":
+                prior.update(state="unknown", updated_at=now)
+        operations[operation_id] = {"kind": kind, "state": "running", "error": "", "created_at": now, "updated_at": now}
+        record.update({kind + "_state": "running", kind + "_operation_id": operation_id,
+                       kind + "_error": "", "updated_at": now})
+        if kind == "dependency":
+            record["dependency_output"] = ""
+            record["dependency_guard"] = None
+            record["dependency_workspace"] = None
+            record["dependency_cleanup_pending"] = False
+        _write_native_restore(record)
+        claimed = True
+        return record, fd, None
+    finally:
+        if not claimed:
+            _release_process_lease(fd)
+
+
+@bp.route(NATIVE_PREFIX + "/restores/<request_id>/scheduler-reload", methods=["POST"])
+def api_backup_native_restore_scheduler_reload(request_id):
+    if not REQUEST_ID_RE.fullmatch(request_id):
+        return _error("invalid_request_id", "恢复请求标识无效", 400)
+    body, error = _json_body({"operation_id", "confirm_retry"}, {"operation_id", "confirm_retry"})
+    if error:
+        return error
+    operation_id = body["operation_id"]
+    if not isinstance(operation_id, str) or not REQUEST_ID_RE.fullmatch(operation_id) or type(body["confirm_retry"]) is not bool:
+        return _error("invalid_operation", "调度器重载操作标识或确认无效", 400)
+    from ...scheduler import reload_scheduler
+    with RESTORE_LOCK:
+        try:
+            record, process_lease_fd, response = _claim_restore_followup(
+                request_id, "scheduler", operation_id, body["confirm_retry"],
+            )
+            if response:
+                return response
+            RESTORE_SCHEDULER_ACTIVE.add(request_id)
+        except Exception:
+            return _error("restore_unavailable", "无法安全开始调度器重载，请查询原请求", 503)
+    try:
+        try:
+            reload_scheduler()
+        except Exception as exc:
+            record = _restore_record_update(request_id, scheduler_state="failed", scheduler_error=_bounded_text(str(exc), 1000))
+            return _response({"ok": False, "restore": _native_restore_payload(record), "msg": "调度器重载失败；目录没有重复恢复"}, 503)
+        record = _restore_record_update(request_id, scheduler_state="succeeded", scheduler_error="")
+        return _response({"ok": True, "restore": _native_restore_payload(record), "msg": "调度器已重载，恢复目录保持不变"})
+    except Exception:
+        return _error("scheduler_reload_unknown", "调度器重载结果尚未持久确认；查询原恢复请求后再决定", 503)
+    finally:
+        with RESTORE_LOCK:
+            RESTORE_SCHEDULER_ACTIVE.discard(request_id)
+        _release_process_lease(process_lease_fd)
+
+
+def _drain_restore_dependency_output(stream, output, output_lock, errors=None):
+    pending = bytearray()
+    dropping_line = False
+
+    def append_line(line):
+        sanitized = _bounded_text(line.decode("utf-8", errors="replace"), 8192).encode("utf-8") + b"\n"
+        with output_lock:
+            output.extend(sanitized)
+            if len(output) > RESTORE_DEPENDENCY_OUTPUT_LIMIT:
+                del output[:-RESTORE_DEPENDENCY_OUTPUT_LIMIT]
+
+    try:
+        read = getattr(stream, "read1", stream.read)
+        while True:
+            chunk = read(4096)
+            if not chunk:
+                if pending and not dropping_line:
+                    append_line(pending)
+                return
+            for index, part in enumerate(chunk.replace(b"\r", b"\n").split(b"\n")):
+                if index:
+                    if not dropping_line:
+                        append_line(pending)
+                    pending.clear()
+                    dropping_line = False
+                if dropping_line:
+                    continue
+                if len(pending) + len(part) > 8192:
+                    append_line(b"[output line exceeded limit; omitted]")
+                    pending.clear()
+                    dropping_line = True
+                else:
+                    pending.extend(part)
+    except Exception:
+        if errors is None:
+            raise
+        errors.append("依赖输出读取中断，无法确认完整执行输出")
+    finally:
+        try:
+            stream.close()
+        except Exception:
+            if errors is None:
+                raise
+            errors.append("依赖输出流无法关闭")
+
+
+def _stop_restore_dependency_process(process):
+    process.stop(timeout=10)
+
+
+def _dependency_workspace_identity(work_dir):
+    info = work_dir.lstat()
+    if not stat.S_ISDIR(info.st_mode):
+        raise RuntimeError("依赖工作目录无效")
+    return {"name": work_dir.name, "device": info.st_dev, "inode": info.st_ino}
+
+
+def _cleanup_dependency_resources(entry):
+    process = entry.get("process")
+    if process is not None:
+        _stop_restore_dependency_process(process)
+    elif entry.get("guard") is not None:
+        cleanup_previous_process(entry["guard"])
+    reader = entry.get("reader")
+    if reader is not None:
+        reader.join(timeout=10)
+        if reader.is_alive():
+            raise RuntimeError("依赖输出仍被子进程占用，尚未完成清理")
+    elif process is not None and process.stdout is not None:
+        process.stdout.close()
+    workspace = entry.get("workspace")
+    if workspace is not None:
+        if PREFLIGHT_WORK_DIR.is_symlink():
+            raise RuntimeError("依赖临时目录已变化")
+        work_dir = PREFLIGHT_WORK_DIR / workspace["name"]
+        try:
+            current = _dependency_workspace_identity(work_dir)
+        except FileNotFoundError:
+            return
+        if current != workspace:
+            raise RuntimeError("依赖工作目录身份已变化，未删除替换目录")
+        shutil.rmtree(work_dir)
+
+
+def _run_native_restore_dependencies(app, request_id, process_lease_fd=None):
+    work_dir = None
+    process = None
+    reader = None
+    reader_started = False
+    reader_errors = []
+    workspace = None
+    record = None
+    output = bytearray()
+    output_lock = threading.Lock()
+    error = ""
+    with app.app_context():
+        try:
+            record = _read_native_restore(request_id)
+            if record is None:
+                raise RuntimeError("restore record disappeared")
+            preflight = _read_preflight_record(record["preflight_id"])
+            if preflight is None:
+                raise ValueError("preflight_archive_changed")
+            work_dir = Path(tempfile.mkdtemp(prefix="deps-" + request_id[:8] + "-", dir=str(PREFLIGHT_WORK_DIR)))
+            workspace = _dependency_workspace_identity(work_dir)
+            _restore_record_update(request_id, dependency_cleanup_pending=True, dependency_workspace=workspace)
+            suffix = {"tar.gz": ".tar.gz", "tgz": ".tgz", "tar": ".tar", "zip": ".zip"}[preflight["archive_format"]]
+            archive_path = work_dir / ("source" + suffix)
+            _fingerprint_preflight_archive(record["preflight_id"], record["archive_size_bytes"], record["archive_sha256"], archive_path)
+            extract_dir = work_dir / "extracted"
+            backup.extract_archive(archive_path, extract_dir)
+            root = backup.find_backup_root(extract_dir)
+            dep_file = backup.find_dependency_file(extract_dir, root) if root else None
+            if dep_file is None:
+                raise ValueError("dependency_file_missing")
+            process = DependencyProcess(
+                [sys.executable, "-m", "pip", "install", "-r", str(dep_file)],
+                workspace=work_dir,
+                cwd=str(backup.BASE_DIR),
+                env=os.environ.copy(),
+                lease_fd=process_lease_fd,
+            )
+            _restore_record_update(
+                request_id, dependency_cleanup_pending=True,
+                dependency_guard=process.identity, dependency_workspace=workspace,
+            )
+            process.start()
+            reader = threading.Thread(
+                target=_drain_restore_dependency_output,
+                args=(process.stdout, output, output_lock, reader_errors),
+                name="backup-native-restore-deps-output-" + request_id[:8],
+                daemon=True,
+            )
+            reader.start()
+            reader_started = True
+            deadline = time.monotonic() + RESTORE_WORKER_TIMEOUT_SECONDS
+            try:
+                while True:
+                    if reader_errors:
+                        raise RuntimeError(reader_errors[0])
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired("pip", RESTORE_WORKER_TIMEOUT_SECONDS)
+                    try:
+                        return_code = process.wait(timeout=min(2, remaining))
+                        break
+                    except subprocess.TimeoutExpired:
+                        with output_lock:
+                            progress_output = bytes(output).decode("utf-8", errors="replace")
+                        _restore_record_update(request_id, dependency_output=_bounded_text(progress_output, RESTORE_DEPENDENCY_OUTPUT_LIMIT))
+            except subprocess.TimeoutExpired:
+                error = "依赖安装超过 30 分钟，已终止子进程"
+                return_code = -1
+            if return_code != 0 and not error:
+                error = "pip 依赖安装失败，查看下方有界输出并检查面板环境"
+        except Exception as exc:
+            error = _bounded_text(str(exc), 1000)
+        finally:
+            entry = {
+                "process": process, "reader": reader if reader_started else None,
+                "workspace": workspace, "guard": process.identity if process is not None else None,
+                "lease_fd": process_lease_fd, "operation_id": (record or {}).get("dependency_operation_id", ""),
+            }
+            cleanup_complete = True
+            try:
+                _cleanup_dependency_resources(entry)
+            except Exception as exc:
+                cleanup_complete = False
+                cleanup_error = _bounded_text(str(exc), 1000)
+            if reader_errors:
+                error = reader_errors[0]
+            entry.update(terminal_state="failed" if error else "succeeded", terminal_error=error)
+            with output_lock:
+                output_text = output.decode("utf-8", errors="replace")
+            try:
+                _restore_record_update(
+                    request_id,
+                    dependency_state="unknown" if not cleanup_complete else "failed" if error else "succeeded",
+                    dependency_error=error if cleanup_complete else cleanup_error,
+                    dependency_output=_bounded_text(output_text, RESTORE_DEPENDENCY_OUTPUT_LIMIT),
+                    dependency_cleanup_pending=not cleanup_complete,
+                    dependency_guard=entry["guard"], dependency_workspace=workspace,
+                )
+            except Exception:
+                cleanup_complete = False
+            with RESTORE_LOCK:
+                RESTORE_DEPENDENCY_ACTIVE.discard(request_id)
+                try:
+                    record = _read_native_restore(request_id)
+                    if record is not None:
+                        PREFLIGHT_RETAINED_FOR_RESTORE.discard(record["preflight_id"])
+                except Exception:
+                    pass
+                if not cleanup_complete:
+                    RESTORE_DEPENDENCY_CLEANUP[request_id] = entry
+            if cleanup_complete:
+                _release_process_lease(process_lease_fd)
+
+
+@bp.route(NATIVE_PREFIX + "/restores/<request_id>/dependencies/cleanup", methods=["POST"])
+def api_backup_native_cleanup_restore_dependencies(request_id):
+    if not REQUEST_ID_RE.fullmatch(request_id):
+        return _error("invalid_request_id", "恢复请求标识无效", 400)
+    body, error = _json_body({"operation_id"}, {"operation_id"})
+    if error:
+        return error
+    operation_id = body["operation_id"]
+    if not isinstance(operation_id, str) or not REQUEST_ID_RE.fullmatch(operation_id):
+        return _error("invalid_operation", "原依赖操作标识无效", 400)
+    with RESTORE_LOCK:
+        try:
+            record = _read_native_restore(request_id)
+            if record is None:
+                return _error("restore_not_found", "恢复请求不存在", 404)
+            if record.get("dependency_operation_id") != operation_id:
+                return _error("operation_id_conflict", "该标识不是当前依赖操作，未执行清理", 409)
+            if request_id in RESTORE_DEPENDENCY_ACTIVE or request_id in RESTORE_DEPENDENCY_CLEANING:
+                return _error("dependency_busy", "该依赖操作仍在执行或清理，请先查询原请求", 409)
+            entry = RESTORE_DEPENDENCY_CLEANUP.get(request_id)
+            if entry is None:
+                if not record.get("dependency_cleanup_pending", False):
+                    return _native_restore_response(record, replayed=True)
+                fd = _try_process_lease(RESTORE_PROCESS_LOCK_PATH)
+                if fd is None:
+                    return _error("restore_busy", "依赖监管或其他恢复操作尚未退出，请稍后查询", 409)
+                try:
+                    record = _read_native_restore(request_id)
+                    if record is None or record.get("dependency_operation_id") != operation_id:
+                        _release_process_lease(fd)
+                        return _error("operation_id_conflict", "依赖操作已变化，未执行清理", 409)
+                    if not record.get("dependency_cleanup_pending", False):
+                        _release_process_lease(fd)
+                        return _native_restore_response(record, replayed=True)
+                    _mark_restore_lease(fd, request_id, "dependency-cleanup", operation_id)
+                except Exception:
+                    _release_process_lease(fd)
+                    raise
+                entry = {
+                    "operation_id": operation_id, "process": None, "reader": None,
+                    "guard": record.get("dependency_guard"), "workspace": record.get("dependency_workspace"),
+                    "lease_fd": fd, "terminal_state": "unknown",
+                    "terminal_error": "清理已完成，原依赖安装结果未确认；请检查输出和面板环境",
+                }
+                RESTORE_DEPENDENCY_CLEANUP[request_id] = entry
+            if entry["operation_id"] != operation_id:
+                return _error("operation_id_conflict", "清理句柄属于其他依赖操作", 409)
+            RESTORE_DEPENDENCY_CLEANING.add(request_id)
+        except Exception:
+            return _error("dependency_cleanup_unavailable", "无法读取依赖清理身份，请查询原请求", 503)
+    try:
+        _cleanup_dependency_resources(entry)
+        record = _restore_record_update(
+            request_id, dependency_state=entry["terminal_state"], dependency_error=entry["terminal_error"],
+            dependency_cleanup_pending=False, dependency_guard=None, dependency_workspace=None,
+        )
+        with RESTORE_LOCK:
+            RESTORE_DEPENDENCY_CLEANUP.pop(request_id, None)
+            _release_process_lease(entry["lease_fd"])
+            entry["lease_fd"] = None
+        return _native_restore_response(record)
+    except Exception as exc:
+        try:
+            record = _restore_record_update(
+                request_id, dependency_state="unknown", dependency_cleanup_pending=True,
+                dependency_error="依赖清理尚未确认：" + _bounded_text(str(exc), 900),
+            )
+        except Exception:
+            pass
+        return _response({
+            "ok": False, "code": "dependency_cleanup_incomplete", "msg": "清理尚未完成，保留原作业占用；可以查询后再次清理",
+            "restore": _native_restore_payload(record),
+        }, 503)
+    finally:
+        with RESTORE_LOCK:
+            RESTORE_DEPENDENCY_CLEANING.discard(request_id)
+
+
+@bp.route(NATIVE_PREFIX + "/restores/<request_id>/dependencies", methods=["POST"])
+def api_backup_native_restore_dependencies(request_id):
+    if not REQUEST_ID_RE.fullmatch(request_id):
+        return _error("invalid_request_id", "恢复请求标识无效", 400)
+    body, error = _json_body({"operation_id", "confirm_retry"}, {"operation_id", "confirm_retry"})
+    if error:
+        return error
+    operation_id = body["operation_id"]
+    if not isinstance(operation_id, str) or not REQUEST_ID_RE.fullmatch(operation_id) or type(body["confirm_retry"]) is not bool:
+        return _error("invalid_operation", "依赖安装操作标识或确认无效", 400)
+    with RESTORE_LOCK:
+        try:
+            record, process_lease_fd, response = _claim_restore_followup(
+                request_id, "dependency", operation_id, body["confirm_retry"],
+            )
+            if response:
+                return response
+            RESTORE_DEPENDENCY_ACTIVE.add(request_id)
+            PREFLIGHT_RETAINED_FOR_RESTORE.add(record["preflight_id"])
+        except Exception:
+            return _error("restore_unavailable", "无法安全开始依赖安装，请查询原请求", 503)
+    try:
+        app = current_app._get_current_object()
+        worker = threading.Thread(
+            target=_run_native_restore_dependencies,
+            args=(app, request_id, process_lease_fd),
+            name="backup-native-restore-deps-" + request_id[:8],
+            daemon=True,
+        )
+        worker.start()
+    except Exception as exc:
+        with RESTORE_LOCK:
+            RESTORE_DEPENDENCY_ACTIVE.discard(request_id)
+            PREFLIGHT_RETAINED_FOR_RESTORE.discard(record["preflight_id"])
+            try:
+                record = _read_native_restore(request_id)
+                if record is not None:
+                    PREFLIGHT_RETAINED_FOR_RESTORE.discard(record["preflight_id"])
+            except Exception:
+                pass
+        try:
+            record = _restore_record_update(
+                request_id, dependency_state="failed",
+                dependency_error="依赖作业无法启动：" + _bounded_text(str(exc), 900),
+            )
+            return _response({"ok": False, "restore": _native_restore_payload(record), "msg": "依赖安装作业无法启动"}, 503)
+        except Exception:
+            return _error("dependency_start_unknown", "依赖安装启动状态无法持久确认，请查询原请求", 503)
+        finally:
+            _release_process_lease(process_lease_fd)
+    latest = _read_native_restore(request_id)
+    return _native_restore_response(latest or record, 202 if latest and latest["dependency_state"] == "running" else 200)
