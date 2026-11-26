@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import json
 import os
 import re
 import secrets
@@ -10,6 +11,7 @@ from contextlib import contextmanager
 from flask import current_app, request
 
 from .paths import DATA_DIR
+from .config import load_config
 
 
 NATIVE_SESSION_COOKIE = "fls_native_session"
@@ -23,7 +25,10 @@ def _token_fingerprint(token):
     key = current_app.secret_key
     if isinstance(key, str):
         key = key.encode("utf-8")
-    return hmac.new(key, str(token).encode("utf-8"), hashlib.sha256).hexdigest()
+    cfg = load_config()
+    credentials = [str(token), cfg["security_verify_enabled"],
+                   cfg["security_verify_type"], cfg["totp_secret"]]
+    return hmac.new(key, json.dumps(credentials).encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def _session_hash(session_id):
@@ -64,6 +69,7 @@ def _database():
 
 
 def create_native_session(token, remember=False, verified=False):
+    fingerprint = _token_fingerprint(token)
     now = int(time.time())
     max_age = (
         NATIVE_SESSION_REMEMBER_SECONDS if remember else NATIVE_SESSION_SECONDS
@@ -86,7 +92,7 @@ def create_native_session(token, remember=False, verified=False):
             """,
             (
                 session_hash,
-                _token_fingerprint(token),
+                fingerprint,
                 csrf,
                 now + max_age,
                 int(bool(verified)),
@@ -102,6 +108,7 @@ def native_session_from_request(token=None):
         return None
 
     session_hash = _session_hash(session_id)
+    fingerprint = _token_fingerprint(token) if token is not None else None
     with _database() as connection:
         row = connection.execute(
             "SELECT * FROM native_sessions WHERE session_hash = ?",
@@ -118,7 +125,7 @@ def native_session_from_request(token=None):
             return None
 
         if token is not None and not hmac.compare_digest(
-            row["token_fingerprint"], _token_fingerprint(token)
+            row["token_fingerprint"], fingerprint
         ):
             connection.execute(
                 "DELETE FROM native_sessions WHERE session_hash = ?",
@@ -140,6 +147,7 @@ def mark_native_session_verified(native_session, token):
     if not native_session:
         return False
     now = int(time.time())
+    fingerprint = _token_fingerprint(token)
     with _database() as connection:
         cursor = connection.execute(
             """
@@ -149,7 +157,7 @@ def mark_native_session_verified(native_session, token):
             """,
             (
                 native_session["session_hash"],
-                _token_fingerprint(token),
+                fingerprint,
                 now,
             ),
         )
@@ -164,6 +172,11 @@ def delete_native_session(session_id):
             "DELETE FROM native_sessions WHERE session_hash = ?",
             (_session_hash(session_id),),
         )
+
+
+def delete_all_native_sessions():
+    with _database() as connection:
+        connection.execute("DELETE FROM native_sessions")
 
 
 def set_native_session_cookie(response, session_id, max_age=None):

@@ -51,13 +51,17 @@ def _config_apply_state(cfg):
     return state
 
 
-def _apply_saved_config(cfg):
+def _apply_saved_config(cfg, *, cleanup_operation=None, scheduler_operation=None):
     state = {"status": "running", "revision": _apply_revision(cfg), "errors": [], "updated_at": now_str()}
     try:
         write_json(CONFIG_APPLY_STATE_FILE, state)
     except Exception as e:
         return {**state, "status": "unknown", "errors": [f"配置已保存，但应用状态记录失败，未开始应用：{e}"]}
-    for label, operation in (("日志清理", cleanup_logs), ("调度器重载", reload_scheduler)):
+    operations = (
+        ("日志清理", cleanup_operation or cleanup_logs),
+        ("调度器重载", scheduler_operation or reload_scheduler),
+    )
+    for label, operation in operations:
         try:
             operation()
         except Exception as e:
@@ -108,6 +112,9 @@ def _config_draft(old_cfg):
 @bp.route("/config/apply", methods=["POST"])
 @bp.route("/api/config/apply", methods=["POST"])
 def config_apply():
+    if request.path.startswith("/api/") and request.is_json:
+        from .native import apply_json_config
+        return apply_json_config()
     try:
         with TASKS_MUTATION_LOCK:
             cfg, _revision = _config_snapshot()
