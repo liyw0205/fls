@@ -24,6 +24,7 @@ from .dependency_process import DependencyProcess, cleanup_previous_process
 from ...storage import storage_transaction, write_json
 from ...sensitive import mask_sensitive_text
 from ... import backup_commit
+from ...data_access import directory_access
 from ...backup_lease import try_process_lease as _try_process_lease, release_process_lease as _release_process_lease
 
 NATIVE_PREFIX = "/api/backup/native"
@@ -1532,6 +1533,10 @@ def _native_restore_payload(record):
     )
     if cleanup_required:
         dependency_state = "unknown"
+    startup_pending = (
+        current_app.config.get("RESTORE_STARTUP_RECONCILIATION_PENDING", False)
+        and record["request_id"] in current_app.config.get("RESTORE_STARTUP_REQUEST_IDS", ())
+    )
     return {
         "request_id": record["request_id"],
         "preflight_id": record["preflight_id"],
@@ -1544,7 +1549,9 @@ def _native_restore_payload(record):
         "phase": phase,
         "active": active,
         "committed": phase == "restored",
-        "directory_recovery_required": not active and backup_commit.recovery_required(backup.BASE_DIR, record["request_id"]),
+        "directory_recovery_required": not active and (
+            startup_pending or backup_commit.recovery_required(backup.BASE_DIR, record["request_id"])
+        ),
         "live_state_unchanged": record["live_state_unchanged"] or interrupted_before_commit,
         "restore_outcome_unknown": state == "unknown" or phase == "unknown",
         "error": _bounded_text(
@@ -1873,7 +1880,7 @@ def _run_native_restore(app, request_id, process_lease_fd=None):
             for source, target, keep_backups in restore_sources:
                 staged.append(legacy_restore._stage_restore_directory(source, target, keep_backups))
 
-            with RESTORE_LOCK, models.COLLECTION_MUTATION_LOCK, models.TASKS_MUTATION_LOCK, storage_transaction(), NATIVE_SESSION_LOCK:
+            with directory_access(exclusive=True), RESTORE_LOCK, models.COLLECTION_MUTATION_LOCK, models.TASKS_MUTATION_LOCK, storage_transaction(), NATIVE_SESSION_LOCK:
                 _restore_record_update(request_id, state="committing", live_state_unchanged=False)
                 commit_attempted = True
                 legacy_restore._commit_restore_directories(staged, preserve_runtime_identity=True, request_id=request_id)
@@ -2080,10 +2087,13 @@ def api_backup_native_recover_directories(request_id):
                 return _error("restore_not_found", "恢复请求不存在", 404)
             transaction = backup_commit.read(backup.BASE_DIR, request_id)
             if transaction is None:
+                if current_app.config.get("RESTORE_STARTUP_RECONCILIATION_PENDING"):
+                    from ...app import reconcile_startup_state
+                    reconcile_startup_state(current_app)
                 return _native_restore_response(record, replayed=True)
             if sorted(entry["target"] for entry in transaction["entries"]) != sorted(record["restore_items"]):
                 return _error("restore_identity_conflict", "目录现场与原恢复范围不一致", 409)
-            with models.COLLECTION_MUTATION_LOCK, models.TASKS_MUTATION_LOCK, storage_transaction(), NATIVE_SESSION_LOCK:
+            with directory_access(exclusive=True, recovery=True), models.COLLECTION_MUTATION_LOCK, models.TASKS_MUTATION_LOCK, storage_transaction(), NATIVE_SESSION_LOCK:
                 outcome = backup_commit.recover(backup.BASE_DIR, request_id)
                 restored = outcome == "restored"
                 record = _restore_record_update(
@@ -2093,6 +2103,9 @@ def api_backup_native_recover_directories(request_id):
                     error="" if restored else "中断的目录恢复已回滚，原目录与实例身份已恢复；未执行后续处理",
                 )
                 backup_commit.finish(backup.BASE_DIR, request_id)
+                if current_app.config.get("RESTORE_STARTUP_RECONCILIATION_PENDING"):
+                    from ...app import reconcile_startup_state
+                    reconcile_startup_state(current_app)
                 return _native_restore_response(record)
         except Exception:
             return _error("directory_recovery_unavailable", "目录现场尚未恢复完成；记录和副本保留，请查询原请求", 503)

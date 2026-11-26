@@ -6,11 +6,13 @@ import re
 import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 from itertools import islice
 from urllib.parse import urljoin, urlsplit
 
+from .data_access import directory_access
 from .models import TASKS_MUTATION_LOCK, load_proxies
 from .paths import DATA_DIR, PROXY_DIAGNOSTICS_FILE
 from .proxy import (GITHUB_QUALITY_RAW_URL, GITHUB_QUALITY_REPO_URL,
@@ -61,7 +63,7 @@ def target_url(value):
 
 def _read_json(path, limit):
     try:
-        with path.open("r", encoding="utf-8") as handle:
+        with directory_access(), path.open("r", encoding="utf-8") as handle:
             raw = handle.read(limit + 1)
     except FileNotFoundError:
         return None
@@ -375,6 +377,12 @@ def _probe(proxy, item):
 
 
 def _git_probe(proxy):
+    # Git must not hold a cwd inside data while a restore replaces that tree.
+    with tempfile.TemporaryDirectory(prefix="fls-proxy-check-") as directory:
+        return _git_probe_in_directory(proxy, directory)
+
+
+def _git_probe_in_directory(proxy, directory):
     def result(ok=False, error="git_failed"):
         return dict(status="succeeded" if ok else "failed", reachable=ok, http_success=None,
                     status_code=None, error_code="" if ok else error)
@@ -385,12 +393,11 @@ def _git_probe(proxy):
     env = {key: value for key, value in os.environ.items()
            if not key.startswith("GIT_") and key.lower() not in ("http_proxy", "https_proxy", "all_proxy", "no_proxy")}
     env.update(GIT_TERMINAL_PROMPT="0", GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
-               GIT_CEILING_DIRECTORIES=str(DATA_DIR))
+               GIT_CEILING_DIRECTORIES=str(directory))
     command = [git, "-c", "credential.helper=", "-c", "core.askPass=",
                "-c", f"url.{prefix.rstrip('/')}/https://github.com/.insteadOf=https://github.com/",
                "ls-remote", "--exit-code", GITHUB_QUALITY_REPO_URL, "refs/heads/main", "refs/heads/master"]
-    CHECK_DIR.mkdir(parents=True, exist_ok=True)
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, cwd=CHECK_DIR,
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, cwd=directory,
                                env=env, start_new_session=os.name != "nt")
     output, overflow = bytearray(), threading.Event()
 

@@ -2,7 +2,7 @@ import os
 import shutil
 from datetime import datetime, timezone, timedelta
 from .paths import CONFIG_FILE
-from .storage import read_json, write_json
+from .storage import read_json, write_json, storage_transaction
 from .constants import DEFAULT_HOST, DEFAULT_PORT, LOG_CLEANUP_INTERVAL_MINUTES, LOG_MAX_SIZE_MB, LOG_KEEP_PER_TASK
 
 DEFAULT_CONFIG = {
@@ -184,9 +184,10 @@ def load_config():
     return normalize_config_data(cfg)
 
 def save_config(cfg):
-    base = load_config()
-    base.update(cfg or {})
-    write_json(CONFIG_FILE, normalize_config_data(base))
+    with storage_transaction():
+        base = load_config()
+        base.update(cfg or {})
+        write_json(CONFIG_FILE, normalize_config_data(base))
 
 def get_host():
     return os.environ.get("FLS_HOST", DEFAULT_HOST)

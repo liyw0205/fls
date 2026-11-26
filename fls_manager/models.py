@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 from collections import Counter
+from contextlib import closing
 from pathlib import Path
 
 from .paths import (
@@ -614,7 +615,7 @@ def _open_current_task_history_index():
         current = False
         if index_path.exists():
             try:
-                with sqlite3.connect(str(index_path), timeout=30) as probe:
+                with closing(sqlite3.connect(str(index_path), timeout=30)) as probe:
                     meta = dict(probe.execute("SELECT key, value FROM history_meta").fetchall())
                     objects = {
                         name

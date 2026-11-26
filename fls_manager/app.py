@@ -4,7 +4,9 @@ from datetime import timedelta
 
 from flask import Flask, request
 
-from .paths import DATA_DIR
+from .paths import BASE_DIR, DATA_DIR
+from . import backup_commit
+from .data_access import directory_access, PanelStorageBusy
 
 from .csrf import csrf_before_request
 from .auth import (
@@ -52,6 +54,11 @@ def get_persistent_secret_key():
     if env_key:
         return env_key
 
+    with directory_access():
+        return _secret_key_from_data()
+
+
+def _secret_key_from_data():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     key_file = DATA_DIR / "secret_key.txt"
@@ -67,11 +74,14 @@ def get_persistent_secret_key():
     key = uuid.uuid4().hex + uuid.uuid4().hex
 
     try:
-        key_file.write_text(key, encoding="utf-8")
+        with directory_access(write=True):
+            key_file.write_text(key, encoding="utf-8")
         try:
             os.chmod(key_file, 0o600)
         except Exception:
             pass
+    except PanelStorageBusy:
+        raise
     except Exception:
         # 极端情况下文件无法写入，至少保证程序能启动。
         return key
@@ -79,18 +89,51 @@ def get_persistent_secret_key():
     return key
 
 
+def reconcile_startup_state(app):
+    with directory_access(write=True):
+        # Runtime handles are in memory; reconcile durable snapshots before use.
+        reconcile_task_history_after_restart(running_history_ids())
+        from .routes.scripts.debug import load_script_debug_runs
+        load_script_debug_runs()
+        if app.config.get("RESTORE_STARTUP_RUNTIME_PENDING"):
+            initialize_startup_runtime(app)
+        app.config["RESTORE_STARTUP_RECONCILIATION_PENDING"] = False
+
+
+def initialize_startup_runtime(app):
+    from .config import save_config, load_config
+    from .scheduler import reload_scheduler
+    from .logs import cleanup_logs
+
+    with directory_access(write=True):
+        try:
+            save_config(load_config())
+        except PanelStorageBusy:
+            raise
+        except Exception as exc:
+            print(f"[Config] 初始化配置失败: {exc}")
+        reload_scheduler()
+        cleanup_logs()
+        app.config["RESTORE_STARTUP_RUNTIME_PENDING"] = False
+
+
 def create_app():
     app = Flask(__name__)
 
     app.secret_key = get_persistent_secret_key()
+    app.config["RESTORE_STARTUP_REQUEST_IDS"] = frozenset(backup_commit.pending(BASE_DIR))
+    app.config["RESTORE_STARTUP_RECONCILIATION_PENDING"] = bool(app.config["RESTORE_STARTUP_REQUEST_IDS"])
+    if not app.config["RESTORE_STARTUP_RECONCILIATION_PENDING"]:
+        reconcile_startup_state(app)
 
-    # Runtime process handles are in memory; close the false "running" state
-    # left by a previous panel process before serving the first request.
-    reconcile_task_history_after_restart(running_history_ids())
-    # Debug process handles are also in memory; reconcile durable snapshots
-    # before the first page/API request can report their restart state.
-    from .routes.scripts.debug import load_script_debug_runs
-    load_script_debug_runs()
+    @app.errorhandler(PanelStorageBusy)
+    def panel_storage_busy(_error):
+        from flask import jsonify
+        response = jsonify(ok=False, code="panel_storage_busy", msg=str(_error))
+        response.status_code = 503
+        response.headers["Retry-After"] = "1"
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     # Cookie 基础配置。
     # remember 登录时，auth.py 会设置 session.permanent；

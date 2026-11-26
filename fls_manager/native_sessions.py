@@ -13,6 +13,8 @@ from flask import current_app, request
 
 from .paths import DATA_DIR
 from .config import load_config
+from .data_access import directory_access, PanelStorageBusy
+from .storage import storage_transaction
 
 
 NATIVE_SESSION_COOKIE = "fls_native_session"
@@ -37,22 +39,30 @@ def _session_hash(session_id):
     return hashlib.sha256(session_id.encode("ascii")).hexdigest()
 
 
-def _connect():
+def _connect(*, read_only=False):
+    if read_only:
+        connection = sqlite3.connect(NATIVE_SESSION_FILE.absolute().as_uri() + "?mode=ro", uri=True, timeout=10)
+        connection.row_factory = sqlite3.Row
+        return connection
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(str(NATIVE_SESSION_FILE), timeout=10)
     connection.row_factory = sqlite3.Row
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS native_sessions (
-            session_hash TEXT PRIMARY KEY,
-            token_fingerprint TEXT NOT NULL,
-            csrf_token TEXT NOT NULL,
-            expires_at INTEGER NOT NULL,
-            verified INTEGER NOT NULL,
-            remember INTEGER NOT NULL
+    try:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS native_sessions (
+                session_hash TEXT PRIMARY KEY,
+                token_fingerprint TEXT NOT NULL,
+                csrf_token TEXT NOT NULL,
+                expires_at INTEGER NOT NULL,
+                verified INTEGER NOT NULL,
+                remember INTEGER NOT NULL
+            )
+            """
         )
-        """
-    )
+    except BaseException:
+        connection.close()
+        raise
     try:
         os.chmod(NATIVE_SESSION_FILE, 0o600)
     except OSError:
@@ -61,9 +71,13 @@ def _connect():
 
 
 @contextmanager
-def _database():
-    with NATIVE_SESSION_LOCK:
-        connection = _connect()
+def _database(*, read_only=False):
+    # Fingerprint reads and configuration changes share storage -> session order.
+    with directory_access(write=not read_only), storage_transaction(live_data=False), NATIVE_SESSION_LOCK:
+        if read_only and not NATIVE_SESSION_FILE.exists():
+            yield None
+            return
+        connection = _connect(read_only=read_only)
         try:
             with connection:
                 yield connection
@@ -72,7 +86,6 @@ def _database():
 
 
 def create_native_session(token, remember=False, verified=False):
-    fingerprint = _token_fingerprint(token)
     now = int(time.time())
     max_age = (
         NATIVE_SESSION_REMEMBER_SECONDS if remember else NATIVE_SESSION_SECONDS
@@ -82,6 +95,7 @@ def create_native_session(token, remember=False, verified=False):
     session_hash = _session_hash(session_id)
 
     with _database() as connection:
+        fingerprint = _token_fingerprint(token)
         connection.execute(
             "DELETE FROM native_sessions WHERE expires_at <= ?",
             (now,),
@@ -111,8 +125,10 @@ def native_session_from_request(token=None):
         return None
 
     session_hash = _session_hash(session_id)
-    fingerprint = _token_fingerprint(token) if token is not None else None
-    with _database() as connection:
+    with _database(read_only=True) as connection:
+        if connection is None:
+            return None
+        fingerprint = _token_fingerprint(token) if token is not None else None
         row = connection.execute(
             "SELECT * FROM native_sessions WHERE session_hash = ?",
             (session_hash,),
@@ -120,38 +136,37 @@ def native_session_from_request(token=None):
         if row is None:
             return None
 
-        if int(row["expires_at"]) <= int(time.time()):
-            connection.execute(
-                "DELETE FROM native_sessions WHERE session_hash = ?",
-                (session_hash,),
-            )
-            return None
+        invalid = int(row["expires_at"]) <= int(time.time()) or (
+            token is not None and not hmac.compare_digest(row["token_fingerprint"], fingerprint)
+        )
+        if not invalid:
+            return {
+                "session_id": session_id,
+                "session_hash": session_hash,
+                "csrf_token": row["csrf_token"],
+                "expires_at": int(row["expires_at"]),
+                "verified": bool(row["verified"]),
+                "remember": bool(row["remember"]),
+            }
 
-        if token is not None and not hmac.compare_digest(
-            row["token_fingerprint"], fingerprint
-        ):
+    # Invalid sessions stay invalid if credentials are later changed back.
+    try:
+        with _database() as connection:
             connection.execute(
-                "DELETE FROM native_sessions WHERE session_hash = ?",
-                (session_hash,),
+                "DELETE FROM native_sessions WHERE session_hash = ? AND token_fingerprint = ? AND expires_at = ?",
+                (session_hash, row["token_fingerprint"], row["expires_at"]),
             )
-            return None
-
-        return {
-            "session_id": session_id,
-            "session_hash": session_hash,
-            "csrf_token": row["csrf_token"],
-            "expires_at": int(row["expires_at"]),
-            "verified": bool(row["verified"]),
-            "remember": bool(row["remember"]),
-        }
+    except PanelStorageBusy:
+        pass
+    return None
 
 
 def mark_native_session_verified(native_session, token):
     if not native_session:
         return False
     now = int(time.time())
-    fingerprint = _token_fingerprint(token)
     with _database() as connection:
+        fingerprint = _token_fingerprint(token)
         cursor = connection.execute(
             """
             UPDATE native_sessions

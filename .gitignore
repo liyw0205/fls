@@ -26,6 +26,7 @@ log/
 *.bak
 *.tmp
 *.pid
+/.backup_data_io.lock
 .DS_Store
 Thumbs.db
 .idea/

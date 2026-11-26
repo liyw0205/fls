@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 
 from .backup_commit import recover_at_startup
+from .data_access import directory_access
 
 def detect_base_dir():
     env_dir = os.environ.get("FLS_BASE_DIR", "").strip()
@@ -57,5 +58,7 @@ SCRIPT_IMPORT_JOBS_FILE = DATA_DIR / "script_import_jobs.json"
 SCRIPT_RENAME_FILE = DATA_DIR / "script_renames.json"
 PID_FILE = DATA_DIR / "fls-manager.pid"
 
-for d in (BASE_DIR, DATA_DIR, LOG_DIR, SCRIPT_DIR):
-    d.mkdir(parents=True, exist_ok=True)
+BASE_DIR.mkdir(parents=True, exist_ok=True)
+with directory_access(BASE_DIR):
+    for d in (DATA_DIR, LOG_DIR, SCRIPT_DIR):
+        d.mkdir(parents=True, exist_ok=True)

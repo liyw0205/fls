@@ -64,10 +64,8 @@ def main():
     try:
         _bootstrap_deps()
 
-        from fls_manager.app import create_app
-        from fls_manager.config import get_host, get_port, fls_get_admin_token, save_config, load_config
-        from fls_manager.scheduler import reload_scheduler
-        from fls_manager.logs import cleanup_logs
+        from fls_manager.app import create_app, initialize_startup_runtime
+        from fls_manager.config import get_host, get_port, fls_get_admin_token
         from fls_manager.paths import BASE_DIR, DATA_DIR, LOG_DIR, SCRIPT_DIR
         from fls_manager.state import scheduler
         from fls_manager.constants import MAIN_PROCESS_NAME, TASK_PROCESS_PREFIX
@@ -80,13 +78,10 @@ def main():
 
         app = create_app()
 
-        try:
-            save_config(load_config())
-        except Exception as e:
-            print(f"[Config] 初始化配置失败: {e}")
-
-        reload_scheduler()
-        cleanup_logs()
+        if app.config.get("RESTORE_STARTUP_RECONCILIATION_PENDING"):
+            app.config["RESTORE_STARTUP_RUNTIME_PENDING"] = True
+        else:
+            initialize_startup_runtime(app)
 
         host = get_host()
         port = get_port()

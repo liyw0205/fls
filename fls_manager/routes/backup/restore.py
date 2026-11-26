@@ -5,10 +5,11 @@ import re
 import threading
 import uuid
 from flask import redirect, send_file
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager, nullcontext, ExitStack
 from ... import models
 from ...csrf import csrf_token
 from ...storage import storage_transaction
+from ...data_access import directory_access
 from ...ui.components import page_header_card
 
 
@@ -439,7 +440,7 @@ def _restore_archive_summary(record):
 
 
 def _compact_restore_receipts():
-    with storage_transaction(), BACKUP_RESTORE_REQUEST_LOCK, _restore_archive_process_lock():
+    with storage_transaction(live_data=False), BACKUP_RESTORE_REQUEST_LOCK, _restore_archive_process_lock():
         directory = BACKUP_RESTORE_REQUESTS_DIR
         if directory.is_symlink():
             raise RuntimeError("备份恢复回执目录不能是符号链接")
@@ -602,7 +603,7 @@ def api_backup_restore_history():
         return jsonify(ok=False, msg="恢复历史分页参数无效"), 400
 
     try:
-        with storage_transaction(), BACKUP_RESTORE_REQUEST_LOCK, _restore_archive_process_lock():
+        with storage_transaction(live_data=False), BACKUP_RESTORE_REQUEST_LOCK, _restore_archive_process_lock():
             maintenance_notices = []
             try:
                 _compact_restore_receipts()
@@ -683,7 +684,7 @@ def api_backup_restore_request(request_id):
     if not re.fullmatch(r"[a-f0-9]{32}", request_id):
         return jsonify(ok=False, msg="恢复请求标识无效"), 400
     try:
-        with storage_transaction(), BACKUP_RESTORE_REQUEST_LOCK, _restore_archive_process_lock():
+        with storage_transaction(live_data=False), BACKUP_RESTORE_REQUEST_LOCK, _restore_archive_process_lock():
             archived = _read_restore_archive_index()["records"].get(request_id)
             maintenance = _read_restore_archive_maintenance_state()
             record = _read_restore_request(request_id)
@@ -715,7 +716,7 @@ def _ack_restore_archive_maintenance(event_id):
     if not re.fullmatch(r"[a-f0-9]{32}", event_id or ""):
         return {"ok": False, "msg": "恢复维护事件标识无效"}, 400
     try:
-        with storage_transaction(), BACKUP_RESTORE_REQUEST_LOCK, _restore_archive_process_lock():
+        with storage_transaction(live_data=False), BACKUP_RESTORE_REQUEST_LOCK, _restore_archive_process_lock():
             state = _read_restore_archive_maintenance_state()
             if state is None:
                 return {"ok": True, "cleared": True, "maintenance": None}, 200
@@ -1022,6 +1023,13 @@ def _rollback_runtime_identity_files(source_data, destination_data, moved):
 
 
 def _commit_restore_directories(entries, *, preserve_runtime_identity=False, request_id=None):
+    with directory_access(exclusive=True):
+        return _commit_restore_directories_locked(
+            entries, preserve_runtime_identity=preserve_runtime_identity, request_id=request_id,
+        )
+
+
+def _commit_restore_directories_locked(entries, *, preserve_runtime_identity=False, request_id=None):
     if request_id is not None:
         from ... import backup_commit
         if not preserve_runtime_identity:
@@ -1152,6 +1160,7 @@ def backup_import():
     commit_attempted = False
     staged = []
     maintenance = None
+    directory_guard = ExitStack()
 
     try:
         original = os.path.basename(f.filename or "backup")
@@ -1163,7 +1172,7 @@ def backup_import():
                 digest.update(chunk)
 
         if request_id:
-            with storage_transaction(), BACKUP_RESTORE_REQUEST_LOCK, _restore_archive_process_lock():
+            with storage_transaction(live_data=False), BACKUP_RESTORE_REQUEST_LOCK, _restore_archive_process_lock():
                 try:
                     archived = _read_restore_archive_index()["records"].get(request_id)
                     maintenance = _read_restore_archive_maintenance_state()
@@ -1257,6 +1266,7 @@ def backup_import():
         if not try_begin_restore_activity():
             return restore_error("备份正在创建或恢复，请等待当前操作完成后重试。", 409)
         restore_reserved = True
+        directory_guard.enter_context(directory_access(exclusive=True))
 
         staged = []
         try:
@@ -1322,6 +1332,7 @@ def backup_import():
                 if not entry["preserve_workspace"]:
                     shutil.rmtree(entry["workspace"], ignore_errors=True)
 
+        directory_guard.close()
         restored = [label for _source, _target, _keep, label in restore_sources]
 
         deps_msg = ""
@@ -1458,6 +1469,7 @@ def backup_import():
         for entry in staged:
             if not entry["preserve_workspace"]:
                 shutil.rmtree(entry["workspace"], ignore_errors=True)
+        directory_guard.close()
         if restore_reserved:
             end_restore_activity()
         shutil.rmtree(tmp_dir, ignore_errors=True)

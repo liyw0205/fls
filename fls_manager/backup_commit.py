@@ -8,6 +8,7 @@ import stat
 from pathlib import Path
 
 from .backup_lease import release_process_lease, try_process_lease
+from .data_access import directory_access
 
 JOURNAL_NAME = ".backup_native_commits"
 JOURNAL_LIMIT = 128 * 1024
@@ -206,7 +207,21 @@ def _verify_terminal(base, row):
             _expect(target / name, identity)
 
 
+def assert_data_accessible(base, *, write=False):
+    base = Path(base)
+    for request_id in pending(base):
+        row = read(base, request_id)
+        if row is None or row["state"] == "prepared" or write:
+            raise RuntimeError("directory recovery must finish before accessing live data")
+        _verify_terminal(base, row)
+
+
 def recover(base, request_id):
+    with directory_access(base, exclusive=True, recovery=True):
+        return _recover(base, request_id)
+
+
+def _recover(base, request_id):
     base = Path(base)
     row = read(base, request_id)
     if row is None:
@@ -247,6 +262,11 @@ def recover(base, request_id):
 
 
 def commit(base, request_id, entries, identity_names):
+    with directory_access(base, exclusive=True):
+        return _commit(base, request_id, entries, identity_names)
+
+
+def _commit(base, request_id, entries, identity_names):
     base = Path(base)
     if pending(base):
         raise DirectoryCommitError("a previous directory transaction requires recovery", True)
@@ -298,6 +318,11 @@ def commit(base, request_id, entries, identity_names):
 
 
 def finish(base, request_id):
+    with directory_access(base, exclusive=True, recovery=True):
+        return _finish(base, request_id)
+
+
+def _finish(base, request_id):
     base = Path(base)
     row = read(base, request_id)
     if row is None:

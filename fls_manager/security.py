@@ -11,6 +11,8 @@ from pathlib import Path
 
 from .paths import DATA_DIR
 from .config import load_config
+from .data_access import directory_access
+from .storage import storage_transaction
 
 
 FLS_CODE_FILE = DATA_DIR / "fls_code.json"
@@ -52,6 +54,11 @@ def generate_random_code():
 
 
 def save_random_code(code, ip="", ua=""):
+    with storage_transaction():
+        return _save_random_code(code, ip, ua)
+
+
+def _save_random_code(code, ip, ua):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     now = int(time.time())
@@ -78,6 +85,11 @@ def save_random_code(code, ip="", ua=""):
 
 
 def load_random_code():
+    with directory_access(), storage_transaction(live_data=False):
+        return _load_random_code()
+
+
+def _load_random_code():
     try:
         if not FLS_CODE_FILE.exists():
             return {}
@@ -113,11 +125,12 @@ def random_code_valid(input_code):
 
 
 def clear_random_code():
-    try:
-        if FLS_CODE_FILE.exists():
-            FLS_CODE_FILE.unlink()
-    except Exception:
-        pass
+    with storage_transaction():
+        try:
+            if FLS_CODE_FILE.exists():
+                FLS_CODE_FILE.unlink()
+        except OSError:
+            pass
 
 
 def generate_totp_secret():

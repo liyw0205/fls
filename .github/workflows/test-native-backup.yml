@@ -5,12 +5,14 @@ on:
     branches: [develop, main]
     paths:
       - 'fls_manager/**'
+      - 'fls-manager.py'
       - 'tests/**'
       - '.github/workflows/test-native-backup.yml'
   pull_request:
     branches: [develop, main]
     paths:
       - 'fls_manager/**'
+      - 'fls-manager.py'
       - 'tests/**'
       - '.github/workflows/test-native-backup.yml'
 
@@ -40,6 +42,7 @@ jobs:
           python -m pytest -q
           tests/test_backup_dependency_process.py
           tests/test_backup_activity_lease.py
+          tests/test_backup_data_access.py
           tests/test_backup_directory_commit.py
           tests/test_native_backup_directory_recovery.py
           tests/test_native_backup_api.py
@@ -53,6 +56,13 @@ jobs:
           tests/test_backup_orphan_staging.py
           tests/test_backup_atomic_publication.py
           tests/test_backup_limits.py
+          tests/test_storage_notify_proxy.py
+          tests/test_history_native_api.py
+          tests/test_history_performance.py
+          tests/test_native_config_api.py
+          tests/test_config_apply_recovery.py
+          tests/test_native_proxy_checks.py
+          tests/test_fls_startup.py
   windows:
     name: Windows dependency process tree and lease
     runs-on: windows-latest
@@ -74,6 +84,10 @@ jobs:
         env:
           PYTHONPATH: .
         run: python -m pytest -q tests/test_backup_activity_lease.py
+      - name: Verify SQLite lifetimes and background storage during directory replacement
+        env:
+          PYTHONPATH: .
+        run: python -m pytest -q tests/test_backup_data_access.py tests/test_auth_backup.py -k 'BackupDataAccess or native_login or native_logout or native_resend or native_totp'
       - name: Verify interrupted directory commit and startup recovery
         env:
           PYTHONPATH: .
