@@ -47,7 +47,9 @@ def isolated_fls_env(token=None):
         purge_fls_modules()
 
         try:
-            yield Path(temp_dir)
+            # Authentication/backup tests do not send notifications or fetch releases.
+            with patch("fls_manager.app.dispatch_frontend_open_event"):
+                yield Path(temp_dir)
         finally:
             shutdown_scheduler()
             purge_fls_modules()
@@ -335,7 +337,8 @@ class NativeAuthApiTests(unittest.TestCase):
             self.assertEqual(client.get("/api/status").status_code, 200)
 
             from fls_manager.native_sessions import NATIVE_SESSION_FILE
-            self.assertEqual(stat.S_IMODE(NATIVE_SESSION_FILE.stat().st_mode), 0o600)
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(NATIVE_SESSION_FILE.stat().st_mode), 0o600)
             self.assertNotIn(b"unit-token", NATIVE_SESSION_FILE.read_bytes())
 
             with patch.dict(os.environ, {"FLS_TOKEN": "rotated-token"}):

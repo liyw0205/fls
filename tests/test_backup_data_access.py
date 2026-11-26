@@ -339,7 +339,7 @@ class BackupDataAccessTests(unittest.TestCase):
 
     def test_restart_waits_for_original_request_confirmation_before_reconciling_runtime(self):
         with isolated_app() as (app, base):
-            from fls_manager import backup_commit, storage, paths
+            from fls_manager import backup_commit, storage, paths, instance_lock
             from fls_manager.routes.backup import restore, native_api
             from fls_manager.data_access import directory_access, PanelStorageBusy
 
@@ -348,7 +348,9 @@ class BackupDataAccessTests(unittest.TestCase):
             self.assertEqual(login.status_code, 200, login.json)
             cookie = client.get_cookie("fls_native_session").value
             storage.write_json(paths.CONFIG_FILE, {})
-            (paths.DATA_DIR / "fls-manager.lock").touch()
+            descriptor = instance_lock.acquire_instance_lock()
+            self.assertIsNotNone(descriptor)
+            instance_lock.release_instance_lock(descriptor)
             source = base / "source/data"
             source.mkdir(parents=True)
             (source / "config.json").write_bytes(b'{}')
@@ -426,11 +428,13 @@ class BackupDataAccessTests(unittest.TestCase):
                 with patch.dict(manager['main'].__globals__, {{'_bootstrap_deps': lambda: None}}), \\
                      patch.object(Flask, 'run', serve), \\
                      patch.object(scheduler, 'reload_scheduler', side_effect=reload_once_retried):
-                    assert manager['main']() is None
+                    result = manager['main']()
+                    assert result is None, result
             """)
             completed = subprocess.run([sys.executable, "-c", script], capture_output=True, timeout=15,
                                        env=dict(os.environ, PYTHONIOENCODING="utf-8"))
-            self.assertEqual(completed.returncode, 0, completed.stderr.decode(errors="replace"))
+            self.assertEqual(completed.returncode, 0,
+                             (completed.stdout + completed.stderr).decode(errors="replace"))
             self.assertEqual(backup_commit.pending(base), [])
             with directory_access(exclusive=True):
                 storage.write_json(paths.DATA_DIR / "after-recovery.json", {})
