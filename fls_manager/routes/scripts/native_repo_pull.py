@@ -5,7 +5,6 @@ import os
 import queue
 import re
 import shutil
-import signal
 import stat
 import subprocess
 import threading
@@ -18,6 +17,7 @@ from flask import request
 from . import bp
 from .helpers import build_repo_pull_command
 from ...directory_jobs import directory_job_operation, start_directory_job
+from ...directory_process import DirectoryProcess
 from .native_pull import (
     SCRIPT_PULL_ID_RE,
     _error,
@@ -29,7 +29,7 @@ from .native_pull import (
     _safe_url,
     _script_path_still_matches,
 )
-from ...paths import SCRIPT_DIR, SCRIPT_REPO_PULL_JOBS_FILE
+from ...paths import BASE_DIR, SCRIPT_DIR, SCRIPT_REPO_PULL_JOBS_FILE
 from ...proxy import apply_proxy_env, validate_proxy_id
 from ...script_files import script_file_target
 from ...storage import write_json
@@ -437,26 +437,7 @@ def _drain_stderr(stream, output_queue):
 
 
 def _stop_process(process):
-    if process.poll() is not None:
-        return
-    try:
-        if os.name == "posix":
-            os.killpg(process.pid, signal.SIGTERM)
-        else:
-            process.terminate()
-    except OSError:
-        pass
-    try:
-        process.wait(timeout=3)
-    except subprocess.TimeoutExpired:
-        try:
-            if os.name == "posix":
-                os.killpg(process.pid, signal.SIGKILL)
-            else:
-                process.kill()
-        except OSError:
-            pass
-        process.wait()
+    process.stop()
 
 
 def _run_clone(job_id, url, proxy_id, target, parent_fd, parent_identity, cancel):
@@ -498,17 +479,11 @@ def _run_clone(job_id, url, proxy_id, target, parent_fd, parent_identity, cancel
         env = apply_proxy_env(os.environ.copy(), proxy_id)
         env["GIT_TERMINAL_PROMPT"] = "0"
         env["GIT_ASKPASS"] = ""
-        kwargs = {
-            "cwd": str(SCRIPT_DIR),
-            "env": env,
-            "stdout": subprocess.DEVNULL,
-            "stderr": subprocess.PIPE,
-            "bufsize": 0,
-            "start_new_session": os.name == "posix",
-        }
-        if parent_fd is not None and os.name == "posix":
-            kwargs["pass_fds"] = (parent_fd,)
-        process = subprocess.Popen(command, **kwargs)
+        process = DirectoryProcess(
+            command, workspace=stage_path, cwd=str(SCRIPT_DIR), env=env,
+            lease_path=BASE_DIR / ".backup_native_restore.lock",
+            pass_fds=(parent_fd,) if parent_fd is not None else (),
+        )
         reader = threading.Thread(
             target=_drain_stderr,
             args=(process.stderr, output_queue),
@@ -516,6 +491,7 @@ def _run_clone(job_id, url, proxy_id, target, parent_fd, parent_identity, cancel
             name=f"fls-repo-progress-{job_id[:8]}",
         )
         reader.start()
+        process.start()
         _update(job_id, status="cloning", phase="connecting", current=None, total=None)
         last_saved = time.monotonic()
         while process.poll() is None or reader.is_alive() or not output_queue.empty():
@@ -641,6 +617,8 @@ def _run_clone(job_id, url, proxy_id, target, parent_fd, parent_identity, cancel
             if created_stage and target is not None:
                 if not _remove_entry(target, parent_fd, stage, stage_identity):
                     outcome = ("unknown", "cleanup_failed")
+        except Exception:
+            outcome = ("unknown", "cleanup_failed")
         finally:
             if parent_fd is not None:
                 try:
