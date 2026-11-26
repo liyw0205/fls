@@ -66,4 +66,4 @@ jobs:
       - name: Verify independent process lease and receipt ordering
         env:
           PYTHONPATH: .
-        run: python -m pytest -q tests/test_native_backup_api.py -k 'process_lease or rereads'
+        run: python -m pytest -q tests/test_native_backup_api.py -k 'process_lease or rereads or preflight_stages or archive_target'

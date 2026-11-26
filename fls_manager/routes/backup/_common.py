@@ -900,6 +900,7 @@ def start_backup_job(items, *, job_id=None):
 # ============================================================
 
 def _archive_member_target(base, name):
+    base = Path(base).resolve()
     member_name = str(name or "").replace("\\", "/")
 
     if (
@@ -911,7 +912,9 @@ def _archive_member_target(base, name):
 
     target = (base / member_name).resolve()
 
-    if target != base and not str(target).startswith(str(base) + os.sep):
+    try:
+        target.relative_to(base)
+    except ValueError:
         raise RuntimeError("备份文件包含非法路径")
 
     return target

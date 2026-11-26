@@ -95,6 +95,19 @@ class NativeBackupApiTests(unittest.TestCase):
             time.sleep(0.01)
         self.fail("restore worker did not reach a terminal state")
 
+    def test_archive_target_canonicalizes_root_and_rejects_escape(self):
+        with isolated_app() as (_, base):
+            from fls_manager.routes.backup import _common as backup
+
+            root = base / "unused" / ".." / "archive"
+            self.assertEqual(
+                backup._archive_member_target(root, "fls/data/config.json"),
+                (base / "archive/fls/data/config.json").resolve(),
+            )
+            for name in ("../outside", "/outside", "C:/outside", "..\\outside"):
+                with self.subTest(name=name), self.assertRaises(RuntimeError):
+                    backup._archive_member_target(root, name)
+
     def test_preflight_stages_and_validates_archive_without_touching_live_data(self):
         with isolated_app() as (app, base):
             from fls_manager.routes.backup import native_api
