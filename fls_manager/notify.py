@@ -657,7 +657,7 @@ def cfg_value(config, name, default=""):
     return str(v).strip()
 
 
-def send_one(item, title, content):
+def send_one(item, title, content, *, transport=None, smtp_module=None):
     if not item:
         return False, "通知不存在"
 
@@ -669,6 +669,8 @@ def send_one(item, title, content):
         return False, "未知通知渠道"
 
     c = item.get("config", {}) or {}
+    http = transport if transport is not None else requests
+    smtp = smtp_module if smtp_module is not None else smtplib
     title = str(title or "")
     content = str(content or "")
 
@@ -703,7 +705,7 @@ def send_one(item, title, content):
             if _cfg("BARK_URL"):
                 data["url"] = _cfg("BARK_URL")
 
-            r = requests.post(url, json=data, timeout=15)
+            r = http.post(url, json=data, timeout=15)
             js = _json(r)
             return js.get("code") == 200, str(js)
 
@@ -718,7 +720,7 @@ def send_one(item, title, content):
             else:
                 url = f"https://sctapi.ftqq.com/{key}.send"
 
-            r = requests.post(
+            r = http.post(
                 url,
                 data={"text": title, "desp": content.replace("\n", "\n\n")},
                 timeout=15,
@@ -739,7 +741,7 @@ def send_one(item, title, content):
                 "template": _cfg("PUSH_PLUS_TEMPLATE", "html") or "html",
             }
 
-            r = requests.post("https://www.pushplus.plus/send", json=data, timeout=15)
+            r = http.post("https://www.pushplus.plus/send", json=data, timeout=15)
             js = _json(r)
             return js.get("code") == 200, str(js)
 
@@ -754,7 +756,7 @@ def send_one(item, title, content):
 
             text = f"{title}\n\n{content}" if title else content
 
-            r = requests.post(
+            r = http.post(
                 url,
                 data={
                     "chat_id": uid,
@@ -775,7 +777,7 @@ def send_one(item, title, content):
             url = f"{origin}/cgi-bin/webhook/send?key={key}"
             text = f"{title}\n\n{content}" if title else content
 
-            r = requests.post(
+            r = http.post(
                 url,
                 json={"msgtype": "text", "text": {"content": text}},
                 timeout=15,
@@ -801,7 +803,7 @@ def send_one(item, title, content):
             url = f"https://oapi.dingtalk.com/robot/send?access_token={token}&timestamp={timestamp}&sign={sign}"
             text = f"{title}\n\n{content}" if title else content
 
-            r = requests.post(
+            r = http.post(
                 url,
                 json={"msgtype": "text", "text": {"content": text}},
                 timeout=15,
@@ -829,7 +831,7 @@ def send_one(item, title, content):
                 data["timestamp"] = timestamp
                 data["sign"] = base64.b64encode(hmac_code).decode("utf-8")
 
-            r = requests.post(url, json=data, timeout=15)
+            r = http.post(url, json=data, timeout=15)
             js = _json(r)
             return js.get("StatusCode") == 0 or js.get("code") == 0, str(js)
 
@@ -856,13 +858,15 @@ def send_one(item, title, content):
                 port = 465 if _cfg("SMTP_SSL", "false").lower() == "true" else 25
 
             if _cfg("SMTP_SSL", "false").lower() == "true":
-                smtp_obj = smtplib.SMTP_SSL(host, port, timeout=20)
+                smtp_obj = smtp.SMTP_SSL(host, port, timeout=20)
             else:
-                smtp_obj = smtplib.SMTP(host, port, timeout=20)
+                smtp_obj = smtp.SMTP(host, port, timeout=20)
 
-            smtp_obj.login(email_addr, password)
-            smtp_obj.sendmail(email_addr, [to_addr], msg.as_bytes())
-            smtp_obj.close()
+            try:
+                smtp_obj.login(email_addr, password)
+                smtp_obj.sendmail(email_addr, [to_addr], msg.as_bytes())
+            finally:
+                smtp_obj.close()
 
             return True, "ok"
 
@@ -881,7 +885,7 @@ def send_one(item, title, content):
             if _cfg("NTFY_TOKEN"):
                 headers["Authorization"] = "Bearer " + _cfg("NTFY_TOKEN")
 
-            r = requests.post(
+            r = http.post(
                 f"{url}/{topic}",
                 data=content.encode("utf-8"),
                 headers=headers,
@@ -924,7 +928,7 @@ def send_one(item, title, content):
                 "verifyPayType": 0,
             }
 
-            r = requests.post(
+            r = http.post(
                 "https://wxpusher.zjiecode.com/api/send/message",
                 json=data,
                 timeout=15,
@@ -939,7 +943,7 @@ def send_one(item, title, content):
             if not url or not token:
                 return False, "GOTIFY_URL 或 GOTIFY_TOKEN 为空"
 
-            r = requests.post(
+            r = http.post(
                 f"{url}/message",
                 params={"token": token},
                 data={
@@ -958,7 +962,7 @@ def send_one(item, title, content):
                 return False, "DEER_KEY 为空"
 
             url = _cfg("DEER_URL") or "https://api2.pushdeer.com/message/push"
-            r = requests.post(
+            r = http.post(
                 url,
                 data={
                     "pushkey": key,
@@ -1006,7 +1010,7 @@ def send_one(item, title, content):
                 else:
                     data = f"title={urllib.parse.quote_plus(title)}&content={urllib.parse.quote_plus(content)}".encode("utf-8")
 
-            r = requests.request(
+            r = http.request(
                 method=method,
                 url=url,
                 headers=headers,
