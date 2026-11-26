@@ -39,6 +39,62 @@ class DirectoryProcessTests(unittest.TestCase):
             time.sleep(0.01)
         self.assertTrue(process_exited(pid), f"process {pid} did not exit")
 
+    def test_head_probe_reads_output_after_reaping_children_that_inherit_stdout(self):
+        with isolated_app() as (_, base):
+            from fls_manager.routes.scripts import native_repo_pull as repo
+
+            marker = base / "head-children.json"
+            head = "a" * 40
+            command = (
+                "import json,os,pathlib,subprocess,sys\n"
+                "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'])\n"
+                f"pathlib.Path({str(marker)!r}).write_text(json.dumps([os.getpid(),child.pid]))\n"
+                f"print({head!r},flush=True)\n"
+            )
+            original = repo.DirectoryProcess
+
+            def spawn(_command, **options):
+                return original([sys.executable, "-u", "-c", command], **options)
+
+            with patch.object(repo, "DirectoryProcess", side_effect=spawn):
+                self.assertEqual(repo._repo_head(None, base / "scripts"), head)
+            for pid in json.loads(marker.read_text()):
+                self.assert_exited(pid)
+            self.assert_lease_available(base)
+
+    def test_head_probe_timeout_reaps_its_tree_before_releasing_restore_lease(self):
+        with isolated_app() as (_, base):
+            from fls_manager.routes.scripts import native_repo_pull as repo
+
+            marker = base / "head-children.json"
+            command = (
+                "import json,os,pathlib,subprocess,sys,time\n"
+                "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'])\n"
+                f"pathlib.Path({str(marker)!r}).write_text(json.dumps([os.getpid(),child.pid]))\n"
+                "time.sleep(60)\n"
+            )
+            original = repo.DirectoryProcess
+
+            def spawn(_command, **options):
+                process = original([sys.executable, "-u", "-c", command], **options)
+                wait = process.wait
+
+                def short_wait(timeout=None):
+                    deadline = time.monotonic() + 10
+                    while not marker.exists() and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    self.assertTrue(marker.exists())
+                    return wait(timeout=0.1)
+
+                process.wait = short_wait
+                return process
+
+            with patch.object(repo, "DirectoryProcess", side_effect=spawn):
+                self.assertIsNone(repo._repo_head(None, base / "scripts"))
+            for pid in json.loads(marker.read_text()):
+                self.assert_exited(pid)
+            self.assert_lease_available(base)
+
     def test_supervisor_keeps_job_identity_after_original_owner_releases_it(self):
         with isolated_app() as (_, base):
             from fls_manager.directory_jobs import DirectoryJobLock
@@ -366,6 +422,51 @@ class DirectoryProcessTests(unittest.TestCase):
                     for pid in ready["children"] + [ready["supervisor"]]:
                         self.assert_exited(pid)
             self.assertFalse((base / "scripts" / "repo").exists())
+
+    def test_panel_owner_hard_exit_during_head_probe_reaps_tree_before_restore(self):
+        with isolated_app() as (_, base):
+            marker = base / "head-children.json"
+            command = (
+                "import json,os,pathlib,subprocess,sys,time\n"
+                "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'])\n"
+                f"pathlib.Path({str(marker)!r}).write_text(json.dumps([os.getpid(),child.pid]))\n"
+                "time.sleep(60)\n"
+            )
+            owner = (
+                "import json,pathlib,sys,threading,time\n"
+                "from fls_manager.routes.scripts import native_repo_pull as repo\n"
+                "processes=[]\noriginal=repo.DirectoryProcess\n"
+                "def spawn(_command,**kwargs):\n"
+                f" process=original([sys.executable,'-c',{command!r}],**kwargs)\n"
+                " processes.append(process)\n return process\n"
+                "repo.DirectoryProcess=spawn\n"
+                f"threading.Thread(target=repo._repo_head,args=(None,{str(base / 'scripts')!r}),daemon=True).start()\n"
+                "deadline=time.monotonic()+10\n"
+                f"while not pathlib.Path({str(marker)!r}).exists() and time.monotonic()<deadline:time.sleep(0.01)\n"
+                f"children=json.loads(pathlib.Path({str(marker)!r}).read_text())\n"
+                "print('OWNER_READY '+json.dumps({'supervisor':processes[0].pid,'children':children}),flush=True)\n"
+                "sys.stdin.readline()\n"
+            )
+            from fls_manager.backup_lease import release_process_lease, try_process_lease
+
+            with self.paused_owner(owner) as (process, ready):
+                self.assertIsNone(try_process_lease(base / ".backup_native_restore.lock"))
+                process.kill()
+                process.wait(timeout=10)
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline:
+                    fd = try_process_lease(base / ".backup_native_restore.lock")
+                    if fd is not None:
+                        try:
+                            self.assertTrue(all(process_exited(pid) for pid in ready["children"]))
+                        finally:
+                            release_process_lease(fd)
+                        break
+                    time.sleep(0.01)
+                else:
+                    self.fail("head probe supervisor did not finish cleanup")
+                for pid in ready["children"] + [ready["supervisor"]]:
+                    self.assert_exited(pid)
 
 
 if __name__ == "__main__":

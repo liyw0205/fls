@@ -19,7 +19,8 @@ from fls_manager.process_tree import WindowsJob, _posix_group_running
 
 
 class DirectoryProcess:
-    def __init__(self, command, *, workspace, cwd, env, lease_path, pass_fds=(), job_lease_path=None):
+    def __init__(self, command, *, workspace, cwd, env, lease_path, pass_fds=(), job_lease_path=None,
+                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE):
         if os.name != "nt" and not (
             os.name == "posix" and Path("/proc").is_dir()
             and all(hasattr(os, name) for name in ("waitid", "WNOWAIT", "WNOHANG", "CLD_EXITED"))
@@ -36,7 +37,7 @@ class DirectoryProcess:
         self._process = subprocess.Popen(
             [sys.executable, "-u", str(Path(__file__).resolve()), str(self.result_path)],
             cwd=tempfile.gettempdir(), env=env, stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, **options,
+            stdout=stdout, stderr=stderr, **options,
         )
         self.stderr = self._process.stderr
 
@@ -148,7 +149,7 @@ def _supervise(result_path):
             process = subprocess.Popen(
                 [sys.executable, "-u", str(Path(__file__).resolve()), "--command"],
                 cwd=configuration["cwd"], stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
             )
             job.assign(process)
             assigned = True
@@ -159,7 +160,7 @@ def _supervise(result_path):
         else:
             process = subprocess.Popen(
                 configuration["command"], cwd=configuration["cwd"], stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL, start_new_session=True, pass_fds=inherited,
+                start_new_session=True, pass_fds=inherited,
             )
         _write_status(result_path.with_name(".process-ready.json"), {"ready": True})
         while not disconnected.is_set():

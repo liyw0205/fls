@@ -6,6 +6,7 @@ import re
 import shutil
 import stat
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -208,21 +209,25 @@ def _repo_head(directory_fd, directory_path=None):
     else:
         return None
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=cwd,
-            pass_fds=pass_fds,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
+        with tempfile.TemporaryDirectory(prefix="fls-repo-head-") as workspace, tempfile.TemporaryFile() as output:
+            env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="")
+            process = DirectoryProcess(
+                ["git", "rev-parse", "HEAD"], workspace=workspace, cwd=cwd, env=env,
+                lease_path=BASE_DIR / ".backup_native_restore.lock", pass_fds=pass_fds,
+                stdout=output, stderr=subprocess.DEVNULL,
+            )
+            try:
+                process.start()
+                return_code = process.wait(timeout=10)
+            finally:
+                process.stop()
+            if return_code != 0:
+                return ""
+            # A regular file avoids pipe EOF waits caused by inherited child handles.
+            output.seek(0)
+            value = output.read(256).decode("ascii").strip().lower()
+    except (OSError, RuntimeError, UnicodeError, subprocess.SubprocessError):
         return None
-    if result.returncode != 0:
-        return ""
-    value = result.stdout.strip().lower()
     return value if re.fullmatch(r"[0-9a-f]{40,64}", value) else None
 
 
