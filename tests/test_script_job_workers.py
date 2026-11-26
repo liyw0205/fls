@@ -1,6 +1,7 @@
 import contextlib
 import json
 import os
+import queue
 import subprocess
 import sys
 import tempfile
@@ -103,44 +104,42 @@ finally:
 class ScriptJobWorkerTests(unittest.TestCase):
     @contextlib.contextmanager
     def worker(self, base, kind, label):
-        with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
+        with tempfile.TemporaryFile() as errors:
             process = subprocess.Popen(
                 [sys.executable, '-u', '-c', WORKER, kind, label],
-                stdin=subprocess.PIPE, stdout=output, stderr=errors, text=True,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors, text=True,
                 env=dict(os.environ, PYTHONIOENCODING='utf-8'),
             )
-            offset = 0
+            results = queue.Queue()
+
+            def read_results():
+                for line in process.stdout:
+                    if line.startswith('FLS_RESULT '):
+                        results.put(json.loads(line[len('FLS_RESULT '):]))
+
+            reader = threading.Thread(target=read_results, daemon=True)
+            reader.start()
 
             def rpc(method, path=None, data=None):
-                nonlocal offset
                 process.stdin.write(json.dumps({'method': method, 'path': path, 'data': data}) + '\n')
                 process.stdin.flush()
-                deadline = time.monotonic() + 15
-                while time.monotonic() < deadline:
-                    output.seek(offset)
-                    line = output.readline()
-                    if line and line.endswith(b'\n'):
-                        offset = output.tell()
-                        if line.startswith(b'FLS_RESULT '):
-                            return json.loads(line[len(b'FLS_RESULT '):])
-                    elif process.poll() is not None:
-                        break
-                    else:
-                        time.sleep(.01)
-                errors.seek(0)
-                raise AssertionError('worker RPC failed: ' + errors.read().decode(errors='replace'))
+                try:
+                    return results.get(timeout=15)
+                except queue.Empty as exc:
+                    errors.seek(0)
+                    raise AssertionError('worker RPC failed: ' + errors.read().decode(errors='replace')) from exc
 
             try:
                 self.assertEqual(rpc('get', '/api/scripts/' + kind + '-history')[0], 200)
                 yield process, rpc
-            except BaseException:
+            except BaseException as exc:
                 errors.seek(0)
-                print('WORKER_DIAGNOSTICS', kind, label, errors.read().decode(errors='replace'))
+                details = [f'WORKER_DIAGNOSTICS {kind} {label}', errors.read().decode(errors='replace')]
                 for diagnostic in base.glob('*.git-*'):
-                    print(diagnostic.name, diagnostic.read_text(errors='replace'))
+                    details.append(diagnostic.name + ': ' + diagnostic.read_text(errors='replace'))
                 for diagnostic in (base / 'scripts').rglob('.process-*.json'):
-                    print(diagnostic.name, diagnostic.read_text(errors='replace'))
-                raise
+                    details.append(str(diagnostic.relative_to(base)) + ': ' + diagnostic.read_text(errors='replace'))
+                raise AssertionError(str(exc) + '\n' + '\n'.join(details)) from exc
             finally:
                 (base / (label + '.release')).touch()
                 if process.poll() is None:
@@ -150,7 +149,11 @@ class ScriptJobWorkerTests(unittest.TestCase):
                         process.wait(timeout=15)
                     except subprocess.TimeoutExpired:
                         process.kill()
-                process.communicate(timeout=10)
+                process.wait(timeout=10)
+                reader.join(5)
+                self.assertFalse(reader.is_alive())
+                process.stdin.close()
+                process.stdout.close()
 
     def wait_started(self, base, label):
         deadline = time.monotonic() + 15
