@@ -20,7 +20,9 @@ from fls_manager.process_tree import WindowsJob, _posix_group_running
 
 class DirectoryProcess:
     def __init__(self, command, *, workspace, cwd, env, lease_path, pass_fds=(), job_lease_path=None,
-                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE):
+                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, shell=False, stop_grace_seconds=0):
+        if not 0 <= stop_grace_seconds <= 10:
+            raise ValueError("invalid command stop grace period")
         if os.name != "nt" and not (
             os.name == "posix" and Path("/proc").is_dir()
             and all(hasattr(os, name) for name in ("waitid", "WNOWAIT", "WNOHANG", "CLD_EXITED"))
@@ -32,6 +34,7 @@ class DirectoryProcess:
             "command": command, "cwd": str(cwd), "lease_path": str(lease_path),
             "pass_fds": list(pass_fds),
             "job_lease_path": str(job_lease_path) if job_lease_path is not None else None,
+            "shell": shell, "stop_grace_seconds": stop_grace_seconds,
         }
         options = {"pass_fds": tuple(pass_fds)} if os.name == "posix" else {}
         self._process = subprocess.Popen(
@@ -131,7 +134,8 @@ def _supervise(result_path):
     job = None
     assigned = False
     signalled = False
-    returncode = -1
+    terminate_deadline = None
+    returncode = None
 
     def watch_owner():
         try:
@@ -154,13 +158,15 @@ def _supervise(result_path):
             job.assign(process)
             assigned = True
             if not disconnected.is_set():
-                process.stdin.write(json.dumps(configuration["command"]).encode("utf-8") + b"\n")
+                process.stdin.write(json.dumps({
+                    "command": configuration["command"], "shell": configuration.get("shell", False),
+                }).encode("utf-8") + b"\n")
                 process.stdin.flush()
             process.stdin.close()
         else:
             process = subprocess.Popen(
                 configuration["command"], cwd=configuration["cwd"], stdin=subprocess.DEVNULL,
-                start_new_session=True, pass_fds=inherited,
+                start_new_session=True, pass_fds=inherited, shell=configuration.get("shell", False),
             )
         _write_status(result_path.with_name(".process-ready.json"), {"ready": True})
         while not disconnected.is_set():
@@ -181,6 +187,17 @@ def _supervise(result_path):
                             process.kill()
                     else:
                         if not signalled:
+                            grace = configuration.get("stop_grace_seconds", 0)
+                            if disconnected.is_set() and grace:
+                                if terminate_deadline is None:
+                                    try:
+                                        os.killpg(process.pid, signal.SIGTERM)
+                                    except ProcessLookupError:
+                                        pass
+                                    terminate_deadline = time.monotonic() + grace
+                                if _posix_group_running(process.pid) and time.monotonic() < terminate_deadline:
+                                    time.sleep(0.01)
+                                    continue
                             try:
                                 os.killpg(process.pid, signal.SIGKILL)
                             except ProcessLookupError:
@@ -189,7 +206,9 @@ def _supervise(result_path):
                         if _posix_group_running(process.pid):
                             time.sleep(0.01)
                             continue
-                    process.wait(timeout=10)
+                    actual_returncode = process.wait(timeout=10)
+                    if returncode is None:
+                        returncode = actual_returncode
                     break
                 except (OSError, RuntimeError, TimeoutError, subprocess.SubprocessError):
                     time.sleep(0.1)
@@ -198,7 +217,7 @@ def _supervise(result_path):
         if job is not None:
             job.close()
         try:
-            _write_status(result_path, {"returncode": returncode})
+            _write_status(result_path, {"returncode": returncode if returncode is not None else -1})
         finally:
             for fd in inherited:
                 os.close(fd)
@@ -212,7 +231,8 @@ def _run_command():
         return 1
     if len(raw) > 128 * 1024 or not raw.endswith(b"\n"):
         raise ValueError("invalid command configuration")
-    return subprocess.call(json.loads(raw), stdin=subprocess.DEVNULL)
+    configuration = json.loads(raw)
+    return subprocess.call(configuration["command"], stdin=subprocess.DEVNULL, shell=configuration.get("shell", False))
 
 
 if __name__ == "__main__":

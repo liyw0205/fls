@@ -16,6 +16,7 @@ from ...online_scripts.constants import (
 from ...online_scripts.logs import online_refresh_log_file
 from ...sensitive import mask_sensitive_text
 from ...paths import LOG_DIR
+from ...directory_jobs import directory_job_operation
 
 
 RECOVERY_STATUSES = {"结果未知", "失败", "超时", "已停止", "启动失败"}
@@ -649,6 +650,7 @@ def _install_history_filter_form(script_id="", status="", limit=50):
 
 
 @bp.route("/api/online-scripts/install-history")
+@directory_job_operation
 def api_online_install_history():
     requested_snapshot = request.args.get("snapshot")
     if requested_snapshot is not None and not re.fullmatch(r"[a-f0-9]{64}", requested_snapshot):
@@ -677,6 +679,7 @@ def api_online_install_history():
 
 
 @bp.route("/api/online-scripts/log/<install_id>")
+@directory_job_operation
 def api_online_install_log(install_id):
     try:
         lines = int(request.args.get("lines", "1200"))
@@ -782,6 +785,7 @@ def api_online_install_log(install_id):
 
 
 @bp.route("/online-scripts/log/<install_id>")
+@directory_job_operation
 def online_install_log(install_id):
     back_url = get_back_url("/online-scripts")
     history_path = "/online-scripts/install-history"
@@ -1364,6 +1368,7 @@ loadLog();
 
 
 @bp.route("/online-scripts/install-history")
+@directory_job_operation
 def online_install_history():
     script_id = str(request.args.get("script_id") or "").strip()
     status = str(request.args.get("status") or "").strip()

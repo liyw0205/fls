@@ -47,6 +47,12 @@ jobs:
           tests/test_script_directory_access.py
           tests/test_script_job_workers.py
           tests/test_directory_process.py
+          tests/test_online_install_directory_jobs.py
+          tests/test_online_install_lifecycle.py
+          tests/test_online_install_recovery.py
+          tests/test_online_install_storage_recovery.py
+          tests/test_online_install_scheduler_recovery.py
+          tests/test_online_task_validation.py
           tests/test_native_script_pull_api.py
           tests/test_native_script_repo_pull_api.py
           tests/test_native_script_import_api.py
@@ -107,3 +113,7 @@ jobs:
         env:
           PYTHONPATH: .
         run: python -m pytest -q tests/test_backup_directory_commit.py tests/test_native_backup_directory_recovery.py
+      - name: Verify online install admission, command supervision and recovery
+        env:
+          PYTHONPATH: .
+        run: python -m pytest -q tests/test_online_install_directory_jobs.py tests/test_online_install_lifecycle.py tests/test_online_install_recovery.py tests/test_online_install_storage_recovery.py tests/test_online_install_scheduler_recovery.py tests/test_online_task_validation.py

@@ -7,6 +7,7 @@ from ...utils import now_str
 from ...models import TASKS_MUTATION_LOCK, TaskSchedulerReloadError
 from ...storage import storage_transaction
 from ...scheduler import reload_scheduler
+from ...directory_jobs import directory_job_operation
 from ...online_scripts.constants import (
     ONLINE_INSTALL_LOCK,
     ONLINE_INSTALL_RUNNING,
@@ -350,6 +351,7 @@ def _start_install_job(
 
 
 @bp.route("/online-scripts/install/<script_id>", methods=["POST"])
+@directory_job_operation
 def online_scripts_install(script_id):
     raw_request_id = request.form.get("request_id", "")
     try:
@@ -678,6 +680,7 @@ def _api_install_rejected(request_id, message, status_code, *, retry_allowed=Fal
 
 
 @bp.route("/api/online-scripts/install/<script_id>", methods=["POST"])
+@directory_job_operation
 def api_online_scripts_install(script_id):
     if request.is_json:
         data = request.get_json(silent=True)
@@ -916,11 +919,13 @@ def _retry_unstarted_install_receipt(install_id):
 
 
 @bp.route("/online-scripts/install-start-retry/<install_id>", methods=["POST"])
+@directory_job_operation
 def online_scripts_install_start_retry(install_id):
     return _retry_unstarted_install_receipt(install_id)
 
 
 @bp.route("/api/online-scripts/install-start-retry/<install_id>", methods=["POST"])
+@directory_job_operation
 def api_online_scripts_install_start_retry(install_id):
     if not re.fullmatch(r"[a-f0-9]{32}", install_id or ""):
         return jsonify(ok=False, request_id=install_id, msg="在线脚本安装请求标识无效"), 400
@@ -1275,6 +1280,7 @@ def _retry_install_tasks(install_id):
 
 
 @bp.route("/online-scripts/install-task-retry/<install_id>", methods=["POST"])
+@directory_job_operation
 def online_scripts_install_task_retry(install_id):
     payload, status = _retry_install_tasks(install_id)
     if payload.get("ok"):
@@ -1286,6 +1292,7 @@ def online_scripts_install_task_retry(install_id):
 
 
 @bp.route("/api/online-scripts/install-task-retry/<install_id>", methods=["POST"])
+@directory_job_operation
 def api_online_scripts_install_task_retry(install_id):
     if not re.fullmatch(r"[a-f0-9]{32}", install_id or ""):
         return jsonify(ok=False, request_id=install_id, msg="在线脚本安装请求标识无效"), 400
@@ -1350,12 +1357,14 @@ def _confirm_install_tasks(install_id):
 
 
 @bp.route("/api/online-scripts/install-task-confirm/<install_id>", methods=["POST"])
+@directory_job_operation
 def api_online_scripts_install_task_confirm(install_id):
     payload, status = _confirm_install_tasks(install_id)
     return jsonify(payload), status
 
 
 @bp.route("/online-scripts/install-task-confirm/<install_id>", methods=["POST"])
+@directory_job_operation
 def online_scripts_install_task_confirm(install_id):
     payload, status = _confirm_install_tasks(install_id)
     if payload.get("ok"):
@@ -1524,6 +1533,7 @@ def _reload_install_scheduler(install_id):
 
 
 @bp.route("/online-scripts/install-reload/<install_id>", methods=["POST"])
+@directory_job_operation
 def online_scripts_install_reload(install_id):
     payload, status = _reload_install_scheduler(install_id)
     if not payload.get("ok"):
@@ -1539,6 +1549,7 @@ def online_scripts_install_reload(install_id):
 
 
 @bp.route("/api/online-scripts/install-reload/<install_id>", methods=["POST"])
+@directory_job_operation
 def api_online_scripts_install_reload(install_id):
     if not re.fullmatch(r"[a-f0-9]{32}", install_id or ""):
         return jsonify(ok=False, request_id=install_id, msg="在线脚本安装请求标识无效"), 400
@@ -1547,6 +1558,7 @@ def api_online_scripts_install_reload(install_id):
 
 
 @bp.route("/online-scripts/install-retry/<install_id>", methods=["POST"])
+@directory_job_operation
 def online_scripts_install_retry(install_id):
     try:
         info = get_online_install_job(install_id)
@@ -1688,6 +1700,7 @@ def online_scripts_install_retry(install_id):
 
 
 @bp.route("/api/online-scripts/install-retry/<install_id>", methods=["POST"])
+@directory_job_operation
 def api_online_scripts_install_retry(install_id):
     if not re.fullmatch(r"[a-f0-9]{32}", install_id or ""):
         return jsonify(ok=False, request_id=install_id, msg="在线脚本安装请求标识无效"), 400
@@ -1816,6 +1829,7 @@ def _stop_install_result(install_id):
 
 
 @bp.route("/online-scripts/install-stop/<install_id>", methods=["POST"])
+@directory_job_operation
 def online_scripts_install_stop(install_id):
     ok, msg, code = _stop_install_result(install_id)
     back = get_back_url("/online-scripts")
@@ -1846,6 +1860,7 @@ def online_scripts_install_stop(install_id):
 
 
 @bp.route("/api/online-scripts/install-stop/<install_id>", methods=["POST"])
+@directory_job_operation
 def api_online_scripts_install_stop(install_id):
     ok, msg, code = _stop_install_result(install_id)
     try:

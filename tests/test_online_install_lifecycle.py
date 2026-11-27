@@ -384,18 +384,21 @@ class OnlineInstallLifecycleTests(unittest.TestCase):
 
             info = self.register(base_dir)
             exited = threading.Event()
+
+            def stop(**_kwargs):
+                if not exited.is_set():
+                    raise PermissionError("tree cleanup denied")
+
             proc = SimpleNamespace(
                 pid=4321, returncode=-9,
                 poll=lambda: -9 if exited.is_set() else None,
-                wait=Mock(side_effect=subprocess.TimeoutExpired("install", 1)),
-                terminate=Mock(side_effect=PermissionError("terminate denied")),
-                kill=Mock(side_effect=PermissionError("kill denied")),
+                start=Mock(),
+                wait=lambda **_kwargs: -9 if exited.is_set() else None,
+                stop=stop,
             )
             worker = threading.Thread(target=install_worker, args=("install", self.item("sleep 30")))
             with patch("fls_manager.online_scripts.install.download_online_script_logged"), patch(
-                "fls_manager.online_scripts.install.subprocess.Popen", return_value=proc,
-            ), patch("fls_manager.online_scripts.install.os.killpg", side_effect=PermissionError("group denied")), patch(
-                "fls_manager.online_scripts.install.os.getpgid", return_value=4321,
+                "fls_manager.online_scripts.install.DirectoryProcess", return_value=proc,
             ):
                 worker.start()
                 try:
@@ -403,13 +406,13 @@ class OnlineInstallLifecycleTests(unittest.TestCase):
                     client = app.test_client()
                     response = client.post("/api/online-scripts/install-stop/install", headers={"X-Token": TOKEN})
                     self.assertEqual(response.status_code, 409)
-                    self.assertIn("kill denied", response.json["msg"])
+                    self.assertIn("tree cleanup denied", response.json["msg"])
                     self.assertTrue(info["running"])
                     self.assertIs(info["process"], proc)
                     self.assertEqual(self.snapshot()["status"], "停止失败")
                     page = client.post("/online-scripts/install-stop/install", headers={"X-Token": TOKEN})
                     self.assertEqual(page.status_code, 409)
-                    self.assertIn("group denied", page.get_data(as_text=True))
+                    self.assertIn("tree cleanup denied", page.get_data(as_text=True))
                     with patch("fls_manager.routes.online_scripts.install.get_online_script", return_value=self.item()), patch(
                         "fls_manager.routes.online_scripts.install.start_install_thread",
                     ) as start:
@@ -422,7 +425,7 @@ class OnlineInstallLifecycleTests(unittest.TestCase):
             self.assertFalse(worker.is_alive())
             self.assertEqual(info["status"], "已停止")
             self.assertEqual(info["returncode"], -9)
-            self.assertIn("kill denied", self.snapshot()["error"])
+            self.assertIn("tree cleanup denied", self.snapshot()["error"])
 
     def test_stop_failure_receipt_write_failure_keeps_query_and_safe_stop_retry(self):
         with isolated_app() as (app, base_dir):

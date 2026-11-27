@@ -3,15 +3,17 @@ import hashlib
 import json
 import os
 import shutil
-import signal
 import stat
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
 from contextlib import closing
 
-from ..paths import SCRIPT_DIR
+from ..paths import BASE_DIR, SCRIPT_DIR
+from ..directory_jobs import directory_job, start_directory_job
+from ..directory_process import DirectoryProcess
 from ..models import TaskSchedulerReloadError, load_tasks
 from ..utils import now_str, LazyModule, prune_completed_records
 from ..proxy import (
@@ -49,6 +51,10 @@ class InstallTimeout(InstallCommandError):
 
 
 class InstallStopped(InstallCommandError):
+    pass
+
+
+class InstallCommandUncertain(InstallCommandError):
     pass
 
 
@@ -262,34 +268,18 @@ def terminate_install_process(proc):
     if not proc:
         return True, ""
 
-    errors = []
-    for sig, method in ((signal.SIGTERM, "terminate"), (getattr(signal, "SIGKILL", signal.SIGTERM), "kill")):
+    try:
+        proc.stop(timeout=10)
         if proc.poll() is not None:
             return True, ""
-        if os.name == "nt":
-            try:
-                getattr(proc, method)()
-            except Exception as e:
-                errors.append(f"{method}: {e}")
-        else:
-            try:
-                os.killpg(os.getpgid(proc.pid), sig)
-            except Exception as e:
-                errors.append(f"killpg({sig}): {e}")
-                try:
-                    getattr(proc, method)()
-                except Exception as fallback_error:
-                    errors.append(f"{method}: {fallback_error}")
+    except Exception as exc:
         try:
-            proc.wait(timeout=1)
-        except subprocess.TimeoutExpired:
+            if proc.poll() is not None:
+                return True, ""
+        except Exception:
             pass
-        except Exception as e:
-            errors.append(f"wait: {e}")
-
-    if proc.poll() is not None:
-        return True, ""
-    return False, "；".join(errors + ["无法确认安装进程已退出"])
+        return False, f"停止安装进程树失败：{exc}；无法确认安装进程已退出"
+    return False, "无法确认安装进程已退出"
 
 
 def _interrupt_install_command(install_id, proc, reason, retry=False):
@@ -405,6 +395,7 @@ def command_list_to_text(cmd):
     return " ".join(str(x) for x in cmd)
 
 
+@directory_job()
 def run_logged_command(cmd, cwd, log_file, env=None, shell=False, install_id=""):
     append_log(log_file, "")
     append_log(
@@ -414,44 +405,53 @@ def run_logged_command(cmd, cwd, log_file, env=None, shell=False, install_id="")
     append_log(log_file, f"cwd: {cwd}")
     append_log(log_file, "------------------------------------------------------------")
 
-    with open(log_file, "ab", buffering=0) as log_fp:
-        popen_kwargs = {
-            "stdout": log_fp,
-            "stderr": subprocess.STDOUT,
-            "cwd": str(cwd),
-            "env": env or os.environ.copy(),
-            "shell": shell,
-        }
-
-        if os.name != "nt":
-            popen_kwargs["start_new_session"] = True
-
-        with ONLINE_INSTALL_LOCK:
-            if install_id and online_install_should_stop(install_id):
-                raise InstallStopped("安装已停止")
-            proc = subprocess.Popen(cmd, **popen_kwargs)
-            info = ONLINE_INSTALL_RUNNING.get(install_id)
-            if info is not None:
-                info["process"] = proc
-                info.pop("command_interruption", None)
-
-        deadline = time.monotonic() + ONLINE_INSTALL_TIMEOUT_SECONDS
-        interruption_attempted = False
-        while proc.poll() is None:
-            stopping = install_id and online_install_should_stop(install_id)
-            if not interruption_attempted and (stopping or time.monotonic() >= deadline):
-                interruption_attempted = True
-                reason = "stop" if stopping else "timeout"
+    with tempfile.TemporaryDirectory(prefix="fls-online-install-") as workspace, open(log_file, "ab", buffering=0) as log_fp:
+        proc = None
+        gate_attempted = False
+        try:
+            with ONLINE_INSTALL_LOCK:
+                if install_id and online_install_should_stop(install_id):
+                    raise InstallStopped("安装已停止")
+                proc = DirectoryProcess(
+                    cmd, workspace=workspace, cwd=cwd, env=env or os.environ.copy(), shell=shell,
+                    lease_path=BASE_DIR / ".backup_native_restore.lock", stdout=log_fp,
+                    stderr=subprocess.STDOUT, stop_grace_seconds=1,
+                )
+                gate_attempted = True
+                proc.start()
+                info = ONLINE_INSTALL_RUNNING.get(install_id)
                 if info is not None:
-                    with ONLINE_INSTALL_LOCK:
-                        already_attempted = bool(info.get("command_interruption"))
-                    if not already_attempted:
-                        _interrupt_install_command(install_id, proc, reason)
-                else:
-                    terminate_install_process(proc)
-            time.sleep(0.1)
+                    info["process"] = proc
+                    info.pop("command_interruption", None)
+            deadline = time.monotonic() + ONLINE_INSTALL_TIMEOUT_SECONDS
+            interruption_attempted = False
+            while proc.poll() is None:
+                stopping = install_id and online_install_should_stop(install_id)
+                if not interruption_attempted and (stopping or time.monotonic() >= deadline):
+                    interruption_attempted = True
+                    reason = "stop" if stopping else "timeout"
+                    if info is not None:
+                        with ONLINE_INSTALL_LOCK:
+                            already_attempted = bool(info.get("command_interruption"))
+                        if not already_attempted:
+                            _interrupt_install_command(install_id, proc, reason)
+                    else:
+                        terminate_install_process(proc)
+                time.sleep(0.1)
 
-        return_code = proc.returncode
+            return_code = proc.wait(timeout=0)
+        except InstallCommandError:
+            raise
+        except Exception as exc:
+            if gate_attempted:
+                raise InstallCommandUncertain(f"无法确认安装命令结果：{exc}") from exc
+            raise
+        finally:
+            if proc is not None:
+                try:
+                    proc.stop()
+                except Exception as exc:
+                    raise InstallCommandUncertain(f"无法确认安装进程树清理结果：{exc}") from exc
         with ONLINE_INSTALL_LOCK:
             interruption = info.pop("command_interruption", "") if info is not None else ""
             if info is not None:
@@ -794,6 +794,7 @@ def install_worker(
 
     except Exception as e:
         stopped = isinstance(e, InstallStopped)
+        uncertain = isinstance(e, InstallCommandUncertain)
 
         with ONLINE_INSTALL_LOCK:
             info = ONLINE_INSTALL_RUNNING.get(install_id)
@@ -814,11 +815,11 @@ def install_worker(
             info.update({
                 "running": False,
                 "phase": (
-                    info.get("phase") if not stopped and not isinstance(e, InstallTimeout)
+                    "unknown" if uncertain else info.get("phase") if not stopped and not isinstance(e, InstallTimeout)
                     and info.get("phase") == "importing_tasks"
                     else "stopped" if stopped else ("timeout" if isinstance(e, InstallTimeout) else "failed")
                 ),
-                "status": "已停止" if stopped else ("超时" if isinstance(e, InstallTimeout) else "失败"),
+                "status": "结果未知" if uncertain else "已停止" if stopped else ("超时" if isinstance(e, InstallTimeout) else "失败"),
                 "returncode": getattr(e, "returncode", None),
                 "error": "；".join(dict.fromkeys(filter(None, (
                     str(e), info.get("error"), info.get("persistence_error"),
@@ -868,8 +869,8 @@ def start_install_thread(
     enable_task=False,
     selected_task_indexes=None,
 ):
-    th = threading.Thread(
-        target=install_worker,
+    return start_directory_job(
+        install_worker,
         args=(
             install_id,
             dict(item),
@@ -879,8 +880,5 @@ def start_install_thread(
             enable_task,
             selected_task_indexes,
         ),
-        daemon=True,
         name=f"fls-online-install-{install_id[:8]}",
     )
-    th.start()
-    return th
