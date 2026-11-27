@@ -115,7 +115,7 @@ class OnlineTaskLinkTests(unittest.TestCase):
             request_id = "f" * 32
             source.mutate_json(source.ONLINE_TASK_LINK_REQUESTS_FILE, {}, lambda _: {}, strict=True)
             before = source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes()
-            source.ONLINE_TASK_LINK_ACTIVE.add(request_id)
+            owner = source.TASK_LINK_IDENTITIES.claim(request_id)
             try:
                 with patch.object(task_link, "fetch_task_link_tasks", return_value=[self.task("unexpected")]) as fetch:
                     client = app.test_client()
@@ -131,9 +131,9 @@ class OnlineTaskLinkTests(unittest.TestCase):
                     self.assertIn("重新查询", page.get_data(as_text=True))
                     fetch.assert_not_called()
                 self.assertEqual(source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes(), before)
-                self.assertIn(request_id, source.ONLINE_TASK_LINK_ACTIVE)
+                self.assertIn(request_id, source.task_link_active_ids())
             finally:
-                source.ONLINE_TASK_LINK_ACTIVE.discard(request_id)
+                owner.close()
 
     def test_retention_protects_all_unresolved_states_and_active_completed_receipts(self):
         with isolated_app() as (_app, _base_dir):
@@ -146,7 +146,7 @@ class OnlineTaskLinkTests(unittest.TestCase):
                 request_id = f"{index:032x}"
                 records[request_id].update(state=state, updated_at="old")
                 protected.append(request_id)
-            source.ONLINE_TASK_LINK_ACTIVE.add(protected[-1])
+            owner = source.TASK_LINK_IDENTITIES.claim(protected[-1])
             source.mutate_json(source.ONLINE_TASK_LINK_REQUESTS_FILE, {}, lambda _: records, strict=True)
             try:
                 for index in range(10):
@@ -155,7 +155,7 @@ class OnlineTaskLinkTests(unittest.TestCase):
                 self.assertEqual(len(actual), 200)
                 self.assertTrue(all(key in actual for key in protected))
             finally:
-                source.ONLINE_TASK_LINK_ACTIVE.discard(protected[-1])
+                owner.close()
 
     def test_new_claim_reserves_room_for_active_missing_receipt_and_allows_original_recovery(self):
         with isolated_app() as (app, _base_dir):
@@ -168,7 +168,7 @@ class OnlineTaskLinkTests(unittest.TestCase):
             records.pop(f"{199:032x}")
             source.mutate_json(source.ONLINE_TASK_LINK_REQUESTS_FILE, {}, lambda _: records, strict=True)
             before = source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes()
-            source.ONLINE_TASK_LINK_ACTIVE.add(missing_id)
+            owner = source.TASK_LINK_IDENTITIES.claim(missing_id)
             try:
                 with patch.object(task_link, "fetch_task_link_tasks") as fetch:
                     rejected = app.test_client().post("/api/online-scripts/task-link/demo", json={"request_id": new_id}, headers={"X-Token": TOKEN})
@@ -180,7 +180,7 @@ class OnlineTaskLinkTests(unittest.TestCase):
                 self.assertEqual(len(json.loads(source.ONLINE_TASK_LINK_REQUESTS_FILE.read_text())), 200)
                 self.assertEqual(source.get_task_link_request(missing_id)["state"], "completed")
             finally:
-                source.ONLINE_TASK_LINK_ACTIVE.discard(missing_id)
+                owner.close()
 
     def test_archive_frees_capacity_without_changing_unknown_result_or_tasks_and_blocks_replay(self):
         for state, entry in (("unknown", "api"), ("failed", "form")):
@@ -260,11 +260,11 @@ class OnlineTaskLinkTests(unittest.TestCase):
                     self.assertEqual(client.post(api, json={"acknowledge": "archive"}, headers={"X-CSRF-Token": csrf}).status_code, 400)
                     self.assertEqual(client.post(form, data={"acknowledge": "archive", "csrf_token": csrf}).status_code, 400)
                 self.assertEqual(client.post(api + "?token=blocked", json={"acknowledge": "archive"}, headers={"X-CSRF-Token": "archive-csrf"}).status_code, 403)
-                source.ONLINE_TASK_LINK_ACTIVE.add(request_id)
+                owner = source.TASK_LINK_IDENTITIES.claim(request_id)
                 try:
                     self.assertEqual(client.post(api, json={"acknowledge": "archive"}, headers=headers).status_code, 409)
                 finally:
-                    source.ONLINE_TASK_LINK_ACTIVE.discard(request_id)
+                    owner.close()
                 self.assertEqual(source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes(), before)
                 self.assertEqual(source.ONLINE_SCRIPT_CACHE_FILE.read_bytes(), cache_before)
                 fetch.assert_not_called()
@@ -391,7 +391,7 @@ class OnlineTaskLinkTests(unittest.TestCase):
 
             item, request_id = self.item(), "a" * 32
             source.save_online_script_cache([item])
-            source.ONLINE_TASK_LINK_ACTIVE.add(request_id)
+            owner = source.TASK_LINK_IDENTITIES.claim(request_id)
             client, headers = app.test_client(), {"X-Token": TOKEN}
             try:
                 with self.assertRaises(source.TaskLinkReceiptMissing):
@@ -403,7 +403,7 @@ class OnlineTaskLinkTests(unittest.TestCase):
                         self.assertEqual(failed.status_code, 503)
                     fetch.assert_not_called()
             finally:
-                source.ONLINE_TASK_LINK_ACTIVE.discard(request_id)
+                owner.close()
             for kind in ("corrupt", "symlink", "invalid_archive"):
                 with self.subTest(kind=kind):
                     receipt = source.ONLINE_TASK_LINK_REQUESTS_FILE
@@ -434,6 +434,7 @@ class OnlineTaskLinkTests(unittest.TestCase):
                     cache = base_dir / "data" / "online_scripts_cache.json"
                     original = cache.read_bytes()
                     upstream = Mock(status_code=status, text=text, headers={"Content-Type": "application/json"})
+                    upstream.iter_content.return_value = [text.encode("utf-8")]
                     headers = {"X-Token": TOKEN}
                     if ajax:
                         headers["X-Requested-With"] = "FLS-Ajax"
@@ -1024,7 +1025,7 @@ class OnlineTaskLinkTests(unittest.TestCase):
             request_id = "c" * 32
             source.persist_task_link_request({"request_id": request_id, "script_id": "demo", "proxy_id": "", "state": "running"})
             before = source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes()
-            ONLINE_TASK_LINK_ACTIVE.add(request_id)
+            owner = source.TASK_LINK_IDENTITIES.claim(request_id)
             try:
                 with patch.object(task_link, "get_online_script") as cache, patch.object(task_link, "claim_task_link_request") as claim:
                     result = app.test_client().post("/api/online-scripts/task-link/demo", json={"request_id": request_id}, headers={"X-Token": TOKEN})
@@ -1034,7 +1035,7 @@ class OnlineTaskLinkTests(unittest.TestCase):
                     cache.assert_not_called()
                     claim.assert_not_called()
             finally:
-                ONLINE_TASK_LINK_ACTIVE.discard(request_id)
+                owner.close()
             self.assertEqual(source.ONLINE_TASK_LINK_REQUESTS_FILE.read_bytes(), before)
 
     def test_simultaneous_initial_receipt_misses_still_claim_and_fetch_only_once(self):
@@ -1629,9 +1630,19 @@ class OnlineTaskLinkTests(unittest.TestCase):
 
             with patch.object(task_link, "persist_task_link_request", wraps=source.persist_task_link_request) as persist, ThreadPoolExecutor(max_workers=2) as pool:
                 responses = [future.result(timeout=5) for future in (pool.submit(confirm), pool.submit(confirm))]
-            self.assertEqual([response.status_code for response in responses], [200, 200])
-            self.assertEqual(sorted(response.json.get("replayed", False) for response in responses), [False, True])
-            self.assertEqual([response.json["confirmation"] for response in responses], ["merged", "merged"])
+            self.assertIn(200, [response.status_code for response in responses])
+            for response in responses:
+                self.assertIn(response.status_code, (200, 409))
+                if response.status_code == 409:
+                    self.assertTrue(response.json["active"])
+                else:
+                    self.assertEqual(response.json["confirmation"], "merged")
+            replay = app.test_client().post(
+                "/api/online-scripts/task-link-confirm/" + request_id, headers={"X-Token": TOKEN},
+            )
+            self.assertEqual(replay.status_code, 200)
+            self.assertTrue(replay.json["replayed"])
+            self.assertEqual(replay.json["confirmation"], "merged")
             persist.assert_called_once()
             self.assertEqual(source.get_task_link_request(request_id)["state"], "completed")
 

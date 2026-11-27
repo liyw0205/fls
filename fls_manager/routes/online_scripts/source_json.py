@@ -3,7 +3,8 @@ import re
 
 from ._common import *
 
-from ...storage import storage_transaction
+from ...directory_jobs import directory_job_operation
+from ...online_scripts.source_coordination import source_cache_transaction
 
 SOURCE_CACHE_MAX_BYTES = 4 * 1024 * 1024
 SOURCE_REQUEST_MAX_BYTES = 8 * 1024 * 1024
@@ -25,10 +26,11 @@ def _source_cache_revision(cache_text):
 
 
 @bp.route("/api/online-scripts/source", methods=["GET", "PUT"])
+@directory_job_operation
 def api_online_scripts_source():
     if request.method == "GET":
         try:
-            with storage_transaction():
+            with source_cache_transaction():
                 cache_text = read_cache_text(strict=True)
         except Exception:
             return _source_json_response({"ok": False, "msg": "在线脚本源缓存无法读取"}, 500)
@@ -64,7 +66,7 @@ def api_online_scripts_source():
     if submitted_size > SOURCE_CACHE_MAX_BYTES:
         return _source_json_response({"ok": False, "msg": "在线脚本源缓存超过 4 MiB 限制"}, 413)
 
-    with storage_transaction():
+    with source_cache_transaction():
         try:
             current_text = read_cache_text(strict=True)
         except Exception:
@@ -107,6 +109,7 @@ def api_online_scripts_source():
 
 
 @bp.route("/online-scripts/source", methods=["GET", "POST"])
+@directory_job_operation
 def online_scripts_source():
     msg = request.args.get("msg", "")
     err = ""
@@ -116,7 +119,7 @@ def online_scripts_source():
     submitted_text = request.form.get("json_text", "") if request.method == "POST" else None
 
     # Version comparison and persistence share the cache writer's storage lock.
-    with storage_transaction():
+    with source_cache_transaction():
         try:
             cache_text = read_cache_text(strict=True)
             revision = hashlib.sha256(cache_text.encode("utf-8")).hexdigest()

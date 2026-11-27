@@ -59,6 +59,10 @@ def isolated_app():
             if coordination:
                 for owner in list(coordination.TASK_IMPORT_IDENTITIES.owners.values()):
                     owner.close()
+            coordination = sys.modules.get("fls_manager.online_scripts.source_coordination")
+            if coordination:
+                for owner in list(coordination.TASK_LINK_IDENTITIES.owners.values()):
+                    owner.close()
             purge_fls_modules()
 
             for key, value in old_env.items():

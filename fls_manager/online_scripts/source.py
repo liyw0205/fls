@@ -8,7 +8,7 @@ from contextlib import closing
 from pathlib import Path
 
 from ..config import load_config
-from ..storage import mutate_json, storage_transaction
+from ..storage import mutate_json
 from ..utils import now_str, LazyModule
 from ..proxy import requests_proxy_dict, github_proxy_url, validate_proxy_id
 from .constants import (
@@ -29,6 +29,10 @@ from .constants import (
 )
 from .logs import append_log, online_refresh_log_file
 from .tasks import normalize_online_task_crons, online_script_task_crons
+from .source_coordination import (
+    TASK_LINK_ADMISSION, TASK_LINK_IDENTITIES, source_cache_transaction,
+    task_link_active_ids, task_link_receipt_transaction,
+)
 
 requests = LazyModule("requests")
 
@@ -141,7 +145,7 @@ def online_script_source_fingerprint():
 
 
 def save_online_script_cache(items):
-    with storage_transaction():
+    with source_cache_transaction():
         if ONLINE_SCRIPT_CACHE_FILE.is_symlink():
             raise RuntimeError("在线脚本源缓存不能是符号链接，未覆盖原文件")
         ONLINE_SCRIPT_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -227,8 +231,8 @@ def _task_link_request_snapshot(info):
     return snapshot
 
 
-def _task_link_needs_recovery(value):
-    if value.get("request_id") in ONLINE_TASK_LINK_ACTIVE:
+def _task_link_needs_recovery(value, active_ids):
+    if value.get("request_id") in active_ids:
         return True
     if value.get("archived") or value.get("state") == "completed":
         if value.get("state") == "completed" and value.get("origin_refresh_request_id"):
@@ -252,8 +256,9 @@ def _task_link_needs_recovery(value):
     return True
 
 
-def _prune_task_link_requests(records, current_id, *, capacity=200):
-    protected = {key for key, value in records.items() if _task_link_needs_recovery(value)}
+def _prune_task_link_requests(records, current_id, active_ids):
+    capacity = 200 - len(active_ids - records.keys())
+    protected = {key for key, value in records.items() if _task_link_needs_recovery(value, active_ids)}
     protected.add(current_id)
     if len(protected) > capacity:
         raise TaskLinkHistoryFull("待恢复的同步请求已达上限，请先处理或归档原请求；未接受新的同步请求。")
@@ -268,8 +273,8 @@ def online_script_task_fingerprint(item):
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _recover_task_link_request(value):
-    if value.get("request_id") in ONLINE_TASK_LINK_ACTIVE:
+def _recover_task_link_request(value, active_ids):
+    if value.get("request_id") in active_ids:
         return False
     state = value.get("state")
     if state not in ("prepared", "running"):
@@ -288,13 +293,14 @@ def _recover_task_link_request(value):
 def get_task_link_request(request_id, *, script_id=None, proxy_id=None):
     if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
         return None
-    with storage_transaction():
+    with task_link_receipt_transaction():
+        active_ids = task_link_active_ids()
         if ONLINE_TASK_LINK_REQUESTS_FILE.is_symlink():
             raise RuntimeError("在线任务源同步回执不能是符号链接，未覆盖原文件")
         try:
             raw = ONLINE_TASK_LINK_REQUESTS_FILE.read_text(encoding="utf-8")
         except FileNotFoundError:
-            if request_id in ONLINE_TASK_LINK_ACTIVE:
+            if request_id in active_ids:
                 raise TaskLinkReceiptMissing("原同步请求仍在处理中，但回执暂时缺失；请重新查询，不能重新提交。")
             return None
         try:
@@ -303,17 +309,19 @@ def get_task_link_request(request_id, *, script_id=None, proxy_id=None):
             raise RuntimeError(f"在线任务源同步回执损坏，未覆盖原文件：{exc}") from exc
         value = data.get(request_id)
         if not isinstance(value, dict):
-            if request_id in ONLINE_TASK_LINK_ACTIVE:
+            if request_id in active_ids:
                 raise TaskLinkReceiptMissing("原同步请求仍在处理中，但回执暂时缺失；请重新查询，不能重新提交。")
             return None
         value = dict(value)
         if ((script_id is not None and value.get("script_id") != script_id)
                 or (proxy_id is not None and value.get("proxy_id") != proxy_id)):
             return value
-        if _recover_task_link_request(value):
+        if _recover_task_link_request(value, active_ids):
             data[request_id] = _task_link_request_snapshot(value)
             mutate_json(ONLINE_TASK_LINK_REQUESTS_FILE, {}, lambda _: data, strict=True)
-        value["active"] = request_id in ONLINE_TASK_LINK_ACTIVE
+        owner = TASK_LINK_IDENTITIES.owners.get(request_id)
+        own_recovery = owner is not None and getattr(owner, "recovery_thread", None) == threading.get_ident()
+        value["active"] = request_id in active_ids and not own_recovery
         return value
 
 
@@ -332,7 +340,8 @@ def list_task_link_requests(limit=50, script_id="", *, recovery=False, offset=0,
     if not 0 <= offset <= 200:
         raise ValueError("在线任务源历史起始位置必须在 0 到 200 之间")
     script_id = str(script_id or "").strip()
-    with storage_transaction():
+    with task_link_receipt_transaction():
+        active_ids = task_link_active_ids()
         if ONLINE_TASK_LINK_REQUESTS_FILE.is_symlink():
             raise RuntimeError("在线任务源同步回执不能是符号链接，未覆盖原文件")
         try:
@@ -346,14 +355,14 @@ def list_task_link_requests(limit=50, script_id="", *, recovery=False, offset=0,
         changed = False
         for request_id, value in records.items():
             value = dict(value)
-            if _recover_task_link_request(value):
+            if _recover_task_link_request(value, active_ids):
                 records[request_id] = _task_link_request_snapshot(value)
                 changed = True
         if changed:
             mutate_json(ONLINE_TASK_LINK_REQUESTS_FILE, {}, lambda _: records, strict=True)
-        items = [{**value, "active": value.get("request_id") in ONLINE_TASK_LINK_ACTIVE}
+        items = [{**value, "active": value.get("request_id") in active_ids}
                  for value in records.values() if (not script_id or value.get("script_id") == script_id)
-                 and (not recovery or _task_link_needs_recovery(value))]
+                 and (not recovery or _task_link_needs_recovery(value, active_ids))]
         items.sort(key=lambda value: str(value.get("updated_at") or ""), reverse=True)
         page = items[offset:offset + limit]
         if with_pagination:
@@ -367,16 +376,14 @@ def persist_task_link_request(info):
     request_id = snapshot["request_id"]
     if not isinstance(request_id, str) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
         raise ValueError("在线任务源同步请求标识无效")
-    with storage_transaction():
+    with task_link_receipt_transaction():
         if ONLINE_TASK_LINK_REQUESTS_FILE.is_symlink():
             raise RuntimeError("在线任务源同步回执不能是符号链接，未覆盖原文件")
 
         def update(data):
             records = _validate_task_link_requests(data)
-            existed = request_id in records
             records[request_id] = snapshot
-            capacity = 200 if existed else 200 - len(ONLINE_TASK_LINK_ACTIVE - records.keys())
-            return _prune_task_link_requests(records, request_id, capacity=capacity)
+            return _prune_task_link_requests(records, request_id, task_link_active_ids())
 
         mutate_json(ONLINE_TASK_LINK_REQUESTS_FILE, {}, update, strict=True)
 
@@ -389,21 +396,22 @@ def claim_task_link_request(info):
         raise ValueError("在线任务源同步请求标识无效")
 
     observed = {}
-    with storage_transaction():
+    with TASK_LINK_ADMISSION, source_cache_transaction(), task_link_receipt_transaction():
+        active_ids = task_link_active_ids()
         if ONLINE_TASK_LINK_REQUESTS_FILE.is_symlink():
             raise RuntimeError("在线任务源同步回执不能是符号链接，未覆盖原文件")
 
         def update(data):
             records = _validate_task_link_requests(data)
             current = records.get(request_id)
-            if not current and request_id in ONLINE_TASK_LINK_ACTIVE:
+            if not current and request_id in active_ids:
                 raise TaskLinkReceiptMissing("原同步请求仍在处理中，但回执暂时缺失；请重新查询，不能重新提交。")
             if current and (current.get("state") != "failed" or current.get("archived")
-                            or request_id in ONLINE_TASK_LINK_ACTIVE):
-                observed["value"] = {**current, "active": request_id in ONLINE_TASK_LINK_ACTIVE}
+                            or request_id in active_ids):
+                observed["value"] = {**current, "active": request_id in active_ids}
                 return None
             if current and any(current.get(field) != snapshot.get(field) for field in (
-                "script_id", "proxy_id", "expected_version",
+                "script_id", "proxy_id", "expected_version", "origin_refresh_request_id",
             )):
                 observed["value"] = dict(current)
                 return None
@@ -424,10 +432,18 @@ def claim_task_link_request(info):
                     return None
             records[request_id] = snapshot
             observed["value"] = None
-            capacity = 200 if current else 200 - len(ONLINE_TASK_LINK_ACTIVE - records.keys())
-            return _prune_task_link_requests(records, request_id, capacity=capacity)
+            retained = _prune_task_link_requests(records, request_id, active_ids)
+            owner = TASK_LINK_IDENTITIES.claim(request_id)
+            owner.execution_thread = threading.get_ident()
+            observed["owner"] = owner
+            return retained
 
-        mutate_json(ONLINE_TASK_LINK_REQUESTS_FILE, {}, update, strict=True)
+        try:
+            mutate_json(ONLINE_TASK_LINK_REQUESTS_FILE, {}, update, strict=True)
+        except BaseException:
+            if "owner" in observed:
+                observed["owner"].close()
+            raise
         if observed.get("value") is None:
             ONLINE_TASK_LINK_ACTIVE.add(request_id)
     return observed.get("value")
@@ -435,7 +451,7 @@ def claim_task_link_request(info):
 
 def merge_task_link_tasks(expected_item, linked_tasks, *, before_publish=None):
     # Fetch outside the storage lock, then merge into the latest cache snapshot.
-    with storage_transaction():
+    with source_cache_transaction():
         items = load_online_script_cache()
         item = next((one for one in items if one.get("id") == expected_item.get("id")), None)
         expected_metadata = {key: value for key, value in expected_item.items() if key != "task_cron"}
@@ -481,6 +497,21 @@ def read_cache_text(strict=False):
     return ""
 
 
+def _read_source_response(response, *, limit):
+    length = response.headers.get("Content-Length", "")
+    if isinstance(length, str) and length.isdecimal() and int(length) > limit:
+        raise RuntimeError(f"在线源响应超过 {limit} 字节限制，未发布缓存")
+    payload = bytearray()
+    for chunk in response.iter_content(chunk_size=65536):
+        if not chunk:
+            continue
+        if len(payload) + len(chunk) > limit:
+            raise RuntimeError(f"在线源响应超过 {limit} 字节限制，未发布缓存")
+        payload.extend(chunk)
+    encoding = getattr(response, "encoding", None)
+    return payload.decode(encoding if isinstance(encoding, str) and encoding else "utf-8-sig", errors="replace")
+
+
 def fetch_task_link_tasks(item, proxy_id="", timeout=12):
     """
     同步 item.task_link 指向的任务 JSON。
@@ -505,9 +536,10 @@ def fetch_task_link_tasks(item, proxy_id="", timeout=12):
         timeout=timeout,
         headers={"User-Agent": "Mozilla/5.0 FLS-Manager"},
         proxies=requests_proxy_dict(proxy_id),
+        stream=True,
     )) as r:
         status_code = getattr(r, "status_code", 0)
-        text = r.text or ""
+        text = _read_source_response(r, limit=4 * 1024 * 1024)
         headers = getattr(r, "headers", {})
 
     if status_code < 200 or status_code >= 300:
@@ -557,6 +589,9 @@ def _task_link_failure(item, error, proxy_id="", refresh_request_id=""):
 
 def fetch_online_scripts(proxy_id="", timeout=12, publish_cache=True, task_link_failures=None,
                          refresh_request_id=""):
+    if publish_cache:
+        with ONLINE_REFRESH_LOCK, source_cache_transaction():
+            initial_cache_fingerprint = online_script_cache_fingerprint()
     validate_proxy_id(proxy_id)
     url = get_online_script_source()
     real_url = github_proxy_url(url, proxy_id)
@@ -566,9 +601,10 @@ def fetch_online_scripts(proxy_id="", timeout=12, publish_cache=True, task_link_
         timeout=timeout,
         headers={"User-Agent": "Mozilla/5.0 FLS-Manager"},
         proxies=requests_proxy_dict(proxy_id),
+        stream=True,
     )) as r:
         status_code = getattr(r, "status_code", 0)
-        text = r.text or ""
+        text = _read_source_response(r, limit=4 * 1024 * 1024)
         headers = getattr(r, "headers", {})
 
     if status_code < 200 or status_code >= 300:
@@ -645,7 +681,10 @@ def fetch_online_scripts(proxy_id="", timeout=12, publish_cache=True, task_link_
             )
 
     if publish_cache:
-        save_online_script_cache(items)
+        with source_cache_transaction():
+            if online_script_cache_fingerprint() != initial_cache_fingerprint:
+                raise OnlineScriptCacheConflict("在线脚本源缓存在抓取期间已变化，未覆盖后来缓存")
+            save_online_script_cache(items)
     return items
 
 
@@ -662,6 +701,8 @@ def refresh_worker(refresh_id, proxy_id="", log_file=""):
             expected_cache_fingerprint = str(ONLINE_REFRESH_STATE.get("expected_cache_fingerprint") or "")
             source_fingerprint = str(ONLINE_REFRESH_STATE.get("source_fingerprint") or "")
     try:
+        with ONLINE_REFRESH_LOCK, source_cache_transaction():
+            initial_cache_fingerprint = online_script_cache_fingerprint()
         if source_fingerprint and online_script_source_fingerprint() != source_fingerprint:
             raise RuntimeError("在线脚本源地址在刷新提交后已变化，未发送外部请求")
         if retry_of and expected_cache_fingerprint and online_script_cache_fingerprint() != expected_cache_fingerprint:
@@ -695,9 +736,9 @@ def refresh_worker(refresh_id, proxy_id="", log_file=""):
         )
         if source_fingerprint and online_script_source_fingerprint() != source_fingerprint:
             raise RuntimeError("在线脚本源地址在抓取期间已变化，未发布缓存")
-        with ONLINE_REFRESH_LOCK, storage_transaction():
+        with ONLINE_REFRESH_LOCK, source_cache_transaction():
             current_cache_fingerprint = online_script_cache_fingerprint()
-            if retry_of and expected_cache_fingerprint and current_cache_fingerprint != expected_cache_fingerprint:
+            if current_cache_fingerprint != initial_cache_fingerprint:
                 raise RuntimeError("在线脚本源缓存在抓取期间已变化，未覆盖后来缓存")
             published_cache_fingerprint = online_script_cache_fingerprint_for_items(items)
             update_online_refresh_state(

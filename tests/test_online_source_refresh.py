@@ -28,6 +28,7 @@ class OnlineSourceRefreshTests(unittest.TestCase):
         response = Mock()
         response.status_code = status
         response.text = body
+        response.iter_content.return_value = [body.encode("utf-8")]
         response.headers = {"Content-Type": "application/json"}
         return response
 
@@ -1563,7 +1564,7 @@ vm.runInContext(input.reader+input.script,context);
                 updated_at="before",
             )
 
-            real_storage_transaction = source.storage_transaction
+            real_storage_transaction = source.source_cache_transaction
             publish_entered = threading.Event()
             allow_publish = threading.Event()
             query_started = threading.Event()
@@ -1591,7 +1592,7 @@ vm.runInContext(input.reader+input.script,context);
 
             with patch.object(constants, "ONLINE_REFRESH_LOCK", refresh_lock), patch.object(
                 source, "ONLINE_REFRESH_LOCK", refresh_lock,
-            ), patch.object(source, "storage_transaction", checked_storage_transaction), patch.object(
+            ), patch.object(source, "source_cache_transaction", checked_storage_transaction), patch.object(
                 source,
                 "fetch_online_scripts",
                 return_value=[{"id": "demo", "name": "Demo", "type": "raw", "link": "https://example.invalid/demo.sh"}],

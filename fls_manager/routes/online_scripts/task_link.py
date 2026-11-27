@@ -1,5 +1,7 @@
 import re
+import threading
 import uuid
+from functools import wraps
 
 from ._common import *
 from ...online_scripts.source import (
@@ -25,6 +27,11 @@ from ...online_scripts.constants import (
 )
 from ...utils import now_str
 from ...storage import storage_transaction
+from ...directory_jobs import directory_job_operation
+from ...online_scripts.source_coordination import (
+    TASK_LINK_ADMISSION, TASK_LINK_IDENTITIES, finish_task_link_request,
+    source_cache_transaction, task_link_receipt_transaction,
+)
 
 
 _STALE_TASK_LINK_CONFIRMATION = (
@@ -247,7 +254,12 @@ def _task_link_confirmation_matches_current_cache(record):
 
 
 def _task_link_status_record(request_id):
-    with storage_transaction():
+    record = get_task_link_request(request_id)
+    if record:
+        record["retry_allowed"] = record.get("state") == "failed" and not record.get("active") and not record.get("archived")
+    if not record or record.get("archived") or record.get("active") or record.get("confirmation") != "not_merged":
+        return record
+    with source_cache_transaction():
         record = get_task_link_request(request_id)
         if record:
             record["retry_allowed"] = record.get("state") == "failed" and not record.get("active") and not record.get("archived")
@@ -402,7 +414,9 @@ def _submit_task_link(script_id, proxy_id, raw_request_id, origin_refresh_reques
                     "retry_allowed": False}, 503
         if claimed_previous.get("_confirmation_stale"):
             return _stale_task_link_confirmation(claimed_previous)
-        return _existing_task_link_result(claimed_previous, script_id, proxy_id, expected_version)
+        return _existing_task_link_result(
+            claimed_previous, script_id, proxy_id, expected_version, origin_refresh_request_id,
+        )
 
     try:
         try:
@@ -440,23 +454,24 @@ def _submit_task_link(script_id, proxy_id, raw_request_id, origin_refresh_reques
                 if not _task_link_receipt_matches(expected_receipt, actual):
                     raise RuntimeError(f"任务发布意图回执无法确认：{exc}；磁盘状态不一致") from exc
 
-        try:
-            added, total = merge_task_link_tasks(
-                item, linked_tasks, before_publish=persist_publication_intent,
-            )
-        except OnlineScriptCacheConflict as exc:
-            return _persist_failure(record, str(exc), 409, retry=False)
-        except Exception as exc:
-            message = f"外部任务源发布结果无法确认：{exc}。请查询同步回执和当前缓存后再重试。"
-            return _persist_failure(record, message, 503, retry=False, state="unknown")
+        with source_cache_transaction():
+            try:
+                added, total = merge_task_link_tasks(
+                    item, linked_tasks, before_publish=persist_publication_intent,
+                )
+            except OnlineScriptCacheConflict as exc:
+                return _persist_failure(record, str(exc), 409, retry=False)
+            except Exception as exc:
+                message = f"外部任务源发布结果无法确认：{exc}。请查询同步回执和当前缓存后再重试。"
+                return _persist_failure(record, message, 503, retry=False, state="unknown")
 
-        try:
-            merged_item = next(
-                one for one in load_online_script_cache() if one.get("id") == script_id
-            )
-            published_tasks_fingerprint = online_script_task_fingerprint(merged_item)
-        except Exception as exc:
-            return _persist_failure(record, f"任务已可能合并，但当前任务指纹无法确认：{exc}", 503, retry=False, state="unknown")
+            try:
+                merged_item = next(
+                    one for one in load_online_script_cache() if one.get("id") == script_id
+                )
+                published_tasks_fingerprint = online_script_task_fingerprint(merged_item)
+            except Exception as exc:
+                return _persist_failure(record, f"任务已可能合并，但当前任务指纹无法确认：{exc}", 503, retry=False, state="unknown")
         _record_update(record, "completed", added=added, total=total)
         record["published_tasks_fingerprint"] = published_tasks_fingerprint
         if origin_refresh_request_id:
@@ -521,6 +536,7 @@ def _submit_task_link(script_id, proxy_id, raw_request_id, origin_refresh_reques
         }, 200
     finally:
         ONLINE_TASK_LINK_ACTIVE.discard(request_id)
+        finish_task_link_request(request_id)
 
 
 def _render_task_link_result(script_id, payload, status_code, proxy_id, origin_refresh_request_id=""):
@@ -552,10 +568,40 @@ def _render_task_link_result(script_id, payload, status_code, proxy_id, origin_r
     )
 
 
+def _claim_task_link_operation(function):
+    @wraps(function)
+    def claimed(request_id, *args):
+        if (not re.fullmatch(r"[a-f0-9]{32}", request_id or "")
+                or (function.__name__ == "_archive_task_link" and args != ("archive",))):
+            return function(request_id, *args)
+        owner = None
+        with TASK_LINK_ADMISSION:
+            try:
+                record = get_task_link_request(request_id)
+            except TaskLinkReceiptMissing as exc:
+                return _missing_task_link_receipt(request_id, exc)
+            except Exception:
+                record = None
+            if record and record.get("active"):
+                return {"ok": False, "request_id": request_id, "active": True,
+                        "retry_allowed": False, "msg": "原同步或恢复仍在处理中，请稍后查询原请求。"}, 409
+            if record:
+                with task_link_receipt_transaction():
+                    owner = TASK_LINK_IDENTITIES.claim(request_id)
+                    owner.execution_thread = owner.recovery_thread = threading.get_ident()
+        try:
+            return function(request_id, *args)
+        finally:
+            if owner is not None:
+                finish_task_link_request(request_id)
+    return claimed
+
+
+@_claim_task_link_operation
 def _confirm_task_link(request_id):
     if not re.fullmatch(r"[a-f0-9]{32}", request_id or ""):
         return {"ok": False, "msg": "在线任务源同步请求标识无效"}, 400
-    with storage_transaction():
+    with source_cache_transaction():
         return _confirm_task_link_locked(request_id)
 
 
@@ -704,6 +750,7 @@ def _confirm_task_link_locked(request_id):
     }, 200
 
 
+@_claim_task_link_operation
 def _archive_task_link(request_id, choice):
     if not re.fullmatch(r"[a-f0-9]{32}", request_id or "") or choice != "archive":
         return {"ok": False, "msg": "请明确确认归档原同步请求；未修改回执或任务。"}, 400
@@ -733,6 +780,7 @@ def _archive_task_link(request_id, choice):
 
 
 @bp.route("/api/online-scripts/task-link-archive/<request_id>", methods=["POST"])
+@directory_job_operation
 def api_online_scripts_task_link_archive(request_id):
     data = (request.get_json(silent=True) if request.is_json else request.form) or {}
     choice = data.get("acknowledge") if hasattr(data, "get") else None
@@ -741,6 +789,7 @@ def api_online_scripts_task_link_archive(request_id):
 
 
 @bp.route("/online-scripts/task-link-archive/<request_id>", methods=["POST"])
+@directory_job_operation
 def online_scripts_task_link_archive(request_id):
     payload, status_code = _archive_task_link(request_id, request.form.get("acknowledge"))
     if payload.get("ok"):
@@ -754,6 +803,7 @@ def online_scripts_task_link_archive(request_id):
 
 
 @bp.route("/online-scripts/task-link/<script_id>", methods=["POST"])
+@directory_job_operation
 def online_scripts_pull_task_link(script_id):
     proxy_id = request.form.get("proxy_id", "").strip()
     payload, status_code = _submit_task_link(script_id, proxy_id, request.form.get("request_id"))
@@ -761,6 +811,7 @@ def online_scripts_pull_task_link(script_id):
 
 
 @bp.route("/online-scripts/refresh-task-link/<refresh_request_id>/task-link/<script_id>", methods=["POST"])
+@directory_job_operation
 def online_scripts_pull_refresh_task_link(refresh_request_id, script_id):
     proxy_id = request.form.get("proxy_id", "").strip()
     payload, status_code = _submit_task_link(
@@ -770,6 +821,7 @@ def online_scripts_pull_refresh_task_link(refresh_request_id, script_id):
 
 
 @bp.route("/api/online-scripts/task-link/<script_id>", methods=["POST"])
+@directory_job_operation
 def api_online_scripts_pull_task_link(script_id):
     data = request.get_json(silent=True) if request.is_json else request.form
     data = data or {}
@@ -782,6 +834,7 @@ def api_online_scripts_pull_task_link(script_id):
 
 
 @bp.route("/api/online-scripts/refresh-task-link/<refresh_request_id>/task-link/<script_id>", methods=["POST"])
+@directory_job_operation
 def api_online_scripts_pull_refresh_task_link(refresh_request_id, script_id):
     data = request.get_json(silent=True) if request.is_json else request.form
     data = data or {}
@@ -798,6 +851,7 @@ def api_online_scripts_pull_refresh_task_link(refresh_request_id, script_id):
 
 
 @bp.route("/api/online-scripts/task-link-status/<request_id>")
+@directory_job_operation
 def api_online_scripts_task_link_status(request_id):
     if not re.fullmatch(r"[a-f0-9]{32}", request_id or ""):
         return jsonify(ok=False, msg="在线任务源同步请求标识无效"), 400
@@ -814,6 +868,7 @@ def api_online_scripts_task_link_status(request_id):
 
 
 @bp.route("/api/online-scripts/task-link-history")
+@directory_job_operation
 def api_online_scripts_task_link_history():
     try:
         page = _task_link_history_page()
@@ -834,12 +889,14 @@ def _task_link_history_page():
 
 
 @bp.route("/api/online-scripts/task-link-confirm/<request_id>", methods=["POST"])
+@directory_job_operation
 def api_online_scripts_task_link_confirm(request_id):
     payload, status_code = _confirm_task_link(request_id)
     return jsonify(payload), status_code
 
 
 @bp.route("/online-scripts/task-link-confirm/<request_id>", methods=["POST"])
+@directory_job_operation
 def online_scripts_task_link_confirm(request_id):
     payload, status_code = _confirm_task_link(request_id)
     if payload.get("ok"):
@@ -859,6 +916,7 @@ def online_scripts_task_link_confirm(request_id):
 
 
 @bp.route("/online-scripts/task-link-status/<request_id>")
+@directory_job_operation
 def online_scripts_task_link_status(request_id):
     if not re.fullmatch(r"[a-f0-9]{32}", request_id or ""):
         body = page_header_card(
@@ -971,6 +1029,7 @@ def online_scripts_task_link_status(request_id):
 
 
 @bp.route("/online-scripts/task-link-history")
+@directory_job_operation
 def online_scripts_task_link_history():
     script_id = str(request.args.get("script_id") or "").strip()
     try:

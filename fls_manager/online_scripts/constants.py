@@ -14,6 +14,7 @@ from .task_import_coordination import (
     ONLINE_TASK_IMPORT_LOCK, TASK_IMPORT_IDENTITIES, task_import_active_ids,
     task_import_receipt_transaction,
 )
+from .source_coordination import task_link_receipt_transaction
 from ..storage import mutate_json, storage_transaction, write_json
 from ..utils import now_str
 
@@ -1112,7 +1113,7 @@ def get_online_refresh_task_link_recovery(request_id, script_id):
     if (not isinstance(script_id, str) or not script_id or len(script_id) > 200
             or not re.fullmatch(r"[a-f0-9]{32}", request_id or "")):
         raise ValueError("在线脚本源失败项身份无效")
-    with storage_transaction():
+    with task_link_receipt_transaction():
         recoveries = _read_online_refresh_task_recoveries_file(request_id)
         recovery = recoveries.get(script_id)
         if not recovery:
@@ -1127,7 +1128,7 @@ def has_online_refresh_task_link_failure(request_id, script_id):
     if (not isinstance(script_id, str) or not script_id or len(script_id) > 200
             or not re.fullmatch(r"[a-f0-9]{32}", request_id or "")):
         raise ValueError("在线脚本源失败项身份无效")
-    with storage_transaction():
+    with task_link_receipt_transaction():
         return any(
             item.get("script_id") == script_id
             for item in _online_refresh_failure_items_for_request_unlocked(request_id)
@@ -1139,7 +1140,7 @@ def persist_online_refresh_task_link_recovery(request_id, script_id, *, proxy_id
             or not re.fullmatch(r"[a-f0-9]{32}", request_id or "")
             or type(added) is not int or type(total) is not int or added < 0 or total < 0):
         raise ValueError("在线脚本源失败恢复结果无效")
-    with storage_transaction():
+    with task_link_receipt_transaction():
         failures = _online_refresh_failure_items_for_request_unlocked(request_id)
         if not failures or not any(item.get("script_id") == script_id for item in failures):
             raise LookupError("原刷新失败项不存在，不能保存恢复结果")
