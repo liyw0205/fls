@@ -170,12 +170,40 @@ class OnlineInstallDirectoryJobTests(unittest.TestCase):
             self.assertIsNone(failure)
             self.assertEqual(actual, target.resolve())
 
+    def test_install_outputs_validate_actual_parent_and_fingerprint_leaf_links_without_following_them(self):
+        with isolated_app() as (_, base):
+            from fls_manager.online_scripts import install
+
+            script = base / "scripts" / "installed.py"
+            script.write_bytes(b"fixture script")
+            info = {"target_path": str(script), "target_fingerprint": install._fingerprint_path(script)}
+            self.assertEqual(install.verify_install_outputs(info)["target"], "unchanged")
+            outside = base / "scripts-other"
+            outside.mkdir()
+            external = outside / "external.py"
+            external.write_bytes(b"external file")
+            alias = base / "scripts" / "outside"
+            alias.symlink_to(outside, target_is_directory=True)
+            fingerprint = install._fingerprint_path(external)
+            for path in (external, alias / "external.py"):
+                with self.subTest(path=path), patch.object(install, "_fingerprint_path") as read:
+                    state = install.verify_install_outputs({"target_path": str(path), "target_fingerprint": fingerprint})
+                    self.assertEqual(state["target"], "unreadable")
+                    self.assertTrue(state["changed"])
+                    read.assert_not_called()
+            linked = base / "scripts" / "linked.py"
+            linked.symlink_to(external)
+            info = {"target_path": str(linked), "target_fingerprint": install._fingerprint_path(linked)}
+            self.assertEqual(info["target_fingerprint"]["kind"], "symlink")
+            self.assertEqual(install.verify_install_outputs(info)["target"], "unchanged")
+
     @unittest.skipUnless(os.name == "nt", "Windows short path aliases and junctions")
-    def test_windows_log_accepts_short_name_alias_but_rejects_directory_junction(self):
+    def test_windows_log_and_output_accept_short_name_alias_but_reject_directory_junction(self):
         import ctypes
         from ctypes import wintypes
 
         with isolated_app() as (_, base):
+            from fls_manager.online_scripts import install
             from fls_manager.routes.online_scripts.logs import _install_log_file
 
             target = base / "log" / "install.log"
@@ -189,6 +217,12 @@ class OnlineInstallDirectoryJobTests(unittest.TestCase):
             actual, failure = _install_log_file({"id": "install", "log_file": buffer.value})
             self.assertIsNone(failure)
             self.assertEqual(actual, target.resolve())
+            script = base / "scripts" / "installed.py"
+            script.write_bytes(b"fixture script")
+            count = api.GetShortPathNameW(str(script.resolve()), buffer, len(buffer))
+            self.assertTrue(0 < count < len(buffer))
+            info = {"target_path": buffer.value, "target_fingerprint": install._fingerprint_path(script)}
+            self.assertEqual(install.verify_install_outputs(info)["target"], "unchanged")
             junction = base / "log-junction"
             created = subprocess.run(["cmd", "/c", "mklink", "/J", str(junction), str(target.parent)],
                                      capture_output=True, timeout=10)

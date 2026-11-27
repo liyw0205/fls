@@ -30,6 +30,8 @@ class DirectoryProcess:
             raise RuntimeError("file job process supervision is unavailable on this platform")
         self.result_path = Path(workspace) / ".process-result.json"
         self.ready_path = Path(workspace) / ".process-ready.json"
+        self._result_lock = threading.Lock()
+        self._returncode = None
         self._configuration = {
             "command": command, "cwd": str(cwd), "lease_path": str(lease_path),
             "pass_fds": list(pass_fds),
@@ -65,14 +67,19 @@ class DirectoryProcess:
     def wait(self, timeout=None):
         if self._process.wait(timeout=timeout) != 0:
             raise RuntimeError("file job supervisor failed")
-        fd = os.open(self.result_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-        with os.fdopen(fd, "rb") as stream:
-            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+        # Other waiters can outlive the owner's temporary workspace cleanup.
+        with self._result_lock:
+            if self._returncode is not None:
+                return self._returncode
+            fd = os.open(self.result_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(fd, "rb") as stream:
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    raise RuntimeError("invalid file job result")
+                result = json.loads(stream.read(1024))
+            if not isinstance(result, dict) or type(result.get("returncode")) is not int:
                 raise RuntimeError("invalid file job result")
-            result = json.loads(stream.read(1024))
-        if not isinstance(result, dict) or type(result.get("returncode")) is not int:
-            raise RuntimeError("invalid file job result")
-        return result["returncode"]
+            self._returncode = result["returncode"]
+            return self._returncode
 
     def poll(self):
         return None if self._process.poll() is None else self.wait(timeout=0)

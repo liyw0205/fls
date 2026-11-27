@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -188,6 +189,69 @@ class DirectoryProcessTests(unittest.TestCase):
             finally:
                 process.stop()
                 process.stderr.close()
+
+    def test_concurrent_wait_retains_validated_exit_after_owner_removes_result(self):
+        for code in (0, 17):
+            with self.subTest(code=code), isolated_app() as (_, base):
+                process = self.make_process(base, [sys.executable, "-c", f"raise SystemExit({code})"])
+                entered, release = threading.Event(), threading.Event()
+                results, errors = [], []
+                original_wait = process._process.wait
+
+                def delayed_wait(*args, **kwargs):
+                    status = original_wait(*args, **kwargs)
+                    if threading.current_thread() is waiter:
+                        entered.set()
+                        if not release.wait(10):
+                            raise RuntimeError("concurrent waiter was not released")
+                    return status
+
+                def wait():
+                    try:
+                        results.append(process.wait(timeout=10))
+                    except Exception as exc:
+                        errors.append(exc)
+
+                waiter = threading.Thread(target=wait)
+                try:
+                    process.start()
+                    with patch.object(process._process, "wait", side_effect=delayed_wait):
+                        waiter.start()
+                        self.assertTrue(entered.wait(10))
+                        self.assertEqual(process.wait(timeout=10), code)
+                        process.result_path.unlink()
+                        self.assertEqual(process.poll(), code)
+                        release.set()
+                        waiter.join(10)
+                        self.assertFalse(waiter.is_alive())
+                        self.assertEqual(errors, [])
+                        self.assertEqual(results, [code])
+                finally:
+                    release.set()
+                    if waiter.ident is not None:
+                        waiter.join(10)
+                    process.stop()
+                    process.stderr.close()
+                self.assert_lease_available(base)
+
+    def test_missing_or_invalid_first_result_does_not_become_success(self):
+        for payload in (None, '{"returncode": true}', '{"returncode": "0"}', '[]'):
+            with self.subTest(payload=payload), isolated_app() as (_, base):
+                process = self.make_process(base, [sys.executable, "-c", "pass"])
+                try:
+                    process.start()
+                    self.assertEqual(process._process.wait(timeout=10), 0)
+                    if payload is None:
+                        process.result_path.unlink()
+                    else:
+                        process.result_path.write_text(payload, encoding="ascii")
+                    for _ in range(2):
+                        with self.assertRaises((OSError, RuntimeError)):
+                            process.poll()
+                finally:
+                    process.stop()
+                    process.stderr.close()
+                self.assert_lease_available(base)
 
     def test_stop_cleans_command_and_descendants_and_does_not_execute_twice(self):
         with isolated_app() as (_, base):

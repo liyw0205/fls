@@ -10,6 +10,7 @@ import threading
 import time
 import uuid
 from contextlib import closing
+from pathlib import Path
 
 from ..paths import BASE_DIR, SCRIPT_DIR
 from ..directory_jobs import directory_job, start_directory_job
@@ -233,10 +234,13 @@ def verify_install_outputs(info):
     target_path = str(info.get("target_path") or "")
     if expected_target and target_path:
         try:
-            target = os.path.abspath(target_path)
-            base = os.path.abspath(SCRIPT_DIR)
-            if target != base and not target.startswith(base + os.sep):
-                raise RuntimeError("目标路径超出 scripts 目录")
+            target = Path(os.path.abspath(target_path))
+            # Resolve parent aliases while fingerprinting a leaf symlink itself.
+            target = target.parent.resolve() / target.name
+            try:
+                target.relative_to(SCRIPT_DIR.resolve())
+            except ValueError as exc:
+                raise RuntimeError("目标路径超出 scripts 目录") from exc
             result["target"] = "unchanged" if _fingerprint_path(target) == expected_target else "changed"
         except Exception as exc:
             result["target"] = "unreadable"
