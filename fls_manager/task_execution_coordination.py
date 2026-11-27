@@ -29,7 +29,7 @@ def _receipt_path(task_id):
     return directory / (hashlib.sha256(task_id.encode("utf-8")).hexdigest() + ".json")
 
 
-def _open_receipt(path):
+def _open_receipt(path, *, delete_access=False):
     if os.name != "nt":
         return os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
 
@@ -50,7 +50,8 @@ def _open_receipt(path):
     api.CloseHandle.restype = wintypes.BOOL
     # Readers retain the old object while atomic publication replaces its name.
     share = 0x1 | 0x2 | 0x4  # FILE_SHARE_READ, WRITE, DELETE
-    handle = api.CreateFileW(str(path), 0x80000000, share, None, 3, 0x00200000, None)
+    desired_access = 0x80000000 | (0x10000 if delete_access else 0)  # GENERIC_READ, DELETE
+    handle = api.CreateFileW(str(path), desired_access, share, None, 3, 0x00200000, None)
     if handle == wintypes.HANDLE(-1).value:
         raise ctypes.WinError(ctypes.get_last_error())
     try:
@@ -63,6 +64,39 @@ def _open_receipt(path):
     except BaseException:
         api.CloseHandle(handle)
         raise
+
+
+def _publish_receipt(temporary, path):
+    if os.name != "nt":
+        os.replace(temporary, path)
+        return
+
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    filename = str(path.absolute()).encode("utf-16-le")
+
+    class RenameInfo(ctypes.Structure):
+        _fields_ = [("flags", wintypes.DWORD), ("root", wintypes.HANDLE),
+                    ("length", wintypes.DWORD), ("filename", ctypes.c_ushort * (len(filename) // 2 + 1))]
+
+    info = RenameInfo()
+    # MoveFileEx/os.replace still rejects an open target, even with delete sharing.
+    info.flags = 0x1 | 0x2  # FILE_RENAME_REPLACE_IF_EXISTS, FILE_RENAME_POSIX_SEMANTICS
+    info.length = len(filename)
+    ctypes.memmove(ctypes.addressof(info) + RenameInfo.filename.offset, filename, len(filename))
+    api = ctypes.WinDLL("kernel32", use_last_error=True)
+    api.SetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+    api.SetFileInformationByHandle.restype = wintypes.BOOL
+    fd = _open_receipt(temporary, delete_access=True)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise DirectoryJobHistoryError("invalid task execution receipt")
+        if not api.SetFileInformationByHandle(msvcrt.get_osfhandle(fd), 22, ctypes.byref(info), ctypes.sizeof(info)):
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        os.close(fd)
 
 
 def _read(path):
@@ -103,7 +137,7 @@ def _write(row):
             json.dump(row, stream, ensure_ascii=True)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        _publish_receipt(temporary, path)
         if os.name == "posix":
             directory = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
             try:

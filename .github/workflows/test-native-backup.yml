@@ -111,6 +111,21 @@ jobs:
           tests/test_config_apply_recovery.py
           tests/test_native_proxy_checks.py
           tests/test_fls_startup.py
+  windows_tasks:
+    name: Windows task execution and receipts
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install test dependencies
+        run: python -m pip install Flask 'APScheduler<4' requests PySocks tzdata qrcode pytest pytest-subtests
+      - name: Verify ordinary task ownership, remote stops, retries and log lifetimes
+        env:
+          PYTHONPATH: .
+        run: python -m pytest -q tests/test_task_execution_workers.py tests/test_task_log_directory_access.py
   windows:
     name: Windows dependency process tree and lease
     runs-on: windows-latest
@@ -123,11 +138,6 @@ jobs:
       - name: Install test dependencies
         id: test_dependencies
         run: python -m pip install Flask 'APScheduler<4' requests PySocks tzdata qrcode pytest pytest-subtests
-      - name: Verify ordinary task ownership, remote stops, retries and log lifetimes
-        if: ${{ !cancelled() && steps.test_dependencies.outcome == 'success' }}
-        env:
-          PYTHONPATH: .
-        run: python -m pytest -q tests/test_task_execution_workers.py tests/test_task_log_directory_access.py
       - name: Verify log handle leases, bounded reads and Web deletion compatibility
         if: ${{ !cancelled() && steps.test_dependencies.outcome == 'success' }}
         env:

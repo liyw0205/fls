@@ -198,6 +198,37 @@ class TaskExecutionWorkerTests(unittest.TestCase):
                     coordination._read(path)
             self.assertEqual(outside.read_bytes(), original)
 
+    def test_atomic_receipt_publication_keeps_unicode_path_reader_on_previous_object(self):
+        with isolated_app() as (_, base):
+            from fls_manager import task_execution_coordination as coordination
+
+            directory = base / 'receipts-\u6d4b\u8bd5-\U00020000'
+            directory.mkdir()
+            path, temporary = directory / 'current.json', directory / 'prepared.json'
+            path.write_bytes(b'previous version')
+            temporary.write_bytes(b'published version')
+            with os.fdopen(coordination._open_receipt(path), 'rb') as reader:
+                coordination._publish_receipt(temporary, path)
+                self.assertEqual(reader.read(), b'previous version')
+                self.assertEqual(path.read_bytes(), b'published version')
+            self.assertFalse(temporary.exists())
+
+    def test_failed_receipt_publication_preserves_previous_and_removes_temporary(self):
+        with isolated_app() as (_, base):
+            from fls_manager import task_execution_coordination as coordination
+
+            row = dict(task_id='a', history_id='a' * 32, status='starting', stop_requested=False)
+            coordination._write(row)
+            path = coordination._receipt_path('a')
+            previous = path.read_bytes()
+            with patch.object(coordination, '_publish_receipt', side_effect=OSError('publication denied')):
+                with self.assertRaises(OSError):
+                    coordination._write(dict(row, status='running'))
+            self.assertEqual(path.read_bytes(), previous)
+            self.assertEqual(list(path.parent.glob('.task-*')), [])
+            coordination._write(dict(row, status='running'))
+            self.assertEqual(coordination._read(path)['status'], 'running')
+
     def test_execution_receipt_reader_preserves_size_and_regular_file_limits(self):
         with isolated_app() as (_, base):
             from fls_manager import task_execution_coordination as coordination
