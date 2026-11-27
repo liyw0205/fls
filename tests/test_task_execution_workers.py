@@ -113,11 +113,23 @@ class TaskExecutionWorkerTests(unittest.TestCase):
         self.fail('task execution condition did not become true')
 
     def done(self, rpc):
+        observations = []
+
         def idle():
             status, body = rpc('get', '/api/task/a')
             self.assertEqual(status, 200, body)
+            observation = {
+                'runtime': body['runtime'],
+                'history': [{key: row.get(key) for key in ('id', 'status', 'source', 'message')}
+                            for row in body['history']],
+            }
+            if not observations or observations[-1] != observation:
+                observations.append(observation)
             return body if not body['runtime']['running'] else None
-        return self.wait_for(idle)
+        try:
+            return self.wait_for(idle)
+        except AssertionError as exc:
+            self.fail(f'{exc}; observed task phases: {observations!r}')
 
     def test_two_workers_reserve_once_and_remote_stop_preserves_history(self):
         with isolated_app() as (_, base):
@@ -274,8 +286,20 @@ class TaskExecutionWorkerTests(unittest.TestCase):
             with self.worker(base) as (_, a), self.worker(base) as (_, b):
                 self.assertEqual(a('post', '/api/task/action/run/a', {'request_id': '3' * 32})[0], 200)
                 self.wait_for(lambda: execution_snapshot(['a']).get('a', {}).get('status') == 'retry_wait')
+                cancelled_history_id = execution_snapshot(['a'])['a']['history_id']
                 response = b('post', '/api/task/action/run/a', {'request_id': '4' * 32})
                 self.assertEqual(response[0], 200, response)
+
+                def new_manual_retry():
+                    row = execution_snapshot(['a']).get('a', {})
+                    return row if row.get('status') == 'retry_wait' and row['history_id'] != cancelled_history_id else None
+
+                # Observe the replacement's first attempt before waiting for its retry and cleanup.
+                replacement = self.wait_for(new_manual_retry)
+                intermediate = b('get', '/api/task/a')[1]
+                self.assertTrue(intermediate['runtime']['active'])
+                self.assertEqual(intermediate['runtime']['history_id'], replacement['history_id'])
+                self.assertEqual([row['source'] for row in intermediate['history']], ['manual', 'manual'])
                 final = self.done(b)
                 self.assertEqual(len(final['history']), 3)
                 self.assertEqual([row['source'] for row in final['history']], ['retry', 'manual', 'manual'])
