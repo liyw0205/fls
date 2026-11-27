@@ -1,6 +1,8 @@
 from ._common import *
 import re
+import threading
 import uuid
+from functools import wraps
 
 from ...models import TASKS_MUTATION_LOCK, TaskSchedulerReloadError
 from ...scheduler import reload_scheduler
@@ -22,6 +24,11 @@ from ...online_scripts.tasks import (
 from ...online_scripts.source import get_task_link_request, online_task_link_version
 from ...storage import storage_transaction
 from ...utils import now_str
+from ...directory_jobs import directory_job_operation
+from ...online_scripts.task_import_coordination import (
+    TASK_IMPORT_IDENTITIES, TASK_IMPORT_PUBLICATION_LOCK, finish_task_import_request,
+    task_import_receipt_transaction,
+)
 
 
 def _task_import_error(script_id, message, status_code, persisted=False, request_id="", selected_task_indexes=None, enable_task=False, history_full=False):
@@ -140,7 +147,7 @@ def _run_online_task_import(record, item, enable_task, selected_task_indexes, re
     ONLINE_TASK_IMPORT_ACTIVE.add(request_id)
     try:
         try:
-            with TASKS_MUTATION_LOCK, storage_transaction():
+            with TASK_IMPORT_PUBLICATION_LOCK, TASKS_MUTATION_LOCK, storage_transaction():
                 record["task_baseline"] = task_import_file_signature()
                 record["task_baseline_captured"] = True
                 persist_online_task_import_request(record)
@@ -154,7 +161,7 @@ def _run_online_task_import(record, item, enable_task, selected_task_indexes, re
             return _import_failure(record, f"导入启动回执无法保存，未写入任务：{exc}", 500)
 
         def before_publish(publication):
-            if record.get("retry_source") and record["retry_source"] != publication["before_source"]:
+            if record.get("retry_source_captured") and record["retry_source"] != publication["before_source"]:
                 raise OnlineTaskConfirmationStale("原未写入确认已因任务文件变化失效，未写入任务；请重新核对当前任务")
             if record.get("task_baseline_captured") and record["task_baseline"] != publication["before_source"]:
                 raise OnlineTaskConfirmationStale("任务文件自原请求检查后已变化，未写入任务；请重新核对当前任务")
@@ -275,6 +282,18 @@ def _submit_online_task_import(script_id, data):
         request_id = _import_request_id(data.get("request_id"))
     except ValueError as exc:
         return {"ok": False, "request_id": "", "msg": str(exc), "retry_allowed": False}, 400
+    try:
+        return _submit_online_task_import_inner(script_id, data, request_id)
+    finally:
+        owner = TASK_IMPORT_IDENTITIES.owners.get(request_id)
+        if owner is not None and getattr(owner, "execution_thread", None) == threading.get_ident():
+            try:
+                finish_task_import_request(request_id)
+            finally:
+                ONLINE_TASK_IMPORT_ACTIVE.discard(request_id)
+
+
+def _submit_online_task_import_inner(script_id, data, request_id):
     try:
         previous = get_online_task_import_request(request_id, recover=False)
     except TaskImportReceiptMissing as exc:
@@ -404,12 +423,14 @@ def _render_import_result(script_id, payload, status_code, data):
 
 
 @bp.route("/online-scripts/import-tasks/<script_id>", methods=["POST"])
+@directory_job_operation
 def online_scripts_import_tasks_only(script_id):
     payload, status_code = _submit_online_task_import(script_id, request.form)
     return _render_import_result(script_id, payload, status_code, request.form)
 
 
 @bp.route("/api/online-scripts/import-tasks/<script_id>", methods=["POST"])
+@directory_job_operation
 def api_online_scripts_import_tasks_only(script_id):
     data = request.get_json(silent=True) if request.is_json else request.form
     data = data or {}
@@ -418,6 +439,7 @@ def api_online_scripts_import_tasks_only(script_id):
 
 
 @bp.route("/api/online-scripts/import-tasks-status/<request_id>")
+@directory_job_operation
 def api_online_scripts_import_tasks_status(request_id):
     if not re.fullmatch(r"[a-f0-9]{32}", request_id or ""):
         return jsonify(ok=False, msg="在线任务导入请求标识无效"), 400
@@ -434,6 +456,7 @@ def api_online_scripts_import_tasks_status(request_id):
 
 
 @bp.route("/api/online-scripts/import-tasks-history")
+@directory_job_operation
 def api_online_scripts_import_tasks_history():
     try:
         page = _import_history_page()
@@ -493,10 +516,44 @@ def _import_history_filter_form(script_id="", recovery=False, limit=50):
 """
 
 
+def _claim_task_import_operation(function):
+    @wraps(function)
+    def claimed(request_id, *args):
+        if not re.fullmatch(r"[a-f0-9]{32}", request_id or ""):
+            return function(request_id, *args)
+        if function.__name__ == "_archive_task_import" and args != ("archive",):
+            return function(request_id, *args)
+        owner = None
+        with ONLINE_TASK_IMPORT_LOCK:
+            try:
+                record = get_online_task_import_request(request_id)
+            except TaskImportReceiptMissing as exc:
+                return _missing_import_receipt(request_id, exc)
+            except Exception:
+                record = None
+            if record and record.get("active"):
+                return {"ok": False, "request_id": request_id, "script_id": record["script_id"],
+                        "state": record["state"], "active": True, "retry_allowed": False,
+                        "msg": "原导入或恢复仍在处理中，请稍后查询原请求。",
+                        "status_url": f"/online-scripts/import-tasks-status/{request_id}",
+                        "state_url": f"/api/online-scripts/import-tasks-status/{request_id}"}, 409
+            if record:
+                with task_import_receipt_transaction():
+                    owner = TASK_IMPORT_IDENTITIES.claim(request_id)
+                    owner.execution_thread = owner.recovery_thread = threading.get_ident()
+        try:
+            return function(request_id, *args)
+        finally:
+            if owner is not None:
+                finish_task_import_request(request_id)
+    return claimed
+
+
+@_claim_task_import_operation
 def _confirm_task_import(request_id):
     if not re.fullmatch(r"[a-f0-9]{32}", request_id or ""):
         return {"ok": False, "msg": "在线任务导入请求标识无效", "retry_allowed": False}, 400
-    with ONLINE_TASK_IMPORT_LOCK, TASKS_MUTATION_LOCK, storage_transaction():
+    with TASK_IMPORT_PUBLICATION_LOCK, TASKS_MUTATION_LOCK:
         try:
             record = get_online_task_import_request(request_id)
         except TaskImportReceiptMissing as exc:
@@ -553,12 +610,14 @@ def _confirm_task_import(request_id):
 
 
 @bp.route("/api/online-scripts/import-tasks-confirm/<request_id>", methods=["POST"])
+@directory_job_operation
 def api_online_scripts_import_tasks_confirm(request_id):
     payload, status_code = _confirm_task_import(request_id)
     return jsonify(payload), status_code
 
 
 @bp.route("/online-scripts/import-tasks-confirm/<request_id>", methods=["POST"])
+@directory_job_operation
 def online_scripts_import_tasks_confirm(request_id):
     payload, status_code = _confirm_task_import(request_id)
     if payload.get("ok"):
@@ -568,6 +627,7 @@ def online_scripts_import_tasks_confirm(request_id):
 
 
 @bp.route("/api/online-scripts/import-tasks-reload/<request_id>", methods=["POST"])
+@directory_job_operation
 def api_online_scripts_import_tasks_reload(request_id):
     payload, status_code = _reload_import_scheduler(request_id)
     return jsonify(payload), status_code
@@ -582,10 +642,11 @@ def _task_import_receipt_matches(expected, actual):
         return False
 
 
+@_claim_task_import_operation
 def _reload_import_scheduler(request_id):
     if not re.fullmatch(r"[a-f0-9]{32}", request_id or ""):
         return {"ok": False, "msg": "在线任务导入请求标识无效"}, 400
-    with ONLINE_TASK_IMPORT_LOCK, TASKS_MUTATION_LOCK:
+    with TASK_IMPORT_PUBLICATION_LOCK, TASKS_MUTATION_LOCK:
         try:
             record = get_online_task_import_request(request_id)
         except TaskImportReceiptMissing as exc:
@@ -666,6 +727,7 @@ def _reload_import_scheduler(request_id):
             "msg": "任务已保存，调度器已恢复"}, 200
 
 
+@_claim_task_import_operation
 def _archive_task_import(request_id, choice):
     if not re.fullmatch(r"[a-f0-9]{32}", request_id or "") or choice != "archive":
         return {"ok": False, "msg": "请明确确认归档原导入请求；未修改回执或任务。"}, 400
@@ -694,6 +756,7 @@ def _archive_task_import(request_id, choice):
 
 
 @bp.route("/api/online-scripts/import-tasks-archive/<request_id>", methods=["POST"])
+@directory_job_operation
 def api_online_scripts_import_tasks_archive(request_id):
     data = (request.get_json(silent=True) if request.is_json else request.form) or {}
     choice = data.get("acknowledge") if hasattr(data, "get") else None
@@ -702,6 +765,7 @@ def api_online_scripts_import_tasks_archive(request_id):
 
 
 @bp.route("/online-scripts/import-tasks-archive/<request_id>", methods=["POST"])
+@directory_job_operation
 def online_scripts_import_tasks_archive(request_id):
     payload, status_code = _archive_task_import(request_id, request.form.get("acknowledge"))
     if payload.get("ok"):
@@ -711,6 +775,7 @@ def online_scripts_import_tasks_archive(request_id):
 
 
 @bp.route("/online-scripts/import-tasks-reload/<request_id>", methods=["POST"])
+@directory_job_operation
 def online_scripts_import_tasks_reload(request_id):
     payload, status_code = _reload_import_scheduler(request_id)
     if payload.get("ok"):
@@ -720,6 +785,7 @@ def online_scripts_import_tasks_reload(request_id):
 
 
 @bp.route("/online-scripts/import-tasks-status/<request_id>")
+@directory_job_operation
 def online_scripts_import_tasks_status(request_id):
     if not re.fullmatch(r"[a-f0-9]{32}", request_id or ""):
         return _task_import_error("", "在线任务导入请求标识无效", 400)
@@ -774,6 +840,7 @@ def online_scripts_import_tasks_status(request_id):
 
 
 @bp.route("/online-scripts/import-tasks-history")
+@directory_job_operation
 def online_scripts_import_tasks_history():
     script_id = str(request.args.get("script_id") or "").strip()
     try:
@@ -867,6 +934,7 @@ def online_scripts_import_tasks_history():
 
 
 @bp.route("/online-scripts/install-select/<script_id>")
+@directory_job_operation
 def online_scripts_install_select(script_id):
     try:
         item = get_online_script(script_id)

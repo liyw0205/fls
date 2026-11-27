@@ -112,10 +112,10 @@ finally:
 
 class OnlineInstallWorkerTests(unittest.TestCase):
     @contextlib.contextmanager
-    def worker(self, base, label, mode='download'):
+    def worker(self, base, label, mode='download', *, worker_code=WORKER):
         with tempfile.TemporaryFile() as errors:
             process = subprocess.Popen(
-                [sys.executable, '-u', '-c', WORKER, label, mode], stdin=subprocess.PIPE,
+                [sys.executable, '-u', '-c', worker_code, label, mode], stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=errors, text=True, encoding='utf-8',
                 env=dict(os.environ, PYTHONIOENCODING='utf-8'),
             )

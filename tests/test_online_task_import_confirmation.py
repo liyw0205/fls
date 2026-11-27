@@ -293,7 +293,9 @@ class OnlineTaskImportConfirmationTests(unittest.TestCase):
                 first.start()
                 self.assertTrue(entered.wait(5))
                 second.start()
-                self.assertFalse(second_done.wait(0.1))
+                self.assertTrue(second_done.wait(2))
+                self.assertEqual(results["second"].status_code, 409)
+                self.assertTrue(results["second"].json["active"])
                 release.set()
                 first.join(5)
                 second.join(5)
@@ -301,9 +303,12 @@ class OnlineTaskImportConfirmationTests(unittest.TestCase):
                 self.assertFalse(second.is_alive())
 
             self.assertEqual(len(writes), 1)
-            self.assertEqual({response.status_code for response in results.values()}, {200})
+            self.assertEqual(results["first"].status_code, 200)
             self.assertEqual({response.json["request_id"] for response in results.values()}, {self.request_id})
-            self.assertEqual(sorted(response.json["replayed"] for response in results.values()), [False, True])
+            self.assertFalse(results["first"].json["replayed"])
+            replay = self.confirm(app)
+            self.assertEqual(replay.status_code, 200)
+            self.assertTrue(replay.json["replayed"])
             self.assertEqual(constants.get_online_task_import_request(self.request_id)["state"], "scheduler_pending")
 
     def test_native_csrf_form_recovers_atomic_confirmation_write_exception(self):

@@ -37,6 +37,12 @@ class OnlineTaskImportRetentionTests(unittest.TestCase):
         constants.mutate_json(constants.ONLINE_TASK_IMPORT_REQUESTS_FILE, {}, lambda _: records, strict=True)
         return records
 
+    def hold_active(self, constants, request_id):
+        with constants.task_import_receipt_transaction():
+            owner = constants.TASK_IMPORT_IDENTITIES.claim(request_id)
+        constants.ONLINE_TASK_IMPORT_ACTIVE.add(request_id)
+        return owner
+
     def test_pruning_keeps_all_unresolved_states_active_and_current_receipts(self):
         for operation in ("persist", "claim"):
             with self.subTest(operation=operation), self.app() as (_app, _base_dir):
@@ -48,7 +54,7 @@ class OnlineTaskImportRetentionTests(unittest.TestCase):
                     request_id = f"{index:032x}"
                     protected.append(request_id)
                     records[request_id].update(state=state, updated_at="old")
-                constants.ONLINE_TASK_IMPORT_ACTIVE.add(protected[-1])
+                self.hold_active(constants, protected[-1])
                 constants.mutate_json(constants.ONLINE_TASK_IMPORT_REQUESTS_FILE, {}, lambda _: records, strict=True)
                 new_id = "f" * 32
                 record = self.record(constants, new_id, "prepared", "older")
@@ -93,7 +99,7 @@ class OnlineTaskImportRetentionTests(unittest.TestCase):
 
             self.seed(constants, count=199, state="failed")
             request_id = "e" * 32
-            constants.ONLINE_TASK_IMPORT_ACTIVE.add(request_id)
+            self.hold_active(constants, request_id)
             client, headers = app.test_client(), {"X-Token": TOKEN}
             before = constants.ONLINE_TASK_IMPORT_REQUESTS_FILE.read_bytes()
             with patch.object(install_select, "import_task_if_needed") as importer:
@@ -170,10 +176,11 @@ class OnlineTaskImportRetentionTests(unittest.TestCase):
                     self.assertEqual(client.post(api, json={"acknowledge": "archive"}, headers={"X-CSRF-Token": csrf}).status_code, 400)
                     self.assertEqual(client.post(form, data={"acknowledge": "archive", "csrf_token": csrf}).status_code, 400)
                 self.assertEqual(client.post(api + "?token=blocked", json={"acknowledge": "archive"}, headers={"X-CSRF-Token": "archive-csrf"}).status_code, 403)
-                constants.ONLINE_TASK_IMPORT_ACTIVE.add(request_id)
+                owner = self.hold_active(constants, request_id)
                 self.assertEqual(client.post(api, json={"acknowledge": "archive"}, headers=headers).status_code, 409)
                 self.assertEqual(constants.ONLINE_TASK_IMPORT_REQUESTS_FILE.read_bytes(), before)
                 constants.ONLINE_TASK_IMPORT_ACTIVE.clear()
+                owner.close()
                 importer.assert_not_called()
                 reload.assert_not_called()
                 self.assertEqual(client.post(form, data={"acknowledge": "archive", "csrf_token": "archive-csrf"}).status_code, 302)

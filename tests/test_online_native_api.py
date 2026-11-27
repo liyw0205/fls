@@ -317,7 +317,9 @@ class OnlineNativeApiTests(unittest.TestCase):
             redirect = app.response_class(
                 "", status=302, headers={"Location": f"/online-scripts/log/{child_id}"},
             )
-            with patch.object(install_routes, "get_online_install_job", side_effect=[parent, parent, child]), \
+            with patch.object(install_routes, "get_online_install_job", side_effect=lambda request_id: {
+                parent_id: parent, child_id: child,
+            }.get(request_id)), \
                     patch.object(install_routes, "online_install_retry_relation", return_value={}), \
                     patch.object(install_routes, "active_online_install_for_script", return_value=("", None)), \
                     patch.object(install_routes, "get_online_script", return_value=sample_script("alpha")), \

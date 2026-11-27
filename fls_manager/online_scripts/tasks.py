@@ -8,6 +8,7 @@ from ..paths import SCRIPT_DIR
 from ..scheduler import reload_scheduler, cron_to_trigger
 from ..utils import now_str
 from .logs import append_log
+from .task_import_coordination import TASK_IMPORT_PUBLICATION_LOCK
 
 
 def online_task_import_version(item):
@@ -230,7 +231,7 @@ def task_import_publication_state(record):
 def task_import_retry_matches(record):
     if record.get("confirmation") != "not_published":
         return True
-    _tasks, signature = _read_import_task_file()
+    _tasks, signature = _read_import_task_file(allow_missing=record.get("confirmation_source") == "")
     return signature == record.get("confirmation_source")
 
 
@@ -391,7 +392,8 @@ def import_task_if_needed(
         return imported > 0
 
     try:
-        mutate_tasks(add_selected_tasks, reload_scheduler)
+        with TASK_IMPORT_PUBLICATION_LOCK:
+            mutate_tasks(add_selected_tasks, reload_scheduler)
     except TaskSchedulerReloadError as e:
         summary = f"任务已持久化，但调度器重载失败：{e}"
         if log_file:

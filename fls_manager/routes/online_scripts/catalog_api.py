@@ -4,6 +4,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from ._common import *
 from ...models import load_proxies
+from ...directory_jobs import directory_job_operation
 from ...sensitive import is_sensitive_key, mask_sensitive_text, mask_sensitive_url
 from ...online_scripts.tasks import online_script_task_crons, online_task_cron_vars, validate_online_task_import
 
@@ -241,6 +242,7 @@ def api_online_scripts_detail(script_id):
 
 
 @bp.route("/api/online-scripts/install-options/<script_id>")
+@directory_job_operation
 def api_online_scripts_install_options(script_id):
     try:
         item = get_online_script(script_id)
