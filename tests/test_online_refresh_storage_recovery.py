@@ -225,7 +225,10 @@ class OnlineRefreshStorageRecoveryTests(unittest.TestCase):
                 thread.join(timeout=10)
             self.assertFalse(any(thread.is_alive() for thread in threads))
             self.assertEqual(errors, [])
-            self.assertEqual(results, [200] * 4)
+            self.assertIn(200, results)
+            self.assertTrue(set(results) <= {200, 409}, results)
+            replay = client.post(endpoint, headers={"X-CSRF-Token": "refresh-csrf"})
+            self.assertEqual(replay.status_code, 200)
             self.assertEqual(json.loads(state.ONLINE_REFRESH_STATE_FILE.read_text(encoding="utf-8"))["request_id"], "a" * 32)
             if cache_before is None:
                 self.assertFalse(before.exists())

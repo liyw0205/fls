@@ -46,7 +46,7 @@ def isolated_app():
             yield create_app(), Path(temp_dir)
         finally:
             for worker in threading.enumerate():
-                if worker.name.startswith(("fls-script-pull-", "fls-repo-pull-", "fls-script-import-", "fls-repo-progress-", "fls-online-install-")):
+                if worker.name.startswith(("fls-script-pull-", "fls-repo-pull-", "fls-script-import-", "fls-repo-progress-", "fls-online-install-", "fls-online-scripts-refresh")):
                     worker.join(10)
                     if worker.is_alive():
                         raise AssertionError(f"script worker did not finish: {worker.name}")
@@ -62,6 +62,10 @@ def isolated_app():
             coordination = sys.modules.get("fls_manager.online_scripts.source_coordination")
             if coordination:
                 for owner in list(coordination.TASK_LINK_IDENTITIES.owners.values()):
+                    owner.close()
+            coordination = sys.modules.get("fls_manager.online_scripts.refresh_coordination")
+            if coordination:
+                for owner in list(coordination.REFRESH_IDENTITIES.owners.values()):
                     owner.close()
             purge_fls_modules()
 

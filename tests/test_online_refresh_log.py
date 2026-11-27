@@ -11,6 +11,12 @@ from tests.test_ui_route_components import ROOT, TOKEN, isolated_app
 
 
 class OnlineRefreshLogTests(unittest.TestCase):
+    def _activate(self, request_id):
+        from fls_manager.online_scripts.constants import ONLINE_REFRESH_LOCK, REFRESH_IDENTITIES
+
+        with ONLINE_REFRESH_LOCK:
+            return REFRESH_IDENTITIES.claim(request_id)
+
     def _state(self, base_dir, *, refresh_id="a" * 32, request_id="b" * 32, log_file=None):
         from fls_manager.online_scripts.constants import update_online_refresh_state
         from fls_manager.online_scripts.source import online_script_cache_fingerprint, online_script_source_fingerprint
@@ -42,6 +48,7 @@ class OnlineRefreshLogTests(unittest.TestCase):
         constants.update_online_refresh_state(running=True, status="运行中", error="original diagnosis")
         self._state(base_dir, refresh_id="c" * 32, request_id="d" * 32)
         if active_current:
+            constants.REFRESH_IDENTITIES.claim("d" * 32)
             constants.update_online_refresh_state(running=True, status="运行中")
         else:
             constants.ONLINE_REFRESH_STATE.clear()
@@ -582,6 +589,7 @@ const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
             request_id = self._state(base_dir)
             from fls_manager.online_scripts.constants import update_online_refresh_state
 
+            owner = self._activate(request_id)
             update_online_refresh_state(running=True, status="运行中", message="still working")
             client = app.test_client()
             running = client.get(
@@ -592,6 +600,7 @@ const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
             self.assertTrue(running.json["running"])
 
             update_online_refresh_state(running=False, status="已完成", message="done")
+            owner.close()
             terminal = client.get(
                 f"/api/online-scripts/refresh-log/{request_id}", headers={"X-Token": TOKEN},
             )
@@ -606,6 +615,7 @@ const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
 
             log_file = base_dir / "log" / f"online-script-source-refresh-{'a' * 32}.log"
             log_file.unlink()
+            owner = self._activate(request_id)
             update_online_refresh_state(
                 running=True, status="运行中", message="still working", error="", log_file=str(log_file),
             )
@@ -635,6 +645,7 @@ const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
             self.assertIn("refresh log appeared", available.json["log"])
 
             update_online_refresh_state(running=False, status="已完成", error="")
+            owner.close()
             completed = client.get(f"/api/online-scripts/refresh-log/{request_id}", headers=headers)
             self.assertEqual(completed.status_code, 200)
             self.assertTrue(completed.json["terminal"])
@@ -1265,6 +1276,7 @@ const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
             request_id = self._state(base_dir)
             from fls_manager.online_scripts.constants import update_online_refresh_state
 
+            self._activate(request_id)
             update_online_refresh_state(running=True, status="运行中", message="still working")
             html = app.test_client().get(
                 f"/online-scripts/refresh-log/{request_id}", headers={"X-Token": TOKEN},
@@ -1320,6 +1332,7 @@ const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
             request_id = self._state(base_dir)
             from fls_manager.online_scripts.constants import update_online_refresh_state
 
+            self._activate(request_id)
             update_online_refresh_state(running=True, status="运行中", message="still working", error="")
             html = app.test_client().get(
                 f"/online-scripts/refresh-log/{request_id}", headers={"X-Token": TOKEN},

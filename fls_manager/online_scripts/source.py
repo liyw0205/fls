@@ -9,6 +9,7 @@ from pathlib import Path
 
 from ..config import load_config
 from ..storage import mutate_json
+from ..directory_jobs import start_directory_job
 from ..utils import now_str, LazyModule
 from ..proxy import requests_proxy_dict, github_proxy_url, validate_proxy_id
 from .constants import (
@@ -25,6 +26,7 @@ from .constants import (
     online_refresh_task_link_request_id,
     persist_online_refresh_task_link_recovery,
     RefreshPublicationError,
+    get_online_refresh_state,
     update_online_refresh_state,
 )
 from .logs import append_log, online_refresh_log_file
@@ -33,6 +35,7 @@ from .source_coordination import (
     TASK_LINK_ADMISSION, TASK_LINK_IDENTITIES, source_cache_transaction,
     task_link_active_ids, task_link_receipt_transaction,
 )
+from .refresh_coordination import REFRESH_IDENTITIES
 
 requests = LazyModule("requests")
 
@@ -695,7 +698,9 @@ def refresh_worker(refresh_id, proxy_id="", log_file=""):
     retry_of = ""
     expected_cache_fingerprint = ""
     source_fingerprint = ""
+    cache_published = False
     with ONLINE_REFRESH_LOCK:
+        get_online_refresh_state()
         if ONLINE_REFRESH_STATE.get("id") == refresh_id:
             request_id = str(ONLINE_REFRESH_STATE.get("request_id") or "")
             retry_of = str(ONLINE_REFRESH_STATE.get("retry_of") or "")
@@ -706,9 +711,10 @@ def refresh_worker(refresh_id, proxy_id="", log_file=""):
             initial_cache_fingerprint = online_script_cache_fingerprint()
         if source_fingerprint and online_script_source_fingerprint() != source_fingerprint:
             raise RuntimeError("在线脚本源地址在刷新提交后已变化，未发送外部请求")
-        if retry_of and expected_cache_fingerprint and online_script_cache_fingerprint() != expected_cache_fingerprint:
-            raise RuntimeError("在线脚本源缓存在重试提交后已变化，未发送外部请求")
+        if expected_cache_fingerprint and initial_cache_fingerprint != expected_cache_fingerprint:
+            raise RuntimeError("在线脚本源缓存在刷新提交后已变化，未发送外部请求")
         update_online_refresh_state(
+            _expected_id=refresh_id if request_id else "",
             id=refresh_id,
             request_id=request_id,
             proxy_id=str(proxy_id or ""),
@@ -738,11 +744,14 @@ def refresh_worker(refresh_id, proxy_id="", log_file=""):
         if source_fingerprint and online_script_source_fingerprint() != source_fingerprint:
             raise RuntimeError("在线脚本源地址在抓取期间已变化，未发布缓存")
         with ONLINE_REFRESH_LOCK, source_cache_transaction():
+            if source_fingerprint and online_script_source_fingerprint() != source_fingerprint:
+                raise RuntimeError("在线脚本源地址在发布前已变化，未发布缓存")
             current_cache_fingerprint = online_script_cache_fingerprint()
             if current_cache_fingerprint != initial_cache_fingerprint:
                 raise RuntimeError("在线脚本源缓存在抓取期间已变化，未覆盖后来缓存")
             published_cache_fingerprint = online_script_cache_fingerprint_for_items(items)
             update_online_refresh_state(
+                _expected_id=refresh_id if request_id else "",
                 status="发布中",
                 message="已获取脚本源，正在原子发布本地缓存",
                 task_link_failures=task_link_failures,
@@ -764,6 +773,7 @@ def refresh_worker(refresh_id, proxy_id="", log_file=""):
                         f"{failure.get('name', '')}：{failure.get('error', '')}",
                     )
             save_online_script_cache(items)
+            cache_published = True
             if online_script_cache_fingerprint() != published_cache_fingerprint:
                 raise RuntimeError("缓存发布后指纹与预期不一致，结果未知")
         # Cache replacement is a separate durable side effect; retain that
@@ -783,6 +793,7 @@ def refresh_worker(refresh_id, proxy_id="", log_file=""):
         append_log(log_file, msg)
 
         update_online_refresh_state(
+            _expected_id=refresh_id if request_id else "",
             id=refresh_id,
             running=False,
             status=status,
@@ -800,7 +811,6 @@ def refresh_worker(refresh_id, proxy_id="", log_file=""):
             except Exception:
                 pass
             return
-        cache_published = bool(ONLINE_REFRESH_STATE.get("cache_published"))
         if cache_published:
             err = (
                 f"在线脚本源缓存已发布，但同步结果无法确认：{e}。"
@@ -816,6 +826,7 @@ def refresh_worker(refresh_id, proxy_id="", log_file=""):
             pass
         try:
             update_online_refresh_state(
+                _expected_id=refresh_id if request_id else "",
                 id=refresh_id,
                 running=False,
                 status=status,
@@ -828,18 +839,24 @@ def refresh_worker(refresh_id, proxy_id="", log_file=""):
             )
         except Exception as storage_error:
             with ONLINE_REFRESH_LOCK:
+                diagnostic_disk = dict(ONLINE_REFRESH_STATE)
                 ONLINE_REFRESH_STATE.update(
                     running=False, status=status, message="", error=err,
                     persistence_error=str(storage_error), updated_at=now_str(),
+                    _diagnostic_disk=diagnostic_disk,
                 )
 
 
 def start_refresh_thread(refresh_id, proxy_id="", log_file=""):
-    th = threading.Thread(
-        target=refresh_worker,
-        args=(refresh_id, proxy_id, log_file),
-        daemon=True,
+    with ONLINE_REFRESH_LOCK:
+        state = get_online_refresh_state()
+        if state.get("id") != refresh_id:
+            raise RuntimeError("刷新身份已变化，未启动抓取")
+        owner = REFRESH_IDENTITIES.owners.get(state.get("request_id"))
+        if owner is None:
+            raise RuntimeError("刷新身份未认领，未启动抓取")
+    return start_directory_job(
+        refresh_worker, args=(refresh_id, proxy_id, log_file),
         name="fls-online-scripts-refresh",
+        owner=owner,
     )
-    th.start()
-    return th

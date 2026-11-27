@@ -1,4 +1,5 @@
 from ._common import *
+from ...data_access import PanelStorageBusy
 import re
 import stat
 from pathlib import Path
@@ -124,6 +125,8 @@ def _refresh_log_state(request_id):
         return None, ("参数错误", "在线脚本源刷新请求标识无效，请从刷新状态重新打开日志。", 400)
     try:
         state = get_online_refresh_state()
+    except PanelStorageBusy:
+        raise
     except Exception as exc:
         if "刷新历史" in str(exc):
             return None, ("历史不可读", f"刷新历史无法读取，未覆盖原记录：{exc}", 500)
@@ -131,6 +134,8 @@ def _refresh_log_state(request_id):
     if state.get("request_id") != request_id:
         try:
             state = get_online_refresh_request(request_id)
+        except PanelStorageBusy:
+            raise
         except Exception as exc:
             return None, ("历史不可读", f"刷新历史无法读取，未覆盖原记录：{exc}", 500)
         if not state:
@@ -148,7 +153,7 @@ def _refresh_log_state(request_id):
         try:
             candidate_stat = candidate.stat()
         except FileNotFoundError:
-            if state.get("running"):
+            if state.get("running") or state.get("active"):
                 return (state, None), None
             return (state, None), ("日志不存在", "刷新日志尚未生成或已被清理，请返回刷新状态后重试。", 404)
         except OSError as exc:
@@ -200,6 +205,8 @@ def _refresh_log_payload(request_id, lines):
         }, 200
     try:
         log = tail_file(str(candidate), lines)
+    except PanelStorageBusy:
+        raise
     except Exception as exc:
         return _refresh_log_error_payload(
             request_id, "日志不可读", f"刷新日志读取失败：{exc}。请修复日志权限后重试。", 500, state,
@@ -211,7 +218,8 @@ def _refresh_log_payload(request_id, lines):
         "request_id": request_id,
         "id": state.get("id", ""),
         "running": bool(state.get("running")),
-        "terminal": not bool(state.get("running")) and state.get("status") in REFRESH_TERMINAL_STATUSES,
+        "active": bool(state.get("active")),
+        "terminal": not bool(state.get("running") or state.get("active")) and state.get("status") in REFRESH_TERMINAL_STATUSES,
         "status": state.get("status") or "-",
         "updated_at": state.get("updated_at") or "",
         "error": state.get("error") or "",
@@ -224,6 +232,7 @@ def _refresh_log_payload(request_id, lines):
 
 
 @bp.route("/api/online-scripts/refresh-log/<request_id>")
+@directory_job_operation
 def api_online_refresh_log(request_id):
     try:
         lines = int(request.args.get("lines", "1200"))
@@ -234,6 +243,7 @@ def api_online_refresh_log(request_id):
 
 
 @bp.route("/online-scripts/refresh-log/<request_id>")
+@directory_job_operation
 def online_refresh_log(request_id):
     payload, status = _refresh_log_payload(request_id, 1200)
     if not payload.get("ok"):
@@ -553,6 +563,8 @@ def _install_recovery(info):
 
     try:
         item = get_online_script(script_id)
+    except PanelStorageBusy:
+        raise
     except Exception as exc:
         return {
             "available": False,
@@ -670,6 +682,8 @@ def api_online_install_history():
         )
     except ValueError as exc:
         return jsonify(ok=False, msg=str(exc)), 400
+    except PanelStorageBusy:
+        raise
     except Exception as exc:
         return jsonify(ok=False, msg=f"安装历史无法读取：{exc}"), 500
     if requested_snapshot is not None and requested_snapshot != snapshot:
@@ -702,6 +716,8 @@ def api_online_install_log(install_id):
 
     try:
         info = get_online_install_job(install_id)
+    except PanelStorageBusy:
+        raise
     except Exception as exc:
         return jsonify({
             "ok": False,
@@ -797,6 +813,8 @@ def online_install_log(install_id):
     history_url = back_url if back_url == history_path or back_url.startswith(history_path + "?") else history_path
     try:
         info = get_online_install_job(install_id)
+    except PanelStorageBusy:
+        raise
     except Exception as exc:
         body = page_header_card(
             "在线脚本安装记录无法读取",
@@ -1391,6 +1409,8 @@ def online_install_history():
             actions_html='<a class="btn btn-gray" href="/online-scripts">返回在线脚本</a>',
         ) + _install_history_filter_form(script_id, status if status in ONLINE_INSTALL_STATUSES else "", raw_limit)
         return layout("在线脚本安装历史", "online_scripts", body), 400
+    except PanelStorageBusy:
+        raise
     except Exception as exc:
         body = page_header_card(
             "在线脚本安装历史",

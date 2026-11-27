@@ -2,6 +2,8 @@ import re
 from urllib.parse import urlencode
 
 from ._common import *
+from ...directory_jobs import directory_job_operation
+from ...data_access import PanelStorageBusy
 from ...online_scripts.constants import (
     ONLINE_REFRESH_HISTORY_LIMIT,
     OnlineRefreshHistoryChanged,
@@ -13,6 +15,7 @@ from ...online_scripts.constants import (
 
 
 @bp.route("/online-scripts")
+@directory_job_operation
 def online_scripts_page():
     selected_refresh_request = request.args.get("refresh_request_id", "").strip()
     if selected_refresh_request and not re.fullmatch(r"[a-f0-9]{32}", selected_refresh_request):
@@ -66,6 +69,8 @@ def online_scripts_page():
                 limit=8, request_id=selected_refresh_request,
             )
             refresh_history = refresh_history_page["items"]
+        except PanelStorageBusy:
+            raise
         except Exception as latest_exc:
             refresh_history = []
             refresh_history_page["total"] = exc.total
@@ -80,10 +85,14 @@ def online_scripts_page():
                 limit=8, request_id=selected_refresh_request,
             )
             refresh_history = refresh_history_page["items"]
+        except PanelStorageBusy:
+            raise
         except Exception as latest_exc:
             refresh_history = []
             refresh_history_page["total"] = exc.total
             refresh_history_error += f"；最新历史也无法读取：{latest_exc}"
+    except PanelStorageBusy:
+        raise
     except Exception as exc:
         refresh_history = []
         refresh_history_error = f"在线脚本源刷新历史无法读取，未覆盖当前状态：{exc}"
@@ -95,6 +104,8 @@ def online_scripts_page():
     cache_error = ""
     try:
         all_items = load_online_script_cache()
+    except PanelStorageBusy:
+        raise
     except Exception as exc:
         all_items = []
         cache_error = f"在线脚本源缓存无法读取，未覆盖原文件：{exc}。请检查源数据后重试。"
@@ -120,6 +131,8 @@ def online_scripts_page():
 
     try:
         refresh_state = get_online_refresh_state()
+    except PanelStorageBusy:
+        raise
     except Exception as exc:
         refresh_state = {
             "running": False,
@@ -146,6 +159,8 @@ def online_scripts_page():
     if selected_refresh_request:
         try:
             failure_snapshot = get_online_refresh_request(selected_refresh_request) or {}
+        except PanelStorageBusy:
+            raise
         except Exception as exc:
             failure_snapshot = {}
             failure_detail_error = f"原刷新失败源状态无法读取：{exc}"
@@ -175,6 +190,8 @@ def online_scripts_page():
             refresh_task_link_failures = failure_page["items"]
             failure_count = failure_page["total"]
             failure_recovery_maintenance = failure_page.get("maintenance") or {}
+        except PanelStorageBusy:
+            raise
         except Exception as exc:
             refresh_task_link_failures = (failure_snapshot.get("task_link_failures") or []) if failure_offset == 0 else []
             failure_detail_error = failure_detail_error or f"原刷新失败源明细无法读取，未清除已知首屏：{exc}"

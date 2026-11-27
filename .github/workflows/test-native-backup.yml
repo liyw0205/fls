@@ -62,6 +62,7 @@ jobs:
           tests/test_online_task_import_retention.py
           tests/test_online_task_link_workers.py
           tests/test_online_task_link.py
+          tests/test_online_refresh_workers.py
           tests/test_online_source_refresh.py
           tests/test_online_source_editor.py
           tests/test_online_source_api.py
@@ -139,4 +140,4 @@ jobs:
       - name: Verify task-link identity, source publication and recovery across workers
         env:
           PYTHONPATH: .
-        run: python -m pytest -q tests/test_online_task_link_workers.py tests/test_online_task_link.py tests/test_online_source_refresh.py tests/test_online_source_editor.py tests/test_online_source_api.py tests/test_online_refresh_storage_recovery.py tests/test_online_refresh_log.py tests/test_online_cache_storage_recovery.py
+        run: python -m pytest -q tests/test_online_task_link_workers.py tests/test_online_task_link.py tests/test_online_refresh_workers.py tests/test_online_source_refresh.py tests/test_online_source_editor.py tests/test_online_source_api.py tests/test_online_refresh_storage_recovery.py tests/test_online_refresh_log.py tests/test_online_cache_storage_recovery.py

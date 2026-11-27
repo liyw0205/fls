@@ -15,6 +15,10 @@ from .task_import_coordination import (
     task_import_receipt_transaction,
 )
 from .source_coordination import task_link_receipt_transaction
+from .refresh_coordination import (
+    ONLINE_REFRESH_LOCK, REFRESH_IDENTITIES, refresh_active, refresh_active_ids,
+    refresh_action_busy,
+)
 from ..storage import mutate_json, storage_transaction, write_json
 from ..utils import now_str
 
@@ -40,7 +44,6 @@ ONLINE_INSTALL_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 ONLINE_REFRESH_STATE_FILE = DATA_DIR / "online_script_refresh.json"
 ONLINE_REFRESH_HISTORY_FILE = DATA_DIR / "online_script_refresh_requests.json"
 ONLINE_REFRESH_TASK_FAILURES_DIR = DATA_DIR / "online_script_refresh_failures"
-ONLINE_REFRESH_LOCK = threading.RLock()
 ONLINE_REFRESH_TASK_FAILURE_INLINE_LIMIT = 100
 ONLINE_REFRESH_TASK_FAILURE_PAGE_LIMIT = 100
 ONLINE_REFRESH_TASK_FAILURE_RECORD_LIMIT = 5000
@@ -770,6 +773,10 @@ class OnlineRefreshHistoryPageOutOfRange(ValueError):
 
 
 def _prune_online_refresh_history(history, current_request_id):
+    active_ids = refresh_active_ids()
+    missing = active_ids - set(history)
+    if len(history) + len(missing) > ONLINE_REFRESH_HISTORY_LIMIT and missing:
+        raise OnlineRefreshHistoryFull("仍有活动刷新缺少回执，未裁剪历史或启动新的同步")
     neighbours = {request_id: set() for request_id in history}
     for request_id, info in history.items():
         parent = info.get("retry_of")
@@ -799,7 +806,7 @@ def _prune_online_refresh_history(history, current_request_id):
         )
 
     def component_key(component):
-        running = any(history[request_id].get("running") is True for request_id in component)
+        running = any(history[request_id].get("running") is True or request_id in active_ids for request_id in component)
         linked = any(history[request_id].get("retry_of") for request_id in component) or any(
             neighbours[request_id] for request_id in component
         )
@@ -809,8 +816,8 @@ def _prune_online_refresh_history(history, current_request_id):
     components.sort(key=component_key, reverse=True)
     retained = set()
     for component in components:
-        if len(retained) + len(component) > ONLINE_REFRESH_HISTORY_LIMIT:
-            if component is current or any(history[request_id].get("running") for request_id in component):
+        if len(retained) + len(component) + len(missing) > ONLINE_REFRESH_HISTORY_LIMIT:
+            if component is current or any(history[request_id].get("running") or request_id in active_ids for request_id in component):
                 raise OnlineRefreshHistoryFull(
                     "在线脚本源刷新历史已满，仍有活动请求无法安全裁剪；未启动新的同步。"
                 )
@@ -839,7 +846,7 @@ def _publish_refresh_history(history):
 def persist_online_refresh(info):
     if not isinstance(info, dict):
         raise RuntimeError("在线脚本源同步状态结构损坏，未覆盖原文件")
-    with storage_transaction():
+    with ONLINE_REFRESH_LOCK:
         if ONLINE_REFRESH_STATE_FILE.is_symlink():
             raise RuntimeError("在线脚本源同步状态文件不能是符号链接")
         if ONLINE_REFRESH_HISTORY_FILE.is_symlink():
@@ -937,9 +944,17 @@ def persist_online_refresh(info):
     return snapshot
 
 
-def update_online_refresh_state(**updates):
+def update_online_refresh_state(_expected_id="", **updates):
     with ONLINE_REFRESH_LOCK:
         previous = dict(ONLINE_REFRESH_STATE)
+        disk = _read_online_refresh_file()
+        if _expected_id and disk.get("id") != _expected_id:
+            raise RuntimeError("刷新身份已变化，未覆盖新的刷新回执")
+        if disk and disk.get("id") == previous.get("id"):
+            ONLINE_REFRESH_STATE.clear()
+            ONLINE_REFRESH_STATE.update(disk)
+            if previous.get("persistence_error"):
+                ONLINE_REFRESH_STATE["persistence_error"] = previous["persistence_error"]
         ONLINE_REFRESH_STATE.update(updates)
         try:
             snapshot = persist_online_refresh(ONLINE_REFRESH_STATE)
@@ -948,6 +963,7 @@ def update_online_refresh_state(**updates):
             ONLINE_REFRESH_STATE.update(getattr(exc, "published_snapshot", None) or previous)
             if getattr(exc, "published_snapshot", None):
                 ONLINE_REFRESH_STATE["persistence_error"] = str(exc)
+                ONLINE_REFRESH_STATE["_diagnostic_disk"] = dict(exc.published_snapshot)
             raise
         ONLINE_REFRESH_STATE.clear()
         ONLINE_REFRESH_STATE.update(snapshot)
@@ -957,15 +973,18 @@ def update_online_refresh_state(**updates):
 def get_online_refresh_state():
     with ONLINE_REFRESH_LOCK:
         current = dict(ONLINE_REFRESH_STATE)
-        loaded_from_file = False
         if ONLINE_REFRESH_STATE_FILE.exists() or ONLINE_REFRESH_STATE_FILE.is_symlink():
             data = _read_online_refresh_file()
-            if data and (data.get("id") != current.get("id") or (not data.get("running") and current.get("running"))):
+            if data:
+                diagnostic = current if current.get("id") == data.get("id") else {}
                 current = dict(data)
-                loaded_from_file = True
+                if diagnostic.get("persistence_error") and _refresh_snapshot(diagnostic.get("_diagnostic_disk") or {}) == data:
+                    current.update({key: diagnostic[key] for key in ("running", "status", "error", "message", "log_file", "persistence_error") if key in diagnostic})
+                    current["_diagnostic_disk"] = data
                 ONLINE_REFRESH_STATE.clear()
                 ONLINE_REFRESH_STATE.update(current)
-        if loaded_from_file and current.get("running"):
+        active = refresh_active(current.get("request_id"))
+        if current.get("running") and not refresh_action_busy(current.get("request_id")):
             current["running"] = False
             current["status"] = "结果未知"
             current["error"] = "面板重启后无法确认在线脚本源同步是否完成；保留旧缓存，请查看刷新日志后重试。"
@@ -987,7 +1006,7 @@ def get_online_refresh_state():
                     "api_action": f'/api/online-scripts/refresh-recover/{current["request_id"]}',
                     "label": "修复刷新回执",
                 }
-        return current
+        return dict({key: value for key, value in current.items() if not key.startswith("_")}, active=active)
 
 
 def _recover_online_refresh_history(history, current, request_id=""):
@@ -995,6 +1014,8 @@ def _recover_online_refresh_history(history, current, request_id=""):
     changed = False
     for key, info in history.items():
         if (request_id and key != request_id) or key == current.get("request_id") or not info.get("running"):
+            continue
+        if refresh_action_busy(key):
             continue
         reason = "原同步已不再是当前活动刷新，无法确认是否完成；请查看原日志并检查当前缓存，再明确重试。"
         recovered[key] = _validate_refresh_snapshot({
@@ -1016,7 +1037,7 @@ def get_online_refresh_request(request_id):
             return current
         history = _recover_online_refresh_history(_read_online_refresh_history_file(), current, request_id)
         value = history.get(request_id)
-        return dict(value) if isinstance(value, dict) else None
+        return dict(value, active=refresh_active(request_id)) if isinstance(value, dict) else None
 
 
 def get_online_refresh_task_link_failures(request_id, offset=0, limit=ONLINE_REFRESH_TASK_FAILURE_PAGE_LIMIT):
@@ -1201,7 +1222,7 @@ def get_online_refresh_history(limit=50, request_id=""):
             ),
             reverse=True,
         )
-        return [dict(value) for value in ordered[:limit]]
+        return [dict(value, active=refresh_active(value.get("request_id"))) for value in ordered[:limit]]
 
 
 def get_online_refresh_history_page(limit=8, offset=0, request_id="", snapshot=""):
@@ -1259,6 +1280,8 @@ def recover_online_refresh_receipt(request_id):
         info = get_online_refresh_request(request_id)
         if not info:
             return None
+        if refresh_action_busy(request_id):
+            return {"_conflict": True, **info}
         if info.get("request_id") == ONLINE_REFRESH_STATE.get("request_id"):
             persist_online_refresh(info)
             ONLINE_REFRESH_STATE.clear()
@@ -1288,7 +1311,7 @@ def confirm_online_refresh_result(request_id, cache_fingerprint, source_fingerpr
                 return {"_conflict": True, **record}
             return {"_replayed": True, **record}
         orphaned = record.get("running") and record.get("request_id") != current.get("request_id")
-        if not orphaned and (record.get("running") or record.get("status") != "结果未知"):
+        if refresh_action_busy(request_id) or (not orphaned and (record.get("running") or record.get("status") != "结果未知")):
             return {"_conflict": True, **record}
         if not record.get("source_fingerprint") or record.get("source_fingerprint") != source_fingerprint:
             return {"_conflict": True, **record}
@@ -1402,7 +1425,7 @@ def claim_online_refresh_retry(original_request_id, proxy_id="", request_id="", 
         if orphaned:
             original = get_online_refresh_request(original_request_id)
         current = dict(ONLINE_REFRESH_STATE)
-        if current.get("running"):
+        if current.get("running") or refresh_active_ids():
             return None
         info = {
             "id": uuid.uuid4().hex,
@@ -1423,12 +1446,15 @@ def claim_online_refresh_retry(original_request_id, proxy_id="", request_id="", 
             "confirmation": "",
             "confirmation_fingerprint": "",
         }
+        owner = REFRESH_IDENTITIES.claim(request_id)
         try:
             persist_online_refresh(info)
         except OnlineRefreshHistoryFull:
+            owner.close()
             raise
         except Exception as exc:
             _retain_unlaunched_refresh(exc)
+            owner.close()
             raise
         ONLINE_REFRESH_STATE.clear()
         ONLINE_REFRESH_STATE.update(info)
@@ -1438,6 +1464,7 @@ def claim_online_refresh_retry(original_request_id, proxy_id="", request_id="", 
 def _retain_unlaunched_refresh(exc):
     published = getattr(exc, "published_snapshot", None)
     if published:
+        diagnostic_disk = dict(published)
         error = f"刷新回执发布未确认，未启动抓取：{exc}。请先修复刷新回执。"
         if re.fullmatch(r"[a-f0-9]{32}", published.get("id", "")):
             log_path = online_refresh_log_file(published["id"])
@@ -1456,6 +1483,7 @@ def _retain_unlaunched_refresh(exc):
             running=False, status="结果未知", message="",
             error=error,
             persistence_error=str(exc),
+            _diagnostic_disk=diagnostic_disk,
         )
 
 
@@ -1470,7 +1498,7 @@ def get_online_refresh_submission(proxy_id, request_id):
         if str(info.get("proxy_id") or "") != str(proxy_id or ""):
             return {"_binding_conflict": True, **info}
         info = get_online_refresh_request(request_id)
-        if info.get("running"):
+        if info.get("running") or info.get("active"):
             return {"_running": True, **info}
         if info.get("status") in ("已完成", "部分完成"):
             return {"_replay": True, **info}
@@ -1493,7 +1521,7 @@ def reserve_online_refresh(proxy_id="", request_id="", cache_fingerprint="", sou
         existing = get_online_refresh_submission(proxy_id, request_id)
         if existing:
             return existing
-        if current.get("running"):
+        if current.get("running") or refresh_active_ids():
             return None
         if current.get("persistence_error"):
             if current.get("status") == "启动失败":
@@ -1521,17 +1549,20 @@ def reserve_online_refresh(proxy_id="", request_id="", cache_fingerprint="", sou
             "confirmation": "",
             "confirmation_fingerprint": "",
         }
+        owner = REFRESH_IDENTITIES.claim(request_id)
         ONLINE_REFRESH_STATE.update(info)
         try:
             persist_online_refresh(info)
         except OnlineRefreshHistoryFull:
             ONLINE_REFRESH_STATE.clear()
             ONLINE_REFRESH_STATE.update(previous)
+            owner.close()
             raise
         except Exception as exc:
             ONLINE_REFRESH_STATE.clear()
             ONLINE_REFRESH_STATE.update(previous)
             _retain_unlaunched_refresh(exc)
+            owner.close()
             raise
         return dict(info)
 

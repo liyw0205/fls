@@ -1,10 +1,16 @@
 import re
 import uuid
+import threading
+from functools import wraps
 
 from ._common import *
+from ...directory_jobs import directory_job_operation
+from ...data_access import PanelStorageBusy
 from ...online_scripts.constants import (
     ONLINE_REFRESH_LOCK,
     ONLINE_REFRESH_STATE,
+    _read_online_refresh_file,
+    _read_online_refresh_history_file,
     OnlineRefreshHistoryFull,
     OnlineRefreshHistoryChanged,
     OnlineRefreshHistoryPageOutOfRange,
@@ -20,9 +26,43 @@ from ...online_scripts.constants import (
     update_online_refresh_state,
 )
 from ...online_scripts.logs import online_refresh_log_file
+from ...online_scripts.refresh_coordination import REFRESH_IDENTITIES, refresh_active
 from ...online_scripts.source import online_script_cache_fingerprint, online_script_source_fingerprint
 from ...models import load_proxies
 from ...utils import now_str
+
+
+def _claim_refresh_operation(function):
+    @wraps(function)
+    def claimed(request_id):
+        owner = None
+        with ONLINE_REFRESH_LOCK:
+            try:
+                current = _read_online_refresh_file()
+                info = current if current.get("request_id") == request_id else _read_online_refresh_history_file().get(request_id)
+            except PanelStorageBusy:
+                raise
+            except Exception as exc:
+                return {"ok": False, "request_id": request_id,
+                        "error": f"刷新回执无法读取：{exc}"}, 503
+            if refresh_active(request_id):
+                return {"ok": False, "request_id": request_id, "active": True,
+                        "error": "原刷新仍在执行或清理，请稍后查询原请求"}, 409
+            if info:
+                owner = REFRESH_IDENTITIES.claim(request_id)
+                owner.recovery_thread = threading.get_ident()
+        try:
+            return function(request_id)
+        finally:
+            if owner is not None:
+                owner.close()
+    return claimed
+
+
+def _close_refresh_owner(request_id):
+    owner = REFRESH_IDENTITIES.owners.get(request_id)
+    if owner is not None:
+        owner.close()
 
 
 def _refresh_request_id(raw):
@@ -33,6 +73,7 @@ def _refresh_request_id(raw):
 
 
 @bp.route("/api/online-scripts/refresh-options")
+@directory_job_operation
 def api_online_refresh_options():
     try:
         proxies = [
@@ -44,6 +85,8 @@ def api_online_refresh_options():
             for proxy in load_proxies()
             if proxy.get("enabled", True) and proxy.get("id")
         ]
+    except PanelStorageBusy:
+        raise
     except Exception:
         response = jsonify(ok=False, error="代理配置无法读取")
         response.status_code = 500
@@ -62,6 +105,8 @@ def _refresh_status_with_failure_recovery(state):
         page = get_online_refresh_task_link_failures(request_id, offset=0, limit=100)
     except LookupError:
         return state
+    except PanelStorageBusy:
+        raise
     except Exception as exc:
         state["task_link_failure_error"] = f"失败源恢复状态暂时无法读取：{exc}"
         state["task_link_failures"] = [
@@ -88,6 +133,8 @@ def _submit_online_refresh(proxy_id, raw_request_id=""):
                 validate_proxy_id(proxy_id)
             except ValueError as e:
                 return {"ok": False, "status": "参数错误", "request_id": request_id, "error": str(e)}, 400
+            except PanelStorageBusy:
+                raise
             except Exception as e:
                 return {"ok": False, "status": "代理不可读", "request_id": request_id,
                         "error": f"读取代理配置失败：{e}"}, 500
@@ -97,6 +144,8 @@ def _submit_online_refresh(proxy_id, raw_request_id=""):
     except OnlineRefreshHistoryFull as exc:
         return {"ok": False, "status": "历史已满", "request_id": request_id,
                 "retry_not_started": True, "error": str(exc)}, 409
+    except PanelStorageBusy:
+        raise
     except Exception as e:
         return {
             "ok": False, "status": "启动失败",
@@ -130,16 +179,23 @@ def _submit_online_refresh(proxy_id, raw_request_id=""):
     try:
         log_file = str(online_refresh_log_file(info["id"]))
         start_refresh_thread(info["id"], info.get("proxy_id", ""), log_file)
+    except PanelStorageBusy:
+        _close_refresh_owner(request_id)
+        raise
     except Exception as e:
         error = f"启动在线脚本源同步线程失败：{e}"
         try:
             update_online_refresh_state(
-                running=False, status="启动失败", message="", error=error,
+                _expected_id=info["id"], running=False, status="启动失败", message="", error=error,
                 updated_at=now_str(), log_file=log_file,
             )
+        except PanelStorageBusy:
+            _close_refresh_owner(request_id)
+            raise
         except Exception as state_error:
             error += f"；同步状态保存失败：{state_error}。请检查状态文件权限和磁盘空间后重试。"
             with ONLINE_REFRESH_LOCK:
+                diagnostic_disk = dict(ONLINE_REFRESH_STATE)
                 ONLINE_REFRESH_STATE.update(
                     running=False,
                     status="启动失败",
@@ -147,7 +203,10 @@ def _submit_online_refresh(proxy_id, raw_request_id=""):
                     error=error,
                     updated_at=now_str(),
                     log_file=log_file,
+                    persistence_error=str(state_error),
+                    _diagnostic_disk=diagnostic_disk,
                 )
+        _close_refresh_owner(request_id)
         return {"ok": False, "id": info["id"], "request_id": request_id,
                 "status": "启动失败", "error": error}, 500
     return {"ok": True, "id": info["id"], "request_id": request_id,
@@ -173,6 +232,8 @@ def _submit_online_refresh_retry(original_request_id, proxy_id, raw_request_id="
                 "retry_of": original_request_id, "retry_not_started": True, "error": str(exc)}, 409
     except ValueError as exc:
         return {"ok": False, "status": "参数错误", "request_id": request_id, "error": str(exc)}, 400
+    except PanelStorageBusy:
+        raise
     except Exception as exc:
         return {"ok": False, "status": "重试准备失败", "request_id": request_id,
                 "error": f"准备在线脚本源重试失败：{exc}"}, 500
@@ -202,33 +263,50 @@ def _submit_online_refresh_retry(original_request_id, proxy_id, raw_request_id="
     try:
         log_file = str(online_refresh_log_file(info["id"]))
         start_refresh_thread(info["id"], info.get("proxy_id", ""), log_file)
+    except PanelStorageBusy:
+        _close_refresh_owner(request_id)
+        raise
     except Exception as exc:
         error = f"启动在线脚本源重试线程失败：{exc}"
         try:
             update_online_refresh_state(
-                running=False, status="启动失败", message="", error=error,
+                _expected_id=info["id"], running=False, status="启动失败", message="", error=error,
                 updated_at=now_str(), log_file=log_file,
             )
+        except PanelStorageBusy:
+            _close_refresh_owner(request_id)
+            raise
         except Exception as state_error:
             error += f"；同步状态保存失败：{state_error}"
             with ONLINE_REFRESH_LOCK:
+                diagnostic_disk = dict(ONLINE_REFRESH_STATE)
                 ONLINE_REFRESH_STATE.update(
                     running=False, status="启动失败", message="", error=error,
                     persistence_error=str(state_error), updated_at=now_str(), log_file=log_file,
+                    _diagnostic_disk=diagnostic_disk,
                 )
+        _close_refresh_owner(request_id)
         return {"ok": False, "id": info["id"], "request_id": request_id,
                 "retry_of": original_request_id, "status": "启动失败", "error": error}, 500
     return {"ok": True, "id": info["id"], "request_id": request_id,
             "retry_of": original_request_id, "status": "运行中"}, 202
 
 
+@_claim_refresh_operation
 def _confirm_online_refresh_result(request_id):
+    return _confirm_online_refresh_result_locked(request_id)
+
+
+def _confirm_online_refresh_result_locked(request_id):
     try:
-        cache_fingerprint = online_script_cache_fingerprint()
-        source_fingerprint = online_script_source_fingerprint()
-        info = confirm_online_refresh_result(request_id, cache_fingerprint, source_fingerprint)
+        with ONLINE_REFRESH_LOCK:
+            cache_fingerprint = online_script_cache_fingerprint()
+            source_fingerprint = online_script_source_fingerprint()
+            info = confirm_online_refresh_result(request_id, cache_fingerprint, source_fingerprint)
     except ValueError as exc:
         return {"ok": False, "status": "参数错误", "error": str(exc), "request_id": request_id}, 400
+    except PanelStorageBusy:
+        raise
     except Exception as exc:
         return {"ok": False, "status": "确认失败", "error": f"核对刷新结果失败：{exc}", "request_id": request_id}, 500
     if info.get("_missing"):
@@ -240,25 +318,33 @@ def _confirm_online_refresh_result(request_id):
             "replayed": bool(info.get("_replayed"))}, 200
 
 
+@_claim_refresh_operation
 def _recover_online_refresh(request_id):
     try:
         info = recover_online_refresh_receipt(request_id)
     except ValueError as exc:
         return {"ok": False, "request_id": request_id, "error": str(exc)}, 400
+    except PanelStorageBusy:
+        raise
     except Exception as exc:
         return {"ok": False, "request_id": request_id, "error": f"修复刷新回执失败：{exc}。请查询原请求后重试。"}, 500
     if info is None:
         return {"ok": False, "request_id": request_id, "error": "刷新请求不存在或已清理"}, 404
+    if info.get("_conflict"):
+        return {"ok": False, "request_id": request_id, "active": True,
+                "error": "原刷新仍在执行或清理，请稍后查询原请求"}, 409
     return {"ok": True, **info}, 200
 
 
 @bp.route("/api/online-scripts/refresh-recover/<request_id>", methods=["POST"])
+@directory_job_operation
 def api_online_refresh_recover(request_id):
     payload, status_code = _recover_online_refresh(request_id)
     return jsonify(payload), status_code
 
 
 @bp.route("/online-scripts/refresh-recover/<request_id>", methods=["POST"])
+@directory_job_operation
 def online_refresh_recover(request_id):
     payload, status_code = _recover_online_refresh(request_id)
     actions = '<a class="btn btn-gray" href="/online-scripts#online-status">返回刷新状态</a>'
@@ -281,6 +367,7 @@ def online_refresh_recover(request_id):
 
 
 @bp.route("/online-scripts/refresh", methods=["POST"])
+@directory_job_operation
 def online_scripts_refresh():
     proxy_id = request.form.get("proxy_id", "").strip()
     request_id = request.form.get("request_id", "").strip()
@@ -322,14 +409,18 @@ def online_scripts_refresh():
 
 
 @bp.route("/api/online-scripts/refresh-status")
+@directory_job_operation
 def api_online_refresh_status():
     try:
         return jsonify(_refresh_status_with_failure_recovery(get_online_refresh_state()))
+    except PanelStorageBusy:
+        raise
     except Exception as e:
         return jsonify({"ok": False, "error": f"读取在线脚本源同步状态失败：{e}"}), 500
 
 
 @bp.route("/api/online-scripts/refresh-history")
+@directory_job_operation
 def api_online_refresh_history():
     try:
         limit = int(request.args.get("limit", "50"))
@@ -358,12 +449,15 @@ def api_online_refresh_history():
         return jsonify(ok=False, error=str(e), items=[]), 400
     except LookupError as e:
         return jsonify(ok=False, error=str(e), items=[]), 404
+    except PanelStorageBusy:
+        raise
     except Exception as e:
         return jsonify(ok=False, error=f"读取在线脚本源刷新历史失败：{e}", items=[]), 500
     return jsonify(ok=True, **page), 200
 
 
 @bp.route("/api/online-scripts/refresh-task-link-failures/<request_id>")
+@directory_job_operation
 def api_online_refresh_task_link_failures(request_id):
     try:
         offset = int(request.args.get("offset", "0"))
@@ -376,12 +470,15 @@ def api_online_refresh_task_link_failures(request_id):
         return jsonify(ok=False, error=str(exc), items=[]), 400
     except LookupError as exc:
         return jsonify(ok=False, error=str(exc), items=[]), 404
+    except PanelStorageBusy:
+        raise
     except Exception as exc:
         return jsonify(ok=False, error=f"读取在线脚本源失败明细失败：{exc}", request_id=request_id, items=[]), 503
     return jsonify(ok=True, **payload), 200
 
 
 @bp.route("/api/online-scripts/refresh-retry/<request_id>", methods=["POST"])
+@directory_job_operation
 def api_online_refresh_retry(request_id):
     data = request.get_json(silent=True) if request.is_json else request.form
     data = data or {}
@@ -394,6 +491,7 @@ def api_online_refresh_retry(request_id):
 
 
 @bp.route("/online-scripts/refresh-retry/<request_id>", methods=["POST"])
+@directory_job_operation
 def online_refresh_retry(request_id):
     proxy_id = request.form.get("proxy_id", "").strip()
     payload, status_code = _submit_online_refresh_retry(
@@ -432,12 +530,14 @@ def online_refresh_retry(request_id):
 
 
 @bp.route("/api/online-scripts/refresh-confirm/<request_id>", methods=["POST"])
+@directory_job_operation
 def api_online_refresh_confirm(request_id):
     payload, status_code = _confirm_online_refresh_result(request_id)
     return jsonify(payload), status_code
 
 
 @bp.route("/online-scripts/refresh-confirm/<request_id>", methods=["POST"])
+@directory_job_operation
 def online_refresh_confirm(request_id):
     payload, status_code = _confirm_online_refresh_result(request_id)
     if not payload.get("ok"):
@@ -458,6 +558,7 @@ def online_refresh_confirm(request_id):
 
 
 @bp.route("/api/online-scripts/refresh-status/<request_id>")
+@directory_job_operation
 def api_online_refresh_status_for_request(request_id):
     try:
         expected = _refresh_request_id(request_id)
@@ -465,11 +566,15 @@ def api_online_refresh_status_for_request(request_id):
         return jsonify({"ok": False, "error": str(exc)}), 400
     try:
         state = get_online_refresh_state()
+    except PanelStorageBusy:
+        raise
     except Exception as e:
         return jsonify({"ok": False, "error": f"读取在线脚本源同步状态失败：{e}"}), 500
     if state.get("request_id") != expected:
         try:
             state = get_online_refresh_request(expected)
+        except PanelStorageBusy:
+            raise
         except Exception as e:
             return jsonify({
                 "ok": False,
@@ -482,6 +587,7 @@ def api_online_refresh_status_for_request(request_id):
 
 
 @bp.route("/api/online-scripts/refresh", methods=["POST"])
+@directory_job_operation
 def api_online_scripts_refresh():
     data = request.get_json(silent=True) if request.is_json else request.form
     data = data or {}

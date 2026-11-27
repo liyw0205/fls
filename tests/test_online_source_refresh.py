@@ -1640,6 +1640,7 @@ vm.runInContext(input.reader+input.script,context);
                         updated_at="2026-11-14 00:00:00",
                         log_file="",
                     )
+                    refresh.REFRESH_IDENTITIES.owners[refresh.ONLINE_REFRESH_STATE["request_id"]].close()
                     completed.set()
 
                 threading.Thread(target=finish, daemon=True).start()
@@ -1863,6 +1864,7 @@ vm.runInContext(input.reader+input.script,context);
                     message="同步在线脚本源部分完成", error="", cache_published=True,
                     task_link_failures=[], updated_at="now", log_file="",
                 )
+                refresh.REFRESH_IDENTITIES.owners[request_id].close()
                 replay = client.post(
                     "/api/online-scripts/refresh",
                     data={"request_id": request_id}, headers={"X-Token": TOKEN},
@@ -1900,6 +1902,7 @@ vm.runInContext(input.reader+input.script,context);
                     running=False, status="结果未知", message="", error="缓存已发布但回执未知",
                     cache_published=True, task_link_failures=[], updated_at="now", log_file="",
                 )
+                refresh.REFRESH_IDENTITIES.owners[request_id].close()
                 unknown = client.post(
                     "/api/online-scripts/refresh",
                     data={"request_id": request_id, "proxy_id": "chosen"},
@@ -2143,6 +2146,7 @@ vm.runInContext(input.reader+input.script,context);
             constants.update_online_refresh_state(
                 request_id="c" * 32, id="d" * 32, running=True, status="运行中", updated_at="new",
             )
+            constants.REFRESH_IDENTITIES.claim("c" * 32)
             before = constants.ONLINE_REFRESH_STATE_FILE.read_bytes()
             with patch.object(refresh, "start_refresh_thread") as start:
                 replay = app.test_client().post(
