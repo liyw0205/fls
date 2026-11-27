@@ -1211,6 +1211,10 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
                 denied = client.post(f"/api/online-scripts/install-reload/{install_id}")
                 self.assertEqual(denied.status_code, 400)
                 ONLINE_INSTALL_RUNNING[install_id]["running"] = True
+                from fls_manager.online_scripts.constants import ONLINE_INSTALL_LOCK
+
+                with ONLINE_INSTALL_LOCK:
+                    ONLINE_INSTALL_LOCK.claim(install_id)
                 running = client.post(
                     f"/api/online-scripts/install-reload/{install_id}",
                     headers={"X-CSRF-Token": "api-reload-csrf"},
@@ -1320,7 +1324,7 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
 
     def test_missing_running_and_completed_records_do_not_reload(self):
         with isolated_app() as (app, base_dir):
-            from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING, ONLINE_INSTALL_LOCK, persist_online_install
 
             install_id = self.partial_install(app, base_dir)
             client = app.test_client()
@@ -1329,8 +1333,15 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
                 self.assertEqual(missing.status_code, 404)
                 for options in ({"running": True}, {"running": False, "scheduler_reload_pending": False, "status": "已完成"}):
                     ONLINE_INSTALL_RUNNING[install_id].update(options)
+                    persist_online_install(ONLINE_INSTALL_RUNNING[install_id])
+                    owner = None
+                    if options.get("running"):
+                        with ONLINE_INSTALL_LOCK:
+                            owner = ONLINE_INSTALL_LOCK.claim(install_id)
                     response = client.post(f"/online-scripts/install-reload/{install_id}", headers={"X-Token": TOKEN})
                     self.assertEqual(response.status_code, 409)
+                    if owner:
+                        owner.close()
                 reload_scheduler.assert_not_called()
 
     def test_recovery_requires_valid_csrf_session_and_permission(self):

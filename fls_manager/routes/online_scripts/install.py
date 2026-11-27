@@ -2,12 +2,16 @@ from ._common import *
 import hashlib
 import json
 import re
+import threading
+from contextlib import ExitStack
+from functools import wraps
 
 from ...utils import now_str
 from ...models import TASKS_MUTATION_LOCK, TaskSchedulerReloadError
 from ...storage import storage_transaction
 from ...scheduler import reload_scheduler
 from ...directory_jobs import directory_job_operation
+from ...data_access import PanelStorageBusy
 from ...online_scripts.constants import (
     ONLINE_INSTALL_LOCK,
     ONLINE_INSTALL_RUNNING,
@@ -60,7 +64,13 @@ def _install_start_receipt_retryable(info):
     )
 
 
-def _start_install_job(
+def _start_install_job(*args, **kwargs):
+    with ExitStack() as resources:
+        return _start_install_job_inner(resources, *args, **kwargs)
+
+
+def _start_install_job_inner(
+    resources,
     script_id,
     item,
     proxy_id="",
@@ -129,7 +139,11 @@ def _start_install_job(
                         request_id, "在线安装请求冲突", "该请求标识已绑定其他安装选项，请重新打开任务选择页。", 409,
                     )
                 if not _install_start_receipt_retryable(previous):
+                    if request.path.startswith("/api/"):
+                        return _api_install_replay_response(request_id, previous)
                     return redirect(url_for("online_scripts.online_install_log", install_id=request_id, back="/online-scripts"))
+                if previous.get("_worker_active"):
+                    return _install_retry_error(request_id, "原在线安装仍在清理", "请稍后查询原请求，未重复启动安装。", 409)
                 if previous.get("script_fingerprint") != script_fingerprint:
                     return _install_retry_error(
                         request_id,
@@ -157,6 +171,10 @@ def _start_install_job(
                 return _install_retry_consumed(retry_of, previous["retried_by"])
         active_id, _ = active_online_install_for_script(script_id)
         if active_id:
+            if request.path.startswith("/api/"):
+                return jsonify(ok=False, request_id=request_id or install_id, install_id=active_id,
+                               msg="该脚本正在安装中，请先查看当前安装记录",
+                               log_url=url_for("online_scripts.api_online_install_log", install_id=active_id)), 409
             if retry_of:
                 return _install_retry_error(
                     retry_of, "无法重试在线安装", "该脚本仍有安装任务正在运行，请先查看当前任务。", 409,
@@ -203,6 +221,8 @@ def _start_install_job(
             "process": None,
             "updated_at": now_str(),
         }
+        owner = ONLINE_INSTALL_LOCK.claim(install_id)
+        resources.callback(owner.close)
         ONLINE_INSTALL_RUNNING[install_id] = info
         try:
             persist_online_install(info)
@@ -286,6 +306,7 @@ def _start_install_job(
             enable_task=enable_task,
             selected_task_indexes=selected_task_indexes,
         )
+        resources.pop_all()
     except Exception as e:
         with ONLINE_INSTALL_LOCK:
             info = ONLINE_INSTALL_RUNNING[install_id]
@@ -451,7 +472,12 @@ def online_scripts_install(script_id):
                 return redirect(url_for("online_scripts.online_install_log", install_id=request_id, back="/online-scripts"))
 
     with ONLINE_INSTALL_LOCK:
-        active_id, _ = active_online_install_for_script(script_id)
+        try:
+            active_id, _ = active_online_install_for_script(script_id)
+        except PanelStorageBusy:
+            raise
+        except Exception as exc:
+            return _install_start_error(request_id or script_id, f"保存安装状态失败：{exc}", log_available=False, script_id=script_id)
         if active_id:
             return redirect(
                 url_for(
@@ -1145,6 +1171,39 @@ def _save_install_task_result(info):
             raise
 
 
+def _claim_install_operation(function):
+    @wraps(function)
+    def claimed(install_id):
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", install_id or ""):
+            return function(install_id)
+        with ONLINE_INSTALL_LOCK:
+            with ONLINE_INSTALL_LOCK.probe(install_id) as active:
+                if active:
+                    message = "安装或恢复仍在进行，请稍后查询原结果。"
+                    if function.__name__.startswith("_"):
+                        return {"ok": False, "request_id": install_id, "msg": message}, 409
+                    return _install_retry_error(install_id, "无法恢复在线安装", message, 409)
+            try:
+                cached = ONLINE_INSTALL_RUNNING.get(install_id)
+                expected_recovery = cached.get("task_recovery") if isinstance(cached, dict) else None
+                info = get_online_install_job(install_id)
+            except Exception:
+                return function(install_id)
+            if not info:
+                return function(install_id)
+            if (function.__name__ == "_reload_install_scheduler" and isinstance(cached, dict)
+                    and expected_recovery != info.get("task_recovery")):
+                return _install_reload_claim_conflict(install_id, info)
+            owner = ONLINE_INSTALL_LOCK.claim(install_id)
+            owner.recovery_thread = threading.get_ident()
+        try:
+            return function(install_id)
+        finally:
+            owner.close()
+    return claimed
+
+
+@_claim_install_operation
 def _retry_install_tasks(install_id):
     """Retry only the task import after a script download already succeeded."""
     with ONLINE_INSTALL_LOCK:
@@ -1300,6 +1359,7 @@ def api_online_scripts_install_task_retry(install_id):
     return jsonify(payload), status
 
 
+@_claim_install_operation
 def _confirm_install_tasks(install_id):
     identity = {"request_id": install_id}
     if not re.fullmatch(r"[a-f0-9]{32}", install_id or ""):
@@ -1373,6 +1433,7 @@ def online_scripts_install_task_confirm(install_id):
                                 actions_html=_install_task_confirmation_form(install_id))
 
 
+@_claim_install_operation
 def _reload_install_scheduler(install_id):
     """Reload saved task imports without repeating the installation side effects."""
     with ONLINE_INSTALL_LOCK:
@@ -1382,8 +1443,10 @@ def _reload_install_scheduler(install_id):
             return {
                 "ok": False,
                 "request_id": install_id,
-                "msg": f"安装记录无法读取，未覆盖原文件：{exc}",
-            }, 500
+                "receipt_confirmation_required": True,
+                "state_url": _install_reload_state_url(install_id),
+                "msg": f"原安装回执无法核实，未覆盖原文件：{exc}",
+            }, 503 if install_id in ONLINE_INSTALL_RUNNING else 500
         if not info:
             return {"ok": False, "request_id": install_id, "msg": "安装记录不存在。"}, 404
         if info.get("running") or install_id in ONLINE_INSTALL_RETRYING:
@@ -1559,6 +1622,7 @@ def api_online_scripts_install_reload(install_id):
 
 @bp.route("/online-scripts/install-retry/<install_id>", methods=["POST"])
 @directory_job_operation
+@_claim_install_operation
 def online_scripts_install_retry(install_id):
     try:
         info = get_online_install_job(install_id)
@@ -1701,6 +1765,7 @@ def online_scripts_install_retry(install_id):
 
 @bp.route("/api/online-scripts/install-retry/<install_id>", methods=["POST"])
 @directory_job_operation
+@_claim_install_operation
 def api_online_scripts_install_retry(install_id):
     if not re.fullmatch(r"[a-f0-9]{32}", install_id or ""):
         return jsonify(ok=False, request_id=install_id, msg="在线脚本安装请求标识无效"), 400

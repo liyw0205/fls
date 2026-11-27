@@ -2,6 +2,7 @@ import uuid
 
 from ..utils import h
 from ..ui.components import empty_state, status_badge
+from ..data_access import PanelStorageBusy
 from ..proxy import proxy_select_options
 from .tasks import (
     online_script_task_crons,
@@ -148,7 +149,13 @@ def render_online_script_rows(items):
 </form>
 """
 
-        running_install_id, running_install_info = get_running_install_by_script_id(item_id)
+        try:
+            running_install_id, running_install_info = get_running_install_by_script_id(item_id)
+        except PanelStorageBusy:
+            raise
+        except Exception:
+            # The latest-install branch below renders the unreadable history diagnosis.
+            running_install_id, running_install_info = "", None
 
         if running_install_id:
             install_action_html = f"""

@@ -113,10 +113,12 @@ class OnlineInstallRecoveryTests(unittest.TestCase):
 
     def test_retry_refuses_other_active_install_for_same_script(self):
         with isolated_app() as (app, base_dir):
-            from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING, ONLINE_INSTALL_LOCK
 
             self.prepare(base_dir)
             ONLINE_INSTALL_RUNNING["active"] = {"id": "active", "script_id": "demo", "running": True}
+            with ONLINE_INSTALL_LOCK:
+                ONLINE_INSTALL_LOCK.claim("active")
             with patch("fls_manager.routes.online_scripts.install.start_install_thread") as start:
                 response = app.test_client().post(
                     "/online-scripts/install-retry/previous", headers={"X-Token": TOKEN},
@@ -1092,6 +1094,9 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
                 self.assertEqual(first.status_code, 200)
                 self.assertEqual(first.json["install_id"], request_id)
 
+                from fls_manager.online_scripts.constants import ONLINE_INSTALL_LOCK
+
+                ONLINE_INSTALL_LOCK.owners[request_id].close()
                 ONLINE_INSTALL_RUNNING.clear()
                 save_online_script_cache([])
                 repeated = client.post(

@@ -265,6 +265,8 @@ def get_running_install_by_script_id(script_id):
 
 def online_install_should_stop(install_id):
     with ONLINE_INSTALL_LOCK:
+        if install_id:
+            get_online_install_job(install_id)
         return install_id in ONLINE_INSTALL_STOPPING
 
 
@@ -324,32 +326,44 @@ def request_stop_online_install(install_id):
         if snapshot.get("status") == "结果未知":
             return False, "安装任务结果未知，面板重启后无法停止，请检查日志和脚本目录"
         info = ONLINE_INSTALL_RUNNING.get(install_id)
-
+        local = info is not None
+        if info is None and snapshot.get("_worker_active"):
+            info = dict(snapshot)
         if not info or not info.get("running"):
             return False, "安装任务已结束"
 
-        if install_id in ONLINE_INSTALL_STOPPING and info.get("status") == "停止中":
+        if local and info.get("stop_requested") and info.get("status") == "停止中":
             return True, "已请求停止安装"
 
         previous_status = info.get("status")
         previous_error = info.get("error")
         previous_persistence_error = info.get("persistence_error")
+        previous_stop = {key: info.get(key) for key in ("stop_requested", "stop_request_id")}
         info["status"] = "停止中"
+        info["stop_requested"] = True
+        info["stop_request_id"] = uuid.uuid4().hex
         info["error"] = ""
         info.pop("persistence_error", None)
         info["updated_at"] = now_str()
-        if not _persist_install_state(info):
+        info["_stop_submission"] = True
+        try:
+            saved = _persist_install_state(info)
+        finally:
+            info.pop("_stop_submission", None)
+        if not saved:
             detail = info.get("persistence_error") or "停止状态回执未能确认保存"
             info["status"] = previous_status
             info["error"] = previous_error or ""
+            info.update(previous_stop)
             if previous_persistence_error:
                 info["persistence_error"] = previous_persistence_error
             else:
                 info.pop("persistence_error", None)
             raise RuntimeError(detail)
         info.pop("stop_receipt_confirmation_required", None)
-        ONLINE_INSTALL_STOPPING.add(install_id)
-        proc = info.get("process")
+        if local:
+            ONLINE_INSTALL_STOPPING.add(install_id)
+        proc = info.get("process") if local else None
         log_file = info.get("log_file")
 
     log_error = ""
@@ -364,13 +378,15 @@ def request_stop_online_install(install_id):
                 info["stop_warning"] = log_error
                 info["updated_at"] = now_str()
                 try:
-                    persist_online_install(info)
+                    current = get_online_install_job(install_id) or info
+                    persist_online_install(dict(current, stop_warning=log_error, updated_at=info["updated_at"]))
                 except Exception as persist_error:
                     receipt_detail = str(persist_error).replace("\x00", "")[:300]
                     log_error += f"；停止诊断回执保存失败：{receipt_detail}"
                     info["stop_warning"] = log_error[:1000]
 
     if proc:
+        info["_stop_attempted_id"] = info.get("stop_request_id")
         ok, detail = _interrupt_install_command(install_id, proc, "stop", retry=True)
         if not ok and proc.poll() is None:
             return False, "；".join(filter(None, (f"停止失败：{detail}", log_error)))
@@ -420,6 +436,10 @@ def run_logged_command(cmd, cwd, log_file, env=None, shell=False, install_id="")
                     cmd, workspace=workspace, cwd=cwd, env=env or os.environ.copy(), shell=shell,
                     lease_path=BASE_DIR / ".backup_native_restore.lock", stdout=log_fp,
                     stderr=subprocess.STDOUT, stop_grace_seconds=1,
+                    job_lease_path=(
+                        ONLINE_INSTALL_LOCK.lease_path(install_id)
+                        if install_id in ONLINE_INSTALL_LOCK.owners else None
+                    ),
                 )
                 gate_attempted = True
                 proc.start()
@@ -431,14 +451,20 @@ def run_logged_command(cmd, cwd, log_file, env=None, shell=False, install_id="")
             interruption_attempted = False
             while proc.poll() is None:
                 stopping = install_id and online_install_should_stop(install_id)
-                if not interruption_attempted and (stopping or time.monotonic() >= deadline):
+                retry_stop = bool(
+                    stopping and info is not None
+                    and info.get("stop_request_id") != info.get("_stop_attempted_id")
+                )
+                if retry_stop or (not interruption_attempted and (stopping or time.monotonic() >= deadline)):
                     interruption_attempted = True
                     reason = "stop" if stopping else "timeout"
                     if info is not None:
                         with ONLINE_INSTALL_LOCK:
                             already_attempted = bool(info.get("command_interruption"))
-                        if not already_attempted:
-                            _interrupt_install_command(install_id, proc, reason)
+                            if stopping:
+                                info["_stop_attempted_id"] = info.get("stop_request_id")
+                        if not already_attempted or retry_stop:
+                            _interrupt_install_command(install_id, proc, reason, retry=retry_stop)
                     else:
                         terminate_install_process(proc)
                 time.sleep(0.1)
@@ -642,7 +668,22 @@ def download_online_script_logged(item, proxy_id, log_file, force=False, install
     raise RuntimeError("未知脚本类型")
 
 
-def install_worker(
+def install_worker(install_id, *args, **kwargs):
+    with ONLINE_INSTALL_LOCK:
+        owner = ONLINE_INSTALL_LOCK.owners.get(install_id)
+        if owner is None:
+            with ONLINE_INSTALL_LOCK.probe(install_id) as active:
+                if active:
+                    raise RuntimeError("在线安装仍由其他执行者持有")
+            owner = ONLINE_INSTALL_LOCK.claim(install_id)
+    try:
+        return _install_worker_inner(install_id, *args, **kwargs)
+    finally:
+        if owner is not None:
+            owner.close()
+
+
+def _install_worker_inner(
     install_id,
     item,
     proxy_id="",
@@ -885,4 +926,5 @@ def start_install_thread(
             selected_task_indexes,
         ),
         name=f"fls-online-install-{install_id[:8]}",
+        owner=ONLINE_INSTALL_LOCK.owners.get(install_id),
     )

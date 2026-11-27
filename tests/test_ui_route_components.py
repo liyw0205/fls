@@ -51,6 +51,10 @@ def isolated_app():
                     if worker.is_alive():
                         raise AssertionError(f"script worker did not finish: {worker.name}")
             shutdown_scheduler()
+            coordination = sys.modules.get("fls_manager.online_scripts.install_coordination")
+            if coordination:
+                for owner in list(coordination.ONLINE_INSTALL_LOCK.owners.values()):
+                    owner.close()
             purge_fls_modules()
 
             for key, value in old_env.items():

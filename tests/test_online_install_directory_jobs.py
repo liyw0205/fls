@@ -102,6 +102,8 @@ class OnlineInstallDirectoryJobTests(unittest.TestCase):
 
             def persist(info):
                 self.assert_blocked()
+                with route.ONLINE_INSTALL_LOCK.probe(info["id"]) as active:
+                    self.assertTrue(active)
                 return original_persist(info)
 
             def queue(worker):
@@ -115,11 +117,15 @@ class OnlineInstallDirectoryJobTests(unittest.TestCase):
             self.assertEqual(accepted.status_code, 200, accepted.json)
             self.assertEqual(len(queued), 1)
             self.assert_blocked()
+            with route.ONLINE_INSTALL_LOCK, route.ONLINE_INSTALL_LOCK.probe("a" * 32) as active:
+                self.assertTrue(active)
             try:
                 with patch.object(install, "download_online_script_logged", return_value=base / "scripts" / "demo.py"):
                     queued[0].run()
             finally:
                 self.assert_available()
+            with route.ONLINE_INSTALL_LOCK, route.ONLINE_INSTALL_LOCK.probe("a" * 32) as active:
+                self.assertFalse(active)
             result = app.test_client().get("/api/online-scripts/log/" + "a" * 32, headers={"X-Token": TOKEN})
             self.assertEqual(result.json["status"], "已完成", result.json)
 
@@ -151,6 +157,9 @@ class OnlineInstallDirectoryJobTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 500, response.json)
                 self.assertEqual(list((base / "scripts").iterdir()), [])
                 self.assert_available()
+                self.assertEqual(route.ONLINE_INSTALL_LOCK.owners, {})
+                with route.ONLINE_INSTALL_LOCK, route.ONLINE_INSTALL_LOCK.probe("a" * 32) as active:
+                    self.assertFalse(active)
 
     def test_install_log_rejects_parent_symlinks_and_traversal_within_allowed_directory(self):
         with isolated_app() as (_, base):
@@ -384,6 +393,8 @@ class OnlineInstallDirectoryJobTests(unittest.TestCase):
                     "status": "运行中", "phase": "running_command", "log_file": str(base / "install.log"),
                 }
                 ONLINE_INSTALL_RUNNING["install"] = info
+                with install.ONLINE_INSTALL_LOCK:
+                    install.ONLINE_INSTALL_LOCK.claim("install")
                 command = (
                     "import json,os,pathlib,signal,subprocess,sys,time\n"
                     + ("signal.signal(signal.SIGTERM,signal.SIG_IGN)\n" if mode == "timeout" else "")

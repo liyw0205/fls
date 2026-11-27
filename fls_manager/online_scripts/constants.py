@@ -9,6 +9,7 @@ import uuid
 
 from ..paths import DATA_DIR
 from .logs import online_refresh_log_file
+from .install_coordination import ONLINE_INSTALL_LOCK, install_receipt_transaction
 from ..storage import mutate_json, storage_transaction, write_json
 from ..utils import now_str
 
@@ -23,7 +24,6 @@ ONLINE_INSTALL_RUNNING = {}
 ONLINE_INSTALL_STOPPING = set()
 ONLINE_INSTALL_RETRYING = set()
 ONLINE_INSTALL_JOBS_FILE = DATA_DIR / "online_install_jobs.json"
-ONLINE_INSTALL_LOCK = threading.RLock()
 ONLINE_INSTALL_LIMIT = 100
 ONLINE_INSTALL_HISTORY_OFFSET_LIMIT = 1_000_000
 ONLINE_INSTALL_STATUSES = (
@@ -1533,6 +1533,8 @@ def _install_snapshot(info):
         "returncode",
         "error",
         "stop_warning",
+        "stop_requested",
+        "stop_request_id",
         "scheduler_reload_pending",
         "scheduler_reload_error",
         "task_recovery",
@@ -1702,7 +1704,7 @@ def _validate_install_jobs(data):
 
 def _read_install_jobs():
     """Read install history without treating corruption as an empty history."""
-    with storage_transaction():
+    with install_receipt_transaction():
         if ONLINE_INSTALL_JOBS_FILE.is_symlink():
             raise RuntimeError("在线脚本安装记录不能是符号链接，未读取外部文件")
         try:
@@ -1732,6 +1734,18 @@ def persist_online_install(info):
             if retry_of == install_id:
                 raise RuntimeError("在线脚本安装重试记录不能引用自身，未覆盖原文件")
             existing = jobs.get(install_id)
+            if existing:
+                # A stale owner progress write must preserve another worker's stop.
+                if existing.get("stop_requested") and snapshot.get("running"):
+                    snapshot["stop_requested"] = True
+                    if not info.get("_stop_submission"):
+                        snapshot["stop_request_id"] = existing.get("stop_request_id")
+                    info.update(stop_requested=True, stop_request_id=snapshot["stop_request_id"])
+                    ONLINE_INSTALL_STOPPING.add(install_id)
+                    if snapshot.get("status") in ("准备中", "运行中"):
+                        snapshot["status"] = info["status"] = "停止中"
+                if existing.get("retried_by") and not snapshot.get("retried_by"):
+                    snapshot["retried_by"] = info["retried_by"] = existing["retried_by"]
             if existing and any(
                 existing.get(field) != snapshot.get(field)
                 for field in ("script_id", "retry_of")
@@ -1760,7 +1774,8 @@ def persist_online_install(info):
             jobs = {install_id: snapshot, **jobs}
             return _bounded_online_install_jobs(jobs, allow_protected_overflow=existing is not None)
 
-        mutate_json(ONLINE_INSTALL_JOBS_FILE, {}, update, strict=True)
+        with install_receipt_transaction():
+            mutate_json(ONLINE_INSTALL_JOBS_FILE, {}, update, strict=True)
         previous = ONLINE_INSTALL_RUNNING.get(str(snapshot.get("retry_of") or ""))
         if isinstance(previous, dict):
             previous["retried_by"] = install_id
@@ -1769,7 +1784,7 @@ def persist_online_install(info):
 def persist_online_install_task_recovery(install_id, recovery, **changes):
     # Task publication already holds the task/storage locks. Do not acquire
     # ONLINE_INSTALL_LOCK here: install readers use install -> storage order.
-    with storage_transaction():
+    with install_receipt_transaction():
         jobs = _read_install_jobs()
         current = jobs.get(install_id)
         if not current or (current.get("task_recovery") or {}).get("id") != recovery.get("id"):
@@ -1785,7 +1800,7 @@ def persist_online_install_scheduler_reload(install_id, expected_recovery, info)
     if snapshot.get("id") != install_id or snapshot.get("task_recovery") != expected_recovery:
         raise RuntimeError("调度器重载回执身份无效，未覆盖原记录")
 
-    with storage_transaction():
+    with install_receipt_transaction():
         jobs = _read_install_jobs()
         current = jobs.get(install_id)
         if (
@@ -1827,12 +1842,9 @@ def online_install_retry_relation(info, jobs=None):
         with ONLINE_INSTALL_LOCK:
             if jobs is None:
                 jobs = _load_persisted_online_installs()
-                for live_id, live_info in ONLINE_INSTALL_RUNNING.items():
-                    if isinstance(live_info, dict):
-                        jobs[live_id] = _install_snapshot(live_info)
             else:
                 jobs = dict(jobs)
-            jobs[install_id] = dict(info)
+            jobs.setdefault(install_id, dict(info))
     except Exception as exc:
         return {
             "retry_parent_id": "",
@@ -1901,6 +1913,26 @@ def get_online_install_job(install_id):
     """Return a live or persisted install, marking lost processes as unknown."""
     with ONLINE_INSTALL_LOCK:
         info = ONLINE_INSTALL_RUNNING.get(install_id)
+        persisted = _load_persisted_online_install(install_id)
+        with ONLINE_INSTALL_LOCK.probe(install_id) as active:
+            worker_active = active
+        if isinstance(info, dict) and persisted:
+            owned = install_id in ONLINE_INSTALL_LOCK.owners
+            if owned:
+                if persisted.get("stop_requested"):
+                    info.update(stop_requested=True, stop_request_id=persisted.get("stop_request_id"))
+                    if info.get("running"):
+                        ONLINE_INSTALL_STOPPING.add(install_id)
+                        if info.get("status") in ("准备中", "运行中"):
+                            info["status"] = "停止中"
+                if persisted.get("retried_by"):
+                    info["retried_by"] = persisted["retried_by"]
+            elif (worker_active or not persisted.get("running") or (
+                not info.get("recovery_persistence_error") and info.get("_startup_receipt_confirmed") is not False
+            )):
+                info.update(persisted)
+                info.pop("recovery_persistence_error", None)
+                info.pop("_startup_receipt_confirmed", None)
         if isinstance(info, dict):
             _validate_install_job_record(install_id, info)
             if info.get("recovery_persistence_error"):
@@ -1919,12 +1951,15 @@ def get_online_install_job(install_id):
                         verified = False
                     if not verified:
                         info["recovery_persistence_error"] = recovery_error
-            return dict(info)
+            if worker_active or not info.get("running"):
+                return dict(info, _worker_active=worker_active)
 
-        info = _load_persisted_online_install(install_id)
+        info = info if isinstance(info, dict) else persisted
         if not info:
             return None
 
+        if worker_active:
+            return dict(info, _worker_active=True)
         if info.get("running"):
             info["running"] = False
             info["status"] = "结果未知"
@@ -1958,9 +1993,19 @@ def get_online_install_job(install_id):
 def active_online_install_for_script(script_id):
     script_id = str(script_id or "")
     with ONLINE_INSTALL_LOCK:
+        jobs = _load_persisted_online_installs()
         for install_id, info in ONLINE_INSTALL_RUNNING.items():
-            if info.get("script_id") == script_id and info.get("running"):
-                return install_id, dict(info)
+            if info.get("running") or install_id not in jobs:
+                jobs[install_id] = info
+        for install_id, info in jobs.items():
+            if info.get("script_id") != script_id:
+                continue
+            owner = ONLINE_INSTALL_LOCK.owners.get(install_id)
+            if owner is not None and getattr(owner, "recovery_thread", None) == threading.get_ident():
+                continue
+            current = get_online_install_job(install_id) or info
+            if current.get("running") or current.get("_worker_active"):
+                return install_id, current
     return "", None
 
 
@@ -1973,15 +2018,14 @@ def latest_online_install_for_script(script_id):
     with ONLINE_INSTALL_LOCK:
         jobs = _load_persisted_online_installs()
         for install_id, info in ONLINE_INSTALL_RUNNING.items():
-            if isinstance(info, dict):
-                jobs[str(install_id)] = dict(info)
+            if isinstance(info, dict) and (info.get("running") or install_id not in jobs):
+                jobs[str(install_id)] = get_online_install_job(install_id) or dict(info)
 
         matches = []
         for install_id, info in jobs.items():
             if str(info.get("script_id") or "") != script_id:
                 continue
-            if install_id not in ONLINE_INSTALL_RUNNING and info.get("running"):
-                info = get_online_install_job(install_id) or info
+            info = get_online_install_job(install_id) or info
             matches.append((install_id, info))
 
         if not matches:
@@ -2025,8 +2069,8 @@ def list_online_install_jobs(limit=50, script_id="", status="", offset=0, *, inc
         jobs = _load_persisted_online_installs()
         for install_id, info in ONLINE_INSTALL_RUNNING.items():
             # In-memory terminal records can outlive their retained receipts.
-            if install_id in jobs and isinstance(info, dict):
-                jobs[str(install_id)] = _install_snapshot(info)
+            if install_id in jobs and isinstance(info, dict) and info.get("running"):
+                jobs[str(install_id)] = _install_snapshot(get_online_install_job(install_id) or info)
         for install_id, info in list(jobs.items()):
             if info.get("running") and install_id not in ONLINE_INSTALL_RUNNING:
                 jobs[install_id] = get_online_install_job(install_id) or info

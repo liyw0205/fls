@@ -17,7 +17,7 @@ from tests.test_ui_route_components import TOKEN, isolated_app
 
 class OnlineInstallLifecycleTests(unittest.TestCase):
     def register(self, base_dir, install_id="install"):
-        from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING
+        from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING, ONLINE_INSTALL_LOCK
 
         info = {
             "id": install_id, "script_id": "demo", "script_name": "Demo",
@@ -26,6 +26,8 @@ class OnlineInstallLifecycleTests(unittest.TestCase):
             "error": "", "process": None,
         }
         ONLINE_INSTALL_RUNNING[install_id] = info
+        with ONLINE_INSTALL_LOCK:
+            ONLINE_INSTALL_LOCK.claim(install_id)
         return info
 
     def item(self, command=""):
@@ -1057,11 +1059,12 @@ class OnlineInstallLifecycleTests(unittest.TestCase):
 
     def test_unknown_is_idempotent_preserves_error_and_differs_from_missing(self):
         with isolated_app() as (app, base_dir):
-            from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING, persist_online_install
+            from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING, ONLINE_INSTALL_LOCK, persist_online_install
 
             info = self.register(base_dir)
             info["error"] = "kill denied"
             persist_online_install(info)
+            ONLINE_INSTALL_LOCK.owners["install"].close()
             ONLINE_INSTALL_RUNNING.clear()
             client = app.test_client()
             response = client.post("/api/online-scripts/install-stop/install", headers={"X-Token": TOKEN})
@@ -1712,12 +1715,13 @@ const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
     def test_install_history_api_and_page_recover_stale_running_without_starting(self):
         with isolated_app() as (app, base_dir):
             from fls_manager.online_scripts.constants import (
-                ONLINE_INSTALL_RUNNING, persist_online_install,
+                ONLINE_INSTALL_RUNNING, ONLINE_INSTALL_LOCK, persist_online_install,
             )
 
             first = self.register(base_dir, "history-running")
             first["updated_at"] = "2026-11-18 12:00:00"
             persist_online_install(first)
+            ONLINE_INSTALL_LOCK.owners["history-running"].close()
             ONLINE_INSTALL_RUNNING.clear()
             second = self.register(base_dir, "history-completed")
             second.update(running=False, status="已完成", phase="completed", updated_at="2026-11-18 13:00:00")
