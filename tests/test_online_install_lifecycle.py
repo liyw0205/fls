@@ -1320,7 +1320,7 @@ setImmediate(()=>{
                     "ok": False, "running": True, "status": "运行中", "phase": "downloading",
                     "log_status": 404, "error": "安装日志尚未生成。", "log": "", "recovery_url": "/logs",
                 }}),
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, encoding="utf-8", timeout=5,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertTrue(info["running"])
@@ -1434,7 +1434,7 @@ const fireTimeout=async()=>{const [id,timer]=timeouts.entries().next().value;tim
   }
   console.log('install log transient retry, cap, manual recovery and page lifecycle passed');
 })().catch(error=>{console.error(error);process.exitCode=1;});
-"""], input=json.dumps({"script": script, "reader": reader}), capture_output=True, text=True, timeout=10)
+"""], input=json.dumps({"script": script, "reader": reader}), capture_output=True, text=True, encoding="utf-8", timeout=10)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise stop query retry")
@@ -1497,7 +1497,7 @@ vm.createContext(context);vm.runInContext(input.reader+input.script,context);
   const beforeRestore=calls.length;listeners.pagehide();listeners.pageshow({persisted:true});await flush();
   assert.equal(calls.length,beforeRestore,'terminal installs must not resume polling after BFCache restore');
 })().catch(error=>{console.error(error);process.exitCode=1;});
-"""], input=json.dumps({"script": script, "reader": reader}), capture_output=True, text=True, timeout=10)
+"""], input=json.dumps({"script": script, "reader": reader}), capture_output=True, text=True, encoding="utf-8", timeout=10)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_log_read_failure_then_recovery_keeps_original_job_and_permissions(self):
@@ -1579,7 +1579,7 @@ setImmediate(() => {
                     "running": False, "status": "失败", "returncode": 17,
                     "error": "TLS <peer> failed", "log": "command failed",
                 }}),
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, encoding="utf-8", timeout=5,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
@@ -1629,7 +1629,7 @@ setImmediate(() => {
                         "action": "/online-scripts/install-retry/install",
                     },
                 }}),
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, encoding="utf-8", timeout=5,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
     @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise stop recovery")
@@ -1706,7 +1706,7 @@ const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
   assert.equal(elements.log.textContent, 'previous output');
   assert.equal(intervals, 0);
 })().catch(error => { console.error(error); process.exitCode = 1; });
-"""], input=json.dumps({"script": script}), capture_output=True, text=True, timeout=5)
+"""], input=json.dumps({"script": script}), capture_output=True, text=True, encoding="utf-8", timeout=5)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_install_history_api_and_page_recover_stale_running_without_starting(self):

@@ -688,7 +688,7 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
 })().catch(error=>{console.error(error);process.exitCode=1;});
 """], input=json.dumps({"reader": reader, "script": script, "initial": initial, "failed": failed.json,
                         "unknown": unknown, "confirmed": confirmed.json, "pending": pending,
-                        "reloaded": reloaded.json, "completed": completed}), capture_output=True, text=True, timeout=10)
+                        "reloaded": reloaded.json, "completed": completed}), capture_output=True, text=True, encoding="utf-8", timeout=10)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise missing log recovery")
@@ -760,7 +760,7 @@ vm.createContext(context);vm.runInContext(input.reader+input.script,context);
   await form.submit({preventDefault(){}});assert.equal(calls.length,4,'stale recovery form must not resubmit');
 })().catch(error=>{console.error(error);process.exitCode=1;});
 """], input=json.dumps({"script": script, "reader": reader, "initial": initial, "state": state, "complete": complete}),
-                capture_output=True, text=True, timeout=10)
+                capture_output=True, text=True, encoding="utf-8", timeout=10)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_task_import_recovery_allows_missing_log_and_refuses_uncontrolled_log_writes(self):
@@ -960,7 +960,7 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
   assert.match(wrong.elements.installPollError.textContent,/状态响应无效/);
 })().catch(error=>{console.error(error);process.exitCode=1;});
 """], input=json.dumps({"script": script, "reader": reader, "initial": initial, "complete": complete}),
-                capture_output=True, text=True, timeout=10)
+                capture_output=True, text=True, encoding="utf-8", timeout=10)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_reload_and_persistence_failures_keep_recovery_available(self):
@@ -1396,7 +1396,7 @@ setImmediate(() => {
  assert.doesNotMatch(elements.installRecoveryAction.innerHTML, /重试安装/);
  assert.equal(context.window.__FLS_ACTIVE_LOG_INTERVAL__, null);
 });
-"""], input=json.dumps({"script": script, "reader": reader, "payload": payload}), capture_output=True, text=True, timeout=5)
+"""], input=json.dumps({"script": script, "reader": reader, "payload": payload}), capture_output=True, text=True, encoding="utf-8", timeout=5)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise recovery AJAX")
@@ -1449,7 +1449,7 @@ vm.runInContext(input.reader + input.script, context);
   assert.equal(calls.length, 3);
   assert.equal(elements.log.textContent, 'reloaded');
 })().catch(error => { console.error(error); process.exitCode = 1; });
-"""], input=json.dumps({"script": script, "reader": reader, "payload": payload}), capture_output=True, text=True, timeout=5)
+"""], input=json.dumps({"script": script, "reader": reader, "payload": payload}), capture_output=True, text=True, encoding="utf-8", timeout=5)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise retry-to-reload recovery")
@@ -1534,7 +1534,7 @@ vm.createContext(context);vm.runInContext(input.reader+input.script,context);
   assert.equal(elements.installStatus.textContent,'已完成');
   assert.equal(elements.log.textContent,'recovered');
 })().catch(error=>{console.error(error);process.exitCode=1;});
-"""], input=json.dumps({"script":script,"reader":reader,"initial":initial,"pending":pending,"complete":complete}), capture_output=True, text=True, timeout=5)
+"""], input=json.dumps({"script":script,"reader":reader,"initial":initial,"pending":pending,"complete":complete}), capture_output=True, text=True, encoding="utf-8", timeout=5)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 

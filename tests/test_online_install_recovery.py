@@ -314,7 +314,7 @@ const flush=()=>new Promise(resolve=>setImmediate(resolve));
 })().catch(error=>{console.error(error);process.exitCode=1;});
 """],
                 input=json.dumps({"script": script, "reader": reader, "initial": initial, "recovered": recovered}),
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, encoding="utf-8", timeout=5,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
@@ -1774,7 +1774,7 @@ class FormDataMock{constructor(){this.values={request_id:request.value};}delete(
 (async()=>{await context.flsInstallSubmitApi('/online-scripts/install/demo',form,{disabled:false});
  assert.equal(calls.length,2);assert.equal(calls[0].url,'/api/online-scripts/install/demo');assert.equal(calls[1].opts.body.values.force,'1');
  assert.equal(calls[0].opts.headers['X-CSRF-Token'],'install-csrf');assert.equal(context.window.location.href,'/online-scripts/log/'+ 'a'.repeat(32));})().catch(e=>{console.error(e);process.exitCode=1;});
-"""], input=json.dumps({"script":script,"reader":reader}), capture_output=True, text=True, timeout=5)
+"""], input=json.dumps({"script":script,"reader":reader}), capture_output=True, text=True, encoding="utf-8", timeout=5)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise rejected install recovery")
@@ -1831,7 +1831,7 @@ vm.createContext(context);vm.runInContext(input.reader+input.script,context);
   assert.equal(request.value,id);assert.equal(proxy.value,'missing-proxy');
   assert.match(elements.onlineInstallApiError.textContent,/代理选择无效/);
 })().catch(error=>{console.error(error);process.exitCode=1;});
-"""], input=json.dumps({"script": script, "reader": reader}), capture_output=True, text=True, timeout=5)
+"""], input=json.dumps({"script": script, "reader": reader}), capture_output=True, text=True, encoding="utf-8", timeout=5)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise ambiguous install recovery")
@@ -1960,7 +1960,7 @@ const reply=(status,payload)=>({ok:status>=200&&status<300,status,body:JSON.stri
   assert.match(full.elements.onlineInstallRecoveryStatus.textContent,/新请求未启动/);
   assert.match(full.elements.onlineInstallApiError.textContent,/安装未启动/);
 })().catch(error=>{console.error(error);process.exitCode=1;});
-"""], input=json.dumps({"script": script, "reader": reader}), capture_output=True, text=True, timeout=5)
+"""], input=json.dumps({"script": script, "reader": reader}), capture_output=True, text=True, encoding="utf-8", timeout=5)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise install recovery")
@@ -2106,6 +2106,7 @@ async function runCase(pending, response, expected) {
                 input=json.dumps({"script": script, "reader": reader}),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
                 timeout=5,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -2219,7 +2220,7 @@ const okHistory=historyResponse([item],1,0,false);
   await changed.elements.onlineInstallRecoveryClear.onclick();
   assert.equal(changed.storage.value,'changed-after-check');assert.equal(changed.reloads(),0);
 })().catch(error=>{console.error(error);process.exitCode=1;});
-"""],input=json.dumps({"script":script,"reader":reader}),capture_output=True,text=True,timeout=5)
+"""],input=json.dumps({"script":script,"reader":reader}),capture_output=True,text=True,encoding="utf-8",timeout=5)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise import recovery")
@@ -2247,7 +2248,7 @@ const context={window:{FLS_INSTALL_SCRIPT_ID:'demo',location:{pathname:'/online-
 context.flsReadJsonResponse=async response=>JSON.parse(await response.text());
 vm.createContext(context); vm.runInContext(input.reader+input.script,context);
 (async()=>{await new Promise(resolve=>setImmediate(resolve)); assert.equal(calls,1); assert.equal(elements.onlineInstallRecoveryStatusLink.hidden,false); assert.equal(elements.onlineInstallRecoveryStatusLink.href,'/online-scripts/import-tasks-status/'+id); assert.equal(elements.onlineInstallRecoveryReload.hidden,false); await elements.onlineInstallRecoveryReload.onclick(); await new Promise(resolve=>setImmediate(resolve)); assert.equal(calls,3); assert.equal(storage.value,null);})().catch(error=>{console.error(error);process.exitCode=1;});
-"""], input=json.dumps({"script": script, "reader": reader}), capture_output=True, text=True, timeout=5,
+"""], input=json.dumps({"script": script, "reader": reader}), capture_output=True, text=True, encoding="utf-8", timeout=5,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
@@ -2307,7 +2308,7 @@ vm.createContext(context);vm.runInContext(input.reader+input.script,context);
  assert.equal(calls[1].options.body.values.enable_task,'1');assert.equal(calls[1].options.body.values.proxy_id,'proxy-a');
  assert.equal(storage.value,JSON.stringify(stored));assert.equal(context.window.location.href,'/online-scripts/import-tasks-status/'+id);
 })().catch(error=>{console.error(error);process.exitCode=1;});
-"""],input=json.dumps({"script":script,"reader":reader}),capture_output=True,text=True,timeout=5)
+"""],input=json.dumps({"script":script,"reader":reader}),capture_output=True,text=True,encoding="utf-8",timeout=5)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise log polling")
@@ -2410,7 +2411,7 @@ const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
   }
   console.log('log polling error paths passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });
-"""], input=json.dumps({"script": script, "reader": reader}), capture_output=True, text=True, timeout=5)
+"""], input=json.dumps({"script": script, "reader": reader}), capture_output=True, text=True, encoding="utf-8", timeout=5)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 

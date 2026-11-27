@@ -2,6 +2,7 @@ import contextlib
 import json
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -151,6 +152,54 @@ class OnlineInstallDirectoryJobTests(unittest.TestCase):
                 self.assertEqual(list((base / "scripts").iterdir()), [])
                 self.assert_available()
 
+    def test_install_log_rejects_parent_symlinks_and_traversal_within_allowed_directory(self):
+        with isolated_app() as (_, base):
+            from fls_manager.routes.online_scripts.logs import _install_log_file
+
+            directory = base / "log"
+            target = directory / "install.log"
+            target.write_text("fixture log\n", encoding="utf-8")
+            alias = base / "log-alias"
+            alias.symlink_to(directory, target_is_directory=True)
+            for path in (alias / "install.log", directory / ".." / "log" / "install.log"):
+                with self.subTest(path=path):
+                    actual, failure = _install_log_file({"id": "install", "log_file": str(path)})
+                    self.assertIsNone(actual)
+                    self.assertEqual(failure[2], 500)
+            actual, failure = _install_log_file({"id": "install", "log_file": str(target)})
+            self.assertIsNone(failure)
+            self.assertEqual(actual, target.resolve())
+
+    @unittest.skipUnless(os.name == "nt", "Windows short path aliases and junctions")
+    def test_windows_log_accepts_short_name_alias_but_rejects_directory_junction(self):
+        import ctypes
+        from ctypes import wintypes
+
+        with isolated_app() as (_, base):
+            from fls_manager.routes.online_scripts.logs import _install_log_file
+
+            target = base / "log" / "install.log"
+            target.write_text("fixture log\n", encoding="utf-8")
+            api = ctypes.WinDLL("kernel32", use_last_error=True)
+            api.GetShortPathNameW.argtypes = (wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD)
+            api.GetShortPathNameW.restype = wintypes.DWORD
+            buffer = ctypes.create_unicode_buffer(32768)
+            count = api.GetShortPathNameW(str(target.resolve()), buffer, len(buffer))
+            self.assertTrue(0 < count < len(buffer))
+            actual, failure = _install_log_file({"id": "install", "log_file": buffer.value})
+            self.assertIsNone(failure)
+            self.assertEqual(actual, target.resolve())
+            junction = base / "log-junction"
+            created = subprocess.run(["cmd", "/c", "mklink", "/J", str(junction), str(target.parent)],
+                                     capture_output=True, timeout=10)
+            self.assertEqual(created.returncode, 0, created.stderr)
+            try:
+                actual, failure = _install_log_file({"id": "install", "log_file": str(junction / "install.log")})
+                self.assertIsNone(actual)
+                self.assertEqual(failure[2], 500)
+            finally:
+                junction.rmdir()
+
     def test_http_close_outputs_tasks_terminal_log_and_finally_keep_worker_lease(self):
         for stage in ("request", "close", "outputs", "tasks", "terminal_log", "finally"):
             with self.subTest(stage=stage), isolated_app() as (app, base), contextlib.ExitStack() as stack:
@@ -282,7 +331,7 @@ class OnlineInstallDirectoryJobTests(unittest.TestCase):
                         run_logged_command([sys.executable, "-c", command], base / "scripts", base / "command.log")
                     for pid in json.loads(marker.read_text()):
                         process_tests.DirectoryProcessTests().assert_exited(pid)
-                    self.assertIn("fixture output", (base / "command.log").read_text())
+                    self.assertIn("fixture output", (base / "command.log").read_text(encoding="utf-8"))
                     self.assert_available()
             with self.assertRaises(InstallCommandError) as caught:
                 run_logged_command("exit 7", base / "scripts", base / "command.log", shell=True)

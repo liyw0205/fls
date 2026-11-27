@@ -94,9 +94,14 @@ def _install_log_file(info):
         if not candidate.is_absolute():
             return None, ("日志边界错误", "安装日志路径不是绝对路径，未读取该路径。", 500)
         actual = candidate.resolve(strict=False)
+        linked_parent = any(
+            parent.is_symlink() or getattr(parent, "is_junction", lambda: False)()
+            for parent in candidate.parents
+        )
         if (
             candidate.is_symlink()
-            or candidate.parent.resolve(strict=False) != candidate.parent
+            or ".." in candidate.parts
+            or linked_parent
             or actual.parent not in (base_dir, log_dir)
             or install_id not in actual.name
         ):
