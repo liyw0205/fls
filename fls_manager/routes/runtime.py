@@ -10,6 +10,7 @@ from flask import Blueprint, redirect, request, url_for
 
 from ..paths import BASE_DIR, LOG_DIR
 from ..log_access import open_log_file
+from ..install_process import InstallProcess
 from ..state import DEPS_RUNNING
 from ..utils import now_str, safe_name
 from ..install_records import get_install_job, persist_install_job
@@ -263,7 +264,7 @@ def install_runtime(runtime):
     log_fp.write(header.encode("utf-8"))
 
     try:
-        info["process"] = subprocess.Popen(
+        info["process"] = InstallProcess(
             ["sh", "-lc", cmd_text],
             stdout=log_fp,
             stderr=subprocess.STDOUT,

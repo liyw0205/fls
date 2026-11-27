@@ -24,6 +24,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  install_commands:
+    name: ${{ matrix.os }} dependency command supervision
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install test dependencies
+        run: python -m pip install Flask 'APScheduler<4' requests PySocks tzdata qrcode pytest pytest-subtests
+      - name: Verify supervised commands, owner crash, cancellation and log handoff
+        env:
+          PYTHONPATH: .
+        run: python -m pytest -q tests/test_install_process.py
+      - name: Verify existing dependency and runtime APIs and recovery
+        if: ${{ runner.os == 'Linux' && !cancelled() }}
+        env:
+          PYTHONPATH: .
+        run: >-
+          python -m pytest -q tests/test_deps_install_log_recovery.py
+          tests/test_native_dependency_api.py tests/test_high_side_effect_workflows.py
+          tests/test_runtime_status.py
+          -k 'DependencyInstall or NativeDependencyApi or RuntimeStatus'
   linux:
     name: Linux backup API and recovery
     runs-on: ubuntu-latest

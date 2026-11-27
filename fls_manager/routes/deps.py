@@ -16,6 +16,7 @@ from ..state import DEPS_RUNNING
 from ..utils import h, now_str, safe_name, get_back_url, prune_completed_records
 from ..logs import tail_file
 from ..log_access import open_log_file
+from ..install_process import InstallProcess
 from ..install_records import (
     INSTALL_JOBS_LOCK,
     InstallHistoryLimitError,
@@ -266,10 +267,7 @@ def _finish_install_cancel(info, returncode, cancel_status, error=""):
         except Exception:
             pass
         finally:
-            try:
-                fp.close()
-            except Exception:
-                pass
+            fp.close()
     if still_running:
         cancel_status = "failed"
         error = error or "取消请求后进程仍在运行，请检查进程并重新请求取消。"
@@ -756,14 +754,14 @@ def _retry_install_start(install_id, retry_id):
                 command.extend(("uninstall", "-y", package))
             else:
                 command.extend(("install", package))
-            process = subprocess.Popen(
+            process = InstallProcess(
                 command,
                 stdout=fp, stderr=subprocess.STDOUT, cwd=str(BASE_DIR),
             )
         else:
             from .runtime import runtime_install_command
             cmd_text = runtime_install_command(package)
-            process = subprocess.Popen(
+            process = InstallProcess(
                 ["sh", "-lc", cmd_text], stdout=fp, stderr=subprocess.STDOUT,
                 cwd=str(BASE_DIR), env=os.environ.copy(),
             )
@@ -873,10 +871,7 @@ def _poll_install_process(install_id):
         except Exception:
             pass
         finally:
-            try:
-                fp.close()
-            except Exception:
-                pass
+            fp.close()
 
     info["finished"] = True
     info["running"] = False
@@ -1325,7 +1320,7 @@ def deps_install():
             return redirect(url_for("deps.deps_install_log", install_id=install_id, back="/deps"))
 
     try:
-        info["process"] = subprocess.Popen(
+        info["process"] = InstallProcess(
             [sys.executable, "-m", "pip", "install", name],
             stdout=log_fp,
             stderr=subprocess.STDOUT,
@@ -1543,7 +1538,7 @@ def api_deps_uninstall():
         "============================================================\n"
     ).encode("utf-8"))
     try:
-        info["process"] = subprocess.Popen(
+        info["process"] = InstallProcess(
             [sys.executable, "-m", "pip", "uninstall", "-y", package],
             stdout=log_fp,
             stderr=subprocess.STDOUT,

@@ -184,7 +184,7 @@ class NativeDependencyApiTests(unittest.TestCase):
             request_body = {"name": "REQUESTS", "request_id": "a" * 32}
             with patch.object(
                 deps, "_installed_packages", return_value=[{"name": "requests", "version": "2.0"}]
-            ), patch.object(deps.subprocess, "Popen", return_value=proc) as popen:
+            ), patch.object(deps, "InstallProcess", return_value=proc) as popen:
                 first = client.post("/api/deps/uninstall", json=request_body, headers=self.headers)
                 second = client.post("/api/deps/uninstall", json=request_body, headers=self.headers)
                 conflict = client.post(
@@ -227,7 +227,7 @@ class NativeDependencyApiTests(unittest.TestCase):
             client = app.test_client()
             body = {"name": "requests", "request_id": "b" * 32}
             with patch.object(deps, "_installed_packages", return_value=[]), patch.object(
-                deps.subprocess, "Popen"
+                deps, "InstallProcess"
             ) as popen:
                 absent = client.post("/api/deps/uninstall", json=body, headers=self.headers)
                 invalid = client.post(
@@ -252,7 +252,7 @@ class NativeDependencyApiTests(unittest.TestCase):
             }
             with patch.object(
                 deps, "_installed_packages", return_value=[{"name": "requests", "version": "2.0"}]
-            ), patch.object(deps.subprocess, "Popen") as popen:
+            ), patch.object(deps, "InstallProcess") as popen:
                 response = app.test_client().post(
                     "/api/deps/uninstall",
                     json={"name": "requests", "request_id": "f" * 32},
@@ -276,7 +276,7 @@ class NativeDependencyApiTests(unittest.TestCase):
             })
             with patch.object(
                 deps, "_installed_packages", return_value=[{"name": "requests", "version": "2.0"}]
-            ), patch.object(deps.subprocess, "Popen") as popen:
+            ), patch.object(deps, "InstallProcess") as popen:
                 response = app.test_client().post(
                     "/api/deps/uninstall",
                     json={"name": "requests", "request_id": "j" * 32},
@@ -298,7 +298,7 @@ class NativeDependencyApiTests(unittest.TestCase):
                 "log_file": "/tmp/uninstall.log", "running": True, "finished": False,
                 "status": "running", "returncode": None, "error": "", "updated_at": "now",
             }
-            with patch.object(deps.subprocess, "Popen") as popen:
+            with patch.object(deps, "InstallProcess") as popen:
                 response = app.test_client().post(
                     "/api/deps/install",
                     json={"name": "requests>=2.0", "request_id": "g" * 32},
@@ -332,7 +332,7 @@ class NativeDependencyApiTests(unittest.TestCase):
 
             with patch.object(
                 deps, "_installed_packages", return_value=[{"name": "requests", "version": "2.0"}]
-            ), patch.object(deps.subprocess, "Popen", side_effect=start_process) as popen:
+            ), patch.object(deps, "InstallProcess", side_effect=start_process) as popen:
                 worker = threading.Thread(target=submit_first)
                 worker.start()
                 self.assertTrue(entered_popen.wait(2))
@@ -365,7 +365,7 @@ class NativeDependencyApiTests(unittest.TestCase):
             processes = [FakeProcess(returncode=1), FakeProcess()]
             with patch.object(
                 deps, "_installed_packages", return_value=[{"name": "requests", "version": "2.0"}]
-            ), patch.object(deps.subprocess, "Popen", side_effect=processes) as popen:
+            ), patch.object(deps, "InstallProcess", side_effect=processes) as popen:
                 started = client.post(
                     "/api/deps/uninstall",
                     json={"name": "requests", "request_id": "d" * 32},
@@ -391,7 +391,7 @@ class NativeDependencyApiTests(unittest.TestCase):
             with patch.object(
                 deps, "_installed_packages", return_value=[{"name": "requests", "version": "2.0"}]
             ), patch.object(
-                deps.subprocess, "Popen", return_value=FakeProcess(returncode=1)
+                deps, "InstallProcess", return_value=FakeProcess(returncode=1)
             ) as popen:
                 started = client.post(
                     "/api/deps/uninstall",

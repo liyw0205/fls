@@ -45,7 +45,7 @@ class DependencyInstallLogRecoveryTests(unittest.TestCase):
                     data = {"request_id": "replay-runtime-1"}
                 module = "runtime" if runtime else "deps"
                 with patch(
-                    f"fls_manager.routes.{module}.subprocess.Popen", return_value=proc,
+                    f"fls_manager.routes.{module}.InstallProcess", return_value=proc,
                 ) as popen, patch(
                     "fls_manager.routes.runtime.runtime_install_command",
                     return_value="echo runtime",
@@ -71,7 +71,7 @@ class DependencyInstallLogRecoveryTests(unittest.TestCase):
             from fls_manager.state import DEPS_RUNNING
 
             proc = SimpleNamespace(poll=lambda: None)
-            with patch("fls_manager.routes.deps.subprocess.Popen", return_value=proc) as popen:
+            with patch("fls_manager.routes.deps.InstallProcess", return_value=proc) as popen:
                 first = app.test_client().post(
                     "/api/deps/install",
                     json={"request_id": "api-install-1", "name": "demo-package"},
@@ -95,7 +95,7 @@ class DependencyInstallLogRecoveryTests(unittest.TestCase):
         with isolated_app() as (app, _base_dir):
             proc = SimpleNamespace(poll=lambda: None)
             with patch("fls_manager.routes.runtime.runtime_install_command", return_value="echo runtime"), patch(
-                "fls_manager.routes.runtime.subprocess.Popen", return_value=proc,
+                "fls_manager.routes.runtime.InstallProcess", return_value=proc,
             ) as popen:
                 first = app.test_client().post(
                     "/api/install/runtime/node",
@@ -131,8 +131,8 @@ class DependencyInstallLogRecoveryTests(unittest.TestCase):
                 "updated_at": "2026-11-18 17:01:00",
             })
             client = app.test_client()
-            with patch("fls_manager.routes.deps.subprocess.Popen") as dep_popen, patch(
-                "fls_manager.routes.runtime.subprocess.Popen"
+            with patch("fls_manager.routes.deps.InstallProcess") as dep_popen, patch(
+                "fls_manager.routes.runtime.InstallProcess"
             ) as runtime_popen:
                 succeeded = client.post(
                     "/api/deps/install", json={"request_id": "finished-install", "name": "demo-package"},
@@ -176,7 +176,7 @@ class DependencyInstallLogRecoveryTests(unittest.TestCase):
                 proc = SimpleNamespace(returncode=None)
                 proc.poll = lambda: proc.returncode
                 endpoint = f"/api/deps/install-retry/{original}"
-                patchers = [patch("fls_manager.routes.deps.subprocess.Popen", return_value=proc)]
+                patchers = [patch("fls_manager.routes.deps.InstallProcess", return_value=proc)]
                 if runtime:
                     patchers.append(patch("fls_manager.routes.runtime.runtime_install_command", return_value="echo runtime"))
                 with patchers[0] as popen:
@@ -224,7 +224,7 @@ class DependencyInstallLogRecoveryTests(unittest.TestCase):
                 "finished": True, "status": "failed", "returncode": 1,
                 "error": "failed", "start_time": 1, "updated_at": "2026-11-18 18:01:00",
             })
-            with patch("fls_manager.routes.deps.subprocess.Popen", side_effect=OSError("quota")) as popen:
+            with patch("fls_manager.routes.deps.InstallProcess", side_effect=OSError("quota")) as popen:
                 client = app.test_client()
                 first = client.post(
                     f"/api/deps/install-retry/{original}",
@@ -267,7 +267,7 @@ class DependencyInstallLogRecoveryTests(unittest.TestCase):
                         "returncode": None, "error": "", "updated_at": "2026-11-18 18:02:00",
                     }
                 with patch(
-                    "fls_manager.routes.deps.subprocess.Popen",
+                    "fls_manager.routes.deps.InstallProcess",
                     return_value=SimpleNamespace(poll=lambda: None),
                 ) as popen:
                     response = app.test_client().post(
@@ -296,7 +296,7 @@ class DependencyInstallLogRecoveryTests(unittest.TestCase):
                 "start_time": 1, "updated_at": "2026-11-18 18:03:00",
             })
             with patch(
-                "fls_manager.routes.deps.subprocess.Popen",
+                "fls_manager.routes.deps.InstallProcess",
                 return_value=SimpleNamespace(poll=lambda: None),
             ) as popen:
                 first = app.test_client().post(
@@ -388,7 +388,7 @@ class DependencyInstallLogRecoveryTests(unittest.TestCase):
                 "start_time": 1, "updated_at": "2026-11-18 18:04:30",
             })
             proc = SimpleNamespace(poll=lambda: None)
-            with patch("fls_manager.routes.deps.subprocess.Popen", return_value=proc) as popen:
+            with patch("fls_manager.routes.deps.InstallProcess", return_value=proc) as popen:
                 response = app.test_client().post(
                     f"/deps/install-retry/{install_id}",
                     data={"request_id": "html-retry-child"}, headers={"X-Token": TOKEN},
@@ -472,7 +472,7 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
                 self.assertTrue(release.wait(5))
                 return SimpleNamespace(poll=lambda: None)
 
-            with patch("fls_manager.routes.deps.subprocess.Popen", side_effect=start_process) as popen:
+            with patch("fls_manager.routes.deps.InstallProcess", side_effect=start_process) as popen:
                 with ThreadPoolExecutor(max_workers=2) as pool:
                     first_future = pool.submit(
                         lambda: app.test_client().post(
@@ -640,7 +640,7 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
             self.assertEqual(cancelled.json["status"], "cancelled")
 
             retry_process = SimpleNamespace(poll=lambda: None)
-            with patch("fls_manager.routes.deps.subprocess.Popen", return_value=retry_process) as popen:
+            with patch("fls_manager.routes.deps.InstallProcess", return_value=retry_process) as popen:
                 first = client.post(
                     f"/api/deps/install-retry/{info['id']}",
                     json={"request_id": "cancel-retry-child"}, headers={"X-Token": TOKEN},
@@ -991,7 +991,7 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
                     wait=unittest.mock.Mock(return_value=-15), kill=unittest.mock.Mock(),
                 )
                 module = "runtime" if runtime else "deps"
-                popen_target = f"fls_manager.routes.{module}.subprocess.Popen"
+                popen_target = f"fls_manager.routes.{module}.InstallProcess"
                 endpoint = "/api/install/runtime/node" if runtime else "/api/deps/install"
                 payload = {"request_id": install_id}
                 if not runtime:
@@ -1084,7 +1084,7 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
 
             client = app.test_client()
             with patch("fls_manager.routes.deps.persist_install_job", side_effect=fail_child_running_receipt), patch(
-                "fls_manager.routes.deps.subprocess.Popen", return_value=process,
+                "fls_manager.routes.deps.InstallProcess", return_value=process,
             ) as popen:
                 started = client.post(
                     f"/api/deps/install-retry/{parent_id}",
@@ -1125,7 +1125,7 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
 
             client = app.test_client()
             with patch("fls_manager.routes.deps.persist_install_job", side_effect=fail_running_receipt), patch(
-                "fls_manager.routes.deps.subprocess.Popen", return_value=process,
+                "fls_manager.routes.deps.InstallProcess", return_value=process,
             ) as popen:
                 started = client.post(
                     "/api/deps/install", json={"name": "demo", "request_id": install_id},
@@ -1169,7 +1169,7 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
 
             client = app.test_client()
             with patch("fls_manager.routes.deps.persist_install_job", side_effect=fail_running_receipt), patch(
-                "fls_manager.routes.deps.subprocess.Popen",
+                "fls_manager.routes.deps.InstallProcess",
                 side_effect=[original_process, retry_process],
             ) as popen:
                 started = client.post(
@@ -1295,7 +1295,7 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
             confirm_url = f"/api/deps/install-recovery-confirm/{install_id}"
             confirm_payload = {"request_id": install_id, "confirm_not_running": True}
             with patch("fls_manager.install_records.mutate_json", side_effect=OSError("disk busy")), patch(
-                "fls_manager.routes.deps.subprocess.Popen"
+                "fls_manager.routes.deps.InstallProcess"
             ) as popen:
                 failed = client.post(confirm_url, json=confirm_payload, headers={"X-Token": TOKEN})
                 blocked = client.post(
@@ -1382,7 +1382,7 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
                 self.assertEqual(persisted[info["id"]]["status"], "succeeded")
                 self.assertFalse(persisted[info["id"]]["running"])
 
-            with patch("fls_manager.routes.deps.subprocess.Popen") as popen:
+            with patch("fls_manager.routes.deps.InstallProcess") as popen:
                 denied_retry = client.post(
                     f"/api/deps/install-retry/{info['id']}",
                     json={"request_id": "must-not-retry-install"},
@@ -1604,7 +1604,7 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
             page = client.get("/deps/install-history", headers={"X-Token": TOKEN})
             self.assertIn("missing-retry-child", page.get_data(as_text=True))
 
-            with patch("fls_manager.routes.deps.subprocess.Popen") as popen:
+            with patch("fls_manager.routes.deps.InstallProcess") as popen:
                 retry = client.post(
                     f"/api/deps/install-retry/{parent_id}",
                     json={"request_id": "history-repair-attempt"}, headers={"X-Token": TOKEN},
@@ -1636,7 +1636,7 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
             self.assertEqual(primary["retry_relations"], [])
             self.assertIn("缺失或不匹配", primary["retry_relation_diagnostic"])
             self.assertFalse(primary["recovery_available"])
-            with patch("fls_manager.routes.deps.subprocess.Popen") as popen:
+            with patch("fls_manager.routes.deps.InstallProcess") as popen:
                 mismatch_retry = client.post(
                     f"/api/deps/install-retry/{parent_id}",
                     json={"request_id": "history-mismatch-retry"}, headers={"X-Token": TOKEN},
@@ -1696,7 +1696,7 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
                 headers={"X-Token": TOKEN},
             )
             self.assertEqual(retry_status.status_code, 409)
-            with patch("fls_manager.routes.deps.subprocess.Popen") as popen:
+            with patch("fls_manager.routes.deps.InstallProcess") as popen:
                 retry = client.post(
                     f"/api/deps/install-retry/{child_id}",
                     json={"request_id": "orphan-retry-request"}, headers={"X-Token": TOKEN},
@@ -1804,7 +1804,7 @@ const tick=()=>new Promise(resolve=>setImmediate(resolve));
                 }
             INSTALL_JOBS_FILE.write_text(json.dumps(records), encoding="utf-8")
             original_bytes = INSTALL_JOBS_FILE.read_bytes()
-            with patch("fls_manager.routes.deps.subprocess.Popen") as popen:
+            with patch("fls_manager.routes.deps.InstallProcess") as popen:
                 response = app.test_client().post(
                     f"/api/deps/install-retry/oversized-chain-{INSTALL_JOB_LIMIT - 1:03d}",
                     json={"request_id": "oversized-chain-new-child"}, headers={"X-Token": TOKEN},

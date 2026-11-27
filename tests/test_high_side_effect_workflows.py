@@ -138,7 +138,7 @@ class DependencyInstallIsolationTests(unittest.TestCase):
                             "fls_manager.routes.runtime.runtime_install_command",
                             return_value="mock-install",
                         ), patch(
-                            f"fls_manager.routes.{module}.subprocess.Popen",
+                            f"fls_manager.routes.{module}.InstallProcess",
                             return_value=proc,
                         ):
                             response = client.post(
@@ -197,7 +197,7 @@ class DependencyInstallIsolationTests(unittest.TestCase):
                         "fls_manager.routes.runtime.runtime_install_command",
                         return_value="mock-install",
                     ), patch(
-                        f"fls_manager.routes.{module}.subprocess.Popen",
+                        f"fls_manager.routes.{module}.InstallProcess",
                         side_effect=OSError("permission <denied>"),
                     ) as popen:
                         response = client.post(
@@ -236,7 +236,7 @@ class DependencyInstallIsolationTests(unittest.TestCase):
             with patch(
                 "fls_manager.routes.runtime.runtime_install_command",
                 side_effect=RuntimeError("npm 不可用，请先安装 Node.js"),
-            ), patch("fls_manager.routes.runtime.subprocess.Popen") as popen:
+            ), patch("fls_manager.routes.runtime.InstallProcess") as popen:
                 response = client.post("/install/runtime/typescript", headers={"X-Token": TOKEN})
 
             self.assertEqual(response.status_code, 302)
@@ -345,7 +345,7 @@ class DependencyInstallIsolationTests(unittest.TestCase):
 
             proc = SimpleNamespace(pid=4321, poll=lambda: None)
             with patch(
-                "fls_manager.routes.deps.subprocess.Popen",
+                "fls_manager.routes.deps.InstallProcess",
                 return_value=proc,
             ) as popen:
                 response = app.test_client().post(
@@ -385,7 +385,7 @@ class DependencyInstallIsolationTests(unittest.TestCase):
                 return_value="echo runtime-install",
             ) as build_command:
                 with patch(
-                    "fls_manager.routes.runtime.subprocess.Popen",
+                    "fls_manager.routes.runtime.InstallProcess",
                     return_value=proc,
                 ) as popen:
                     response = app.test_client().get(
