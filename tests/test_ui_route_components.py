@@ -437,12 +437,13 @@ class UiRouteComponentTests(unittest.TestCase):
                 wait=Mock(side_effect=[debug.subprocess.TimeoutExpired("debug", 1), -9]),
             )
             fake_os = SimpleNamespace(name="posix", getpgid=Mock(return_value=4321), killpg=Mock())
-            with patch.object(debug, "os", fake_os):
+            fake_signal = SimpleNamespace(SIGTERM=15, SIGKILL=9)
+            with patch.object(debug, "os", fake_os), patch.object(debug, "signal", fake_signal):
                 self.assertTrue(debug.terminate_debug_process(proc))
 
             self.assertEqual(fake_os.killpg.call_args_list, [
-                unittest.mock.call(4321, debug.signal.SIGTERM),
-                unittest.mock.call(4321, debug.signal.SIGKILL),
+                unittest.mock.call(4321, fake_signal.SIGTERM),
+                unittest.mock.call(4321, fake_signal.SIGKILL),
             ])
             self.assertEqual(proc.wait.call_count, 2)
 
@@ -1595,7 +1596,7 @@ class UiRouteComponentTests(unittest.TestCase):
             log_file.write_bytes(b"password=" + b"s" * (2 * logs.MAX_TAIL_BYTES) + b"\nready\npassword=complete-secret\n")
             info = {"running": False, "returncode": 0, "log_file": str(log_file), "finished": True}
             SCRIPT_DEBUG_RUNNING["d1"] = info.copy()
-            deps_log = base_dir / "log" / "deps-install-demo-i1.log"
+            deps_log = (base_dir / "log" / "deps-install-demo-i1.log").resolve()
             deps_log.write_bytes(log_file.read_bytes())
             DEPS_RUNNING["i1"] = {**info, "log_file": str(deps_log)}
             ABOUT_JOBS["j1"] = info.copy()
@@ -1615,7 +1616,7 @@ class UiRouteComponentTests(unittest.TestCase):
             ):
                 with self.subTest(url=url):
                     response = client.get(url + "?lines=10", headers={"X-Token": TOKEN})
-                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
                     actual = response.get_json()["log"] if response.is_json else response.get_data(as_text=True)
                     self.assertEqual(actual, expected)
 
