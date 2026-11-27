@@ -1,6 +1,7 @@
 import contextlib
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -219,6 +220,103 @@ class NativeDependencyApiTests(unittest.TestCase):
                 }),
                 "",
             )
+
+    def test_web_uninstall_and_native_replay_share_the_same_job(self):
+        with isolated_app() as app:
+            from fls_manager.routes import deps
+
+            client = app.test_client()
+            body = {"name": "REQUESTS", "request_id": "web-uninstall"}
+            with patch.object(deps, "pip_cmd", side_effect=AssertionError("no synchronous uninstall")), patch.object(
+                deps, "_installed_packages", return_value=[{"name": "requests", "version": "2"}]
+            ), patch.object(deps, "InstallProcess", return_value=FakeProcess()) as start:
+                first = client.post("/deps/uninstall", data=body, headers=self.headers)
+                replay = client.post("/deps/uninstall", data=body, headers=self.headers)
+                native = client.post("/api/deps/uninstall", json=body, headers=self.headers)
+            self.assertEqual(first.status_code, 302)
+            self.assertEqual(first.headers["Location"], "/deps/install-log/web-uninstall?back=/deps")
+            self.assertEqual(replay.status_code, 302)
+            self.assertEqual(replay.headers["Location"], first.headers["Location"])
+            self.assertEqual(native.status_code, 200)
+            self.assertEqual(native.json["install_id"], body["request_id"])
+            self.assertEqual(native.json["operation"], "uninstall")
+            start.assert_called_once()
+            self.assertEqual(start.call_args.args[0][-3:], ["uninstall", "-y", "requests"])
+
+    def test_web_uninstall_rejects_invalid_stale_and_conflicting_submissions(self):
+        with isolated_app() as app:
+            from fls_manager.install_records import persist_install_job
+            from fls_manager.routes import deps
+
+            persist_install_job({
+                "id": "busy-package", "kind": "dependency", "package": "requests",
+                "operation": "install", "running": False, "finished": True,
+                "status": "unknown", "returncode": None, "updated_at": "now",
+                "retry_confirmation_required": True,
+            })
+            with patch.object(deps, "pip_cmd", side_effect=AssertionError("no synchronous uninstall")), patch.object(
+                deps, "_installed_packages", return_value=[{"name": "requests", "version": "2"}]
+            ), patch.object(deps, "InstallProcess") as start:
+                for name, status in (("", 400), ("--help", 400), ("<invalid>", 400), ("missing", 404), ("requests", 409)):
+                    with self.subTest(name=name):
+                        response = app.test_client().post("/deps/uninstall", data={
+                            "name": name, "request_id": "web-uninstall-rejected",
+                        }, headers=self.headers)
+                        self.assertEqual(response.status_code, status, response.get_data(as_text=True))
+                        self.assertEqual(response.mimetype, "text/plain")
+                start.assert_not_called()
+
+    def test_web_uninstall_preserves_native_session_csrf(self):
+        with isolated_app() as app:
+            from fls_manager.routes import deps
+
+            client, headers = self._native_client(app, csrf=False)
+            with patch.object(deps, "_installed_packages") as inventory, patch.object(deps, "InstallProcess") as start:
+                response = client.post("/deps/uninstall", data={"name": "requests", "request_id": "web-csrf"})
+                self.assertEqual(response.status_code, 400)
+                inventory.assert_not_called()
+                start.assert_not_called()
+
+    def test_web_uninstall_keeps_original_log_when_running_receipt_cannot_be_saved(self):
+        with isolated_app() as app:
+            from fls_manager.routes import deps
+
+            persist = deps.persist_install_job
+
+            def fail_running_receipt(info):
+                if info.get("status") == "running":
+                    raise OSError("receipt unavailable")
+                return persist(info)
+
+            body = {"name": "requests", "request_id": "web-receipt-pending"}
+            with patch.object(deps, "persist_install_job", side_effect=fail_running_receipt), patch.object(
+                deps, "_installed_packages", return_value=[{"name": "requests", "version": "2"}]
+            ), patch.object(deps, "InstallProcess", return_value=FakeProcess()) as start:
+                client = app.test_client()
+                accepted = client.post("/deps/uninstall", data=body, headers=self.headers)
+                replay = client.post("/deps/uninstall", data=body, headers=self.headers)
+                pending = client.post("/api/deps/uninstall", json=body, headers=self.headers)
+            self.assertEqual(accepted.status_code, 302)
+            self.assertEqual(replay.headers["Location"], accepted.headers["Location"])
+            self.assertIn(body["request_id"], accepted.headers["Location"])
+            self.assertEqual(pending.status_code, 503)
+            self.assertTrue(pending.json["receipt_pending"])
+            self.assertFalse(pending.json["retry_available"])
+            start.assert_called_once()
+
+    def test_web_dependency_forms_include_distinct_uninstall_request_ids(self):
+        with isolated_app() as app:
+            from fls_manager.routes import deps
+
+            packages = [{"name": "requests", "version": "2"}, {"name": "Flask", "version": "3"}]
+            with patch.object(deps, "pip_cmd", return_value=SimpleNamespace(stdout=json.dumps(packages))):
+                response = app.test_client().get("/deps", headers=self.headers)
+            self.assertEqual(response.status_code, 200)
+            forms = re.findall(r'<form\b[^>]*action="/deps/uninstall"[^>]*>(.*?)</form>', response.get_data(as_text=True), re.S)
+            self.assertEqual(len(forms), 2)
+            ids = [re.search(r'name="request_id" value="([a-f0-9]{32})"', form) for form in forms]
+            self.assertTrue(all(ids))
+            self.assertEqual(len({match.group(1) for match in ids}), 2)
 
     def test_uninstall_rejects_uninstalled_and_invalid_package_names(self):
         with isolated_app() as app:

@@ -9,7 +9,7 @@ import re
 import stat
 from pathlib import Path
 
-from flask import Blueprint, request, redirect, url_for, jsonify
+from flask import Blueprint, request, redirect, url_for, jsonify, make_response
 
 from ..paths import BASE_DIR, LOG_DIR
 from ..state import DEPS_RUNNING
@@ -1154,6 +1154,7 @@ def deps_page():
         <div class="row-actions" aria-label="依赖 {h(name)} 行操作">
             <div class="row-actions-danger">
                 <form class="inline-form" method="post" action="/deps/uninstall">
+                    <input type="hidden" name="request_id" value="{uuid.uuid4().hex}">
                     <input type="hidden" name="name" value="{h(name)}">
                     <button class="btn btn-red" type="submit" onclick="return confirm('确定卸载 {h(name)} 吗？')">卸载依赖</button>
                 </form>
@@ -2420,24 +2421,10 @@ def deps_refresh():
 
 @bp.route("/deps/uninstall", methods=["POST"])
 def deps_uninstall():
-    name = request.form.get("name", "").strip()
-
-    if not name:
-        return "依赖名不能为空", 400
-
-    try:
-        result = pip_cmd(["uninstall", "-y", name])
-        output = result.stdout
-    except Exception as e:
-        output = str(e)
-
-    header_card = page_header_card(
-        "卸载结果",
-        actions_html='<a class="btn btn-gray" href="/deps">返回</a>',
-    )
-
-    body = f"""
-{header_card}
-<pre class="log">{h(output)}</pre>
-"""
-    return layout("卸载依赖", "deps", body)
+    response = make_response(api_deps_uninstall())
+    payload = response.get_json()
+    if payload.get("install_id"):
+        return redirect(url_for("deps.deps_install_log", install_id=payload["install_id"], back="/deps"))
+    return str(payload.get("msg") or "卸载提交失败"), response.status_code, {
+        "Content-Type": "text/plain; charset=utf-8",
+    }

@@ -302,6 +302,7 @@ class InstallProcessTests(unittest.TestCase):
         scenarios = [
             ("dependency", "install", False), ("dependency", "install", True),
             ("dependency", "uninstall", False), ("dependency", "uninstall", True),
+            ("web", "uninstall", False),
         ]
         if os.name != "nt":
             scenarios.extend((("runtime", "install", False), ("runtime", "install", True)))
@@ -333,6 +334,9 @@ class InstallProcessTests(unittest.TestCase):
                 elif kind == "runtime":
                     endpoint = "/api/install/runtime/node"
                     module = runtime
+                elif kind == "web":
+                    endpoint = "/deps/uninstall"
+                    module = deps
                 else:
                     endpoint = "/api/deps/" + operation
                     module = deps
@@ -345,11 +349,12 @@ class InstallProcessTests(unittest.TestCase):
                     with patch.object(module, "InstallProcess", side_effect=spawn) as start, patch.object(
                         deps, "_installed_packages", return_value=[{"name": "demo", "version": "1"}]
                     ), patch.object(runtime, "runtime_install_command", return_value="echo harmless"):
-                        response = app.test_client().post(endpoint, json=body, headers={"X-Token": TOKEN})
-                        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+                        options = {"data": body} if kind == "web" else {"json": body}
+                        response = app.test_client().post(endpoint, **options, headers={"X-Token": TOKEN})
+                        self.assertEqual(response.status_code, 302 if kind == "web" else 200, response.get_data(as_text=True))
                         process = DEPS_RUNNING[body["request_id"]]["process"]
-                        replay = app.test_client().post(endpoint, json=body, headers={"X-Token": TOKEN})
-                        self.assertEqual(replay.status_code, 200, replay.get_data(as_text=True))
+                        replay = app.test_client().post(endpoint, **options, headers={"X-Token": TOKEN})
+                        self.assertEqual(replay.status_code, response.status_code, replay.get_data(as_text=True))
                         start.assert_called_once()
                         self.assertIsInstance(process, InstallProcess)
                     release.touch()
