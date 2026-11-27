@@ -231,12 +231,15 @@ class ScriptDebugRecoveryTests(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             self.assertEqual(len(rows[0]["error"]), debug.SCRIPT_DEBUG_TEXT_LIMIT)
             persisted = json.loads(SCRIPT_DEBUG_RUNS_FILE.read_text(encoding="utf-8"))
-            self.assertEqual(len(persisted), 1)
-            self.assertLessEqual(len(persisted[0]["error"]), debug.SCRIPT_DEBUG_TEXT_LIMIT)
+            self.assertEqual(len(persisted), 3)
+            self.assertEqual(len(persisted[0]["error"]), 30000)
 
             SCRIPT_DEBUG_RUNS_FILE.write_text("{not-json", encoding="utf-8")
-            self.assertEqual(debug.load_script_debug_runs(), [])
-            self.assertEqual(json.loads(SCRIPT_DEBUG_RUNS_FILE.read_text(encoding="utf-8")), [])
+            from fls_manager.directory_jobs import DirectoryJobHistoryError
+
+            with self.assertRaises(DirectoryJobHistoryError):
+                debug.load_script_debug_runs()
+            self.assertEqual(SCRIPT_DEBUG_RUNS_FILE.read_text(encoding="utf-8"), "{not-json")
 
 
 if __name__ == "__main__":

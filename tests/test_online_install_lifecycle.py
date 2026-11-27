@@ -1615,7 +1615,7 @@ const context = {
   setInterval: () => 1, clearInterval() {},
 };
 vm.createContext(context);
-vm.runInContext(input.script, context);
+vm.runInContext(input.script, context, {timeout: 1000});
 setImmediate(() => {
   assert.equal(elements.installStatus.textContent, '结果未知');
   assert.match(elements.installRecoveryAction.innerHTML, /install-retry\/install/);
@@ -1632,7 +1632,7 @@ setImmediate(() => {
                         "action": "/online-scripts/install-retry/install",
                     },
                 }}),
-                capture_output=True, text=True, encoding="utf-8", timeout=5,
+                capture_output=True, text=True, encoding="utf-8", timeout=20 if os.name == "nt" else 5,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
     @unittest.skipUnless(shutil.which("node"), "Node is needed to exercise stop recovery")

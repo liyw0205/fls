@@ -228,6 +228,14 @@ def _supervise(result_path):
         finally:
             for fd in inherited:
                 os.close(fd)
+            # An orphaned supervisor must close inherited logs before restore can proceed.
+            for stream in (sys.stdout, sys.stderr):
+                while not stream.closed:
+                    try:
+                        stream.close()
+                    except (OSError, ValueError):
+                        if not stream.closed:
+                            time.sleep(0.05)
             release_process_lease(job_lease)
             release_process_lease(lease)
 

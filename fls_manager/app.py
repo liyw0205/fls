@@ -93,8 +93,6 @@ def reconcile_startup_state(app):
     with directory_access(write=True):
         # Runtime handles are in memory; reconcile durable snapshots before use.
         reconcile_task_history_after_restart(running_history_ids())
-        from .routes.scripts.debug import load_script_debug_runs
-        load_script_debug_runs()
         if app.config.get("RESTORE_STARTUP_RUNTIME_PENDING"):
             initialize_startup_runtime(app)
         app.config["RESTORE_STARTUP_RECONCILIATION_PENDING"] = False

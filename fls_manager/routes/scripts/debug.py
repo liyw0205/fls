@@ -3,8 +3,9 @@ import time
 import uuid
 import signal
 from urllib.parse import quote
-import threading
 import subprocess
+import json
+import tempfile
 
 from flask import redirect, abort, jsonify, request
 
@@ -16,9 +17,12 @@ from .helpers import (
     debug_command_info,
 )
 
-from ...paths import LOG_DIR, SCRIPT_DEBUG_RUNS_FILE
-from ...storage import read_json, write_json
-from ...utils import h, now_str, safe_name, get_back_url, prune_completed_records
+from ...paths import BASE_DIR, LOG_DIR, SCRIPT_DEBUG_RUNS_FILE
+from ...storage import write_json
+from ...directory_jobs import DirectoryJobHistoryError, directory_job_operation, start_directory_job
+from ...directory_process import DirectoryProcess
+from ...script_debug_coordination import DEBUG_RECEIPTS, DEBUG_IDENTITIES, debug_active, debug_active_ids
+from ...utils import h, now_str, safe_name, get_back_url
 from ...ui.layout import layout
 from ...ui.components import page_header_card
 from ...ui.log_controls import log_controls
@@ -27,12 +31,12 @@ from ...models import load_global_env, TASKS_MUTATION_LOCK
 from ...constants import TASK_PROCESS_PREFIX
 
 SCRIPT_DEBUG_RUNNING = {}
-SCRIPT_DEBUG_LOCK = threading.RLock()
+SCRIPT_DEBUG_LOCK = DEBUG_RECEIPTS
 SCRIPT_DEBUG_MANUAL_STOPS = set()
 SCRIPT_DEBUG_LIMIT = 200
 SCRIPT_DEBUG_TEXT_LIMIT = 12000
-SCRIPT_DEBUG_STATUSES = ("starting", "running", "succeeded", "failed", "stopped", "unknown")
-SCRIPT_DEBUG_IN_FLIGHT = ("starting", "running")
+SCRIPT_DEBUG_STATUSES = ("starting", "running", "stopping", "succeeded", "failed", "stopped", "unknown")
+SCRIPT_DEBUG_IN_FLIGHT = ("starting", "running", "stopping")
 
 
 def _debug_text(value, default=""):
@@ -71,7 +75,12 @@ def _debug_rows(raw):
             )
             changed = True
 
-        if status in SCRIPT_DEBUG_IN_FLIGHT and debug_id not in SCRIPT_DEBUG_RUNNING:
+        if row.get("managed") and (row.get("request_id") != debug_id or not row.get("rel")
+                                   or row.get("status") not in SCRIPT_DEBUG_STATUSES):
+            raise DirectoryJobHistoryError("managed debug receipt is invalid")
+        local = SCRIPT_DEBUG_RUNNING.get(debug_id)
+        active = debug_active(debug_id) if row.get("managed") else bool(local and _debug_status(local) in SCRIPT_DEBUG_IN_FLIGHT)
+        if status in SCRIPT_DEBUG_IN_FLIGHT and not active:
             status = "unknown"
             previous = _debug_text(row.get("error")).strip()
             recovery = "面板重启后无法确认调试进程结果，请检查日志和系统进程后重试"
@@ -102,27 +111,37 @@ def _debug_rows(raw):
             "created_at": _debug_text(row.get("created_at")),
             "updated_at": _debug_text(row.get("updated_at")),
             "start_time": row.get("start_time"),
+            "managed": row.get("managed") is True,
+            "stop_request_id": _debug_text(row.get("stop_request_id")),
+            "stop_consumed_id": _debug_text(row.get("stop_consumed_id")),
+            "active": active,
         }
         if normalized_row != row:
             changed = True
         normalized.append(normalized_row)
 
-    limited = normalized[:SCRIPT_DEBUG_LIMIT]
-    if limited != normalized:
-        changed = True
-    return limited, changed
+    return normalized, changed
+
+
+def _read_debug_rows():
+    try:
+        with SCRIPT_DEBUG_RUNS_FILE.open("rb") as stream:
+            raw = stream.read(16 * 1024 * 1024 + 1)
+        if len(raw) > 16 * 1024 * 1024:
+            raise ValueError("debug history is too large")
+        rows = json.loads(raw)
+        if not isinstance(rows, list):
+            raise ValueError("debug history is not a list")
+        return rows
+    except FileNotFoundError:
+        return []
+    except (ValueError, OSError) as exc:
+        raise DirectoryJobHistoryError("debug history cannot be read") from exc
 
 
 def load_script_debug_runs(limit=None):
     with SCRIPT_DEBUG_LOCK:
-        rows, changed = _debug_rows(read_json(SCRIPT_DEBUG_RUNS_FILE, None))
-        if changed:
-            try:
-                write_json(SCRIPT_DEBUG_RUNS_FILE, rows)
-            except Exception:
-                # A read-only or unavailable data directory must not prevent
-                # the panel from serving the recoverable in-memory state.
-                pass
+        rows, _changed = _debug_rows(_read_debug_rows())
         if limit is None:
             return rows
         try:
@@ -158,6 +177,9 @@ def _debug_snapshot(info):
         "created_at": _debug_text(info.get("created_at")),
         "updated_at": now_str(),
         "start_time": info.get("start_time"),
+        "managed": info.get("managed") is True,
+        "stop_request_id": _debug_text(info.get("stop_request_id")),
+        "stop_consumed_id": _debug_text(info.get("stop_consumed_id")),
     }
 
 
@@ -166,14 +188,25 @@ def persist_script_debug(info):
         return False
     snapshot = _debug_snapshot(info)
     with SCRIPT_DEBUG_LOCK:
-        rows, _changed = _debug_rows(read_json(SCRIPT_DEBUG_RUNS_FILE, []))
+        rows = _read_debug_rows()
         for index, row in enumerate(rows):
-            if row.get("id") == snapshot["id"]:
+            if isinstance(row, dict) and row.get("id") == snapshot["id"]:
+                # A late owner diagnostic cannot overwrite a newer persisted result.
+                if row.get("managed") and row.get("status") not in SCRIPT_DEBUG_IN_FLIGHT:
+                    return False
+                snapshot["stop_request_id"] = row.get("stop_request_id", snapshot["stop_request_id"])
+                if (snapshot["status"] in ("starting", "running") and row.get("status") == "stopping"
+                        and row.get("stop_request_id") != snapshot["stop_consumed_id"]):
+                    snapshot["status"] = "stopping"
                 rows[index] = snapshot
                 break
         else:
             rows.insert(0, snapshot)
-        write_json(SCRIPT_DEBUG_RUNS_FILE, rows[:SCRIPT_DEBUG_LIMIT])
+        protected = [row for row in rows if isinstance(row, dict) and (
+            row.get("status") in (*SCRIPT_DEBUG_IN_FLIGHT, "unknown") or debug_active(row.get("id"))
+        )]
+        completed = [row for row in rows if isinstance(row, dict) and row not in protected]
+        write_json(SCRIPT_DEBUG_RUNS_FILE, protected + completed[:max(0, SCRIPT_DEBUG_LIMIT - len(protected))])
     return True
 
 
@@ -192,7 +225,7 @@ def _persist_debug_safely(info):
 def _debug_current_record(debug_id):
     with SCRIPT_DEBUG_LOCK:
         info = SCRIPT_DEBUG_RUNNING.get(debug_id)
-        if info is not None:
+        if info is not None and not info.get("managed"):
             return dict(info)
         info = get_script_debug_run(debug_id)
         return dict(info) if isinstance(info, dict) else info
@@ -312,6 +345,7 @@ def script_debug_watch(debug_id, proc, log_fp):
 
 
 @bp.route("/scripts/debug/<path:rel_path>")
+@directory_job_operation
 def scripts_debug_run(rel_path):
     from ...script_rename import pending_script_rename
 
@@ -325,7 +359,7 @@ def scripts_debug_run(rel_path):
             return f"恢复状态读取失败：{h(e)}", 500
         if pending:
             return redirect(f"/scripts/rename-recovery/{pending['id']}")
-        return _scripts_debug_run(rel_path)
+    return _scripts_debug_run(rel_path)
 
 
 def _scripts_debug_run(rel_path):
@@ -340,59 +374,57 @@ def _scripts_debug_run(rel_path):
     )
 
 
-def _start_script_debug_run(rel_path, request_id="", require_persist=False):
-    target = script_safe_path(rel_path)
-    if not target.exists() or not target.is_file():
-        raise FileNotFoundError
+def _start_script_debug_run(rel_path, request_id=""):
+    from ...script_rename import pending_script_rename
 
-    rel = script_rel_path(target)
-
-    debug_id = uuid.uuid4().hex
-    log_file = script_debug_log_file(debug_id, target.name)
-    prune_completed_records(SCRIPT_DEBUG_RUNNING)
-
-    task = debug_task_for_script(rel, target, debug_id)
-
-    created_at = now_str()
-    info = {
-        "id": debug_id,
-        "request_id": request_id,
-        "script": str(target),
-        "rel": rel,
-        "log_file": str(log_file),
-        "running": True,
-        "process": None,
-        "pid": "-",
-        "start_time": time.time(),
-        "returncode": None,
-        "error": "",
-        "status": "starting",
-        "created_at": created_at,
-    }
-    with SCRIPT_DEBUG_LOCK:
-        SCRIPT_DEBUG_RUNNING[debug_id] = info
-        try:
-            if require_persist:
-                persist_script_debug(info)
-            else:
-                _persist_debug_safely(info)
-        except Exception:
-            SCRIPT_DEBUG_RUNNING.pop(debug_id, None)
-            raise
-
-    log_fp = None
-
-    try:
-        log_fp = open(log_file, "ab", buffering=0)
+    debug_id = request_id or uuid.uuid4().hex
+    # Model readers already use model -> storage; no command waits under either lock.
+    with TASKS_MUTATION_LOCK, SCRIPT_DEBUG_LOCK:
+        previous = next((row for row in load_script_debug_runs() if row["request_id"] == debug_id), None)
+        if previous:
+            if previous["rel"] != rel_path:
+                raise ValueError("request_id 已用于不同脚本")
+            return dict(previous, _replayed=True)
+        rows = _read_debug_rows()
+        known = {row.get("id") for row in rows if isinstance(row, dict)}
+        if debug_id in known or debug_active(debug_id) or debug_active_ids() - known:
+            raise DirectoryJobHistoryError("active debug receipt is missing")
+        if len([row for row in load_script_debug_runs() if row["active"] or row["status"] == "unknown"]) >= SCRIPT_DEBUG_LIMIT:
+            raise DirectoryJobHistoryError("debug recovery history is full")
+        target = script_safe_path(rel_path)
+        if not target.exists() or not target.is_file():
+            raise FileNotFoundError
+        if pending_script_rename(path=target):
+            raise ValueError("脚本存在待恢复重命名，请先完成恢复")
+        rel = script_rel_path(target)
+        log_file = script_debug_log_file(debug_id, target.name)
+        task = debug_task_for_script(rel, target, debug_id)
         cmd_info = debug_command_info(task)
-
         env = os.environ.copy()
         env.update(load_global_env())
         env["PYTHONUNBUFFERED"] = "1"
         env["FLS_SCRIPT_DEBUG_ID"] = debug_id
         env["FLS_SCRIPT_DEBUG_FILE"] = str(target)
         env["FLS_TASK_PROCESS_NAME"] = (TASK_PROCESS_PREFIX + safe_name(f"script-debug-{target.name}"))[:120]
-
+        info = {
+            "id": debug_id, "request_id": debug_id, "script": str(target), "rel": rel,
+            "log_file": str(log_file), "running": True, "process": None, "pid": "-",
+            "start_time": time.time(), "returncode": None, "error": "", "status": "starting",
+            "created_at": now_str(), "managed": True,
+        }
+        owner = DEBUG_IDENTITIES.claim(debug_id)
+        SCRIPT_DEBUG_RUNNING[debug_id] = info
+        try:
+            persist_script_debug(info)
+        except BaseException:
+            SCRIPT_DEBUG_RUNNING.pop(debug_id, None)
+            owner.close()
+            raise
+    log_fp = None
+    proc = None
+    workspace = None
+    try:
+        log_fp = open(log_file, "ab", buffering=0)
         header = (
             f"===== 脚本调试运行 =====\n"
             f"时间: {now_str()}\n"
@@ -403,22 +435,14 @@ def _start_script_debug_run(rel_path, request_id="", require_persist=False):
 
         log_fp.write(header.encode("utf-8"))
 
-        popen_kwargs = {
-            "shell": cmd_info.get("shell", False),
-            "cwd": cmd_info["cwd"],
-            "stdout": log_fp,
-            "stderr": subprocess.STDOUT,
-            "env": env,
-        }
-
-        if os.name != "nt":
-            popen_kwargs["preexec_fn"] = os.setsid
-
-        proc = subprocess.Popen(
-            cmd_info["cmd"],
-            **popen_kwargs,
+        workspace = tempfile.TemporaryDirectory(prefix="fls-script-debug-")
+        proc = DirectoryProcess(
+            cmd_info["cmd"], workspace=workspace.name, cwd=cmd_info["cwd"], env=env,
+            shell=cmd_info.get("shell", False), stdout=log_fp, stderr=subprocess.STDOUT,
+            lease_path=BASE_DIR / ".backup_native_restore.lock",
+            job_lease_path=DEBUG_IDENTITIES.lease_path(debug_id), stop_grace_seconds=1,
         )
-
+        proc.start()
         with SCRIPT_DEBUG_LOCK:
             info.update({
                 "running": True,
@@ -427,39 +451,128 @@ def _start_script_debug_run(rel_path, request_id="", require_persist=False):
                 "status": "running",
                 "error": "",
             })
-            _persist_debug_safely(info)
-
-        th = threading.Thread(
-            target=script_debug_watch,
-            args=(debug_id, proc, log_fp),
-            daemon=True,
+            persist_script_debug(info)
+        start_directory_job(
+            _managed_debug_watch, args=(info, proc, log_fp, workspace), owner=owner,
             name=f"fls-script-debug-{debug_id[:8]}",
         )
-        th.start()
-
     except Exception as e:
+        # Handoff failed: keep the admission and request leases until cleanup is certain.
+        _finish_managed_debug(info, proc, log_fp, workspace, error=str(e))
+        owner.close()
+    return _debug_current_record(debug_id)
+
+
+def _finish_managed_debug(info, proc, log_fp, workspace, *, error="", returncode=None, stopped=False):
+    if proc is not None:
+        while True:
+            try:
+                proc.stop(timeout=10)
+                if returncode is None:
+                    returncode = proc.wait(timeout=0)
+                break
+            except subprocess.TimeoutExpired:
+                time.sleep(0.05)
+            except Exception as exc:
+                # A supervisor failure is unknown, but its exit still proves cleanup.
+                if proc._process.poll() is not None:
+                    error = error or str(exc)
+                    break
+                time.sleep(0.05)
+    if log_fp is not None:
         try:
-            if log_fp is not None:
-                log_fp.write(f"启动调试失败: {e}\n".encode("utf-8"))
+            log_fp.write(f"\n===== 调试运行结束: {now_str()}，退出码: {returncode} =====\n".encode("utf-8"))
+        except Exception as exc:
+            error = error or str(exc)
+        while not log_fp.closed:
+            try:
                 log_fp.close()
-        except Exception:
-            pass
+            except Exception as exc:
+                error = error or str(exc)
+                time.sleep(0.05)
+    if workspace is not None:
+        try:
+            workspace.cleanup()
+        except OSError as exc:
+            error = error or str(exc)
+    status = ("stopped" if stopped else "succeeded" if returncode == 0 else "failed")
+    if proc is not None and returncode is None:
+        status = "unknown"
+    if error and returncode == 0:
+        status = "unknown"
+    with SCRIPT_DEBUG_LOCK:
+        info.update(running=False, process=None, returncode=returncode if returncode is not None else -1,
+                    status=status, error=error or ("用户手动停止" if stopped else
+                    f"调试进程退出码：{returncode}" if returncode else ""))
+        _persist_debug_safely(info)
 
-        with SCRIPT_DEBUG_LOCK:
-            info.update({
-                "running": False,
-                "process": None,
-                "returncode": -1,
-                "status": "failed",
-                "error": str(e),
-            })
-            _persist_debug_safely(info)
 
-    return dict(info)
+def _managed_debug_watch(info, proc, log_fp, workspace):
+    stopped = False
+    error = ""
+    code = None
+    try:
+        while True:
+            code = proc.poll()
+            if code is not None:
+                break
+            with SCRIPT_DEBUG_LOCK:
+                row = next((row for row in _read_debug_rows() if isinstance(row, dict) and row.get("id") == info["id"]), None)
+                if row is None:
+                    raise DirectoryJobHistoryError("active debug receipt is missing")
+                intent = row.get("stop_request_id", "")
+                consumed = info.get("stop_consumed_id", "")
+            if intent and intent != consumed:
+                stopped = True
+                try:
+                    proc.stop(timeout=10)
+                    code = proc.wait(timeout=0)
+                    break
+                except subprocess.TimeoutExpired:
+                    with SCRIPT_DEBUG_LOCK:
+                        info.update(stop_consumed_id=intent, status="running", error="停止失败：尚未确认进程树退出，可重试")
+                        persist_script_debug(info)
+            time.sleep(0.05)
+    except Exception as exc:
+        error = str(exc)
+    finally:
+        _finish_managed_debug(info, proc, log_fp, workspace, error=error, returncode=code, stopped=stopped)
+
+
+def request_debug_stop(debug_id):
+    with SCRIPT_DEBUG_LOCK:
+        info = get_script_debug_run(debug_id)
+        if not info:
+            return None
+        if not info["active"] or info["status"] not in SCRIPT_DEBUG_IN_FLIGHT:
+            return info
+        rows = _read_debug_rows()
+        for row in rows:
+            if isinstance(row, dict) and row.get("id") == debug_id:
+                # Only an explicit new POST creates a new attempt after a failed stop.
+                if row.get("status") != "stopping":
+                    row.update(status="stopping", running=True, stop_request_id=uuid.uuid4().hex, updated_at=now_str())
+                write_json(SCRIPT_DEBUG_RUNS_FILE, rows)
+                break
+        return get_script_debug_run(debug_id)
 
 
 @bp.route("/scripts/debug-stop/<debug_id>", methods=["POST"])
+@directory_job_operation
 def scripts_debug_stop(debug_id):
+    info = _debug_current_record(debug_id)
+    if info and info.get("managed"):
+        try:
+            info = request_debug_stop(debug_id)
+        except OSError:
+            return "停止请求保存失败，未发送停止信号", 503
+        if info["status"] == "unknown" and not info["active"]:
+            return "无法确认调试进程结果，未发送停止信号", 409
+        return redirect(get_back_url("/pull"))
+    return _legacy_scripts_debug_stop(debug_id)
+
+
+def _legacy_scripts_debug_stop(debug_id):
     back_url = get_back_url("/pull")
     with SCRIPT_DEBUG_LOCK:
         info = SCRIPT_DEBUG_RUNNING.get(debug_id)
@@ -493,6 +606,10 @@ def scripts_debug_stop(debug_id):
 
         return_code = None
         stopped = False
+        try:
+            persist_script_debug(dict(info, id=debug_id, stop_request_id=uuid.uuid4().hex))
+        except OSError:
+            return "停止请求保存失败，未发送停止信号", 503
         try:
             if proc is not None:
                 # The watcher may lag behind; use the actual process exit code.
@@ -540,6 +657,7 @@ def scripts_debug_stop(debug_id):
 
 
 @bp.route("/scripts/debug-log/<debug_id>")
+@directory_job_operation
 def scripts_debug_log(debug_id):
     back_url = get_back_url("/pull")
     info = _debug_current_record(debug_id)
@@ -561,7 +679,7 @@ def scripts_debug_log(debug_id):
     stop_btn = ""
     status = _debug_status(info)
 
-    if status in ("starting", "running") and info.get("process") is not None:
+    if status in SCRIPT_DEBUG_IN_FLIGHT and (info.get("active") or info.get("process") is not None):
         stop_btn = f"""
 <div class="row-actions-danger">
     <form class="inline-form" method="post" action="/scripts/debug-stop/{h(debug_id)}?back={h(back_url)}">
@@ -575,7 +693,7 @@ def scripts_debug_log(debug_id):
     header_card = page_header_card(
         "脚本调试日志",
         help_html=f"""
-        状态：<b id="debugStatus">{h({"starting": "启动中", "running": "运行中", "succeeded": "已成功结束", "failed": "已失败", "stopped": "已手动停止", "unknown": "结果未知"}.get(status, status))}</b><br>
+        状态：<b id="debugStatus">{h({"starting": "启动中", "running": "运行中", "stopping": "停止中", "succeeded": "已成功结束", "failed": "已失败", "stopped": "已手动停止", "unknown": "结果未知"}.get(status, status))}</b><br>
         PID：{h(info.get("pid") or "-")}<br>
         脚本：{h(info.get("script") or "-")}<br>
         日志文件：{h(info.get("log_file") or "-")}<br>
@@ -648,7 +766,7 @@ async function loadScriptDebugLog(){{
             }}
         }}
 
-        if(!json.running){{
+        if(!json.running && !json.active){{
             clearInterval(window.__FLS_ACTIVE_LOG_INTERVAL__);
             window.__FLS_ACTIVE_LOG_INTERVAL__ = null;
         }}
@@ -666,6 +784,7 @@ if(!window.__FLS_ACTIVE_LOG_INTERVAL__) window.__FLS_ACTIVE_LOG_INTERVAL__ = set
 
 
 @bp.route("/api/scripts/debug-log/<debug_id>")
+@directory_job_operation
 def api_scripts_debug_log(debug_id):
     info = _debug_current_record(debug_id)
 
@@ -684,7 +803,7 @@ def api_scripts_debug_log(debug_id):
 
     status = _debug_status(info)
     status_labels = {
-        "starting": "启动中", "running": "运行中", "succeeded": "已成功结束",
+        "starting": "启动中", "running": "运行中", "stopping": "停止中", "succeeded": "已成功结束",
         "failed": "已失败", "stopped": "已手动停止", "unknown": "结果未知",
     }
     return jsonify({
@@ -696,6 +815,7 @@ def api_scripts_debug_log(debug_id):
         "status": status,
         "status_label": status_labels.get(status, status),
         "running": status in SCRIPT_DEBUG_IN_FLIGHT,
+        "active": info.get("active", status in SCRIPT_DEBUG_IN_FLIGHT),
         "created_at": info.get("created_at", ""),
         "updated_at": info.get("updated_at", ""),
         "returncode": info.get("returncode"),

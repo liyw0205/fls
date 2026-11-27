@@ -46,6 +46,9 @@ jobs:
           tests/test_script_directory_jobs.py
           tests/test_script_directory_access.py
           tests/test_script_job_workers.py
+          tests/test_script_debug_workers.py
+          tests/test_native_script_debug_api.py
+          tests/test_script_debug_recovery.py
           tests/test_directory_process.py
           tests/test_online_install_directory_jobs.py
           tests/test_online_install_workers.py
@@ -129,6 +132,10 @@ jobs:
         env:
           PYTHONPATH: .
         run: python -m pytest -q tests/test_backup_directory_commit.py tests/test_native_backup_directory_recovery.py
+      - name: Verify debug identity, remote stops and supervised process trees
+        env:
+          PYTHONPATH: .
+        run: python -m pytest -q tests/test_script_debug_workers.py tests/test_native_script_debug_api.py tests/test_script_debug_recovery.py tests/test_ui_route_components.py -k 'debug or ScriptDebug'
       - name: Verify online install admission, command supervision and recovery
         env:
           PYTHONPATH: .

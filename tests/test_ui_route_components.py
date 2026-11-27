@@ -46,11 +46,15 @@ def isolated_app():
             yield create_app(), Path(temp_dir)
         finally:
             for worker in threading.enumerate():
-                if worker.name.startswith(("fls-script-pull-", "fls-repo-pull-", "fls-script-import-", "fls-repo-progress-", "fls-online-install-", "fls-online-scripts-refresh")):
+                if worker.name.startswith(("fls-script-pull-", "fls-repo-pull-", "fls-script-import-", "fls-repo-progress-", "fls-online-install-", "fls-online-scripts-refresh", "fls-script-debug-")):
                     worker.join(10)
                     if worker.is_alive():
                         raise AssertionError(f"script worker did not finish: {worker.name}")
             shutdown_scheduler()
+            coordination = sys.modules.get("fls_manager.script_debug_coordination")
+            if coordination:
+                for owner in list(coordination.DEBUG_IDENTITIES.owners.values()):
+                    owner.close()
             coordination = sys.modules.get("fls_manager.online_scripts.install_coordination")
             if coordination:
                 for owner in list(coordination.ONLINE_INSTALL_LOCK.owners.values()):

@@ -1,5 +1,6 @@
 import json
 import re
+import uuid
 
 from flask import jsonify, request
 
@@ -15,7 +16,9 @@ from .debug import (
     load_script_debug_runs,
     persist_script_debug,
     terminate_debug_process,
+    request_debug_stop,
 )
+from ...directory_jobs import directory_job_operation
 from .helpers import script_rel_path
 from ...models import TASKS_MUTATION_LOCK
 from ...paths import SCRIPT_DIR
@@ -97,9 +100,11 @@ def _run_payload(info):
     status = _debug_status(info)
     return {
         "id": str(info.get("id") or ""),
+        **({"request_id": info["request_id"]} if SCRIPT_DEBUG_REQUEST_ID_RE.fullmatch(str(info.get("request_id") or "")) else {}),
         "path": str(info.get("rel") or ""),
         "status": status,
         "running": status in SCRIPT_DEBUG_IN_FLIGHT,
+        "active": info.get("active", status in SCRIPT_DEBUG_IN_FLIGHT),
         "returncode": info.get("returncode"),
         "error": _scrub_text(info.get("error"), limit=1600),
         "created_at": str(info.get("created_at") or ""),
@@ -115,6 +120,7 @@ def _find_request(request_id):
 
 
 @bp.route("/api/scripts/debug-runs", methods=["GET"])
+@directory_job_operation
 def api_script_debug_runs():
     try:
         limit = int(request.args.get("limit", "30"))
@@ -127,6 +133,7 @@ def api_script_debug_runs():
 
 
 @bp.route("/api/scripts/debug-runs", methods=["POST"])
+@directory_job_operation
 def api_script_debug_start():
     body, error = _json_body()
     if error:
@@ -155,23 +162,32 @@ def api_script_debug_start():
         if pending:
             return _error("脚本存在待恢复重命名，请先完成恢复", 409, "rename_recovery_pending")
 
-        try:
-            info = _start_script_debug_run(
-                relative,
-                request_id=request_id,
-                require_persist=True,
-            )
-        except OSError:
-            return _error("调试作业无法持久化，未启动脚本", 503, "run_persistence_failed")
-        except ValueError as exc:
-            return _error(str(exc), 400, "invalid_path")
-        except Exception:
-            return _error("调试作业启动失败", 500, "start_failed")
+    try:
+        info = _start_script_debug_run(relative, request_id=request_id)
+    except FileNotFoundError:
+        return _error("脚本文件不存在", 404, "script_not_found")
+    except OSError:
+        return _error("调试作业无法持久化，未启动脚本", 503, "run_persistence_failed")
+    except ValueError as exc:
+        return _error(str(exc), 409, "request_or_path_conflict")
 
-    return _response({"ok": True, "replayed": False, "run": _run_payload(info)}, 202)
+    replayed = info.get("_replayed", False)
+    return _response({"ok": True, "replayed": replayed, "run": _run_payload(info)}, 200 if replayed else 202)
+
+
+@bp.route("/api/scripts/debug-requests/<request_id>", methods=["GET"])
+@directory_job_operation
+def api_script_debug_request(request_id):
+    if not SCRIPT_DEBUG_REQUEST_ID_RE.fullmatch(request_id):
+        return _error("request_id 无效", 400, "invalid_request_id")
+    info = _find_request(request_id)
+    if not info:
+        return _error("未找到原提交记录，请勿自动重新启动", 404, "request_not_found")
+    return _response({"ok": True, "run": _run_payload(info)})
 
 
 @bp.route("/api/scripts/debug-runs/<debug_id>", methods=["GET"])
+@directory_job_operation
 def api_script_debug_run(debug_id):
     info = _debug_current_record(debug_id)
     if not info:
@@ -187,7 +203,17 @@ def api_script_debug_run(debug_id):
 
 
 @bp.route("/api/scripts/debug-runs/<debug_id>/stop", methods=["POST"])
+@directory_job_operation
 def api_script_debug_stop(debug_id):
+    current = _debug_current_record(debug_id)
+    if current and current.get("managed"):
+        try:
+            current = request_debug_stop(debug_id)
+        except OSError:
+            return _error("停止请求保存失败，未发送停止信号", 503, "stop_state_persistence_failed")
+        if current["status"] == "unknown" and not current["active"]:
+            return _error("无法确认调试进程结果，未发送停止信号", 409, "process_unavailable", run=_run_payload(current))
+        return _response({"ok": True, "run": _run_payload(current)}, 202 if current["active"] else 200)
     with SCRIPT_DEBUG_LOCK:
         info = SCRIPT_DEBUG_RUNNING.get(debug_id)
         if info is None:
@@ -217,6 +243,10 @@ def api_script_debug_stop(debug_id):
             )
 
         stopped = False
+        try:
+            persist_script_debug(dict(info, stop_request_id=uuid.uuid4().hex))
+        except OSError:
+            return _error("停止请求保存失败，未发送停止信号", 503, "stop_state_persistence_failed")
         try:
             return_code = proc.poll()
             if return_code is None:
