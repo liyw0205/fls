@@ -8,6 +8,7 @@ import unicodedata
 import uuid
 
 from ..paths import DATA_DIR
+from ..log_access import open_log_file
 from .logs import online_refresh_log_file
 from .install_coordination import ONLINE_INSTALL_LOCK, install_receipt_transaction
 from .task_import_coordination import (
@@ -1469,10 +1470,7 @@ def _retain_unlaunched_refresh(exc):
         if re.fullmatch(r"[a-f0-9]{32}", published.get("id", "")):
             log_path = online_refresh_log_file(published["id"])
             try:
-                log_path.parent.mkdir(parents=True, exist_ok=True)
-                flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-                fd = os.open(log_path, flags, 0o600)
-                with os.fdopen(fd, "ab") as stream:
+                with open_log_file(log_path, "xb") as stream:
                     stream.write((error + "\n").encode("utf-8", errors="replace"))
                 published["log_file"] = str(log_path)
             except Exception as log_error:

@@ -15,6 +15,7 @@ from ..paths import BASE_DIR, LOG_DIR
 from ..state import DEPS_RUNNING
 from ..utils import h, now_str, safe_name, get_back_url, prune_completed_records
 from ..logs import tail_file
+from ..log_access import open_log_file
 from ..install_records import (
     INSTALL_JOBS_LOCK,
     InstallHistoryLimitError,
@@ -165,11 +166,11 @@ def safe_install_log_file(info, install_id):
             return None, ("日志不存在", "安装日志尚未生成或已被清理，请返回安装历史后重试。", 404)
         if not stat.S_ISREG(actual.stat().st_mode):
             return None, ("日志类型错误", "安装日志不是普通文件，未读取该路径。", 500)
-        with actual.open("rb") as handle:
+        with open_log_file(actual, "rb") as handle:
             handle.read(1)
     except FileNotFoundError:
         return None, ("日志不存在", "安装日志尚未生成或已被清理，请返回安装历史后重试。", 404)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         return None, ("日志不可读", f"安装日志无法读取：{exc}。请修复日志权限后重试。", 500)
     return actual, None
 
@@ -726,7 +727,7 @@ def _retry_install_start(install_id, retry_id):
         return _retry_install_response(child_id)
 
     try:
-        info["log_fp"] = open(info["log_file"], "ab", buffering=0)
+        info["log_fp"] = open_log_file(info["log_file"], "ab", buffering=0)
     except Exception as exc:
         info.update(
             finished=True, running=False, status="failed",
@@ -1265,7 +1266,7 @@ def deps_install():
 
         log_file = deps_log_file(install_id, name)
         try:
-            log_fp = open(log_file, "ab", buffering=0)
+            log_fp = open_log_file(log_file, "ab", buffering=0)
         except Exception as exc:
             info = {
                 "id": install_id, "request_id": install_id, "kind": "dependency", "package": name,
@@ -1478,7 +1479,7 @@ def api_deps_uninstall():
 
         log_file = LOG_DIR / f"deps-uninstall-{safe_name(package)}-{install_id}.log"
         try:
-            log_fp = open(log_file, "ab", buffering=0)
+            log_fp = open_log_file(log_file, "ab", buffering=0)
         except Exception as exc:
             info = {
                 "id": install_id, "request_id": install_id, "kind": "dependency",

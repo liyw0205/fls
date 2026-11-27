@@ -17,6 +17,7 @@ from .models import (
 )
 from .command import build_command
 from .logs import log_file_for_task, tail_file
+from .log_access import open_log_file
 from .utils import now_str, safe_name
 from .constants import TASK_PROCESS_PREFIX
 from .config import load_config
@@ -231,7 +232,7 @@ def increase_run_count(task_id):
 
 def append_task_log(log_file, text):
     try:
-        with open(log_file, "ab") as f:
+        with open_log_file(log_file, "ab") as f:
             f.write(str(text).encode("utf-8", errors="replace"))
 
             if not str(text).endswith("\n"):
@@ -1087,7 +1088,7 @@ def _submit_task_now(task_id, source="manual", retry_attempt=0, retry_token=None
         try:
             log_file = log_file_for_task(task)
             execution.bind_log(log_file)
-            log_fp = open(log_file, "ab", buffering=0)
+            log_fp = open_log_file(log_file, "ab", buffering=0)
             execution.log_fp = log_fp
         except BaseException:
             execution.release()

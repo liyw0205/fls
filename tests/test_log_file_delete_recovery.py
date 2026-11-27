@@ -50,16 +50,17 @@ class LogFileDeleteRecoveryTests(unittest.TestCase):
     def test_delete_failure_reports_unconfirmed_state_and_retry_works(self):
         with isolated_app() as (app, base_dir):
             path, version = self.seed(base_dir)
-            original_unlink = path.unlink
+            from fls_manager.log_access import LogAccess
+            original_unlink = LogAccess.unlink
             calls = {"count": 0}
 
-            def fail_once():
+            def fail_once(access):
                 calls["count"] += 1
                 if calls["count"] == 1:
                     raise PermissionError("fixture delete denied")
-                return original_unlink()
+                return original_unlink(access)
 
-            with patch.object(type(path), "unlink", side_effect=lambda: fail_once()):
+            with patch.object(LogAccess, "unlink", autospec=True, side_effect=fail_once):
                 response = app.test_client().post(
                     "/logfile/delete/task.log",
                     data={"version": version},

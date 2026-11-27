@@ -50,13 +50,7 @@ class TaskLogDirectoryAccessTests(unittest.TestCase):
                     super().close()
 
             stream = GrowingFile()
-            original = type(target).open
-            resolved_target = target.resolve()
-
-            def opened(path, *args, **kwargs):
-                return stream if path.resolve() == resolved_target else original(path, *args, **kwargs)
-
-            with patch.object(type(target), 'open', autospec=True, side_effect=opened):
+            with patch('fls_manager.routes.logs.files.open_log_file', return_value=stream):
                 response = app.test_client().get('/api/logfile/growing.log/download', headers={'X-Token': TOKEN})
             self.assertEqual(response.status_code, 413)
             self.assertEqual(reads, [8 * 1024 * 1024 + 1])

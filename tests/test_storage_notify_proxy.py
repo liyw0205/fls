@@ -959,7 +959,7 @@ class LogBoundaryTests(unittest.TestCase):
                     reads.append(len(chunk))
                     return chunk
 
-            with mock.patch.object(Path, "open", return_value=CountedFile(data)):
+            with mock.patch.object(logs, "open_log_file", return_value=CountedFile(data)):
                 result = logs.tail_file(log_file, lines=10)
 
             self.assertLessEqual(sum(reads), 1024 * 1024)
@@ -1164,6 +1164,7 @@ class LogBoundaryTests(unittest.TestCase):
     def test_cleanup_logs_swallows_unlink_errors(self):
         with isolated_fls_modules():
             from fls_manager import logs, paths
+            from fls_manager.log_access import LogAccess
 
             paths.LOG_DIR.mkdir(parents=True, exist_ok=True)
             old_log = paths.LOG_DIR / "locked-old.log"
@@ -1177,7 +1178,7 @@ class LogBoundaryTests(unittest.TestCase):
                 logs,
                 "load_config",
                 return_value={"log_keep_per_task": 1, "log_max_size_mb": 10},
-            ), mock.patch.object(Path, "unlink", side_effect=OSError("locked")) as unlink:
+            ), mock.patch.object(LogAccess, "unlink", side_effect=OSError("locked")) as unlink:
                 logs.cleanup_logs()
 
             self.assertGreaterEqual(unlink.call_count, 1)

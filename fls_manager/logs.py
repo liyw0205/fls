@@ -6,6 +6,7 @@ from .paths import LOG_DIR
 from .utils import safe_name
 from .config import load_config
 from .sensitive import mask_sensitive_text
+from .log_access import LogFileBusy, delete_log_file, file_version, open_log_file
 
 MAX_TAIL_LINES = 5000
 MAX_TAIL_BYTES = 1024 * 1024
@@ -40,7 +41,7 @@ def tail_file(file_path, lines=800):
 
     p = Path(file_path)
     try:
-        with p.open("rb") as f:
+        with open_log_file(p, "rb") as f:
             f.seek(0, os.SEEK_END)
             size = f.tell()
             block = 4096
@@ -64,12 +65,14 @@ def tail_file(file_path, lines=800):
             if truncated:
                 return TAIL_TRUNCATION_NOTICE + ("\n" + text if text else "")
             return text
+    except LogFileBusy:
+        raise
     except Exception as e:
         return f"读取日志失败: {e}"
 
 def parse_task_name_from_log(file_path):
     try:
-        with open(file_path, "rb") as f:
+        with open_log_file(file_path, "rb") as f:
             data = f.read(8192).decode("utf-8", errors="ignore")
         m = re.search(r"===== 启动任务:\s*(.*?)\s*=====", data)
         if m:
@@ -87,8 +90,9 @@ def cleanup_logs():
 
     for f in list(files):
         try:
-            if f.stat().st_size > max_bytes:
-                f.unlink()
+            info = f.lstat()
+            if info.st_size > max_bytes:
+                delete_log_file(f, file_version(info))
         except Exception:
             pass
 
@@ -101,6 +105,6 @@ def cleanup_logs():
         fs.sort(key=lambda x: x.stat().st_mtime, reverse=True)
         for old in fs[keep:]:
             try:
-                old.unlink()
+                delete_log_file(old, file_version(old.lstat()))
             except Exception:
                 pass

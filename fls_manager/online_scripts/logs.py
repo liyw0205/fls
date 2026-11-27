@@ -1,5 +1,6 @@
 from ..paths import LOG_DIR
 from ..utils import safe_name
+from ..log_access import open_log_file
 
 
 def online_refresh_log_file(refresh_id):
@@ -13,7 +14,7 @@ def online_install_log_file(install_id, script_name):
 
 def append_log(log_file, text):
     try:
-        with open(log_file, "ab") as f:
+        with open_log_file(log_file, "ab") as f:
             f.write(str(text).encode("utf-8", errors="replace"))
 
             if not str(text).endswith("\n"):

@@ -128,13 +128,15 @@ class LogGroupDeleteRecoveryTests(unittest.TestCase):
         with isolated_app() as (app, base_dir):
             files, versions = self.seed(base_dir)
 
-            real_unlink = Path.unlink
+            from fls_manager.log_access import LogAccess
+            real_unlink = LogAccess.unlink
             calls = {"count": 0}
 
-            def unlink_then_replace():
+            def unlink_then_replace(access):
                 calls["count"] += 1
                 path = files["a.log"] if calls["count"] == 1 else files["b.log"]
-                result = real_unlink(path)
+                self.assertEqual(access.path.resolve(), path.resolve())
+                result = real_unlink(access)
                 if path == files["b.log"]:
                     path.write_text(
                         "===== 启动任务: Group A =====\nreplacement\n",
@@ -142,7 +144,7 @@ class LogGroupDeleteRecoveryTests(unittest.TestCase):
                     )
                 return result
 
-            with patch.object(Path, "unlink", side_effect=unlink_then_replace):
+            with patch.object(LogAccess, "unlink", autospec=True, side_effect=unlink_then_replace):
                 response = self.post(app.test_client(), ["Group A"], {"Group A": versions["Group A"]})
 
             payload = response.get_json()

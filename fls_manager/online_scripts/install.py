@@ -15,6 +15,7 @@ from pathlib import Path
 from ..paths import BASE_DIR, SCRIPT_DIR
 from ..directory_jobs import directory_job, start_directory_job
 from ..directory_process import DirectoryProcess
+from ..log_access import open_log_file
 from ..models import TaskSchedulerReloadError, load_tasks
 from ..utils import now_str, LazyModule, prune_completed_records
 from ..proxy import (
@@ -425,7 +426,7 @@ def run_logged_command(cmd, cwd, log_file, env=None, shell=False, install_id="")
     append_log(log_file, f"cwd: {cwd}")
     append_log(log_file, "------------------------------------------------------------")
 
-    with tempfile.TemporaryDirectory(prefix="fls-online-install-") as workspace, open(log_file, "ab", buffering=0) as log_fp:
+    with tempfile.TemporaryDirectory(prefix="fls-online-install-") as workspace, open_log_file(log_file, "ab", buffering=0) as log_fp:
         proc = None
         gate_attempted = False
         try:

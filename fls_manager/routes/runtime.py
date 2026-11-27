@@ -9,6 +9,7 @@ from pathlib import Path
 from flask import Blueprint, redirect, request, url_for
 
 from ..paths import BASE_DIR, LOG_DIR
+from ..log_access import open_log_file
 from ..state import DEPS_RUNNING
 from ..utils import now_str, safe_name
 from ..install_records import get_install_job, persist_install_job
@@ -191,7 +192,7 @@ def install_runtime(runtime):
 
     log_file = install_log_file(install_id, runtime)
     try:
-        log_fp = open(log_file, "ab", buffering=0)
+        log_fp = open_log_file(log_file, "ab", buffering=0)
     except Exception as exc:
         info = {
             "id": install_id, "request_id": install_id, "kind": "runtime", "package": runtime,

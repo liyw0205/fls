@@ -22,8 +22,9 @@ def api_logs():
             if q and q not in group.lower() and q not in path.name.lower():
                 continue
             try:
-                safe_path = safe_log_file(path.name)
-                info = safe_path.stat()
+                safe_path = path
+                info = safe_path.lstat()
+                file_version(info)
             except (OSError, ValueError):
                 continue
             items.append({

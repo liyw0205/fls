@@ -13,6 +13,7 @@ from ...ui.layout import layout
 from ...ui.components import empty_table_row
 from ...utils import h, now_str, safe_name, LazyModule, prune_completed_records
 from ...logs import tail_file
+from ...log_access import open_log_file
 from ...paths import BASE_DIR, DATA_DIR, LOG_DIR, SCRIPT_DIR
 from ...constants import MAIN_PROCESS_NAME, TASK_PROCESS_PREFIX
 from ...scheduler import reload_scheduler
@@ -262,7 +263,7 @@ def about_job_log_file(job_id, action):
 
 def append_job_log(log_file, text=""):
     try:
-        with open(log_file, "ab") as f:
+        with open_log_file(log_file, "ab") as f:
             f.write(str(text).encode("utf-8", errors="replace"))
 
             if not str(text).endswith("\n"):
@@ -812,7 +813,7 @@ def run_fls_control_later(action):
 
         LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-        with open(log_file, "ab", buffering=0) as log_fp:
+        with open_log_file(log_file, "ab", buffering=0) as log_fp:
             log_fp.write(
                 (
                     f"\n===== 调用 FLS 面板控制 {action}: {now_str()} =====\n"
@@ -860,7 +861,7 @@ def run_fls_control_later(action):
         try:
             LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-            with open(log_file, "ab", buffering=0) as log_fp:
+            with open_log_file(log_file, "ab", buffering=0) as log_fp:
                 log_fp.write(
                     (
                         f"\n===== 调用 FLS 面板控制 {action} 失败: {now_str()} =====\n"

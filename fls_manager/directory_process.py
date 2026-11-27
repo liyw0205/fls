@@ -37,6 +37,10 @@ class DirectoryProcess:
             "pass_fds": list(pass_fds),
             "job_lease_path": str(job_lease_path) if job_lease_path is not None else None,
             "shell": shell, "stop_grace_seconds": stop_grace_seconds,
+            "log_lease_paths": sorted({
+                str(stream.log_lease_path) for stream in (stdout, stderr)
+                if isinstance(getattr(stream, "log_lease_path", None), (str, os.PathLike))
+            }),
         }
         options = {"pass_fds": tuple(pass_fds)} if os.name == "posix" else {}
         self._process = subprocess.Popen(
@@ -136,6 +140,19 @@ def _supervise(result_path):
     if lease is None:
         release_process_lease(job_lease)
         raise RuntimeError("directory restore is active")
+    log_leases = []
+    try:
+        for path in configuration.get("log_lease_paths", []):
+            log_lease = try_process_lease(path, create=False, shared=True)
+            if log_lease is None:
+                raise RuntimeError("log file is being deleted")
+            log_leases.append(log_lease)
+    except BaseException:
+        for log_lease in reversed(log_leases):
+            release_process_lease(log_lease)
+        release_process_lease(job_lease)
+        release_process_lease(lease)
+        raise
     disconnected = threading.Event()
     process = None
     job = None
@@ -236,6 +253,8 @@ def _supervise(result_path):
                     except (OSError, ValueError):
                         if not stream.closed:
                             time.sleep(0.05)
+            for log_lease in reversed(log_leases):
+                release_process_lease(log_lease)
             release_process_lease(job_lease)
             release_process_lease(lease)
 

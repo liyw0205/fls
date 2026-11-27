@@ -21,6 +21,7 @@ from ...paths import BASE_DIR, LOG_DIR, SCRIPT_DEBUG_RUNS_FILE
 from ...storage import write_json
 from ...directory_jobs import DirectoryJobHistoryError, directory_job_operation, start_directory_job
 from ...directory_process import DirectoryProcess
+from ...log_access import open_log_file
 from ...script_debug_coordination import DEBUG_RECEIPTS, DEBUG_IDENTITIES, debug_active, debug_active_ids
 from ...utils import h, now_str, safe_name, get_back_url
 from ...ui.layout import layout
@@ -424,7 +425,7 @@ def _start_script_debug_run(rel_path, request_id=""):
     proc = None
     workspace = None
     try:
-        log_fp = open(log_file, "ab", buffering=0)
+        log_fp = open_log_file(log_file, "ab", buffering=0)
         header = (
             f"===== 脚本调试运行 =====\n"
             f"时间: {now_str()}\n"
@@ -643,7 +644,7 @@ def _legacy_scripts_debug_stop(debug_id):
             log_file = info.get("log_file")
             if log_file:
                 try:
-                    with open(log_file, "ab") as f:
+                    with open_log_file(log_file, "ab") as f:
                         f.write(
                             f"\n===== 用户手动停止调试: {now_str()} =====\n".encode("utf-8")
                         )

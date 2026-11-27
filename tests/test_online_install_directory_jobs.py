@@ -368,16 +368,16 @@ class OnlineInstallDirectoryJobTests(unittest.TestCase):
                     )
                     if code:
                         with self.assertRaises(InstallCommandError) as caught:
-                            run_logged_command([sys.executable, "-c", command], base / "scripts", base / "command.log")
+                            run_logged_command([sys.executable, "-c", command], base / "scripts", base / "log" / "command.log")
                         self.assertEqual(caught.exception.returncode, code)
                     else:
-                        run_logged_command([sys.executable, "-c", command], base / "scripts", base / "command.log")
+                        run_logged_command([sys.executable, "-c", command], base / "scripts", base / "log" / "command.log")
                     for pid in json.loads(marker.read_text()):
                         process_tests.DirectoryProcessTests().assert_exited(pid)
-                    self.assertIn("fixture output", (base / "command.log").read_text(encoding="utf-8"))
+                    self.assertIn("fixture output", (base / "log" / "command.log").read_text(encoding="utf-8"))
                     self.assert_available()
             with self.assertRaises(InstallCommandError) as caught:
-                run_logged_command("exit 7", base / "scripts", base / "command.log", shell=True)
+                run_logged_command("exit 7", base / "scripts", base / "log" / "command.log", shell=True)
             self.assertEqual(caught.exception.returncode, 7)
             self.assert_available()
 
@@ -390,7 +390,7 @@ class OnlineInstallDirectoryJobTests(unittest.TestCase):
                 marker = base / "children.json"
                 info = {
                     "id": "install", "script_id": "demo", "script_name": "Demo", "running": True,
-                    "status": "运行中", "phase": "running_command", "log_file": str(base / "install.log"),
+                    "status": "运行中", "phase": "running_command", "log_file": str(base / "log" / "install.log"),
                 }
                 ONLINE_INSTALL_RUNNING["install"] = info
                 with install.ONLINE_INSTALL_LOCK:
@@ -407,7 +407,7 @@ class OnlineInstallDirectoryJobTests(unittest.TestCase):
                 def run():
                     try:
                         install.run_logged_command([sys.executable, "-c", command], base / "scripts",
-                                                   base / "install.log", install_id="install")
+                                                   base / "log" / "install.log", install_id="install")
                     except Exception as exc:
                         errors.append(exc)
 
@@ -448,7 +448,7 @@ class OnlineInstallDirectoryJobTests(unittest.TestCase):
             marker = base / "executions"
             info = {
                 "id": "install", "script_id": "demo", "script_name": "Demo", "running": True,
-                "status": "准备中", "log_file": str(base / "install.log"),
+                "status": "准备中", "log_file": str(base / "log" / "install.log"),
             }
             ONLINE_INSTALL_RUNNING["install"] = info
             original_process = install.DirectoryProcess
@@ -501,7 +501,7 @@ class OnlineInstallDirectoryJobTests(unittest.TestCase):
                 " process=original(*args,**kwargs)\n processes.append(process)\n return process\n"
                 "install.DirectoryProcess=spawn\n"
                 f"threading.Thread(target=install.run_logged_command,args=([sys.executable,'-c',{command!r}],"
-                f"pathlib.Path({str(base / 'scripts')!r}),pathlib.Path({str(base / 'command.log')!r})),daemon=True).start()\n"
+                f"pathlib.Path({str(base / 'scripts')!r}),pathlib.Path({str(base / 'log' / 'command.log')!r})),daemon=True).start()\n"
                 "deadline=time.monotonic()+10\n"
                 f"while not pathlib.Path({str(marker)!r}).exists() and time.monotonic()<deadline:time.sleep(0.01)\n"
                 f"children=json.loads(pathlib.Path({str(marker)!r}).read_text())\n"

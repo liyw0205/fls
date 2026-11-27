@@ -57,6 +57,10 @@ jobs:
           tests/test_task_runtime.py
           tests/test_task_copy_delete_recovery.py
           tests/test_task_log_directory_access.py
+          tests/test_log_file_coordination.py
+          tests/test_native_log_api.py
+          tests/test_log_file_delete_recovery.py
+          tests/test_log_group_delete_recovery.py
           tests/test_directory_process.py
           tests/test_online_install_directory_jobs.py
           tests/test_online_install_workers.py
@@ -122,6 +126,10 @@ jobs:
         env:
           PYTHONPATH: .
         run: python -m pytest -q tests/test_task_execution_workers.py tests/test_task_log_directory_access.py
+      - name: Verify log handle leases, bounded reads and Web deletion compatibility
+        env:
+          PYTHONPATH: .
+        run: python -m pytest -q tests/test_log_file_coordination.py tests/test_native_log_api.py tests/test_log_file_delete_recovery.py tests/test_log_group_delete_recovery.py
       - name: Verify Job Object ownership and crash cleanup
         run: python -m pytest -q tests/test_backup_dependency_process.py
       - name: Verify independent process lease and receipt ordering

@@ -233,7 +233,7 @@ class NativeScriptDebugApiTests(unittest.TestCase):
 
             client, headers = self._native_client(app)
             debug_id = "d" * 32
-            log_file = base / "logs" / "debug.log"
+            log_file = base / "log" / "debug.log"
             log_file.parent.mkdir(parents=True, exist_ok=True)
             log_file.touch()
             proc = SimpleNamespace(pid=44, poll=Mock(side_effect=[None, -15]))

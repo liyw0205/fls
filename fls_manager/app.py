@@ -7,6 +7,7 @@ from flask import Flask, request
 from .paths import BASE_DIR, DATA_DIR
 from . import backup_commit
 from .data_access import directory_access, PanelStorageBusy
+from .log_access import LogFileBusy
 
 from .csrf import csrf_before_request
 from .auth import (
@@ -125,9 +126,12 @@ def create_app():
         reconcile_startup_state(app)
 
     @app.errorhandler(PanelStorageBusy)
+    @app.errorhandler(LogFileBusy)
     def panel_storage_busy(_error):
         from flask import jsonify
-        response = jsonify(ok=False, code="panel_storage_busy", msg=str(_error))
+        code = "log_file_busy" if isinstance(_error, LogFileBusy) else "panel_storage_busy"
+        message = "日志正在清理，请稍后重新读取" if isinstance(_error, LogFileBusy) else str(_error)
+        response = jsonify(ok=False, code=code, msg=message)
         response.status_code = 503
         response.headers["Retry-After"] = "1"
         response.headers["Cache-Control"] = "no-store"

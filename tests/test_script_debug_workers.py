@@ -262,7 +262,7 @@ class ScriptDebugWorkerTests(unittest.TestCase):
 
             self.script(base)
             entered, release = threading.Event(), threading.Event()
-            actual_open = open
+            actual_open = debug.open_log_file
             wrapped = []
 
             class Log:
@@ -279,6 +279,10 @@ class ScriptDebugWorkerTests(unittest.TestCase):
                 def fileno(self):
                     return self.stream.fileno()
 
+                @property
+                def log_lease_path(self):
+                    return self.stream.log_lease_path
+
                 def close(self):
                     self.calls += 1
                     if self.calls == 1:
@@ -294,7 +298,7 @@ class ScriptDebugWorkerTests(unittest.TestCase):
                 return wrapped[-1]
 
             try:
-                with patch.object(debug, 'open', side_effect=open_log, create=True), patch.object(debug, 'debug_command_info', return_value=dict(cmd=[sys.executable, '-c', 'print("done")'], cwd=str(base), shell=False)):
+                with patch.object(debug, 'open_log_file', side_effect=open_log), patch.object(debug, 'debug_command_info', return_value=dict(cmd=[sys.executable, '-c', 'print("done")'], cwd=str(base), shell=False)):
                     result = app.test_client().post('/api/scripts/debug-runs', json=dict(path='demo.py', request_id='3' * 32), headers={'X-Token': TOKEN})
                     self.assertEqual(result.status_code, 202, result.json)
                     self.assertTrue(entered.wait(10))

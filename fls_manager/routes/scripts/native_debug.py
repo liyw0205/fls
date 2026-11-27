@@ -27,6 +27,7 @@ from ...script_rename import pending_script_rename
 from ...sensitive import mask_sensitive_text
 from ...utils import now_str
 from ...logs import tail_file
+from ...log_access import open_log_file
 
 SCRIPT_DEBUG_REQUEST_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 SCRIPT_DEBUG_HISTORY_LIMIT = 100
@@ -292,9 +293,9 @@ def api_script_debug_stop(debug_id):
             info["status"] = "stopped"
             info["error"] = "用户手动停止"
             try:
-                with open(info.get("log_file", ""), "ab") as log_fp:
+                with open_log_file(info.get("log_file", ""), "ab") as log_fp:
                     log_fp.write(f"\n===== 用户手动停止调试: {now_str()} =====\n".encode("utf-8"))
-            except OSError:
+            except (OSError, ValueError):
                 pass
         else:
             info["status"] = "succeeded" if return_code == 0 else "failed"

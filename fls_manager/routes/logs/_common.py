@@ -1,7 +1,6 @@
 from .bp import bp
 import hashlib
 import stat
-import threading
 from datetime import datetime
 from math import ceil
 from urllib.parse import quote
@@ -11,29 +10,25 @@ from flask import abort, redirect, url_for, request, Response, jsonify
 from ...paths import LOG_DIR
 from ...logs import parse_task_name_from_log, tail_file
 from ...sensitive import mask_sensitive_text
+from ...log_access import delete_log_file, file_version, open_log_file
 from ...utils import h, get_back_url
 from ...ui.layout import layout
 from ...ui.log_controls import log_controls
 from ...ui.components import pagination_card, page_header, empty_state, data_toolbar
 
 
-LOG_FILES_MUTATION_LOCK = threading.RLock()
-
-
 def safe_log_file(filename):
-    filename = str(filename or "").split("/")[-1].split("\\")[-1]
+    if (not isinstance(filename, str) or filename != filename.strip()
+        or "/" in filename or "\\" in filename or not filename.endswith(".log")):
+        abort(404)
     file_path = LOG_DIR / filename
-
     try:
-        resolved = file_path.resolve()
-        log_dir = LOG_DIR.resolve()
-    except OSError:
+        file_version(file_path.lstat())
+        if file_path.is_symlink() or (hasattr(file_path, "is_junction") and file_path.is_junction()):
+            abort(404)
+    except (OSError, ValueError):
         abort(404)
-
-    if resolved.parent != log_dir or not resolved.is_file():
-        abort(404)
-
-    return resolved
+    return file_path
 
 
 def log_file_version(file_path):
@@ -41,8 +36,7 @@ def log_file_version(file_path):
     info = file_path.lstat()
     if not stat.S_ISREG(info.st_mode):
         raise ValueError("日志文件不是常规文件")
-    identity = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
-    return hashlib.sha256(repr(identity).encode("ascii")).hexdigest()
+    return file_version(info)
 
 
 def log_group_version(log_files):

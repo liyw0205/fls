@@ -21,6 +21,7 @@ from flask import request, Response, redirect, url_for, jsonify, abort
 
 from ...paths import BASE_DIR, DATA_DIR, SCRIPT_DIR, LOG_DIR
 from ... import backup_commit
+from ...log_access import open_log_file
 from ...backup_lease import try_process_lease, release_process_lease
 from ...storage import mutate_json, storage_transaction, write_json
 from ...ui.layout import layout
@@ -1142,7 +1143,7 @@ def install_dependencies(dep_file):
         datetime.now().strftime("%Y%m%d-%H%M%S")
     )
 
-    with open(log_file, "ab", buffering=0) as log_fp:
+    with open_log_file(log_file, "ab", buffering=0, restore_lease_fd=RESTORE_ACTIVITY_LEASE) as log_fp:
         header = (
             "===== 备份恢复依赖 =====\n"
             "时间: {}\n"

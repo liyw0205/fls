@@ -4,46 +4,7 @@ from ...directory_jobs import directory_job_operation
 
 def _delete_group_file(file_path, expected_version):
     """Delete one file only when its identity is unchanged, then confirm absence."""
-    with LOG_FILES_MUTATION_LOCK:
-        try:
-            actual_version = log_file_version(file_path)
-        except FileNotFoundError:
-            return "missing", 0, ""
-        except (OSError, ValueError) as exc:
-            return "failed", 0, f"{file_path.name}: {exc}"
-
-        if actual_version != expected_version:
-            return "conflict", 0, f"{file_path.name}: 文件在删除前已变化"
-
-        try:
-            file_path.unlink()
-        except FileNotFoundError:
-            return "missing", 0, ""
-        except Exception as exc:
-            try:
-                after_version = log_file_version(file_path)
-            except FileNotFoundError:
-                return "deleted", 1, ""
-            except (OSError, ValueError) as check_error:
-                return "unknown", 0, f"{file_path.name}: 删除结果无法确认：{exc}；{check_error}"
-            if after_version != expected_version:
-                return "conflict", 0, f"{file_path.name}: 删除期间文件已变化，未删除新文件"
-            return "failed", 0, f"{file_path.name}: {exc}"
-
-        try:
-            file_path.lstat()
-        except FileNotFoundError:
-            return "deleted", 1, ""
-        except OSError as exc:
-            return "unknown", 0, f"{file_path.name}: 删除结果无法确认：{exc}"
-
-        try:
-            after_version = log_file_version(file_path)
-        except (OSError, ValueError) as exc:
-            return "unknown", 0, f"{file_path.name}: 删除后仍存在且无法确认：{exc}"
-        if after_version != expected_version:
-            return "conflict", 0, f"{file_path.name}: 删除期间文件已变化，未删除新文件"
-        return "failed", 0, f"{file_path.name}: 删除后文件仍存在"
+    return delete_log_file(file_path, expected_version)
 
 
 @bp.route("/logfile/<filename>")
@@ -173,9 +134,9 @@ def api_logfile_download(filename):
     if size > 8 * 1024 * 1024:
         return jsonify({"ok": False, "msg": "日志文件超过 8 MB 下载限制，请使用日志筛选查看"}), 413
     try:
-        with file_path.open("rb") as stream:
+        with open_log_file(file_path, "rb") as stream:
             raw_content = stream.read(8 * 1024 * 1024 + 1)
-    except OSError:
+    except (OSError, ValueError):
         abort(404)
     if len(raw_content) > 8 * 1024 * 1024:
         return jsonify({"ok": False, "msg": "日志文件超过 8 MB 下载限制，请使用日志筛选查看"}), 413
@@ -210,34 +171,20 @@ def logfile_delete(filename):
     if not isinstance(version, str) or len(version) != 64 or any(c not in "0123456789abcdef" for c in version):
         return failure("日志文件版本无效，未删除任何文件。请刷新日志页面后重试。", 400)
 
-    file_path = LOG_DIR / filename
     try:
-        actual = log_file_version(file_path)
+        log_file_version(LOG_DIR / filename)
     except FileNotFoundError:
         return redirect(back_url)
     except (OSError, ValueError):
         return failure("日志文件不是可安全删除的常规文件，未删除任何文件。", 409)
-    if actual != version:
-        return failure("日志文件已变化，未删除同名新文件。请刷新列表后重新选择。", 409)
-
-    try:
-        file_path.unlink()
-    except FileNotFoundError:
+    outcome, _, detail = delete_log_file(LOG_DIR / filename, version)
+    if outcome in ("deleted", "missing"):
         return redirect(back_url)
-    except Exception as exc:
-        try:
-            if not file_path.exists():
-                return redirect(back_url)
-        except Exception:
-            return failure(f"删除结果无法确认：{exc}", 503)
-        return failure(f"日志删除失败：{exc}。文件仍在，请检查后重试。", 500)
-
-    try:
-        if file_path.exists():
-            return failure("删除结果无法确认，日志文件仍存在。请查询后重试。", 503)
-    except Exception as exc:
-        return failure(f"删除结果无法确认：{exc}", 503)
-    return redirect(back_url)
+    if outcome == "conflict":
+        return failure("日志文件已变化，未删除同名新文件。请刷新列表后重新选择。", 409)
+    if outcome == "busy":
+        return failure(detail, 409)
+    return failure(detail, 503 if outcome == "unknown" else 500)
 
 
 @bp.route("/api/logs/groups/delete", methods=["POST"])
@@ -279,6 +226,18 @@ def api_log_groups_delete():
             return jsonify({"ok": False, "msg": "日志分组版本无效，未删除任何文件"}), 400
         group_versions[group_name] = version
 
+    try:
+        for candidate in LOG_DIR.glob("*.log"):
+            try:
+                log_file_version(candidate)
+            except FileNotFoundError:
+                continue
+    except (OSError, ValueError):
+        return jsonify({
+            "ok": False, "partial": False, "retry_groups": group_names,
+            "results": [{"group": name, "status": "failed", "deleted": 0} for name in group_names],
+            "msg": "存在无法确认分组的异常日志文件，未删除任何文件，请先核对日志目录",
+        }), 500
     groups = load_log_groups()
     deleted = 0
     missing = []
@@ -316,7 +275,7 @@ def api_log_groups_delete():
             group_deleted += count
             if outcome == "conflict":
                 group_conflict = True
-            elif outcome in ("failed", "unknown"):
+            elif outcome in ("busy", "failed", "unknown"):
                 group_failed = True
             if detail:
                 failed.append(detail)

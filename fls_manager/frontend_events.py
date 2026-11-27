@@ -5,6 +5,7 @@ from flask import request
 from .notify import send_all_enabled
 from .paths import LOG_DIR
 from .utils import now_str
+from .log_access import open_log_file
 
 
 def _client_ip():
@@ -20,8 +21,7 @@ def _log_frontend_event(message):
     print(f"[Frontend] {line}", flush=True)
 
     try:
-        LOG_DIR.mkdir(parents=True, exist_ok=True)
-        with (LOG_DIR / "frontend-events.log").open("a", encoding="utf-8") as fp:
+        with open_log_file(LOG_DIR / "frontend-events.log", "a", encoding="utf-8") as fp:
             fp.write(line + "\n")
     except Exception as exc:
         print(f"[Frontend] 事件日志写入失败: {exc}", flush=True)
