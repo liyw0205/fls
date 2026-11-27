@@ -79,7 +79,7 @@ def log_group_title(task_name, count):
     return title
 
 
-def log_file_group_name(file_path):
+def log_file_group_name(file_path, *, strict=False):
     name = file_path.name
 
     if (
@@ -90,7 +90,7 @@ def log_file_group_name(file_path):
     ):
         return "其他日志"
 
-    return parse_task_name_from_log(file_path) or "其他日志"
+    return parse_task_name_from_log(file_path, strict=strict) or "其他日志"
 
 
 def load_log_groups():

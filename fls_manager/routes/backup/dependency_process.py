@@ -13,6 +13,7 @@ if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from fls_manager.process_tree import WindowsJob, _posix_group_running
+from fls_manager.receipt_io import open_receipt, publish_receipt
 
 
 class DependencyProcess:
@@ -59,7 +60,7 @@ class DependencyProcess:
         deadline = time.monotonic() + timeout
         while True:
             try:
-                fd = os.open(self.result_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                fd = open_receipt(self.result_path)
             except FileNotFoundError:
                 pass
             else:
@@ -149,7 +150,7 @@ def _supervise(result_path, command):
         json.dump({"returncode": returncode}, stream)
         stream.flush()
         os.fsync(stream.fileno())
-    os.replace(temporary, result_path)
+    publish_receipt(temporary, result_path)
     # Keep the owned session leader alive until the parent reaps the whole tree.
     threading.Event().wait()
 

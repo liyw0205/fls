@@ -1,5 +1,6 @@
 from ._common import *
 from ...directory_jobs import directory_job_operation
+from ...log_access import log_file_busy
 
 
 @bp.route("/api/logs")
@@ -25,12 +26,15 @@ def api_logs():
                 safe_path = path
                 info = safe_path.lstat()
                 file_version(info)
+                busy = log_file_busy(safe_path)
             except (OSError, ValueError):
                 continue
             items.append({
                 "filename": safe_path.name,
                 "group": str(group)[:512],
                 "size_bytes": max(0, int(info.st_size)),
+                "version": file_version(info),
+                "busy": busy,
                 "modified_at": datetime.fromtimestamp(info.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
                 "modified_timestamp": info.st_mtime,
             })

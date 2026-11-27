@@ -50,6 +50,33 @@ class BackupDependencyProcessTests(unittest.TestCase):
             time.sleep(0.02)
         self.assertTrue(process_exited(pid), f"process {pid} did not exit")
 
+    def test_result_publication_keeps_open_readers_on_the_previous_object(self):
+        from fls_manager.task_execution_coordination import _open_receipt
+
+        with tempfile.TemporaryDirectory() as directory:
+            process = self.module()["DependencyProcess"](
+                [sys.executable, "-c", "pass"], workspace=Path(directory),
+                cwd=directory, env=os.environ.copy(),
+            )
+            process.result_path.write_text('{"returncode":199}', encoding="ascii")
+            try:
+                with os.fdopen(_open_receipt(process.result_path), "rb") as previous:
+                    process.start()
+                    deadline = time.monotonic() + 5
+                    observed = None
+                    while time.monotonic() < deadline:
+                        with os.fdopen(_open_receipt(process.result_path), "rb") as current:
+                            observed = json.load(current)["returncode"]
+                        if observed == 0:
+                            break
+                        time.sleep(0.02)
+                    self.assertEqual(observed, 0, "supervisor could not publish while a reader held the old receipt")
+                    self.assertEqual(json.load(previous)["returncode"], 199)
+                    self.assertEqual(process.wait(timeout=5), 0)
+            finally:
+                process.stop()
+                process.stdout.close()
+
     def test_start_gate_and_exited_command_keep_owned_supervisor_until_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

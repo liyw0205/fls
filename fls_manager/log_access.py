@@ -21,6 +21,35 @@ def file_version(info):
     return hashlib.sha256(repr(identity).encode("ascii")).hexdigest()
 
 
+def log_directory_version(info):
+    if not stat.S_ISDIR(info.st_mode):
+        raise ValueError("invalid log directory")
+    return hashlib.sha256(repr((info.st_dev, info.st_ino)).encode("ascii")).hexdigest()
+
+
+def log_file_busy(path):
+    """Probe an existing lease without creating or changing lock files."""
+    from .paths import BASE_DIR, LOG_DIR
+
+    path = Path(path).absolute()
+    if _is_link(path.parent) or not os.path.samefile(path.parent, LOG_DIR) or _is_link(path):
+        raise ValueError("invalid log path")
+    if os.name == "nt":
+        path = path.resolve()
+    lock_root = BASE_DIR / ".log_file_locks"
+    if _is_link(lock_root):
+        raise ValueError("invalid log lock directory")
+    name = hashlib.sha256(os.path.normcase(path.name).encode("utf-8")).hexdigest()
+    try:
+        lease = try_process_lease(lock_root / f"{name}.lock", create=False)
+    except FileNotFoundError:
+        return False
+    if lease is None:
+        return True
+    release_process_lease(lease)
+    return False
+
+
 def _is_link(path):
     return path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction())
 
@@ -194,17 +223,23 @@ def _open_log_file(context, mode, buffering, **kwargs):
         raise
 
 
-def delete_log_file(path, expected_version):
+def delete_log_file(path, expected_version, *, prepare=None, expected_directory=None):
     """Check and unlink under one exclusive lease; never retry another object."""
     name = Path(path).name
     try:
         with log_file_access(path, exclusive=True) as access:
+            if expected_directory is not None and log_directory_version(access.expected) != expected_directory:
+                return "conflict", 0, f"{name}: 日志目录已变化"
             try:
                 actual = file_version(access.info())
             except FileNotFoundError:
                 return "missing", 0, ""
             if actual != expected_version:
                 return "conflict", 0, f"{name}: 文件在删除前已变化"
+            if prepare is not None:
+                prepare()
+                if file_version(access.info()) != expected_version:
+                    return "conflict", 0, f"{name}: 保存删除意图期间文件已变化"
             error = None
             try:
                 access.unlink()
@@ -215,6 +250,11 @@ def delete_log_file(path, expected_version):
             try:
                 after = file_version(access.info())
             except FileNotFoundError:
+                if prepare is not None and access.directory is not None:
+                    try:
+                        os.fsync(access.directory)
+                    except OSError:
+                        return "unknown", 0, f"{name}: 删除持久化结果无法确认"
                 return "deleted", 1, ""
             except (OSError, ValueError):
                 return "unknown", 0, f"{name}: 删除结果无法确认"
