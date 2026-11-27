@@ -29,12 +29,47 @@ def _receipt_path(task_id):
     return directory / (hashlib.sha256(task_id.encode("utf-8")).hexdigest() + ".json")
 
 
+def _open_receipt(path):
+    if os.name != "nt":
+        return os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class AttributeTagInfo(ctypes.Structure):
+        _fields_ = [("attributes", wintypes.DWORD), ("tag", wintypes.DWORD)]
+
+    api = ctypes.WinDLL("kernel32", use_last_error=True)
+    api.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                               wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    api.CreateFileW.restype = wintypes.HANDLE
+    api.GetFileInformationByHandleEx.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+    api.GetFileInformationByHandleEx.restype = wintypes.BOOL
+    api.CloseHandle.argtypes = [wintypes.HANDLE]
+    api.CloseHandle.restype = wintypes.BOOL
+    # Readers retain the old object while atomic publication replaces its name.
+    share = 0x1 | 0x2 | 0x4  # FILE_SHARE_READ, WRITE, DELETE
+    handle = api.CreateFileW(str(path), 0x80000000, share, None, 3, 0x00200000, None)
+    if handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        info = AttributeTagInfo()
+        if not api.GetFileInformationByHandleEx(handle, 9, ctypes.byref(info), ctypes.sizeof(info)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if info.attributes & 0x400:  # FILE_ATTRIBUTE_REPARSE_POINT
+            raise DirectoryJobHistoryError("invalid task execution receipt")
+        return msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+    except BaseException:
+        api.CloseHandle(handle)
+        raise
+
+
 def _read(path):
     if path.is_symlink():
         raise DirectoryJobHistoryError("invalid task execution receipt")
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
-                     | getattr(os, "O_NONBLOCK", 0))
+        fd = _open_receipt(path)
         with os.fdopen(fd, "rb") as stream:
             if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                 raise DirectoryJobHistoryError("invalid task execution receipt")

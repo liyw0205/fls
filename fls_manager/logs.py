@@ -70,7 +70,7 @@ def tail_file(file_path, lines=800):
     except Exception as e:
         return f"读取日志失败: {e}"
 
-def parse_task_name_from_log(file_path):
+def parse_task_name_from_log(file_path, *, strict=False):
     try:
         with open_log_file(file_path, "rb") as f:
             data = f.read(8192).decode("utf-8", errors="ignore")
@@ -78,7 +78,8 @@ def parse_task_name_from_log(file_path):
         if m:
             return m.group(1).strip() or None
     except Exception:
-        pass
+        if strict:
+            raise
     return None
 
 def cleanup_logs():
@@ -86,25 +87,49 @@ def cleanup_logs():
     keep = int(cfg.get("log_keep_per_task", 10))
     max_bytes = int(cfg.get("log_max_size_mb", 10)) * 1024 * 1024
 
-    files = [f for f in LOG_DIR.glob("*.log") if f.is_file()]
+    counts = dict.fromkeys(("deleted", "missing", "busy", "conflict", "failed", "unknown"), 0)
 
-    for f in list(files):
+    def remove(path, version):
         try:
-            info = f.lstat()
-            if info.st_size > max_bytes:
-                delete_log_file(f, file_version(info))
+            outcome, _, _ = delete_log_file(path, version)
         except Exception:
-            pass
+            outcome = "failed"
+        counts[outcome] += 1
+
+    files = []
+    for path in list(LOG_DIR.glob("*.log")):
+        try:
+            info = path.lstat()
+            version = file_version(info)
+        except FileNotFoundError:
+            counts["missing"] += 1
+            continue
+        except Exception:
+            counts["failed"] += 1
+            continue
+        files.append((path, version, info.st_mtime_ns, info.st_size))
 
     groups = {}
-    for f in LOG_DIR.glob("*.log"):
-        key = parse_task_name_from_log(f) or "其他日志"
-        groups.setdefault(key, []).append(f)
+    for entry in files:
+        if entry[3] > max_bytes:
+            remove(entry[0], entry[1])
+            continue
+        try:
+            key = parse_task_name_from_log(entry[0], strict=True) or "其他日志"
+        except FileNotFoundError:
+            counts["missing"] += 1
+            continue
+        except LogFileBusy:
+            counts["busy"] += 1
+            continue
+        except Exception:
+            counts["failed"] += 1
+            continue
+        groups.setdefault(key, []).append(entry)
 
-    for _, fs in groups.items():
-        fs.sort(key=lambda x: x.stat().st_mtime, reverse=True)
-        for old in fs[keep:]:
-            try:
-                delete_log_file(old, file_version(old.lstat()))
-            except Exception:
-                pass
+    # Keep one snapshot per path; changed or newly created files wait for the next cycle.
+    for entries in groups.values():
+        entries.sort(key=lambda entry: (entry[2], entry[0].name), reverse=True)
+        for path, version, _, _ in entries[keep:]:
+            remove(path, version)
+    return counts

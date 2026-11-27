@@ -359,11 +359,81 @@ class LogFileCoordinationTests(unittest.TestCase):
             with patch.object(logs, "load_config", return_value={"log_keep_per_task": 0, "log_max_size_mb": 0}):
                 with open_log_file(target, "ab", buffering=0) as stream:
                     stream.write(b"active")
-                    logs.cleanup_logs()
+                    counts = logs.cleanup_logs()
+                    self.assertEqual(counts, dict(deleted=1, missing=0, busy=1, conflict=0, failed=0, unknown=0))
                     self.assertEqual(target.read_bytes(), b"active")
                     self.assertFalse(other.exists())
-                logs.cleanup_logs()
+                counts = logs.cleanup_logs()
+                self.assertEqual(counts, dict(deleted=1, missing=0, busy=0, conflict=0, failed=0, unknown=0))
                 self.assertFalse(target.exists())
+
+    def test_automatic_cleanup_counts_changed_snapshot_once_and_preserves_file(self):
+        with isolated_app() as (_, base):
+            from fls_manager import logs
+
+            target = base / "log" / "changed.log"
+            target.write_bytes(b"original\n")
+            original = logs.parse_task_name_from_log
+
+            def grow(path, **kwargs):
+                group = original(path, **kwargs)
+                with target.open("ab") as writer:
+                    writer.write(b"new output\n")
+                return group
+
+            with patch.object(logs, "load_config", return_value={"log_keep_per_task": 0, "log_max_size_mb": 10}), \
+                    patch.object(logs, "parse_task_name_from_log", side_effect=grow):
+                counts = logs.cleanup_logs()
+            self.assertEqual(counts, dict(deleted=0, missing=0, busy=0, conflict=1, failed=0, unknown=0))
+            self.assertEqual(target.read_bytes(), b"original\nnew output\n")
+
+    def test_automatic_cleanup_preserves_files_created_after_snapshot(self):
+        with isolated_app() as (_, base):
+            from fls_manager import logs
+
+            target = base / "log" / "old.log"
+            added = base / "log" / "new.log"
+            target.write_bytes(b"old output\n")
+            original = logs.delete_log_file
+
+            def add_after_delete(path, version):
+                result = original(path, version)
+                added.write_bytes(b"new output\n")
+                return result
+
+            with patch.object(logs, "load_config", return_value={"log_keep_per_task": 0, "log_max_size_mb": 0}), \
+                    patch.object(logs, "delete_log_file", side_effect=add_after_delete) as remove:
+                counts = logs.cleanup_logs()
+            self.assertEqual(remove.call_count, 1)
+            self.assertEqual(counts, dict(deleted=1, missing=0, busy=0, conflict=0, failed=0, unknown=0))
+            self.assertFalse(target.exists())
+            self.assertEqual(added.read_bytes(), b"new output\n")
+
+    def test_automatic_cleanup_counts_denied_unlink_without_retrying_size_candidate(self):
+        with isolated_app() as (_, base):
+            from fls_manager import logs
+            from fls_manager.log_access import LogAccess
+
+            target = base / "log" / "denied.log"
+            target.write_bytes(b"preserved output\n")
+            with patch.object(logs, "load_config", return_value={"log_keep_per_task": 0, "log_max_size_mb": 0}), \
+                    patch.object(LogAccess, "unlink", side_effect=PermissionError("fixture denied")) as unlink:
+                counts = logs.cleanup_logs()
+            self.assertEqual(unlink.call_count, 1)
+            self.assertEqual(counts, dict(deleted=0, missing=0, busy=0, conflict=0, failed=1, unknown=0))
+            self.assertEqual(target.read_bytes(), b"preserved output\n")
+
+    def test_automatic_cleanup_skips_unreadable_group_and_counts_failure(self):
+        with isolated_app() as (_, base):
+            from fls_manager import logs
+
+            target = base / "log" / "unreadable.log"
+            target.write_bytes(b"preserved output\n")
+            with patch.object(logs, "load_config", return_value={"log_keep_per_task": 0, "log_max_size_mb": 10}), \
+                    patch.object(logs, "open_log_file", side_effect=PermissionError("fixture denied")):
+                counts = logs.cleanup_logs()
+            self.assertEqual(counts, dict(deleted=0, missing=0, busy=0, conflict=0, failed=1, unknown=0))
+            self.assertEqual(target.read_bytes(), b"preserved output\n")
 
     def test_changed_file_is_preserved_and_pinned_read_holds_lease(self):
         with isolated_app() as (_, base):

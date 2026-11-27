@@ -182,6 +182,37 @@ class TaskExecutionWorkerTests(unittest.TestCase):
             self.assertEqual(previous['status'], 'starting')
             self.assertEqual(coordination._read(path)['status'], 'running')
 
+    def test_execution_receipt_reader_rejects_link_after_initial_path_check(self):
+        with isolated_app() as (_, base):
+            from fls_manager import task_execution_coordination as coordination
+
+            path = coordination._receipt_path('a')
+            coordination._write(dict(task_id='a', history_id='a' * 32, status='starting', stop_requested=False))
+            outside = base / 'outside-receipt.json'
+            original = path.read_bytes()
+            path.replace(outside)
+            path.symlink_to(outside)
+            # Exercise the handle check even if a link appears after the path check.
+            with patch.object(type(path), 'is_symlink', return_value=False):
+                with self.assertRaises((OSError, coordination.DirectoryJobHistoryError)):
+                    coordination._read(path)
+            self.assertEqual(outside.read_bytes(), original)
+
+    def test_execution_receipt_reader_preserves_size_and_regular_file_limits(self):
+        with isolated_app() as (_, base):
+            from fls_manager import task_execution_coordination as coordination
+
+            path = coordination._receipt_path('a')
+            coordination._write(dict(task_id='a', history_id='a' * 32, status='starting', stop_requested=False))
+            original = path.read_bytes()
+            path.write_bytes(original + b' ' * (16385 - len(original)))
+            with self.assertRaises(coordination.DirectoryJobHistoryError):
+                coordination._read(path)
+            path.unlink()
+            path.mkdir()
+            with self.assertRaises((OSError, coordination.DirectoryJobHistoryError)):
+                coordination._read(path)
+
     def test_two_workers_reserve_once_and_remote_stop_preserves_history(self):
         with isolated_app() as (_, base):
             self.seed(base, child=True)
