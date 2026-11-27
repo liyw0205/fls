@@ -806,37 +806,39 @@ def api_online_scripts_install(script_id):
             return _api_install_rejected(request_id, "未启用任务导入时不能提交任务选择模式", 400)
         enable_task = False
 
-    try:
-        previous = get_online_install_job(request_id)
-    except Exception as exc:
-        return jsonify(ok=False, request_id=request_id, msg=f"安装记录无法读取：{exc}"), 500
-    if previous:
-        if not _install_request_matches(
-            previous, script_id, proxy_id, import_task, enable_task, force, selected_task_indexes,
-        ):
-            return jsonify(ok=False, request_id=request_id,
-                           msg="安装请求已绑定其他选项，请重新打开安装页面"), 409
-        if not _install_start_receipt_retryable(previous):
-            return _api_install_replay_response(request_id, previous)
+    # A second worker must not publish between replay lookup and active/target checks.
+    with ONLINE_INSTALL_LOCK:
+        try:
+            previous = get_online_install_job(request_id)
+        except Exception as exc:
+            return jsonify(ok=False, request_id=request_id, msg=f"安装记录无法读取：{exc}"), 500
+        if previous:
+            if not _install_request_matches(
+                previous, script_id, proxy_id, import_task, enable_task, force, selected_task_indexes,
+            ):
+                return jsonify(ok=False, request_id=request_id,
+                               msg="安装请求已绑定其他选项，请重新打开安装页面"), 409
+            if not _install_start_receipt_retryable(previous):
+                return _api_install_replay_response(request_id, previous)
 
-    try:
-        target = online_script_target(item)
-    except Exception as exc:
-        return _api_install_rejected(request_id, f"脚本目标路径非法：{exc}", 400)
-    if target.exists() and not force:
-        return _api_install_rejected(
-            request_id, "目标已存在，请确认覆盖后重试", 409,
-            retry_allowed=True, confirm_required=True, target_exists=True,
-        )
+        try:
+            target = online_script_target(item)
+        except Exception as exc:
+            return _api_install_rejected(request_id, f"脚本目标路径非法：{exc}", 400)
+        if target.exists() and not force:
+            return _api_install_rejected(
+                request_id, "目标已存在，请确认覆盖后重试", 409,
+                retry_allowed=True, confirm_required=True, target_exists=True,
+            )
 
-    active_id, active_info = active_online_install_for_script(script_id)
-    if active_id:
-        return jsonify(
-            ok=False, request_id=request_id, install_id=active_id,
-            status=(active_info or {}).get("status") or "运行中", running=True,
-            msg="该脚本正在安装中，请先查看当前安装记录",
-            log_url=url_for("online_scripts.api_online_install_log", install_id=active_id),
-        ), 409
+        active_id, active_info = active_online_install_for_script(script_id)
+        if active_id:
+            return jsonify(
+                ok=False, request_id=request_id, install_id=active_id,
+                status=(active_info or {}).get("status") or "运行中", running=True,
+                msg="该脚本正在安装中，请先查看当前安装记录",
+                log_url=url_for("online_scripts.api_online_install_log", install_id=active_id),
+            ), 409
 
     result = _start_install_job(
         script_id=script_id, item=item, proxy_id=proxy_id, import_task=import_task,
