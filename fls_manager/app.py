@@ -91,7 +91,7 @@ def _secret_key_from_data():
 
 def reconcile_startup_state(app):
     with directory_access(write=True):
-        # Runtime handles are in memory; reconcile durable snapshots before use.
+        # Include independent worker identities before reconciling unfinished history.
         reconcile_task_history_after_restart(running_history_ids())
         if app.config.get("RESTORE_STARTUP_RUNTIME_PENDING"):
             initialize_startup_runtime(app)

@@ -1,7 +1,9 @@
 from ._common import *
+from ...directory_jobs import directory_job_operation
 
 
 @bp.route("/api/logs")
+@directory_job_operation
 def api_logs():
     q = request.args.get("q", "").strip().lower()
     if len(q) > 200:
@@ -53,6 +55,7 @@ def api_logs():
 
 
 @bp.route("/logs")
+@directory_job_operation
 def logs_page():
     q = request.args.get("q", "").strip().lower()
     try:

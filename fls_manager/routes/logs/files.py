@@ -1,4 +1,5 @@
 from ._common import *
+from ...directory_jobs import directory_job_operation
 
 
 def _delete_group_file(file_path, expected_version):
@@ -46,6 +47,7 @@ def _delete_group_file(file_path, expected_version):
 
 
 @bp.route("/logfile/<filename>")
+@directory_job_operation
 def logfile_view(filename):
     back_url = get_back_url("/logs")
     if (not isinstance(filename, str) or filename != filename.strip()
@@ -135,6 +137,7 @@ if(!window.__FLS_ACTIVE_LOG_INTERVAL__) window.__FLS_ACTIVE_LOG_INTERVAL__ = set
 
 
 @bp.route("/api/logfile/<filename>")
+@directory_job_operation
 def api_logfile(filename):
     file_path = safe_log_file(filename)
 
@@ -160,6 +163,7 @@ def api_logfile(filename):
 
 
 @bp.route("/api/logfile/<filename>/download")
+@directory_job_operation
 def api_logfile_download(filename):
     file_path = safe_log_file(filename)
     try:
@@ -169,7 +173,8 @@ def api_logfile_download(filename):
     if size > 8 * 1024 * 1024:
         return jsonify({"ok": False, "msg": "日志文件超过 8 MB 下载限制，请使用日志筛选查看"}), 413
     try:
-        raw_content = file_path.read_bytes()
+        with file_path.open("rb") as stream:
+            raw_content = stream.read(8 * 1024 * 1024 + 1)
     except OSError:
         abort(404)
     if len(raw_content) > 8 * 1024 * 1024:
@@ -185,6 +190,7 @@ def api_logfile_download(filename):
 
 
 @bp.route("/logfile/delete/<filename>", methods=["POST"])
+@directory_job_operation
 def logfile_delete(filename):
     back_url = get_back_url("/logs")
     version = request.form.get("version", "")
@@ -235,6 +241,7 @@ def logfile_delete(filename):
 
 
 @bp.route("/api/logs/groups/delete", methods=["POST"])
+@directory_job_operation
 def api_log_groups_delete():
     data = request.get_json(silent=True) or {}
     raw_groups = data.get("groups") if isinstance(data, dict) and "groups" in data else request.form.getlist("groups")

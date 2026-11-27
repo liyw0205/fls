@@ -425,7 +425,7 @@ def execute_bulk(action, task_ids, request_id, *, load_tasks, mutate_tasks, run_
                                 continue
                             process = info.get("process")
                             try:
-                                process_live = process is None or process.poll() is None
+                                process_live = info.get("active") is True or process is None or process.poll() is None
                             except Exception:
                                 process_live = True
                             if process_live:

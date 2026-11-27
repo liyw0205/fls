@@ -12,7 +12,18 @@ from ...ui.components import empty_table_row, status_badge
 from ...ui.log_controls import log_controls
 from ...task_runner import run_task_now, stop_task_now, is_running
 from ...logs import latest_log_for_task, tail_file
-from ...state import RUNNING
+from ...directory_jobs import directory_job_operation
+from ...task_runner import running_task_snapshot
+from ...paths import LOG_DIR
+
+
+def _task_log_path(task_id, task):
+    info = running_task_snapshot([task_id]).get(task_id, {})
+    if info.get("log_file"):
+        return info["log_file"]
+    if info.get("log_name"):
+        return str(LOG_DIR / info["log_name"])
+    return latest_log_for_task(task)
 
 
 def history_status_badge(status):
@@ -72,6 +83,7 @@ def render_task_history_rows(task_id):
 
 
 @bp.route("/log/<task_id>")
+@directory_job_operation
 def log_view(task_id):
     task = get_task(task_id)
 
@@ -84,12 +96,8 @@ def log_view(task_id):
     toggle_text = "停用" if enabled else "启用"
     toggle_class = "btn-gray" if enabled else "btn-primary"
 
-    if running:
-        log_file = RUNNING.get(task_id, {}).get("log_file", "")
-        pid = RUNNING.get(task_id, {}).get("pid", "")
-    else:
-        log_file = latest_log_for_task(task)
-        pid = ""
+    log_file = _task_log_path(task_id, task)
+    pid = running_task_snapshot([task_id]).get(task_id, {}).get("pid", "")
 
     config_btn = ""
 
@@ -259,6 +267,7 @@ window.__FLS_ACTIVE_LOG_INTERVAL__ = setInterval(loadLog, 2000);
 
 
 @bp.route("/api/log/<task_id>")
+@directory_job_operation
 def api_log(task_id):
     task = get_task(task_id)
 
@@ -274,10 +283,7 @@ def api_log(task_id):
             content_type="text/plain; charset=utf-8",
         )
 
-    if is_running(task_id):
-        log_file = RUNNING.get(task_id, {}).get("log_file", "")
-    else:
-        log_file = latest_log_for_task(task)
+    log_file = _task_log_path(task_id, task)
 
     return Response(
         tail_file(log_file, lines),
@@ -286,6 +292,7 @@ def api_log(task_id):
 
 
 @bp.route("/api/task/<task_id>/log")
+@directory_job_operation
 def api_task_log_json(task_id):
     task = get_task(task_id)
     if not task:
@@ -299,10 +306,7 @@ def api_task_log_json(task_id):
         return jsonify({"ok": False, "msg": "lines 必须在 1 到 1000 之间"}), 400
 
     running = is_running(task_id)
-    if running:
-        log_file = RUNNING.get(task_id, {}).get("log_file", "")
-    else:
-        log_file = latest_log_for_task(task)
+    log_file = _task_log_path(task_id, task)
 
     response = jsonify({
         "ok": True,

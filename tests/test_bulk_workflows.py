@@ -34,9 +34,20 @@ def isolated_app():
 
             from fls_manager.app import create_app
 
-            yield create_app(), Path(temp_dir)
+            with patch("fls_manager.app.dispatch_frontend_open_event"):
+                yield create_app(), Path(temp_dir)
         finally:
             shutdown_scheduler()
+            runner = sys.modules.get("fls_manager.task_runner")
+            if runner is not None:
+                for task_id in set(runner.RUNNING) | set(runner.PENDING_RETRIES):
+                    with contextlib.suppress(Exception):
+                        runner.stop_task_now(task_id)
+                for worker in threading.enumerate():
+                    if worker.name.startswith(("fls-task-", "fls-frontend-open", "fls-about-")) and worker is not threading.current_thread():
+                        worker.join(15)
+                        if worker.is_alive():
+                            raise AssertionError("task worker outlived isolated test state")
             purge_fls_modules()
 
             for key, value in old_env.items():
@@ -422,16 +433,17 @@ class BulkWorkflowTests(unittest.TestCase):
 
             tasks = [sample_task("cached-task", run_count=1)]
             write_json(paths.TASK_FILE, tasks)
-            with patch.object(models, "mutate_json", wraps=models.mutate_json) as mutate_json:
+            with patch.object(models, "read_json", wraps=models.read_json) as read_json:
                 first = models.load_tasks()
                 second = models.load_tasks()
                 self.assertEqual(first, second)
-                self.assertEqual(mutate_json.call_count, 1)
+                self.assertEqual(read_json.call_count, 1)
 
                 tasks[0]["run_count"] = 2
                 models.save_tasks(tasks)
-                models.load_tasks()
-                self.assertEqual(mutate_json.call_count, 2)
+                refreshed = models.load_tasks()
+                self.assertEqual(read_json.call_count, 2)
+                self.assertEqual(refreshed[0]["run_count"], 2)
 
     def test_task_copy_resets_runtime_fields_and_keeps_retry_config(self):
         with isolated_app() as (app, base_dir):

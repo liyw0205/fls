@@ -52,6 +52,11 @@ jobs:
           tests/test_task_config_directory_access.py
           tests/test_task_config_recovery.py
           tests/test_native_task_config.py
+          tests/test_task_execution_workers.py
+          tests/test_task_execution_recovery.py
+          tests/test_task_runtime.py
+          tests/test_task_copy_delete_recovery.py
+          tests/test_task_log_directory_access.py
           tests/test_directory_process.py
           tests/test_online_install_directory_jobs.py
           tests/test_online_install_workers.py
@@ -147,6 +152,10 @@ jobs:
         env:
           PYTHONPATH: .
         run: python -m pytest -q tests/test_task_config_directory_access.py tests/test_native_task_config.py
+      - name: Verify ordinary task ownership, remote stops, retries and log lifetimes
+        env:
+          PYTHONPATH: .
+        run: python -m pytest -q tests/test_task_execution_workers.py tests/test_task_log_directory_access.py
       - name: Verify independent online task import identity and recovery across workers
         env:
           PYTHONPATH: .

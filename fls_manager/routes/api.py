@@ -321,6 +321,8 @@ def api_task_detail(task_id):
     )
     task_payload = {key: task[key] for key in task_fields if key in task}
     runtime = running_task_snapshot([task_id]).get(task_id, {})
+    from ..task_execution_coordination import execution_snapshot
+    execution = execution_snapshot([task_id]).get(task_id, {})
     history_fields = (
         "id", "start_at", "end_at", "duration_seconds", "return_code",
         "status", "source", "message",
@@ -335,9 +337,12 @@ def api_task_detail(task_id):
         "task": task_payload,
         "runtime": {
             "running": bool(runtime),
-            "status": str(runtime.get("status") or ("running" if runtime else "stopped")),
+            "status": str(runtime.get("status") or execution.get("status") or ("running" if runtime else "stopped")),
             "pid": runtime.get("pid"),
             "process_name": runtime.get("process_name"),
+            "history_id": runtime.get("history_id") or execution.get("history_id"),
+            "active": bool(runtime),
+            "stop_requested": execution.get("stop_requested", False),
         },
         "history": history,
     })

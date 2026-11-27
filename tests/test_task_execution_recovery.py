@@ -20,12 +20,13 @@ class TaskExecutionRecoveryTests(unittest.TestCase):
                            json={"request_id": request_id}, headers={"X-Token": TOKEN})
 
     def wait_history(self, status):
-        from fls_manager import models
+        from fls_manager import models, task_runner
         deadline = time.monotonic() + 6
         history = []
         while time.monotonic() < deadline:
             history = models.load_task_history()
-            if history and history[0]["status"] == status:
+            if (history and history[0]["status"] == status
+                    and (status in ("starting", "running", "delaying") or not task_runner.is_running(history[0]["task_id"]))):
                 break
             time.sleep(0.02)
         self.assertTrue(history)

@@ -18,6 +18,7 @@ from .paths import (
 )
 from .storage import read_json, write_json, mutate_json, storage_transaction
 from .task_file_coordination import TASK_FILES_LOCK
+from .directory_jobs import DirectoryJobLock
 from .utils import now_str
 
 MAX_TASK_RETRY_ATTEMPTS = 5
@@ -30,6 +31,7 @@ PROXY_TYPES = ("http", "https", "socks4", "socks5", "socks5h", "github")
 TASK_HISTORY_IN_FLIGHT_STATUSES = frozenset(("starting", "delaying", "running"))
 TASK_HISTORY_INDEX_LOCK = threading.RLock()
 TASK_HISTORY_INDEX_SCHEMA = 6
+TASK_HISTORY_MUTATIONS = DirectoryJobLock("task-history", lambda: None)
 MAX_HISTORY_SEARCH_NGRAM_CANDIDATES = 64
 ABNORMAL_HISTORY_STATUSES = ("failed", "timeout", "start_failed", "unknown")
 ABNORMAL_HISTORY_STATUS_SET = frozenset(ABNORMAL_HISTORY_STATUSES)
@@ -841,7 +843,13 @@ def explain_task_history_query(q="", status="", task_id="", statuses=None):
 
 
 def save_task_history(items):
-    write_json(TASK_HISTORY_FILE, list(items or [])[:TASK_HISTORY_LIMIT])
+    with storage_transaction(), TASK_HISTORY_MUTATIONS:
+        write_json(TASK_HISTORY_FILE, list(items or [])[:TASK_HISTORY_LIMIT])
+
+
+def _mutate_task_history(update, *, strict=True):
+    with storage_transaction(), TASK_HISTORY_MUTATIONS:
+        return mutate_json(TASK_HISTORY_FILE, [], update, strict=strict)
 
 
 def reconcile_task_history_after_restart(active_history_ids=None):
@@ -861,6 +869,10 @@ def reconcile_task_history_after_restart(active_history_ids=None):
 
     def reconcile(data):
         nonlocal recovered_count
+        from .task_execution_coordination import execution_snapshot
+        active = active_history_ids | {
+            row["history_id"] for row in execution_snapshot().values() if row["active"]
+        }
         history = data if isinstance(data, list) else []
         history = [item for item in history if isinstance(item, dict)]
         changed = False
@@ -869,7 +881,7 @@ def reconcile_task_history_after_restart(active_history_ids=None):
             status = str(item.get("status") or "")
             if status not in TASK_HISTORY_IN_FLIGHT_STATUSES:
                 continue
-            if str(item.get("id") or "") in active_history_ids:
+            if str(item.get("id") or "") in active:
                 continue
             if str(item.get("end_at") or "").strip():
                 continue
@@ -892,7 +904,7 @@ def reconcile_task_history_after_restart(active_history_ids=None):
 
         return history[:TASK_HISTORY_LIMIT] if changed else None
 
-    mutate_json(TASK_HISTORY_FILE, [], reconcile)
+    _mutate_task_history(reconcile)
 
     return recovered_count
 
@@ -904,7 +916,7 @@ def add_task_history(record):
         history.insert(0, dict(record or {}))
         return history[:TASK_HISTORY_LIMIT]
 
-    mutate_json(TASK_HISTORY_FILE, [], add_record)
+    _mutate_task_history(add_record)
 
 
 def update_task_history(record_id, updates, fallback_record=None, *, strict=False):
@@ -940,7 +952,7 @@ def update_task_history(record_id, updates, fallback_record=None, *, strict=Fals
 
         return history[:TASK_HISTORY_LIMIT] if changed else None
 
-    mutate_json(TASK_HISTORY_FILE, [], update_record, strict=strict)
+    _mutate_task_history(update_record, strict=strict)
 
     return changed
 

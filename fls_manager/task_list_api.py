@@ -103,6 +103,7 @@ def list_tasks(data, *, load_tasks):
         row = {key: task[key] for key in TASK_FIELDS if key in task}
         row["running"] = is_running
         info = running.get(str(task.get("id") or ""), {})
+        row["execution_status"] = info.get("status", "stopped")
         if info.get("pid") is not None:
             row["pid"] = info["pid"]
         rows.append(row)
