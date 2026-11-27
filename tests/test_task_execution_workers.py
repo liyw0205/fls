@@ -9,6 +9,7 @@ import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from collections import deque
 from unittest.mock import patch
 
 from tests.test_bulk_workflows import isolated_app, sample_task
@@ -45,11 +46,14 @@ class TaskExecutionWorkerTests(unittest.TestCase):
                                     stdout=subprocess.PIPE, stderr=errors, text=True, encoding='utf-8',
                                     env=dict(os.environ, PYTHONIOENCODING='utf-8'))
             results = queue.Queue()
+            output = deque(maxlen=30)
 
             def read():
                 for line in proc.stdout:
                     if line.startswith('FLS_RESULT '):
                         results.put(json.loads(line[len('FLS_RESULT '):]))
+                    else:
+                        output.append(line.rstrip())
 
             reader = threading.Thread(target=read, daemon=True)
             reader.start()
@@ -66,6 +70,25 @@ class TaskExecutionWorkerTests(unittest.TestCase):
             try:
                 self.assertEqual(rpc('get', '/api/tasks')[0], 200)
                 yield proc, rpc
+            except BaseException:
+                # Preserve the failing state before teardown stops tasks and removes fixtures.
+                diagnostics = {'pid': proc.pid, 'returncode': proc.poll(), 'stdout': list(output)}
+                errors.seek(0)
+                diagnostics['stderr'] = errors.read(8192).decode('utf-8', errors='replace')
+                errors.seek(0, os.SEEK_END)
+                paths = [base / 'executions', base / 'data' / 'task_history.json']
+                paths.extend(sorted((base / '.task_executions').glob('*.json')))
+                paths.extend(sorted((base / 'log').glob('*.log')))
+                for path in paths:
+                    try:
+                        with path.open('rb') as stream:
+                            size = stream.seek(0, os.SEEK_END)
+                            stream.seek(max(0, size - 8192))
+                            diagnostics[str(path.relative_to(base))] = stream.read(8192).decode('utf-8', errors='replace')
+                    except OSError as exc:
+                        diagnostics[str(path.relative_to(base))] = repr(exc)
+                print('FLS_WORKER_FAILURE ' + json.dumps(diagnostics, ensure_ascii=True), flush=True)
+                raise
             finally:
                 (base / 'release').touch()
                 if proc.poll() is None:
@@ -130,6 +153,34 @@ class TaskExecutionWorkerTests(unittest.TestCase):
             return self.wait_for(idle)
         except AssertionError as exc:
             self.fail(f'{exc}; observed task phases: {observations!r}')
+
+    def test_execution_receipt_can_publish_while_another_worker_reads_previous_version(self):
+        with isolated_app() as (_, base):
+            from fls_manager import task_execution_coordination as coordination
+
+            path = coordination._receipt_path('a')
+            coordination._write(dict(task_id='a', history_id='a' * 32, status='starting', stop_requested=False))
+            original_fdopen = os.fdopen
+
+            @contextlib.contextmanager
+            def hold_read(fd, *args, **kwargs):
+                with original_fdopen(fd, *args, **kwargs) as stream:
+                    code = (
+                        'from fls_manager.task_execution_coordination import EXECUTIONS,_read,_write,_receipt_path\n'
+                        'with EXECUTIONS:\n'
+                        ' row=_read(_receipt_path("a"))\n'
+                        ' _write(dict(row,status="running"))\n'
+                    )
+                    result = subprocess.run([sys.executable, '-c', code], capture_output=True,
+                                            text=True, encoding='utf-8', timeout=20,
+                                            env=dict(os.environ, PYTHONIOENCODING='utf-8'))
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    yield stream
+
+            with patch.object(coordination.os, 'fdopen', side_effect=hold_read):
+                previous = coordination._read(path)
+            self.assertEqual(previous['status'], 'starting')
+            self.assertEqual(coordination._read(path)['status'], 'running')
 
     def test_two_workers_reserve_once_and_remote_stop_preserves_history(self):
         with isolated_app() as (_, base):

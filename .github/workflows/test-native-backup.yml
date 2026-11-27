@@ -121,54 +121,68 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install test dependencies
+        id: test_dependencies
         run: python -m pip install Flask 'APScheduler<4' requests PySocks tzdata qrcode pytest pytest-subtests
       - name: Verify ordinary task ownership, remote stops, retries and log lifetimes
+        if: ${{ !cancelled() && steps.test_dependencies.outcome == 'success' }}
         env:
           PYTHONPATH: .
         run: python -m pytest -q tests/test_task_execution_workers.py tests/test_task_log_directory_access.py
       - name: Verify log handle leases, bounded reads and Web deletion compatibility
+        if: ${{ !cancelled() && steps.test_dependencies.outcome == 'success' }}
         env:
           PYTHONPATH: .
         run: python -m pytest -q tests/test_log_file_coordination.py tests/test_native_log_api.py tests/test_log_file_delete_recovery.py tests/test_log_group_delete_recovery.py
       - name: Verify Job Object ownership and crash cleanup
+        if: ${{ !cancelled() && steps.test_dependencies.outcome == 'success' }}
         run: python -m pytest -q tests/test_backup_dependency_process.py
       - name: Verify independent process lease and receipt ordering
+        if: ${{ !cancelled() && steps.test_dependencies.outcome == 'success' }}
         env:
           PYTHONPATH: .
         run: python -m pytest -q tests/test_native_backup_api.py -k 'process_lease or rereads or preflight_stages or archive_target'
       - name: Verify shared backups and exclusive Web/native restore across workers
+        if: ${{ !cancelled() && steps.test_dependencies.outcome == 'success' }}
         env:
           PYTHONPATH: .
         run: python -m pytest -q tests/test_backup_activity_lease.py
       - name: Verify SQLite lifetimes and background storage during directory replacement
+        if: ${{ !cancelled() && steps.test_dependencies.outcome == 'success' }}
         env:
           PYTHONPATH: .
         run: python -m pytest -q tests/test_backup_data_access.py tests/test_auth_backup.py -k 'BackupDataAccess or native_login or native_logout or native_resend or native_totp'
       - name: Verify script job admission, handoff and cleanup against directory restore
+        if: ${{ !cancelled() && steps.test_dependencies.outcome == 'success' }}
         env:
           PYTHONPATH: .
         run: python -m pytest -q tests/test_directory_process.py tests/test_script_directory_jobs.py tests/test_script_directory_access.py tests/test_script_job_workers.py tests/test_native_script_repo_pull_api.py tests/test_native_script_import_api.py tests/test_script_import_recovery.py
       - name: Verify interrupted directory commit and startup recovery
+        if: ${{ !cancelled() && steps.test_dependencies.outcome == 'success' }}
         env:
           PYTHONPATH: .
         run: python -m pytest -q tests/test_backup_directory_commit.py tests/test_native_backup_directory_recovery.py
       - name: Verify debug identity, remote stops and supervised process trees
+        if: ${{ !cancelled() && steps.test_dependencies.outcome == 'success' }}
         env:
           PYTHONPATH: .
         run: python -m pytest -q tests/test_script_debug_workers.py tests/test_native_script_debug_api.py tests/test_script_debug_recovery.py tests/test_ui_route_components.py -k 'debug or ScriptDebug'
       - name: Verify online install admission, command supervision and recovery
+        if: ${{ !cancelled() && steps.test_dependencies.outcome == 'success' }}
         env:
           PYTHONPATH: .
         run: python -m pytest -q tests/test_online_install_directory_jobs.py tests/test_online_install_workers.py tests/test_online_install_lifecycle.py tests/test_online_install_recovery.py tests/test_online_install_storage_recovery.py tests/test_online_install_scheduler_recovery.py tests/test_online_native_api.py tests/test_online_task_validation.py
       - name: Verify task config admission, bounded reads and publication cleanup
+        if: ${{ !cancelled() && steps.test_dependencies.outcome == 'success' }}
         env:
           PYTHONPATH: .
         run: python -m pytest -q tests/test_task_config_directory_access.py tests/test_native_task_config.py
       - name: Verify independent online task import identity and recovery across workers
+        if: ${{ !cancelled() && steps.test_dependencies.outcome == 'success' }}
         env:
           PYTHONPATH: .
         run: python -m pytest -q tests/test_online_task_import_workers.py tests/test_online_task_import.py tests/test_online_task_import_replay.py tests/test_online_task_import_confirmation.py tests/test_online_task_import_retention.py
       - name: Verify task-link identity, source publication and recovery across workers
+        if: ${{ !cancelled() && steps.test_dependencies.outcome == 'success' }}
         env:
           PYTHONPATH: .
         run: python -m pytest -q tests/test_online_task_link_workers.py tests/test_online_task_link.py tests/test_online_refresh_workers.py tests/test_online_source_refresh.py tests/test_online_source_editor.py tests/test_online_source_api.py tests/test_online_refresh_storage_recovery.py tests/test_online_refresh_log.py tests/test_online_cache_storage_recovery.py
