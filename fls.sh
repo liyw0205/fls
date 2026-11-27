@@ -668,7 +668,7 @@ start_fls() {
 
   mkdir -p "$DATA_DIR" "$LOG_DIR" 2>/dev/null || true
 
-  nohup "$py_bin" "$MANAGER_FILE" >> "$DAEMON_LOG" 2>&1 &
+  nohup "$py_bin" "$MANAGER_FILE" --daemon-log >/dev/null 2>&1 &
   pid="$!"
 
   echo "$pid" > "$PID_FILE"

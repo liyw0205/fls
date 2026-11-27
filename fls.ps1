@@ -354,15 +354,15 @@ function Quote-CmdArg($s) {
     return '"' + ($s -replace '"', '\"') + '"'
 }
 
-function Python-CmdLine($PySpec) {
+function Python-ManagerArgs($PySpec) {
     $items = @()
-    $items += Quote-CmdArg $PySpec.File
 
     foreach ($a in $PySpec.Args) {
         $items += Quote-CmdArg $a
     }
 
     $items += Quote-CmdArg $ManagerFile
+    $items += "--daemon-log"
 
     return ($items -join " ")
 }
@@ -484,12 +484,9 @@ function Start-Fls([string[]]$ArgsList) {
 
     New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
-    $pyCmd = Python-CmdLine $py
-    $cmdLine = "/c cd /d " + (Quote-CmdArg $BaseDir) + " && " + $pyCmd + " >> " + (Quote-CmdArg $DaemonLog) + " 2>>&1"
-
     $proc = Start-Process `
-        -FilePath "cmd.exe" `
-        -ArgumentList $cmdLine `
+        -FilePath $py.File `
+        -ArgumentList (Python-ManagerArgs $py) `
         -WorkingDirectory $BaseDir `
         -PassThru `
         -WindowStyle Hidden

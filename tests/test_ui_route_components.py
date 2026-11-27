@@ -46,7 +46,7 @@ def isolated_app():
             yield create_app(), Path(temp_dir)
         finally:
             for worker in threading.enumerate():
-                if worker.name.startswith(("fls-script-pull-", "fls-repo-pull-", "fls-script-import-", "fls-repo-progress-", "fls-online-install-", "fls-online-scripts-refresh", "fls-script-debug-")):
+                if worker.name.startswith(("fls-script-pull-", "fls-repo-pull-", "fls-script-import-", "fls-repo-progress-", "fls-online-install-", "fls-online-scripts-refresh", "fls-script-debug-", "fls-frontend-open")):
                     worker.join(10)
                     if worker.is_alive():
                         raise AssertionError(f"script worker did not finish: {worker.name}")

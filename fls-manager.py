@@ -51,6 +51,10 @@ def _bootstrap_deps():
 
 
 def main():
+    if "--daemon-log" in sys.argv[1:]:
+        from fls_manager.daemon_log import redirect_daemon_output
+        redirect_daemon_output()
+
     try:
         instance_lock = acquire_instance_lock()
     except Exception as exc:

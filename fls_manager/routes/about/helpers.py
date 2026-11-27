@@ -14,6 +14,7 @@ from ...ui.components import empty_table_row
 from ...utils import h, now_str, safe_name, LazyModule, prune_completed_records
 from ...logs import tail_file
 from ...log_access import open_log_file
+from ...daemon_log import launch_logged_command
 from ...paths import BASE_DIR, DATA_DIR, LOG_DIR, SCRIPT_DIR
 from ...constants import MAIN_PROCESS_NAME, TASK_PROCESS_PREFIX
 from ...scheduler import reload_scheduler
@@ -768,7 +769,7 @@ try {{
     sh "{script_text}" start
 
     echo "===== FLS 面板自重启结束: $(date '+%Y-%m-%d %H:%M:%S') ====="
-) >> "{LOG_DIR / 'fls-manager-daemon.log'}" 2>&1
+)
 """
     else:
         shell_cmd = f"""
@@ -792,7 +793,7 @@ try {{
     fi
 
     echo "===== FLS 面板停止结束: $(date '+%Y-%m-%d %H:%M:%S') ====="
-) >> "{LOG_DIR / 'fls-manager-daemon.log'}" 2>&1
+)
 """
 
     return [
@@ -813,49 +814,19 @@ def run_fls_control_later(action):
 
         LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-        with open_log_file(log_file, "ab", buffering=0) as log_fp:
-            log_fp.write(
-                (
-                    f"\n===== 调用 FLS 面板控制 {action}: {now_str()} =====\n"
-                    f"系统类型: {os.name}\n"
-                    f"当前面板 PID: {os.getpid()}\n"
-                    f"脚本路径: {script}\n"
-                    f"工作目录: {BASE_DIR}\n"
-                    f"命令: {' '.join(str(x) for x in cmd)}\n"
-                    f"说明: systemd 环境通过独立 transient unit 控制服务，避免当前服务 cgroup 清理重启进程\n"
-                    f"============================================================\n"
-                ).encode("utf-8", errors="replace")
-            )
-
-            popen_kwargs = {
-                "cwd": str(BASE_DIR),
-                "stdout": log_fp,
-                "stderr": subprocess.STDOUT,
-                "stdin": subprocess.DEVNULL,
-            }
-
-            if os.name == "nt":
-                creationflags = 0
-
-                try:
-                    creationflags |= subprocess.CREATE_NEW_PROCESS_GROUP
-                except Exception:
-                    pass
-
-                try:
-                    creationflags |= subprocess.DETACHED_PROCESS
-                except Exception:
-                    pass
-
-                if creationflags:
-                    popen_kwargs["creationflags"] = creationflags
-            else:
-                popen_kwargs["start_new_session"] = True
-
-            subprocess.Popen(
-                cmd,
-                **popen_kwargs,
-            )
+        launch_logged_command(
+            cmd,
+            header=(
+                f"\n===== 调用 FLS 面板控制 {action}: {now_str()} =====\n"
+                f"系统类型: {os.name}\n"
+                f"当前面板 PID: {os.getpid()}\n"
+                f"脚本路径: {script}\n"
+                f"工作目录: {BASE_DIR}\n"
+                f"命令: {' '.join(str(x) for x in cmd)}\n"
+                f"说明: systemd 环境通过独立 transient unit 控制服务，避免当前服务 cgroup 清理重启进程\n"
+                f"============================================================\n"
+            ).encode("utf-8", errors="replace"),
+        )
 
     except Exception as e:
         try:

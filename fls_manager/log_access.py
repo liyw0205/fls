@@ -26,7 +26,7 @@ def _is_link(path):
 
 
 @contextmanager
-def log_file_access(path, *, exclusive=False, restore_lease_fd=None, legacy_root=False):
+def log_file_access(path, *, exclusive=False, restore_lease_fd=None, legacy_root=False, daemon=False):
     from .directory_jobs import _acquire_job_lease
     from .paths import BASE_DIR, LOG_DIR
 
@@ -37,13 +37,19 @@ def log_file_access(path, *, exclusive=False, restore_lease_fd=None, legacy_root
         raise ValueError("invalid log path")
     if _is_link(path) or ":" in path.name:
         raise ValueError("invalid log file")
+    if daemon and (path != LOG_DIR / "fls-manager-daemon.log" or exclusive or restore_lease_fd is not None):
+        raise ValueError("invalid daemon log path")
     # Normalize Windows short-name aliases before choosing the shared lock.
     if os.name == "nt":
         path = path.resolve()
         if not os.path.samefile(path.parent, log_root):
             raise ValueError("invalid log path")
     restore = None
-    if restore_lease_fd is None:
+    if daemon:
+        # This fixed log is outside the data/scripts restore set. A permanent
+        # restore lease would make restoring a running panel impossible.
+        pass
+    elif restore_lease_fd is None:
         restore = _acquire_job_lease()
     else:
         held = os.fstat(restore_lease_fd)
@@ -151,6 +157,14 @@ def open_log_file(path, mode="ab", buffering=-1, *, restore_lease_fd=None, legac
     if mode not in ("a", "ab", "rb", "xb"):
         raise ValueError("unsupported log mode")
     context = log_file_access(path, restore_lease_fd=restore_lease_fd, legacy_root=legacy_root)
+    return _open_log_file(context, mode, buffering, **kwargs)
+
+
+def open_daemon_log(path):
+    return _open_log_file(log_file_access(path, daemon=True), "ab", 0)
+
+
+def _open_log_file(context, mode, buffering, **kwargs):
     access = context.__enter__()
     stream = None
     fd = None
