@@ -6,5 +6,6 @@ bp = Blueprint("tasks", __name__)
 from . import pages
 from . import actions
 from . import config_file
+from . import native_config_file
 from . import logs
 from . import collections

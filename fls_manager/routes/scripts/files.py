@@ -18,6 +18,7 @@ from ...paths import SCRIPT_DIR
 from ...directory_jobs import directory_job, directory_job_operation
 from ...data_access import PanelStorageBusy
 from ...models import TASKS_MUTATION_LOCK
+from ...task_file_coordination import TASK_FILES_LOCK
 from ...script_files import (
     ScriptFileConflict, ScriptFileWriteError, script_file_target,
     script_file_snapshot, publish_script_file,
@@ -75,7 +76,7 @@ def scripts_new():
             target = script_file_target(rel)
             if not target.parent.is_dir():
                 raise ValueError("当前目录不存在，请重新选择目录")
-            with TASKS_MUTATION_LOCK:
+            with TASKS_MUTATION_LOCK, TASK_FILES_LOCK:
                 _guard_file_mutation(target)
                 if target.exists():
                     # Replaying the same create request must never replace another file.
@@ -159,7 +160,7 @@ def scripts_view():
     saved = False
     try:
         target = script_file_target(raw)
-        with TASKS_MUTATION_LOCK:
+        with TASKS_MUTATION_LOCK, TASK_FILES_LOCK:
             if posted_content is None:
                 pending = pending_script_rename(path=target)
                 if pending:
@@ -268,7 +269,7 @@ def scripts_rename():
             raise ValueError("重命名提交标识无效，请重新打开页面")
         validate_new_name(new_name)
         destination = script_file_target(str(target.with_name(new_name).relative_to(SCRIPT_DIR.resolve())))
-        with TASKS_MUTATION_LOCK:
+        with TASKS_MUTATION_LOCK, TASK_FILES_LOCK:
             existing = get_script_rename(operation_id)
             if existing:
                 if existing["source"] != raw or existing["destination"] != str(destination.relative_to(SCRIPT_DIR.resolve())):
@@ -390,7 +391,7 @@ def json_text(update):
 @directory_job_operation
 def scripts_rename_recovery(operation_id):
     try:
-        with TASKS_MUTATION_LOCK:
+        with TASKS_MUTATION_LOCK, TASK_FILES_LOCK:
             record = get_script_rename(operation_id)
             if not record:
                 abort(404)
@@ -459,7 +460,7 @@ def scripts_delete(rel_path):
     parent = target.parent
 
     try:
-        with TASKS_MUTATION_LOCK:
+        with TASKS_MUTATION_LOCK, TASK_FILES_LOCK:
             _guard_file_mutation(target)
             if target.is_dir():
                 shutil.rmtree(target)

@@ -13,6 +13,7 @@ from .helpers import script_rel_path
 from ...directory_jobs import directory_job_operation
 from ...data_access import PanelStorageBusy
 from ...models import TASKS_MUTATION_LOCK
+from ...task_file_coordination import TASK_FILES_LOCK
 from ...paths import SCRIPT_DIR
 from ...script_files import (
     ScriptFileConflict,
@@ -254,7 +255,7 @@ def api_script_tree():
 def api_script_delete_preview():
     raw_path = request.args.get("path", "")
     try:
-        with TASKS_MUTATION_LOCK:
+        with TASKS_MUTATION_LOCK, TASK_FILES_LOCK:
             _target, preview = _delete_preview(raw_path)
     except FileNotFoundError:
         return _error("脚本文件不存在", 404, "not_found")
@@ -278,7 +279,7 @@ def api_script_file():
             target, path = _path_target(raw_path)
         except ValueError:
             return _error("脚本文件路径无效", 400, "invalid_path")
-        with TASKS_MUTATION_LOCK:
+        with TASKS_MUTATION_LOCK, TASK_FILES_LOCK:
             try:
                 _guard_file_mutation(target)
                 if not target.exists():
@@ -319,7 +320,7 @@ def api_script_file():
         ):
             return _error("path、revision 或引用确认无效", 400, "invalid_body")
         try:
-            with TASKS_MUTATION_LOCK:
+            with TASKS_MUTATION_LOCK, TASK_FILES_LOCK:
                 target, preview = _delete_preview(raw_path)
                 if revision != preview["revision"]:
                     return _response({
@@ -367,7 +368,7 @@ def api_script_file():
             target, path = _path_target(raw_path)
         except ValueError:
             return _error("脚本文件路径无效", 400, "invalid_path")
-        with TASKS_MUTATION_LOCK:
+        with TASKS_MUTATION_LOCK, TASK_FILES_LOCK:
             try:
                 _guard_file_mutation(target)
                 if target.exists():
@@ -406,7 +407,7 @@ def api_script_file():
     except ValueError:
         return _error("脚本文件路径无效", 400, "invalid_path")
 
-    with TASKS_MUTATION_LOCK:
+    with TASKS_MUTATION_LOCK, TASK_FILES_LOCK:
         try:
             _guard_file_mutation(target)
             if not target.exists():
@@ -470,7 +471,7 @@ def api_script_rename_preview():
     raw_path = request.args.get("path", "")
     new_name = request.args.get("new_name", "")
     try:
-        with TASKS_MUTATION_LOCK:
+        with TASKS_MUTATION_LOCK, TASK_FILES_LOCK:
             source, destination, references, revision = _rename_preview(raw_path, new_name)
     except FileNotFoundError:
         return _error("源文件或目录不存在", 404, "not_found")
@@ -535,7 +536,7 @@ def api_script_rename():
         form[f"config_{task_id}"] = config_path
 
     try:
-        with TASKS_MUTATION_LOCK:
+        with TASKS_MUTATION_LOCK, TASK_FILES_LOCK:
             source = script_file_target(raw_path)
             validate_new_name(new_name)
             destination = script_file_target(
@@ -613,7 +614,7 @@ def api_script_rename_status(operation_id):
     if not _rename_identifier(operation_id):
         return _error("operation_id 无效", 400, "invalid_operation_id")
     try:
-        with TASKS_MUTATION_LOCK:
+        with TASKS_MUTATION_LOCK, TASK_FILES_LOCK:
             record = get_script_rename(operation_id)
             if not record:
                 return _error("重命名记录不存在", 404, "not_found")
@@ -636,7 +637,7 @@ def api_script_rename_recovery(operation_id):
     if set(data) != {"action"} or data.get("action") not in ("resume", "rollback"):
         return _error("action 必须是 resume 或 rollback", 400, "invalid_action")
     try:
-        with TASKS_MUTATION_LOCK:
+        with TASKS_MUTATION_LOCK, TASK_FILES_LOCK:
             record = get_script_rename(operation_id)
             if not record:
                 return _error("重命名记录不存在", 404, "not_found")

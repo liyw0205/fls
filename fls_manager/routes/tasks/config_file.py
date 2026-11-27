@@ -14,6 +14,7 @@ from ...models import get_task, TASKS_MUTATION_LOCK
 from ...storage import storage_transaction
 from ...data_access import PanelStorageBusy
 from ...directory_jobs import directory_job_operation
+from ...task_file_coordination import TASK_FILES_LOCK
 from ...utils import h, get_back_url
 from ...ui.layout import layout
 from ...ui.components import message_card, page_header
@@ -189,7 +190,7 @@ def task_config_edit(task_id):
     readable = False
     saved = False
     # Match task mutations' lock order so a path edit cannot race publication.
-    with TASKS_MUTATION_LOCK, storage_transaction():
+    with TASKS_MUTATION_LOCK, TASK_FILES_LOCK, storage_transaction():
         try:
             latest_task = get_task(task_id)
             if not latest_task:

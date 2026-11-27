@@ -344,8 +344,9 @@ def _validate_task_states(record, tasks, source, destination, rollback):
 def resume_script_rename(record, rollback=False):
     from .models import TASKS_MUTATION_LOCK, load_tasks, mutate_tasks
     from .scheduler import reload_scheduler
+    from .task_file_coordination import TASK_FILES_LOCK
 
-    with TASKS_MUTATION_LOCK:
+    with TASKS_MUTATION_LOCK, TASK_FILES_LOCK:
         if record["status"] in RENAME_TERMINAL:
             if rollback != (record["status"] == "rolled_back"):
                 raise ScriptFileConflict("该操作已结束，不允许反向重复执行")

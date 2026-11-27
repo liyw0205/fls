@@ -22,9 +22,9 @@ def _file_access(file_path, *, write=False):
     return nullcontext()
 
 
-def read_json(file_path, default):
+def read_json(file_path, default, *, strict=False):
     with _file_access(file_path), _STORAGE_LOCK:
-        return _read_json_unlocked(file_path, default)
+        return _read_json_unlocked(file_path, default, strict=strict)
 
 
 def _read_json_unlocked(file_path, default, strict=False):

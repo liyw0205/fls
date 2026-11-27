@@ -17,6 +17,7 @@ from .paths import (
     COLLECTION_FILE,
 )
 from .storage import read_json, write_json, mutate_json, storage_transaction
+from .task_file_coordination import TASK_FILES_LOCK
 from .utils import now_str
 
 MAX_TASK_RETRY_ATTEMPTS = 5
@@ -356,7 +357,12 @@ def _load_tasks_from_source():
         result["tasks"] = tasks
         return tasks if changed else None
 
-    mutate_json(TASK_FILE, [], normalize, strict=True)
+    data = read_json(TASK_FILE, [], strict=True)
+    updated = normalize(data)
+    if updated is not None:
+        # Normal reads keep seeing the last atomic publication; normalization is a write.
+        with TASK_FILES_LOCK:
+            mutate_json(TASK_FILE, [], normalize, strict=True)
     return result.get("tasks", [])
 
 
@@ -389,7 +395,7 @@ def load_tasks():
 
 
 def save_tasks(tasks):
-    with TASKS_MUTATION_LOCK:
+    with TASKS_MUTATION_LOCK, TASK_FILES_LOCK:
         normalized, _ = _normalize_list(tasks or [], normalize_task)
         write_json(TASK_FILE, normalized)
         _clear_tasks_read_cache()
@@ -399,7 +405,7 @@ def mutate_tasks(update_fn, reload_scheduler_fn=None, after_write=None):
     """Atomically update tasks and keep related scheduler changes in the same order."""
     result = {}
 
-    with TASKS_MUTATION_LOCK:
+    with TASKS_MUTATION_LOCK, TASK_FILES_LOCK:
         def update(data):
             if not isinstance(data, list):
                 raise RuntimeError("任务文件不是 JSON 数组，未覆盖原文件，请修复文件或从备份恢复")
