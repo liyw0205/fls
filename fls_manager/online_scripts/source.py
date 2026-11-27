@@ -156,6 +156,7 @@ def save_online_script_cache(items):
             temp_file.write_text(
                 json.dumps(items, ensure_ascii=False, indent=2),
                 encoding="utf-8",
+                newline="\n",
             )
             os.replace(temp_file, ONLINE_SCRIPT_CACHE_FILE)
         finally:

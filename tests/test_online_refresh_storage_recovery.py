@@ -63,7 +63,7 @@ class OnlineRefreshStorageRecoveryTests(unittest.TestCase):
                     self.assertEqual(replay.json["id"], actual["id"])
                     other = client.post("/api/online-scripts/refresh", json={"request_id": "d" * 32}, headers=headers)
                     self.assertEqual(other.status_code, 500)
-                    self.assertEqual(json.loads(state.ONLINE_REFRESH_STATE_FILE.read_text())["request_id"], request_id)
+                    self.assertEqual(json.loads(state.ONLINE_REFRESH_STATE_FILE.read_text(encoding="utf-8"))["request_id"], request_id)
                     start.assert_not_called()
                 with patch.object(refresh, "start_refresh_thread") as start:
                     for new_endpoint, new_values in (
@@ -78,7 +78,7 @@ class OnlineRefreshStorageRecoveryTests(unittest.TestCase):
                 self.assertEqual(recovered.status_code, 200)
                 self.assertEqual(recovered.json["request_id"], request_id)
                 self.assertFalse(recovered.json["running"])
-                history = json.loads(state.ONLINE_REFRESH_HISTORY_FILE.read_text())
+                history = json.loads(state.ONLINE_REFRESH_HISTORY_FILE.read_text(encoding="utf-8"))
                 self.assertEqual(history[request_id]["id"], actual["id"])
                 if cache_before is None:
                     self.assertFalse(cache.exists())
@@ -162,7 +162,7 @@ class OnlineRefreshStorageRecoveryTests(unittest.TestCase):
                 self.assertEqual(failed.status_code, 500)
                 actual = json.loads(state.ONLINE_REFRESH_STATE_FILE.read_text(encoding="utf-8"))
                 self.assertEqual(actual["request_id"], request_id)
-                self.assertEqual(json.loads(state.ONLINE_REFRESH_HISTORY_FILE.read_text())[request_id]["id"], actual["id"])
+                self.assertEqual(json.loads(state.ONLINE_REFRESH_HISTORY_FILE.read_text(encoding="utf-8"))[request_id]["id"], actual["id"])
                 start.assert_not_called()
 
             status = client.get(f"/api/online-scripts/refresh-status/{request_id}", headers={"X-Token": TOKEN})
@@ -226,7 +226,7 @@ class OnlineRefreshStorageRecoveryTests(unittest.TestCase):
             self.assertFalse(any(thread.is_alive() for thread in threads))
             self.assertEqual(errors, [])
             self.assertEqual(results, [200] * 4)
-            self.assertEqual(json.loads(state.ONLINE_REFRESH_STATE_FILE.read_text())["request_id"], "a" * 32)
+            self.assertEqual(json.loads(state.ONLINE_REFRESH_STATE_FILE.read_text(encoding="utf-8"))["request_id"], "a" * 32)
             if cache_before is None:
                 self.assertFalse(before.exists())
             else:
@@ -262,7 +262,7 @@ class OnlineRefreshStorageRecoveryTests(unittest.TestCase):
             self.assertEqual(recovered["request_id"], request_id)
             self.assertEqual(recovered["status"], "结果未知")
             self.assertFalse(recovered["running"])
-            self.assertEqual(json.loads(state.ONLINE_REFRESH_HISTORY_FILE.read_text())[request_id]["id"], recovered["id"])
+            self.assertEqual(json.loads(state.ONLINE_REFRESH_HISTORY_FILE.read_text(encoding="utf-8"))[request_id]["id"], recovered["id"])
             self.assertTrue(Path(recovered["log_file"]).is_file())
             self.assertIn("未启动抓取", Path(recovered["log_file"]).read_text(encoding="utf-8"))
             with patch.object(refresh, "start_refresh_thread") as restarted:

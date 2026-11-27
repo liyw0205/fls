@@ -71,7 +71,7 @@ class OnlineRefreshLogTests(unittest.TestCase):
                     else:
                         response = client.get(endpoint, headers=headers)
                 self.assertEqual(response.status_code, 202 if entry == "retry" else 200)
-                saved = json.loads(constants.ONLINE_REFRESH_HISTORY_FILE.read_text())[original]
+                saved = json.loads(constants.ONLINE_REFRESH_HISTORY_FILE.read_text(encoding="utf-8"))[original]
                 self.assertFalse(saved["running"])
                 self.assertEqual(saved["status"], "已确认未发布" if entry == "confirm" else "结果未知")
                 self.assertEqual(saved["id"], "a" * 32)
@@ -186,7 +186,7 @@ class OnlineRefreshLogTests(unittest.TestCase):
                 self.assertEqual(replay.status_code, 200)
                 self.assertTrue(replay.json["replayed"])
                 start.assert_called_once()
-            history = json.loads(constants.ONLINE_REFRESH_HISTORY_FILE.read_text())
+            history = json.loads(constants.ONLINE_REFRESH_HISTORY_FILE.read_text(encoding="utf-8"))
             self.assertEqual(history[original]["status"], "结果未知")
             self.assertFalse(history[original]["running"])
             self.assertTrue(history["e" * 32]["running"])
@@ -270,7 +270,7 @@ class OnlineRefreshLogTests(unittest.TestCase):
             self.assertEqual(replay.json["retry_of"], original)
             self.assertEqual(replay.json["status"], "结果未知")
             self.assertFalse(replay.json["running"])
-            self.assertFalse(json.loads(constants.ONLINE_REFRESH_HISTORY_FILE.read_text())[child]["running"])
+            self.assertFalse(json.loads(constants.ONLINE_REFRESH_HISTORY_FILE.read_text(encoding="utf-8"))[child]["running"])
             start.assert_not_called()
 
     def test_orphaned_form_recovery_preserves_csrf_and_can_retry_failed_history_publication(self):
@@ -312,7 +312,7 @@ class OnlineRefreshLogTests(unittest.TestCase):
                         replay = client.post(endpoint, data=values)
                         self.assertEqual(replay.status_code, 200 if action == "retry" else 302)
                         self.assertEqual(start.call_count, 1 if action == "retry" else 0)
-                    saved = json.loads(constants.ONLINE_REFRESH_HISTORY_FILE.read_text())[original]
+                    saved = json.loads(constants.ONLINE_REFRESH_HISTORY_FILE.read_text(encoding="utf-8"))[original]
                     self.assertFalse(saved["running"])
                     self.assertIn("original diagnosis", saved["error"])
 

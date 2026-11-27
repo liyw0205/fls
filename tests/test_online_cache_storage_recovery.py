@@ -7,6 +7,24 @@ from tests.test_ui_route_components import TOKEN, isolated_app
 
 
 class OnlineCacheStorageRecoveryTests(unittest.TestCase):
+    def test_cache_publication_matches_predicted_fingerprint_on_all_platforms(self):
+        with isolated_app() as (_app, _base_dir):
+            from fls_manager.online_scripts import source
+
+            items = [{
+                "id": "demo", "name": "示例", "type": "raw",
+                "link": "https://example.invalid/demo.sh", "description": "first\nsecond",
+            }]
+            predicted = source.online_script_cache_fingerprint_for_items(items)
+            source.save_online_script_cache(items)
+
+            published = source.ONLINE_SCRIPT_CACHE_FILE.read_bytes()
+            self.assertIn(b"\n", published)
+            self.assertNotIn(b"\r\n", published)
+            self.assertEqual(published.decode("utf-8"), json.dumps(items, ensure_ascii=False, indent=2))
+            self.assertEqual(source.online_script_cache_fingerprint(), predicted)
+            self.assertEqual(source.load_online_script_cache()[0]["name"], items[0]["name"])
+
     def seed_cache(self):
         from fls_manager.online_scripts.source import save_online_script_cache
 

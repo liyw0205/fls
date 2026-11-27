@@ -44,7 +44,7 @@ class OnlineSourceRefreshTests(unittest.TestCase):
             self.assertEqual(items[0]["id"], "demo")
             response.close.assert_called_once()
             cache = base_dir / "data" / "online_scripts_cache.json"
-            self.assertEqual(json.loads(cache.read_text())[0]["id"], "demo")
+            self.assertEqual(json.loads(cache.read_text(encoding="utf-8"))[0]["id"], "demo")
 
             failed = self.response("not-json")
             with patch.object(source, "requests", SimpleNamespace(get=Mock(return_value=failed))), patch.object(
@@ -53,7 +53,7 @@ class OnlineSourceRefreshTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "不是合法 JSON"):
                     source.fetch_online_scripts()
             failed.close.assert_called_once()
-            self.assertEqual(json.loads(cache.read_text())[0]["id"], "demo")
+            self.assertEqual(json.loads(cache.read_text(encoding="utf-8"))[0]["id"], "demo")
 
     def test_invalid_or_duplicate_remote_entries_fail_before_cache_publish(self):
         with isolated_app() as (app, base_dir):
@@ -100,7 +100,7 @@ class OnlineSourceRefreshTests(unittest.TestCase):
             self.assertEqual(items[0]["id"], "demo")
             main.close.assert_called_once()
             task.close.assert_called_once()
-            self.assertEqual(json.loads((base_dir / "data" / "online_scripts_cache.json").read_text())[0]["id"], "demo")
+            self.assertEqual(json.loads((base_dir / "data" / "online_scripts_cache.json").read_text(encoding="utf-8"))[0]["id"], "demo")
 
     def test_task_link_failure_is_persisted_as_partial_diagnostic_without_discarding_main_source(self):
         with isolated_app() as (_app, base_dir):
@@ -122,7 +122,7 @@ class OnlineSourceRefreshTests(unittest.TestCase):
             self.assertEqual(len(failures), 1)
             self.assertEqual(failures[0]["script_id"], "demo")
             self.assertIn("不是合法 JSON", failures[0]["error"])
-            self.assertEqual(json.loads((base_dir / "data" / "online_scripts_cache.json").read_text())[0]["id"], "demo")
+            self.assertEqual(json.loads((base_dir / "data" / "online_scripts_cache.json").read_text(encoding="utf-8"))[0]["id"], "demo")
             main.close.assert_called_once()
             task.close.assert_called_once()
 
@@ -681,7 +681,7 @@ class OnlineSourceRefreshTests(unittest.TestCase):
                     self.assertTrue(response.json["maintenance"]["repaired"])
                     self.assertEqual(response.json["items"][0]["recovery"]["request_id"], task_request_id)
                     self.assertEqual(primary.read_bytes(), backup.read_bytes())
-                    self.assertEqual(json.loads(primary.read_text())["items"]["demo"]["state"], "completed")
+                    self.assertEqual(json.loads(primary.read_text(encoding="utf-8"))["items"]["demo"]["state"], "completed")
                     self.assertEqual(good.read_bytes(), primary.read_bytes())
 
             backup.write_text("damaged backup", encoding="utf-8")
@@ -714,7 +714,7 @@ class OnlineSourceRefreshTests(unittest.TestCase):
             original_replace = constants.os.replace
 
             def fail_primary_publish(src, dst):
-                if Path(dst) == primary:
+                if Path(dst).resolve() == primary.resolve():
                     raise OSError("primary recovery publication denied")
                 return original_replace(src, dst)
 
@@ -757,7 +757,7 @@ class OnlineSourceRefreshTests(unittest.TestCase):
             original_replace = constants.os.replace
 
             def fail_backup_publish(src, dst):
-                if Path(dst) == backup:
+                if Path(dst).resolve() == backup.resolve():
                     raise OSError("backup recovery publication denied")
                 return original_replace(src, dst)
 
@@ -1324,8 +1324,8 @@ vm.runInContext(input.reader+input.script,context);
             with patch.object(source, "fetch_online_scripts", return_value=[{"id": "new"}]):
                 source.refresh_worker("r-success", log_file=str(base_dir / "success.log"))
             self.assertEqual(get_online_refresh_state()["status"], "已完成")
-            self.assertEqual(json.loads((base_dir / "data" / "online_scripts_cache.json").read_text())[0]["id"], "new")
-            self.assertEqual(json.loads(ONLINE_REFRESH_STATE_FILE.read_text())["id"], "r-success")
+            self.assertEqual(json.loads((base_dir / "data" / "online_scripts_cache.json").read_text(encoding="utf-8"))[0]["id"], "new")
+            self.assertEqual(json.loads(ONLINE_REFRESH_STATE_FILE.read_text(encoding="utf-8"))["id"], "r-success")
 
             source.save_online_script_cache([{"id": "stable", "name": "Stable", "type": "raw", "link": "x"}])
             with patch.object(source, "fetch_online_scripts", side_effect=TimeoutError("upstream timeout")):
@@ -1333,7 +1333,7 @@ vm.runInContext(input.reader+input.script,context);
             state = get_online_refresh_state()
             self.assertEqual(state["status"], "失败")
             self.assertIn("upstream timeout", state["error"])
-            self.assertEqual(json.loads((base_dir / "data" / "online_scripts_cache.json").read_text())[0]["id"], "stable")
+            self.assertEqual(json.loads((base_dir / "data" / "online_scripts_cache.json").read_text(encoding="utf-8"))[0]["id"], "stable")
             payload = app.test_client().get("/api/online-scripts/refresh-status", headers={"X-Token": TOKEN}).json
             self.assertEqual(payload["status"], "失败")
 
@@ -1366,7 +1366,7 @@ vm.runInContext(input.reader+input.script,context);
             self.assertTrue(state["cache_published"])
             self.assertIn("缓存已发布", state["error"])
             self.assertEqual(source.load_online_script_cache()[0]["id"], "new")
-            self.assertEqual(json.loads((base_dir / "data" / "online_script_refresh.json").read_text())["status"], "结果未知")
+            self.assertEqual(json.loads((base_dir / "data" / "online_script_refresh.json").read_text(encoding="utf-8"))["status"], "结果未知")
             payload = app.test_client().get(
                 "/api/online-scripts/refresh-status", headers={"X-Token": TOKEN},
             ).get_json()
@@ -1453,8 +1453,8 @@ vm.runInContext(input.reader+input.script,context);
                 source.refresh_worker("a" * 32, log_file=str(base_dir / "log" / "terminal.log"))
             self.assertEqual(fetch.call_count, 1)
             self.assertIn("已完成", publications)
-            self.assertEqual(json.loads(constants.ONLINE_REFRESH_STATE_FILE.read_text())["status"], "已完成")
-            history_before = json.loads(constants.ONLINE_REFRESH_HISTORY_FILE.read_text())
+            self.assertEqual(json.loads(constants.ONLINE_REFRESH_STATE_FILE.read_text(encoding="utf-8"))["status"], "已完成")
+            history_before = json.loads(constants.ONLINE_REFRESH_HISTORY_FILE.read_text(encoding="utf-8"))
             self.assertEqual(history_before["b" * 32]["status"], "发布中")
             visible = get_online_refresh_state()
             self.assertEqual(visible["status"], "已完成")
@@ -1469,7 +1469,7 @@ vm.runInContext(input.reader+input.script,context);
             self.assertEqual(repaired.status_code, 200)
             self.assertEqual(repaired.json["status"], "已完成")
             self.assertFalse(repaired.json["running"])
-            self.assertEqual(json.loads(constants.ONLINE_REFRESH_HISTORY_FILE.read_text())["b" * 32]["status"], "已完成")
+            self.assertEqual(json.loads(constants.ONLINE_REFRESH_HISTORY_FILE.read_text(encoding="utf-8"))["b" * 32]["status"], "已完成")
             self.assertEqual(fetch.call_count, 1)
 
     def test_failed_worker_final_history_write_error_is_not_left_running(self):
@@ -1510,7 +1510,7 @@ vm.runInContext(input.reader+input.script,context);
             self.assertEqual(repaired.status_code, 200)
             self.assertEqual(repaired.json["status"], "失败")
             self.assertFalse(repaired.json["running"])
-            self.assertEqual(json.loads(constants.ONLINE_REFRESH_HISTORY_FILE.read_text())["b" * 32]["status"], "失败")
+            self.assertEqual(json.loads(constants.ONLINE_REFRESH_HISTORY_FILE.read_text(encoding="utf-8"))["b" * 32]["status"], "失败")
 
     def test_refresh_worker_publishes_real_fetched_cache_only_once(self):
         with isolated_app() as (_app, base_dir):
