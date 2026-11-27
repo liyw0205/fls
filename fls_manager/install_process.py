@@ -11,7 +11,7 @@ from .paths import BASE_DIR
 
 
 class InstallProcess(DirectoryProcess):
-    def __init__(self, command, *, stdout, stderr, cwd, env=None):
+    def __init__(self, command, *, stdout, stderr, cwd, env=None, restore_lease_fd=None):
         self._workspace = tempfile.TemporaryDirectory(prefix="fls-dependency-install-")
         self._cleanup_lock = threading.Lock()
         try:
@@ -20,6 +20,7 @@ class InstallProcess(DirectoryProcess):
                 env=os.environ.copy() if env is None else env,
                 lease_path=BASE_DIR / ".backup_native_restore.lock",
                 stdout=stdout, stderr=stderr, stop_grace_seconds=1,
+                restore_lease_fd=restore_lease_fd,
             )
             self.start()
         except BaseException:

@@ -14,13 +14,16 @@ from pathlib import Path
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from fls_manager.backup_lease import release_process_lease, try_process_lease
+from fls_manager.backup_lease import (
+    check_restore_owner_lease, release_process_lease, restore_command_lease_path, try_process_lease,
+)
 from fls_manager.process_tree import WindowsJob, _posix_group_running
 
 
 class DirectoryProcess:
     def __init__(self, command, *, workspace, cwd, env, lease_path, pass_fds=(), job_lease_path=None,
-                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, shell=False, stop_grace_seconds=0):
+                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, shell=False, stop_grace_seconds=0,
+                 restore_lease_fd=None):
         if not 0 <= stop_grace_seconds <= 10:
             raise ValueError("invalid command stop grace period")
         if os.name != "nt" and not (
@@ -30,6 +33,11 @@ class DirectoryProcess:
             raise RuntimeError("file job process supervision is unavailable on this platform")
         self.result_path = Path(workspace) / ".process-result.json"
         self.ready_path = Path(workspace) / ".process-ready.json"
+        self.lease_ready_path = Path(workspace) / ".process-lease-ready.json"
+        self._restore_lease_fd = restore_lease_fd
+        self._lease_path = Path(lease_path)
+        if restore_lease_fd is not None:
+            self._check_restore_owner()
         self._result_lock = threading.Lock()
         self._returncode = None
         self._configuration = {
@@ -37,6 +45,7 @@ class DirectoryProcess:
             "pass_fds": list(pass_fds),
             "job_lease_path": str(job_lease_path) if job_lease_path is not None else None,
             "shell": shell, "stop_grace_seconds": stop_grace_seconds,
+            "restore_owner": restore_lease_fd is not None,
             "log_lease_paths": sorted({
                 str(stream.log_lease_path) for stream in (stdout, stderr)
                 if isinstance(getattr(stream, "log_lease_path", None), (str, os.PathLike))
@@ -54,6 +63,9 @@ class DirectoryProcess:
     def pid(self):
         return self._process.pid
 
+    def _check_restore_owner(self):
+        check_restore_owner_lease(self._lease_path, self._restore_lease_fd)
+
     def start(self, timeout=10):
         configuration, self._configuration = self._configuration, None
         if configuration is None:
@@ -61,7 +73,14 @@ class DirectoryProcess:
         self._process.stdin.write(json.dumps(configuration).encode("utf-8") + b"\n")
         self._process.stdin.flush()
         deadline = time.monotonic() + timeout
+        acknowledged = False
         while not self.ready_path.is_file():
+            if self._restore_lease_fd is not None and not acknowledged and self.lease_ready_path.is_file():
+                # The independent guard must be held before the owner opens the command gate.
+                self._check_restore_owner()
+                self._process.stdin.write(b"start\n")
+                self._process.stdin.flush()
+                acknowledged = True
             if self._process.poll() is not None:
                 raise RuntimeError("file job supervisor failed to start")
             if time.monotonic() >= deadline:
@@ -136,7 +155,12 @@ def _supervise(result_path):
         if os.read(job_lease, 1) != b"1":
             release_process_lease(job_lease)
             raise RuntimeError("file job identity has been retired")
-    lease = try_process_lease(configuration["lease_path"], shared=True)
+    restore_owner = configuration.get("restore_owner", False)
+    lease_path = configuration["lease_path"]
+    if restore_owner:
+        lease = try_process_lease(restore_command_lease_path(lease_path))
+    else:
+        lease = try_process_lease(lease_path, shared=True)
     if lease is None:
         release_process_lease(job_lease)
         raise RuntimeError("directory restore is active")
@@ -168,6 +192,10 @@ def _supervise(result_path):
             disconnected.set()
 
     try:
+        if restore_owner:
+            _write_status(result_path.with_name(".process-lease-ready.json"), {"ready": True})
+            if control.readline(16) != b"start\n":
+                return
         threading.Thread(target=watch_owner, daemon=True).start()
         if disconnected.is_set():
             return

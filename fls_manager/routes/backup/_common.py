@@ -22,6 +22,7 @@ from flask import request, Response, redirect, url_for, jsonify, abort
 from ...paths import BASE_DIR, DATA_DIR, SCRIPT_DIR, LOG_DIR
 from ... import backup_commit
 from ...log_access import open_log_file
+from ...install_process import InstallProcess
 from ...backup_lease import try_process_lease, release_process_lease
 from ...storage import mutate_json, storage_transaction, write_json
 from ...ui.layout import layout
@@ -1156,23 +1157,34 @@ def install_dependencies(dep_file):
         log_fp.write(header.encode("utf-8"))
 
         try:
-            proc = subprocess.run(
+            proc = InstallProcess(
                 [sys.executable, "-m", "pip", "install", "-r", str(dep_file)],
                 stdout=log_fp,
                 stderr=subprocess.STDOUT,
                 cwd=str(BASE_DIR),
                 env=os.environ.copy(),
-                timeout=1800,
+                restore_lease_fd=RESTORE_ACTIVITY_LEASE,
             )
+            try:
+                returncode = proc.wait(timeout=1800)
+            finally:
+                # Do not release the restore archive or its log while commands still use them.
+                while True:
+                    try:
+                        proc.stop(timeout=10)
+                        break
+                    except (OSError, RuntimeError, subprocess.SubprocessError):
+                        time.sleep(0.05)
+                proc.wait(timeout=0)
 
             footer = "\n===== 依赖恢复结束：{}，退出码：{} =====\n".format(
                 now_str(),
-                proc.returncode,
+                returncode,
             )
 
             log_fp.write(footer.encode("utf-8"))
 
-            return proc.returncode == 0, str(log_file)
+            return returncode == 0, str(log_file)
 
         except Exception as e:
             log_fp.write(("\n依赖恢复异常: {}\n".format(e)).encode("utf-8"))

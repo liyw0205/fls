@@ -119,10 +119,11 @@ class LogFileCoordinationTests(unittest.TestCase):
                 self.assertIsNone(try_process_lease(base / ".backup_native_restore.lock", shared=True))
                 self.assertIsNone(try_process_lease(stream.log_lease_path, create=False))
                 stream.write(b"fixture output\n")
-                return SimpleNamespace(returncode=0)
+                self.assertEqual(kwargs["restore_lease_fd"], backup.RESTORE_ACTIVITY_LEASE)
+                return SimpleNamespace(wait=lambda timeout: 0, stop=lambda timeout: None)
 
             try:
-                with patch.object(backup.subprocess, "run", side_effect=install) as run:
+                with patch.object(backup, "InstallProcess", side_effect=install) as run:
                     success, log = backup.install_dependencies(requirements)
                 self.assertTrue(success)
                 self.assertEqual(run.call_count, 1)

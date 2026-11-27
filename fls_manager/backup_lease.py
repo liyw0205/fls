@@ -35,7 +35,52 @@ def _windows_lease(fd, *, shared=False, unlock=False):
         raise ctypes.WinError(ctypes.get_last_error())
 
 
+def restore_command_lease_path(path):
+    return Path(path).with_name(".backup_restore_command.lock")
+
+
+def check_restore_owner_lease(path, fd):
+    path = Path(path)
+    try:
+        held, expected = os.fstat(fd), path.lstat()
+        if (path.name != ".backup_native_restore.lock" or not stat.S_ISREG(expected.st_mode)
+            or not stat.S_ISREG(held.st_mode)
+            or (held.st_dev, held.st_ino) != (expected.st_dev, expected.st_ino)):
+            raise ValueError("invalid restore owner lease")
+        # Probe the primary directly: our child may already hold the command guard.
+        probe = _try_process_lease(path, create=False, shared=True)
+        if probe is not None:
+            release_process_lease(probe)
+            raise ValueError("inactive restore owner lease")
+    except OSError as exc:
+        raise ValueError("invalid restore owner lease") from exc
+
+
 def try_process_lease(path, *, create=True, shared=False):
+    path = Path(path)
+    if path.name != ".backup_native_restore.lock":
+        return _try_process_lease(path, create=create, shared=shared)
+    lease = _try_process_lease(path, create=create, shared=shared)
+    if lease is None:
+        return None
+    guard = None
+    try:
+        try:
+            guard = _try_process_lease(restore_command_lease_path(path), create=create, shared=True)
+        except FileNotFoundError:
+            # A valid handoff cannot begin while we hold the primary lease.
+            pass
+        else:
+            if guard is None:
+                return None
+        result, lease = lease, None
+        return result
+    finally:
+        release_process_lease(guard)
+        release_process_lease(lease)
+
+
+def _try_process_lease(path, *, create=True, shared=False):
     path = Path(path)
     if path.is_symlink():
         raise RuntimeError("invalid restore process lock")

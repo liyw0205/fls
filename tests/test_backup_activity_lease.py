@@ -16,6 +16,45 @@ from tests import test_native_backup_api as native_tests
 
 
 class BackupActivityLeaseTests(unittest.TestCase):
+    def test_restore_guard_probe_is_inside_primary_admission_and_never_creates_on_read(self):
+        with isolated_app() as (_, _base):
+            from fls_manager import backup_lease as leases
+            from fls_manager.paths import BASE_DIR
+
+            primary = BASE_DIR / ".backup_native_restore.lock"
+            guard = leases.restore_command_lease_path(primary)
+            primary.touch()
+            raw_acquire = leases._try_process_lease
+            checked = []
+
+            def inspect_guard(path, **options):
+                if path == guard:
+                    # Even when the guard is initially absent, another owner cannot
+                    # acquire primary ownership between our probe and admission.
+                    probe = raw_acquire(primary, create=False)
+                    if probe is not None:
+                        leases.release_process_lease(probe)
+                    self.assertIsNone(probe)
+                    checked.append(True)
+                return raw_acquire(path, **options)
+
+            with patch.object(leases, "_try_process_lease", side_effect=inspect_guard):
+                lease = leases.try_process_lease(primary, create=False)
+            self.assertIsNotNone(lease)
+            leases.release_process_lease(lease)
+            self.assertEqual(checked, [True])
+            self.assertFalse(guard.exists())
+
+            owner = raw_acquire(guard)
+            try:
+                for shared in (False, True):
+                    self.assertIsNone(leases.try_process_lease(primary, create=False, shared=shared))
+                    probe = raw_acquire(primary, create=False)
+                    self.assertIsNotNone(probe, "busy guard rejection leaked primary lease")
+                    leases.release_process_lease(probe)
+            finally:
+                leases.release_process_lease(owner)
+
     @contextlib.contextmanager
     def holder(self, mode, *, hard_exit=False):
         setup, cleanup = {

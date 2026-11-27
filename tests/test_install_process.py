@@ -251,6 +251,173 @@ class InstallProcessTests(unittest.TestCase):
                     owner.wait(timeout=10)
                     owner.stdin.close()
 
+    def test_restore_owner_hands_exclusion_to_command_until_tree_and_log_close(self):
+        with isolated_app() as (_, base):
+            from fls_manager.backup_lease import release_process_lease, try_process_lease
+            from fls_manager.install_process import InstallProcess
+            from fls_manager.log_access import open_log_file
+            from fls_manager.routes.backup import _common as backup
+
+            self.assertTrue(backup.try_begin_restore_activity())
+            marker = base / "restore-tree.json"
+            log = open_log_file(base / "log" / "backup-restore-deps-test.log", "ab", buffering=0,
+                                restore_lease_fd=backup.RESTORE_ACTIVITY_LEASE)
+            process = None
+            try:
+                process = InstallProcess(self.tree_command(marker), stdout=log, stderr=subprocess.STDOUT,
+                                         cwd=str(base), restore_lease_fd=backup.RESTORE_ACTIVITY_LEASE)
+                self.wait_file(marker)
+                log.close()
+                backup.end_restore_activity()
+                for shared in (False, True):
+                    self.assertIsNone(try_process_lease(base / ".backup_native_restore.lock", shared=shared))
+                self.assertIsNone(try_process_lease(log.log_lease_path))
+                process.terminate()
+                self.assertNotEqual(process.wait(timeout=10), 0)
+                for pid in json.loads(marker.read_text()):
+                    self.assert_exited(pid)
+                for path in (log.log_lease_path, base / ".backup_native_restore.lock"):
+                    lease = try_process_lease(path)
+                    self.assertIsNotNone(lease)
+                    release_process_lease(lease)
+            finally:
+                if process is not None:
+                    process.stop()
+                    process.wait(timeout=10)
+                log.close()
+                backup.end_restore_activity()
+
+    def test_restore_command_requires_valid_owner_and_second_start_acknowledgement(self):
+        with isolated_app() as (_, base):
+            from fls_manager.backup_lease import release_process_lease, try_process_lease
+            from fls_manager.directory_process import DirectoryProcess
+            from fls_manager.install_process import InstallProcess
+            from fls_manager.routes.backup import _common as backup
+
+            marker = base / "must-not-install"
+            command = [sys.executable, "-c", f"from pathlib import Path;Path({str(marker)!r}).touch()"]
+            with open(base / "wrong-owner", "wb") as wrong, open(base / "output", "ab") as output:
+                with self.assertRaisesRegex(ValueError, "restore owner lease"):
+                    InstallProcess(command, stdout=output, stderr=subprocess.STDOUT,
+                                   cwd=str(base), restore_lease_fd=wrong.fileno())
+                with open(base / ".backup_native_restore.lock", "ab") as unlocked:
+                    with self.assertRaisesRegex(ValueError, "inactive restore owner lease"):
+                        InstallProcess(command, stdout=output, stderr=subprocess.STDOUT,
+                                       cwd=str(base), restore_lease_fd=unlocked.fileno())
+                self.assertTrue(backup.try_begin_restore_activity())
+                seen = []
+
+                def disconnect_before_ack(process):
+                    seen.append(process)
+                    write = process._process.stdin.write
+
+                    def disconnect(data):
+                        if data == b"start\n":
+                            process._process.stdin.close()
+                            raise OSError("owner exited before command gate")
+                        return write(data)
+
+                    with patch.object(process._process.stdin, "write", side_effect=disconnect):
+                        DirectoryProcess.start(process)
+
+                try:
+                    with patch.object(InstallProcess, "start", disconnect_before_ack):
+                        with self.assertRaisesRegex(OSError, "owner exited before command gate"):
+                            InstallProcess(command, stdout=output, stderr=subprocess.STDOUT,
+                                           cwd=str(base), restore_lease_fd=backup.RESTORE_ACTIVITY_LEASE)
+                    self.assertEqual(len(seen), 1)
+                    self.assertIsNotNone(seen[0]._process.poll())
+                    self.assertFalse(marker.exists())
+                finally:
+                    backup.end_restore_activity()
+            lease = try_process_lease(base / ".backup_native_restore.lock")
+            self.assertIsNotNone(lease)
+            release_process_lease(lease)
+
+    def test_legacy_restore_install_uses_owned_supervisor_and_stops_before_timeout_result(self):
+        for timeout in (False, True):
+            with self.subTest(timeout=timeout), isolated_app() as (_, base):
+                from fls_manager.install_process import InstallProcess
+                from fls_manager.routes.backup import _common as backup
+
+                self.assertTrue(backup.try_begin_restore_activity())
+                requirements = base / "requirements.txt"
+                requirements.write_text("harmless-fixture\n", encoding="utf-8")
+                marker = base / "restore-tree.json"
+                processes = []
+
+                def spawn(command, **options):
+                    self.assertEqual(command[-3:], ["install", "-r", str(requirements)])
+                    process = InstallProcess(self.tree_command(marker, wait=timeout), **options)
+                    processes.append(process)
+                    if timeout:
+                        self.wait_file(marker)
+                        wait = process.wait
+
+                        def time_out(*, timeout=None):
+                            process.wait = wait
+                            raise subprocess.TimeoutExpired("restore fixture", timeout)
+
+                        process.wait = time_out
+                    return process
+
+                try:
+                    with patch.object(backup, "InstallProcess", side_effect=spawn):
+                        success, path = backup.install_dependencies(requirements)
+                    self.assertEqual(success, not timeout)
+                    self.assertEqual(len(processes), 1)
+                    self.assertIsNotNone(processes[0]._process.poll())
+                    for pid in json.loads(marker.read_text()):
+                        self.assert_exited(pid)
+                    self.assertIn("installation-output", Path(path).read_text(encoding="utf-8"))
+                finally:
+                    for process in processes:
+                        process.stop()
+                        process.wait(timeout=10)
+                    backup.end_restore_activity()
+
+    def test_restore_owner_crash_closes_guard_only_after_supervised_descendants(self):
+        with isolated_app() as (_, base):
+            from fls_manager.backup_lease import release_process_lease, try_process_lease
+
+            marker = base / "restore-tree.json"
+            ready = base / "restore-owner-ready.json"
+            log_path = base / "log" / "backup-restore-deps-orphan.log"
+            script = (
+                "import json,os,pathlib,sys\n"
+                "from fls_manager.install_process import InstallProcess\n"
+                "from fls_manager.log_access import open_log_file\n"
+                "from fls_manager.routes.backup import _common as backup\n"
+                "assert backup.try_begin_restore_activity()\n"
+                f"log=open_log_file({str(log_path)!r},'ab',buffering=0,restore_lease_fd=backup.RESTORE_ACTIVITY_LEASE)\n"
+                f"process=InstallProcess({self.tree_command(marker)!r},stdout=log,stderr=-2,cwd={str(base)!r},restore_lease_fd=backup.RESTORE_ACTIVITY_LEASE)\n"
+                "log.close()\n"
+                f"pathlib.Path({str(ready)!r}).write_text(json.dumps({{'pid':process.pid,'log_lease':str(log.log_lease_path)}}))\n"
+                "sys.stdin.buffer.read(1)\n"
+            )
+            with open(base / "owner-errors", "wb") as errors:
+                owner = subprocess.Popen([sys.executable, "-u", "-c", script], cwd=ROOT,
+                                         stdin=subprocess.PIPE, stdout=errors, stderr=errors)
+                try:
+                    self.wait_file(ready)
+                    self.wait_file(marker)
+                    identity = json.loads(ready.read_text())
+                    self.assertIsNone(try_process_lease(identity["log_lease"]))
+                    owner.kill()
+                    owner.wait(timeout=10)
+                    for pid in json.loads(marker.read_text()):
+                        self.assert_exited(pid)
+                    self.assert_exited(identity["pid"])
+                    for path in (identity["log_lease"], base / ".backup_native_restore.lock"):
+                        lease = try_process_lease(path)
+                        self.assertIsNotNone(lease)
+                        release_process_lease(lease)
+                finally:
+                    if owner.poll() is None:
+                        owner.kill()
+                    owner.wait(timeout=10)
+                    owner.stdin.close()
+
     def test_dependency_and_runtime_routes_cancel_supervised_tree_and_replay(self):
         kinds = ("dependency",) if os.name == "nt" else ("dependency", "runtime")
         for kind in kinds:
