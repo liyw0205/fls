@@ -99,7 +99,7 @@ class OnlineTaskImportConfirmationTests(unittest.TestCase):
                 self.assertEqual(self.submit(app).status_code, 200)
                 self.assertTrue(self.submit(app).json["replayed"])
                 reload.assert_called_once()
-            self.assertEqual(len(json.loads(models.TASK_FILE.read_text())), 1)
+            self.assertEqual(len(json.loads(models.TASK_FILE.read_text(encoding="utf-8"))), 1)
             self.assertEqual(constants.get_online_task_import_request(self.request_id)["state"], "completed")
 
     def test_history_offers_confirmation_then_only_scheduler_recovery(self):
@@ -472,7 +472,7 @@ class OnlineTaskImportConfirmationTests(unittest.TestCase):
 
                 self.failed_publication(app)
                 if damage == "edit":
-                    current = json.loads(models.TASK_FILE.read_text())
+                    current = json.loads(models.TASK_FILE.read_text(encoding="utf-8"))
                     current[0]["command"] = "echo changed later"
                     models.save_tasks(current)
                 else:

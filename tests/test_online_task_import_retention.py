@@ -62,7 +62,7 @@ class OnlineTaskImportRetentionTests(unittest.TestCase):
                     self.assertIsNone(constants.claim_online_task_import_request(record))
                 else:
                     constants.persist_online_task_import_request(record)
-                actual = json.loads(constants.ONLINE_TASK_IMPORT_REQUESTS_FILE.read_text())
+                actual = json.loads(constants.ONLINE_TASK_IMPORT_REQUESTS_FILE.read_text(encoding="utf-8"))
                 self.assertEqual(len(actual), 200)
                 self.assertTrue(set(protected + [new_id]) <= actual.keys())
                 self.assertNotIn(f"{199:032x}", actual)
@@ -115,7 +115,7 @@ class OnlineTaskImportRetentionTests(unittest.TestCase):
                 self.assertEqual(constants.ONLINE_TASK_IMPORT_REQUESTS_FILE.read_bytes(), before)
                 importer.assert_not_called()
             constants.persist_online_task_import_request(self.record(constants, request_id, "running", "old"))
-            self.assertEqual(len(json.loads(constants.ONLINE_TASK_IMPORT_REQUESTS_FILE.read_text())), 200)
+            self.assertEqual(len(json.loads(constants.ONLINE_TASK_IMPORT_REQUESTS_FILE.read_text(encoding="utf-8"))), 200)
             self.assertTrue(constants.get_online_task_import_request(request_id)["active"])
 
     def test_archive_preserves_real_result_frees_capacity_and_blocks_retry_and_reload(self):
@@ -345,7 +345,7 @@ class OnlineTaskImportRetentionTests(unittest.TestCase):
                     path.rename(target)
                     path.symlink_to(target)
                 elif kind == "invalid_archive":
-                    records = json.loads(path.read_text())
+                    records = json.loads(path.read_text(encoding="utf-8"))
                     records["0" * 32]["archived"] = "yes"
                     path.write_text(json.dumps(records), encoding="utf-8")
                 before = path.read_bytes()
@@ -381,7 +381,7 @@ class OnlineTaskImportRetentionTests(unittest.TestCase):
                 importer.assert_not_called()
                 self.assertEqual(load_tasks(), [])
             self.assertEqual(constants.get_online_task_import_request(request_id)["state"], "completed")
-            self.assertEqual(len(json.loads(constants.ONLINE_TASK_IMPORT_REQUESTS_FILE.read_text())), 200)
+            self.assertEqual(len(json.loads(constants.ONLINE_TASK_IMPORT_REQUESTS_FILE.read_text(encoding="utf-8"))), 200)
 
 
 if __name__ == "__main__":
