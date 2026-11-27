@@ -277,13 +277,16 @@ class DaemonLogTests(unittest.TestCase):
             ready, release = base / "launcher-ready", base / "launcher-release"
             manager = base / "fls-manager.py"
             manager.write_text(
-                "import os,sys,time\n"
+                "import os,subprocess,sys,time\n"
                 "from pathlib import Path\n"
                 f"sys.path.insert(0,{str(ROOT)!r})\n"
                 "if '--daemon-log' in sys.argv:\n"
                 " from fls_manager.daemon_log import redirect_daemon_output\n"
                 " redirect_daemon_output()\n"
                 "print('launcher output',flush=True)\n"
+                "print('launcher stderr',file=sys.stderr,flush=True)\n"
+                "os.write(1,b'launcher descriptor output\\n')\n"
+                "subprocess.run([sys.executable,'-u','-c',\"print('launcher child output',flush=True)\"],check=True)\n"
                 f"Path({str(ready)!r}).write_text(str(os.getpid()))\n"
                 f"while not Path({str(release)!r}).exists(): time.sleep(0.02)\n",
                 encoding="utf-8",
@@ -311,6 +314,9 @@ class DaemonLogTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 wait_for(ready.exists)
                 wait_for(lambda: target.exists() and b"launcher output" in target.read_bytes())
+                output = target.read_bytes()
+                for expected in (b"launcher stderr", b"launcher descriptor output", b"launcher child output"):
+                    self.assertIn(expected, output)
                 actual_pid = int(ready.read_text())
                 if os.name != "nt":
                     self.assertEqual(int((base / "data" / "fls-manager.pid").read_text()), actual_pid)

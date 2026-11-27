@@ -66,6 +66,7 @@ def redirect_daemon_output():
             os.dup2(process.stdin.fileno(), 1)
             os.dup2(process.stdin.fileno(), 2)
             _set_standard_handles()
+            _replace_windows_text_streams()
         except BaseException:
             for original, destination in zip(saved, (1, 2)):
                 os.dup2(original, destination)
@@ -90,6 +91,28 @@ def _set_standard_handles():
         for standard, descriptor in ((-11, 1), (-12, 2)):
             if not set_handle(standard, msvcrt.get_osfhandle(descriptor)):
                 raise ctypes.WinError(ctypes.get_last_error())
+
+
+def _replace_windows_text_streams():
+    if os.name != "nt":
+        return
+    streams = []
+    try:
+        # Startup ConsoleIO objects still call WriteConsoleW after dup2. Use
+        # ordinary pipe-backed streams while keeping separate descriptors.
+        for descriptor in (1, 2):
+            duplicate = os.dup(descriptor)
+            try:
+                stream = os.fdopen(duplicate, "w", buffering=1, encoding="utf-8", errors="backslashreplace")
+            except BaseException:
+                os.close(duplicate)
+                raise
+            streams.append(stream)
+    except BaseException:
+        for stream in streams:
+            stream.close()
+        raise
+    sys.stdout, sys.stderr = streams
 
 
 def launch_logged_command(command, *, header=b""):
