@@ -2522,7 +2522,9 @@ class UiRouteComponentTests(unittest.TestCase):
 
     def test_online_install_log_api_returns_stable_polling_fields(self):
         with isolated_app() as (app, _base_dir):
-            from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING
+            from fls_manager.online_scripts.constants import (
+                ONLINE_INSTALL_LOCK, ONLINE_INSTALL_RUNNING, persist_online_install,
+            )
 
             ONLINE_INSTALL_RUNNING["install-1"] = {
                 "id": "install-1",
@@ -2535,6 +2537,9 @@ class UiRouteComponentTests(unittest.TestCase):
                 "error": "",
                 "process": object(),
             }
+            with ONLINE_INSTALL_LOCK:
+                ONLINE_INSTALL_LOCK.claim("install-1")
+                persist_online_install(ONLINE_INSTALL_RUNNING["install-1"])
             log_path = Path(ONLINE_INSTALL_RUNNING["install-1"]["log_file"])
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_path.write_text("fixture output\n", encoding="utf-8")
@@ -2977,13 +2982,18 @@ class UiRouteComponentTests(unittest.TestCase):
 
     def test_online_install_duplicate_start_is_rejected_while_active(self):
         with isolated_app() as (app, _base_dir):
-            from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING
+            from fls_manager.online_scripts.constants import (
+                ONLINE_INSTALL_LOCK, ONLINE_INSTALL_RUNNING, persist_online_install,
+            )
 
             ONLINE_INSTALL_RUNNING["active-install"] = {
                 "id": "active-install",
                 "script_id": "demo",
                 "running": True,
             }
+            with ONLINE_INSTALL_LOCK:
+                ONLINE_INSTALL_LOCK.claim("active-install")
+                persist_online_install(ONLINE_INSTALL_RUNNING["active-install"])
             item = {
                 "id": "demo",
                 "name": "Demo script",
@@ -3012,7 +3022,9 @@ class UiRouteComponentTests(unittest.TestCase):
 
     def test_online_install_stop_api_returns_success_for_active_job(self):
         with isolated_app() as (app, base_dir):
-            from fls_manager.online_scripts.constants import ONLINE_INSTALL_RUNNING
+            from fls_manager.online_scripts.constants import (
+                ONLINE_INSTALL_LOCK, ONLINE_INSTALL_RUNNING, persist_online_install,
+            )
 
             ONLINE_INSTALL_RUNNING["stop-api-install"] = {
                 "id": "stop-api-install",
@@ -3025,6 +3037,9 @@ class UiRouteComponentTests(unittest.TestCase):
                 "error": "",
                 "process": None,
             }
+            with ONLINE_INSTALL_LOCK:
+                ONLINE_INSTALL_LOCK.claim("stop-api-install")
+                persist_online_install(ONLINE_INSTALL_RUNNING["stop-api-install"])
             with patch("fls_manager.online_scripts.install.append_log"):
                 with patch(
                     "fls_manager.online_scripts.install.terminate_install_process"
