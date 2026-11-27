@@ -17,6 +17,7 @@ from ...online_scripts.constants import (
 from ...online_scripts.logs import online_refresh_log_file
 from ...sensitive import mask_sensitive_text
 from ...paths import LOG_DIR
+from ...log_access import open_log_file
 from ...directory_jobs import directory_job_operation
 
 
@@ -111,11 +112,11 @@ def _install_log_file(info):
             return None, ("日志不存在", "安装日志尚未生成或已被清理，请返回安装历史后重试。", 404)
         if not stat.S_ISREG(actual.stat().st_mode):
             return None, ("日志类型错误", "安装日志不是普通文件，未读取该路径。", 500)
-        with actual.open("rb") as handle:
+        with open_log_file(actual, "rb", legacy_root=True) as handle:
             handle.read(1)
     except FileNotFoundError:
         return None, ("日志不存在", "安装日志尚未生成或已被清理，请返回安装历史后重试。", 404)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         return None, ("日志不可读", f"安装日志无法读取：{exc}。请修复日志权限后重试。", 500)
     return actual, None
 
@@ -160,9 +161,9 @@ def _refresh_log_state(request_id):
             return (state, None), ("日志不可读", f"刷新日志无法读取：{exc}。请修复日志权限后重试。", 500)
         if not stat.S_ISREG(candidate_stat.st_mode):
             return (state, None), ("日志类型错误", "刷新日志不是普通文件，未读取该路径。", 500)
-        with candidate.open("rb") as handle:
+        with open_log_file(candidate, "rb") as handle:
             handle.read(1)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         return (state, None), ("日志不可读", f"刷新日志无法读取：{exc}。请修复日志权限后重试。", 500)
     return (state, candidate), None
 

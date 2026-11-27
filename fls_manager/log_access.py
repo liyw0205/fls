@@ -26,20 +26,21 @@ def _is_link(path):
 
 
 @contextmanager
-def log_file_access(path, *, exclusive=False, restore_lease_fd=None):
+def log_file_access(path, *, exclusive=False, restore_lease_fd=None, legacy_root=False):
     from .directory_jobs import _acquire_job_lease
     from .paths import BASE_DIR, LOG_DIR
 
     path = Path(path).absolute()
-    if (not path.name.endswith(".log") or _is_link(path.parent)
-        or not os.path.samefile(path.parent, LOG_DIR)):
+    log_root = BASE_DIR if legacy_root and os.path.samefile(path.parent, BASE_DIR) else LOG_DIR
+    if (not path.name.endswith(".log") or ".." in path.parts or _is_link(path.parent)
+        or not os.path.samefile(path.parent, log_root)):
         raise ValueError("invalid log path")
     if _is_link(path) or ":" in path.name:
         raise ValueError("invalid log file")
     # Normalize Windows short-name aliases before choosing the shared lock.
     if os.name == "nt":
         path = path.resolve()
-        if not os.path.samefile(path.parent, LOG_DIR):
+        if not os.path.samefile(path.parent, log_root):
             raise ValueError("invalid log path")
     restore = None
     if restore_lease_fd is None:
@@ -55,15 +56,17 @@ def log_file_access(path, *, exclusive=False, restore_lease_fd=None):
         if _is_link(lock_root):
             raise ValueError("invalid log lock directory")
         lock_root.mkdir(mode=0o700, exist_ok=True)
-        name = hashlib.sha256(os.path.normcase(path.name).encode("utf-8")).hexdigest()
+        # Old installation receipts can refer to a log directly in BASE_DIR.
+        scope = "legacy/" if log_root == BASE_DIR else ""
+        name = hashlib.sha256((scope + os.path.normcase(path.name)).encode("utf-8")).hexdigest()
         lock_path = lock_root / f"{name}.lock"
         lock = try_process_lease(lock_path, shared=not exclusive)
         if lock is None:
             raise LogFileBusy("log file is in use")
         if os.name == "posix":
-            directory = os.open(LOG_DIR, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        expected = os.stat(LOG_DIR, follow_symlinks=False)
-        if not stat.S_ISDIR(expected.st_mode) or _is_link(LOG_DIR):
+            directory = os.open(log_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        expected = os.stat(log_root, follow_symlinks=False)
+        if not stat.S_ISDIR(expected.st_mode) or _is_link(log_root):
             raise ValueError("invalid log directory")
         if directory is not None:
             pinned = os.fstat(directory)
@@ -144,10 +147,10 @@ class LeasedLogFile:
         self.close()
 
 
-def open_log_file(path, mode="ab", buffering=-1, *, restore_lease_fd=None, **kwargs):
+def open_log_file(path, mode="ab", buffering=-1, *, restore_lease_fd=None, legacy_root=False, **kwargs):
     if mode not in ("a", "ab", "rb", "xb"):
         raise ValueError("unsupported log mode")
-    context = log_file_access(path, restore_lease_fd=restore_lease_fd)
+    context = log_file_access(path, restore_lease_fd=restore_lease_fd, legacy_root=legacy_root)
     access = context.__enter__()
     stream = None
     fd = None

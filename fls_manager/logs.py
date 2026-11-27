@@ -41,7 +41,7 @@ def tail_file(file_path, lines=800):
 
     p = Path(file_path)
     try:
-        with open_log_file(p, "rb") as f:
+        with open_log_file(p, "rb", legacy_root=True) as f:
             f.seek(0, os.SEEK_END)
             size = f.tell()
             block = 4096

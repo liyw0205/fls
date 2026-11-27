@@ -14,7 +14,7 @@ def online_install_log_file(install_id, script_name):
 
 def append_log(log_file, text):
     try:
-        with open_log_file(log_file, "ab") as f:
+        with open_log_file(log_file, "ab", legacy_root=True) as f:
             f.write(str(text).encode("utf-8", errors="replace"))
 
             if not str(text).endswith("\n"):

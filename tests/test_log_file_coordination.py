@@ -13,6 +13,83 @@ from tests import test_directory_process as process_tests
 
 
 class LogFileCoordinationTests(unittest.TestCase):
+    def test_legacy_root_access_is_opt_in_and_keeps_separate_handle_leases(self):
+        with isolated_app() as (_, base):
+            from fls_manager.backup_lease import release_process_lease, try_process_lease
+            from fls_manager.log_access import (
+                LogFileBusy, delete_log_file, file_version, log_file_access, open_log_file,
+            )
+
+            legacy = base / "legacy-install.log"
+            current = base / "log" / legacy.name
+            legacy.write_bytes(b"old output\n")
+            current.write_bytes(b"current output\n")
+            with self.assertRaises(ValueError):
+                open_log_file(legacy, "rb")
+            with open_log_file(legacy, "ab", buffering=0, legacy_root=True) as writer:
+                writer.write(b"continued output\n")
+                with open_log_file(legacy, "rb", legacy_root=True) as reader:
+                    self.assertEqual(reader.read(), b"old output\ncontinued output\n")
+                self.assertIsNone(try_process_lease(writer.log_lease_path, create=False))
+                with self.assertRaises(LogFileBusy), log_file_access(legacy, exclusive=True, legacy_root=True):
+                    pass
+                self.assertEqual(delete_log_file(legacy, file_version(legacy.stat()))[0], "failed")
+                self.assertTrue(legacy.exists())
+                self.assertEqual(delete_log_file(current, file_version(current.stat()))[0], "deleted")
+            lease = try_process_lease(writer.log_lease_path, create=False)
+            self.assertIsNotNone(lease)
+            release_process_lease(lease)
+            for path in (base / "scripts" / "outside.log", base / "private.txt", base / "log" / ".." / legacy.name):
+                with self.subTest(path=path), self.assertRaises(ValueError):
+                    open_log_file(path, "ab", legacy_root=True)
+                if path != base / "log" / ".." / legacy.name:
+                    self.assertFalse(path.exists())
+
+    def test_legacy_install_log_probe_honors_cleanup_before_tail_read(self):
+        with isolated_app() as (app, base):
+            from fls_manager.log_access import log_file_access
+            from fls_manager.online_scripts.constants import persist_online_install
+            from fls_manager.routes.online_scripts import logs
+
+            target = base / "legacy-install.log"
+            target.write_bytes(b"preserved output\n")
+            persist_online_install({
+                "id": "legacy-install", "script_id": "demo", "script_name": "Demo",
+                "log_file": str(target), "running": False, "status": "失败",
+                "phase": "failed", "returncode": 1, "error": "fixture failure",
+                "start_time": 1, "updated_at": "2026-11-28 04:00:00",
+            })
+            client = app.test_client()
+            headers = {"X-Token": TOKEN}
+            endpoint = "/api/online-scripts/log/legacy-install"
+            with log_file_access(target, exclusive=True, legacy_root=True), patch.object(logs, "tail_file") as tail:
+                response = client.get(endpoint, headers=headers)
+                self.assertEqual(response.status_code, 503)
+                self.assertEqual(response.json["code"], "log_file_busy")
+                tail.assert_not_called()
+                self.assertEqual(client.get(endpoint + "?state_only=1", headers=headers).status_code, 200)
+            response = client.get(endpoint, headers=headers)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json["log"], "preserved output")
+            self.assertEqual(target.read_bytes(), b"preserved output\n")
+
+    def test_refresh_log_probe_honors_exclusive_file_lease(self):
+        with isolated_app() as (_, base):
+            from fls_manager.log_access import LogFileBusy, log_file_access
+            from fls_manager.routes.online_scripts import logs
+
+            refresh_id, request_id = "a" * 32, "b" * 32
+            target = base / "log" / f"online-script-source-refresh-{refresh_id}.log"
+            target.write_bytes(b"original output\n")
+            state = {"id": refresh_id, "request_id": request_id, "log_file": str(target), "running": False}
+            with patch.object(logs, "get_online_refresh_state", return_value=state):
+                with log_file_access(target, exclusive=True), self.assertRaises(LogFileBusy):
+                    logs._refresh_log_state(request_id)
+                result, failure = logs._refresh_log_state(request_id)
+            self.assertIsNone(failure)
+            self.assertEqual(result[1], target)
+            self.assertEqual(target.read_bytes(), b"original output\n")
+
     def test_exclusive_cleanup_returns_retryable_busy_for_log_readers(self):
         with isolated_app() as (app, base):
             from fls_manager.log_access import log_file_access

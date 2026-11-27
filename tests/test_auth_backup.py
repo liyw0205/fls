@@ -514,30 +514,28 @@ class NativeTaskApiTests(unittest.TestCase):
         with isolated_fls_env(token="unit-token"):
             app = load_app()
             from fls_manager.models import save_tasks
-            from fls_manager.routes.tasks import logs as task_logs
+            from fls_manager.paths import LOG_DIR
 
             save_tasks([{"id": "daily", "name": "daily", "command": "task daily.py"}])
-            with tempfile.TemporaryDirectory(prefix="fls-task-log-") as temp_dir:
-                log_path = Path(temp_dir) / "daily.log"
-                log_path.write_text("first\nsecond\nthird\n", encoding="utf-8")
-                with patch.object(task_logs, "latest_log_for_task", return_value=str(log_path)):
-                    denied = app.test_client().get("/api/task/daily/log")
-                    self.assertEqual(denied.status_code, 401)
+            log_path = LOG_DIR / "daily-20261128.log"
+            log_path.write_text("first\nsecond\nthird\n", encoding="utf-8")
+            denied = app.test_client().get("/api/task/daily/log")
+            self.assertEqual(denied.status_code, 401)
 
-                    response = app.test_client().get(
-                        "/api/task/daily/log?lines=2",
-                        headers={"X-Token": "unit-token"},
-                    )
-                    self.assertEqual(response.status_code, 200)
-                    self.assertEqual(response.headers.get("Cache-Control"), "no-store")
-                    self.assertEqual(response.get_json()["log"], "second\nthird")
+            response = app.test_client().get(
+                "/api/task/daily/log?lines=2",
+                headers={"X-Token": "unit-token"},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+            self.assertEqual(response.get_json()["log"], "second\nthird")
 
-                    invalid = app.test_client().get(
-                        "/api/task/daily/log?lines=1001",
-                        headers={"X-Token": "unit-token"},
-                    )
-                    self.assertEqual(invalid.status_code, 400)
-                    self.assertFalse(invalid.get_json()["ok"])
+            invalid = app.test_client().get(
+                "/api/task/daily/log?lines=1001",
+                headers={"X-Token": "unit-token"},
+            )
+            self.assertEqual(invalid.status_code, 400)
+            self.assertFalse(invalid.get_json()["ok"])
 
 
 class NativeTaskMutationApiTests(unittest.TestCase):

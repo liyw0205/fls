@@ -426,7 +426,7 @@ def run_logged_command(cmd, cwd, log_file, env=None, shell=False, install_id="")
     append_log(log_file, f"cwd: {cwd}")
     append_log(log_file, "------------------------------------------------------------")
 
-    with tempfile.TemporaryDirectory(prefix="fls-online-install-") as workspace, open_log_file(log_file, "ab", buffering=0) as log_fp:
+    with tempfile.TemporaryDirectory(prefix="fls-online-install-") as workspace, open_log_file(log_file, "ab", buffering=0, legacy_root=True) as log_fp:
         proc = None
         gate_attempted = False
         try:
