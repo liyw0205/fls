@@ -56,6 +56,13 @@ elif mode == 'publication':
         kwargs['before_publish'] = before_publish
         return original(*args, **kwargs)
     routes.merge_task_link_tasks = merge
+elif mode == 'repair':
+    from fls_manager.online_scripts import constants
+    original = constants._write_online_refresh_task_recoveries_file
+    def write(*args):
+        pause()
+        return original(*args)
+    constants._write_online_refresh_task_recoveries_file = write
 app = create_app()
 headers = {'X-Token': os.environ['FLS_TOKEN']}
 pending, result, held = None, [], {}
@@ -69,8 +76,8 @@ try:
         method, data = command['method'], command.get('data') or {}
         if method == 'quit': break
         if method == 'begin':
-            pending = threading.Thread(target=lambda command=dict(command): result.append(request(
-                dict(command, method='post'))), daemon=True)
+            pending = threading.Thread(target=lambda command=dict(command), verb=data.pop('_method', 'post'): result.append(request(
+                dict(command, method=verb))), daemon=True)
             pending.start()
             payload = [200, {'accepted':True}]
         elif method == 'result':
@@ -85,6 +92,10 @@ try:
             payload = [200, {'claimed':True}]
         elif method == 'save':
             source.persist_task_link_request(data)
+            payload = [200, {'saved':True}]
+        elif method == 'recover':
+            from fls_manager.online_scripts.constants import persist_online_refresh_task_link_recovery
+            persist_online_refresh_task_link_recovery(data['request_id'], data['script_id'], proxy_id='', added=1, total=1)
             payload = [200, {'saved':True}]
         else:
             payload = request(command)
@@ -356,3 +367,26 @@ class OnlineTaskLinkWorkerTests(unittest.TestCase):
                 self.assertEqual(code, 409, conflict)
                 self.assertEqual(conflict['code'], 'revision_conflict')
                 self.assertIn('owner', conflict['current_json_text'])
+
+    def test_failure_query_repairs_copies_without_overwriting_other_worker_recovery(self):
+        with isolated_app() as (_, base):
+            from fls_manager.online_scripts import constants
+
+            self.prepare()
+            refresh_id = 'c' * 32
+            failures = [{'script_id':script_id, 'name':script_id, 'task_link':'https://example.invalid/tasks.json',
+                         'proxy_id':'', 'error':'original failure'} for script_id in ('demo', 'other')]
+            constants.update_online_refresh_state(id='fixture', request_id=refresh_id, status='部分完成',
+                running=False, cache_published=True, task_link_failures=failures)
+            constants.persist_online_refresh_task_link_recovery(refresh_id, 'demo', proxy_id='', added=1, total=1)
+            constants._online_refresh_task_recoveries_path(refresh_id).write_bytes(b'{broken')
+            with self.worker(base, 'owner', 'repair') as (_, first), self.worker(base, 'writer') as (_, second):
+                first('begin', '/api/online-scripts/refresh-task-link-failures/' + refresh_id, {'_method':'get'})
+                self.wait_started(base, 'owner')
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    recovery = pool.submit(second, 'recover', data={'request_id':refresh_id, 'script_id':'other'})
+                    (base / 'owner.release').touch()
+                    self.assertEqual(first('result')[0], 200)
+                    self.assertEqual(recovery.result(15)[0], 200)
+                for script_id in ('demo', 'other'):
+                    self.assertEqual(constants.get_online_refresh_task_link_recovery(refresh_id, script_id)['state'], 'completed')

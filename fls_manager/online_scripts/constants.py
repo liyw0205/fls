@@ -1031,7 +1031,7 @@ def get_online_refresh_task_link_failures(request_id, offset=0, limit=ONLINE_REF
         raise ValueError("失败源分页起始位置超出范围")
     if not 1 <= limit <= ONLINE_REFRESH_TASK_FAILURE_PAGE_LIMIT:
         raise ValueError("失败源分页大小必须在 1 到 100 之间")
-    with ONLINE_REFRESH_LOCK, storage_transaction():
+    with ONLINE_REFRESH_LOCK, task_link_receipt_transaction():
         info = get_online_refresh_request(request_id)
         if not info:
             raise LookupError("原刷新记录不存在或已清理，请返回刷新状态重新选择")
@@ -1078,7 +1078,7 @@ def get_online_refresh_task_link_failures(request_id, offset=0, limit=ONLINE_REF
 def get_online_refresh_task_link_failure(request_id, script_id):
     if not isinstance(script_id, str) or not script_id:
         raise ValueError("失败源脚本标识无效")
-    with ONLINE_REFRESH_LOCK, storage_transaction():
+    with ONLINE_REFRESH_LOCK, task_link_receipt_transaction():
         info = get_online_refresh_request(request_id)
         if not info:
             raise LookupError("原刷新记录不存在或已清理，请返回刷新状态重新选择")
