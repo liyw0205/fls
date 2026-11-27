@@ -12,10 +12,19 @@ from .helpers import task_config_safe_path
 
 from ...models import get_task, TASKS_MUTATION_LOCK
 from ...storage import storage_transaction
+from ...data_access import PanelStorageBusy
+from ...directory_jobs import directory_job_operation
 from ...utils import h, get_back_url
 from ...ui.layout import layout
 from ...ui.components import message_card, page_header
 from ...task_runner import is_running
+
+
+MAX_CONFIG_BYTES = 1024 * 1024
+
+
+class TaskConfigLimitError(ValueError):
+    pass
 
 
 class TaskConfigConflict(ValueError):
@@ -51,12 +60,16 @@ def _read_config_snapshot(target, config_path):
             metadata = os.fstat(fd)
             if not stat.S_ISREG(metadata.st_mode):
                 raise ValueError("配置路径不是普通文件")
+            if metadata.st_size > MAX_CONFIG_BYTES:
+                raise TaskConfigLimitError("配置文件超过 1 MiB 编辑限制")
             fp = os.fdopen(fd, "rb")
         except Exception:
             os.close(fd)
             raise
         with fp:
-            data = fp.read()
+            data = fp.read(MAX_CONFIG_BYTES + 1)
+        if len(data) > MAX_CONFIG_BYTES:
+            raise TaskConfigLimitError("配置文件超过 1 MiB 编辑限制")
     signature = [config_path, str(target), bool(metadata)]
     if metadata:
         signature.extend([
@@ -67,6 +80,8 @@ def _read_config_snapshot(target, config_path):
 
 
 def _save_config_atomic(target, config_path, content, revision, metadata):
+    if len(content) > MAX_CONFIG_BYTES or len(content.encode("utf-8")) > MAX_CONFIG_BYTES:
+        raise TaskConfigLimitError("配置内容超过 1 MiB 编辑限制")
     if task_config_safe_path(config_path) != target:
         raise TaskConfigConflict("配置文件路径已变更，请重新检查当前配置后保存")
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -110,11 +125,14 @@ def _save_config_atomic(target, config_path, content, revision, metadata):
 
 
 @bp.route("/task/config/<task_id>", methods=["GET", "POST"])
+@directory_job_operation
 def task_config_edit(task_id):
     back_url = get_back_url("/tasks")
     submitted = request.form.get("content", "") if request.method == "POST" else None
     try:
         task = get_task(task_id)
+    except PanelStorageBusy:
+        raise
     except Exception as e:
         body = page_header(
             "任务读取失败", help_html=f"{h(e)}。配置未保存，请修复任务文件或恢复备份后重试。",
@@ -148,6 +166,8 @@ def task_config_edit(task_id):
 
     try:
         target = task_config_safe_path(config_path)
+    except PanelStorageBusy:
+        raise
     except Exception as e:
         body = f"""
 <section class="section fls-form-section">
@@ -201,17 +221,24 @@ def task_config_edit(task_id):
                 current_content, revision, metadata = _read_config_snapshot(target, config_path)
                 exists = True
                 msg = "保存成功"
+        except PanelStorageBusy:
+            raise
         except TaskConfigConflict as e:
             status_code = 409
             msg = str(e)
             if readable:
                 try:
                     current_content, revision, _metadata = _read_config_snapshot(target, config_path)
+                except PanelStorageBusy:
+                    raise
                 except Exception as read_error:
                     status_code = 500
                     revision = ""
                     readable = False
                     msg += f" 当前配置读取失败：{read_error}。草稿已保留，请检查文件状态后重试。"
+        except TaskConfigLimitError as e:
+            status_code = 413
+            msg = f"配置文件不可编辑：{e}。草稿已保留，配置未保存。"
         except ValueError as e:
             status_code = 400
             msg = f"配置文件不可编辑：{e}。草稿已保留，请检查配置路径和编码后重试。"

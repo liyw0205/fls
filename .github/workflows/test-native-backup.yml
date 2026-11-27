@@ -49,6 +49,8 @@ jobs:
           tests/test_script_debug_workers.py
           tests/test_native_script_debug_api.py
           tests/test_script_debug_recovery.py
+          tests/test_task_config_directory_access.py
+          tests/test_task_config_recovery.py
           tests/test_directory_process.py
           tests/test_online_install_directory_jobs.py
           tests/test_online_install_workers.py
@@ -140,6 +142,10 @@ jobs:
         env:
           PYTHONPATH: .
         run: python -m pytest -q tests/test_online_install_directory_jobs.py tests/test_online_install_workers.py tests/test_online_install_lifecycle.py tests/test_online_install_recovery.py tests/test_online_install_storage_recovery.py tests/test_online_install_scheduler_recovery.py tests/test_online_native_api.py tests/test_online_task_validation.py
+      - name: Verify task config admission, bounded reads and publication cleanup
+        env:
+          PYTHONPATH: .
+        run: python -m pytest -q tests/test_task_config_directory_access.py
       - name: Verify independent online task import identity and recovery across workers
         env:
           PYTHONPATH: .
