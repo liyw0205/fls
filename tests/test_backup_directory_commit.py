@@ -36,7 +36,7 @@ class BackupDirectoryCommitTests(unittest.TestCase):
             "import os,json\nfrom pathlib import Path\nfrom fls_manager import backup_commit as commit\n"
             f"base=Path({str(base)!r})\n"
             f"entries=[{{k:Path(v) for k,v in row.items()}} for row in {paths!r}]\n"
-            "replace=os.replace\ncount=0\n"
+            "replace=commit._replace\ncount=0\n"
             "def crash_after(source,target):\n"
             " global count\n"
             " replace(source,target)\n"
@@ -46,7 +46,7 @@ class BackupDirectoryCommitTests(unittest.TestCase):
             "  count+=1\n"
             f"  stop=count == {checkpoint!r}\n"
             " if stop: os._exit(73)\n"
-            "os.replace=crash_after\n"
+            "commit._replace=crash_after\n"
             f"commit.commit(base,{self.request_id!r},entries,['secret_key.txt','native_sessions.sqlite3'])\n"
         )
         result = subprocess.run([sys.executable, "-c", script], capture_output=True, timeout=10)
@@ -99,10 +99,10 @@ class BackupDirectoryCommitTests(unittest.TestCase):
             self.run_commit(base, entries, 3)
             script = (
                 "import os\nfrom pathlib import Path\nfrom fls_manager import backup_commit as commit\n"
-                "replace=os.replace\n"
+                "replace=commit._replace\n"
                 "def crash(source,target):\n"
                 " replace(source,target)\n if Path(target).name == 'secret_key.txt': os._exit(74)\n"
-                "os.replace=crash\n"
+                "commit._replace=crash\n"
                 f"commit.recover(Path({str(base)!r}),{self.request_id!r})\n"
             )
             result = subprocess.run([sys.executable, "-c", script], capture_output=True, timeout=10)

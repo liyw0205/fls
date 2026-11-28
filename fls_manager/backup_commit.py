@@ -27,7 +27,8 @@ def _identity(path):
     except FileNotFoundError:
         return None
     kind = stat.S_IFMT(info.st_mode)
-    if kind not in (stat.S_IFREG, stat.S_IFDIR) or not info.st_ino:
+    if (kind not in (stat.S_IFREG, stat.S_IFDIR) or not info.st_ino
+        or getattr(info, "st_file_attributes", 0) & 0x400):
         raise RuntimeError("unverifiable restore object")
     return {"device": info.st_dev, "inode": info.st_ino, "kind": kind}
 
@@ -39,6 +40,7 @@ def _expect(path, identity):
 
 def _sync_directory(path):
     if os.name == "nt":
+        # Windows moves use write-through; it has no POSIX directory fsync.
         return
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
     try:
@@ -48,15 +50,26 @@ def _sync_directory(path):
 
 
 def _sync_tree(root):
-    for current, directories, files in os.walk(root, followlinks=False):
+    identity = _identity(root)
+    if identity is None or identity["kind"] != stat.S_IFDIR:
+        raise RuntimeError("invalid restore tree")
+
+    def scan_failed(error):
+        raise error
+
+    for current, directories, files in os.walk(root, followlinks=False, onerror=scan_failed):
         for name in directories + files:
             path = Path(current) / name
             identity = _identity(path)
-            if identity["kind"] == stat.S_IFREG and os.name != "nt":
-                flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            if identity["kind"] == stat.S_IFREG:
+                access = os.O_RDWR if os.name == "nt" else os.O_RDONLY
+                flags = access | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
                 fd = os.open(path, flags)
                 try:
-                    if os.fstat(fd).st_ino != identity["inode"]:
+                    info = os.fstat(fd)
+                    if (info.st_ino != identity["inode"] or info.st_dev != identity["device"]
+                        or stat.S_IFMT(info.st_mode) != stat.S_IFREG
+                        or getattr(info, "st_file_attributes", 0) & 0x400):
                         raise RuntimeError("restore stage changed")
                     os.fsync(fd)
                 finally:
@@ -64,10 +77,26 @@ def _sync_tree(root):
         _sync_directory(Path(current))
 
 
+def _replace(source, destination):
+    if os.name != "nt":
+        os.replace(source, destination)
+        return
+
+    import ctypes
+    from ctypes import wintypes
+
+    api = ctypes.WinDLL("kernel32", use_last_error=True)
+    api.MoveFileExW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD]
+    api.MoveFileExW.restype = wintypes.BOOL
+    # No COPY_ALLOWED: every transaction move must remain on the same volume.
+    if not api.MoveFileExW(str(source), str(destination), 0x1 | 0x8):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
 def _rename(source, destination, identity):
     _expect(source, identity)
     _expect(destination, None)
-    os.replace(source, destination)
+    _replace(source, destination)
     _sync_directory(source.parent)
     if destination.parent != source.parent:
         _sync_directory(destination.parent)
@@ -164,7 +193,7 @@ def _write(base, row):
         stream.write(encoded)
         stream.flush()
         os.fsync(stream.fileno())
-    os.replace(temporary, path)
+    _replace(temporary, path)
     _sync_directory(path.parent)
 
 
@@ -289,7 +318,13 @@ def _commit(base, request_id, entries, identity_names):
                     archived.unlink()
         if len(identities) > 1000:
             raise DirectoryCommitError("too many runtime identity objects", True)
-        _sync_tree(staged)
+        try:
+            _sync_tree(staged)
+            _sync_directory(workspace)
+            if _identity(target) is not None:
+                _sync_tree(target)
+        except Exception as exc:
+            raise DirectoryCommitError("directory data flush failed", True) from exc
         row["entries"].append({"target": target.name, "workspace": workspace.name,
                                "workspace_identity": _identity(workspace), "replacement": _identity(staged),
                                "original": _identity(target), "identities": identities})

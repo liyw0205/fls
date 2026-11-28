@@ -75,6 +75,11 @@ jobs:
           python -m pytest -q tests/test_backup_sqlite_wal.py
           tests/test_backup_directory_commit.py tests/test_native_backup_directory_recovery.py
           tests/test_backup_data_access.py
+      - name: Verify data flushes, write-through moves and preparation failures
+        env:
+          PYTHONPATH: .
+          PYTHONUTF8: '1'
+        run: python -m pytest -q tests/test_backup_commit_durability.py
   instance_restore:
     name: ${{ matrix.os }} instance lock during restore
     runs-on: ${{ matrix.os }}
