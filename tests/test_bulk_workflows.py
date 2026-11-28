@@ -35,7 +35,7 @@ def isolated_app():
             from fls_manager.app import create_app
 
             with patch("fls_manager.app.dispatch_frontend_open_event"):
-                yield create_app(), Path(temp_dir)
+                yield create_app(), Path(temp_dir).resolve()
         finally:
             shutdown_scheduler()
             runner = sys.modules.get("fls_manager.task_runner")

@@ -374,7 +374,7 @@ class NativeProxyCheckTests(unittest.TestCase):
                 process = MagicMock(stdout=io.BytesIO(output), returncode=returncode, pid=987654)
                 with patch.object(checks.shutil, "which", return_value="git"), \
                      patch.object(checks.subprocess, "Popen", return_value=process) as popen, \
-                     patch.object(checks.os, "killpg"):
+                     patch.object(checks.os, "killpg", create=True):
                     result = checks._git_probe({"type": "github", "url": "https://proxy.example"})
                 self.assertEqual(result["error_code"], expected)
                 self.assertNotIn("SECRET", json.dumps(result))
@@ -386,10 +386,15 @@ class NativeProxyCheckTests(unittest.TestCase):
             process.wait.side_effect = [subprocess.TimeoutExpired("git", 25), 0]
             with patch.object(checks.shutil, "which", return_value="git"), \
                  patch.object(checks.subprocess, "Popen", return_value=process), \
-                 patch.object(checks.os, "killpg") as kill:
+                 patch.object(checks.os, "killpg", create=True) as kill:
                 result = checks._git_probe({"type": "github", "url": "https://proxy.example"})
             self.assertEqual(result["error_code"], "timeout")
-            kill.assert_called_once()
+            if checks.os.name == "nt":
+                process.kill.assert_called_once()
+                kill.assert_not_called()
+            else:
+                kill.assert_called_once_with(process.pid, checks.signal.SIGKILL)
+                process.kill.assert_not_called()
 
     def test_same_proxy_cannot_start_second_check_and_history_is_bounded(self):
         with isolated_app() as (app, _):

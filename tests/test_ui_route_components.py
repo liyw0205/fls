@@ -43,7 +43,7 @@ def isolated_app():
 
             from fls_manager.app import create_app
 
-            yield create_app(), Path(temp_dir)
+            yield create_app(), Path(temp_dir).resolve()
         finally:
             for worker in threading.enumerate():
                 if worker.name.startswith(("fls-script-pull-", "fls-repo-pull-", "fls-script-import-", "fls-repo-progress-", "fls-online-install-", "fls-online-scripts-refresh", "fls-script-debug-", "fls-frontend-open")):

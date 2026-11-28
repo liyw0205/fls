@@ -48,7 +48,7 @@ jobs:
           PYTHONPATH: .
           PYTHONUTF8: '1'
         run: >-
-          python -m pytest -q tests/test_native_storage_busy.py
+          python -m pytest -q tests/test_fixture_paths.py tests/test_native_storage_busy.py
           tests/test_native_env_api.py tests/test_native_config_api.py
           tests/test_native_proxy_api.py tests/test_native_notify_api.py
           tests/test_global_env_recovery.py tests/test_proxy_action_recovery.py

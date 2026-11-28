@@ -1,6 +1,5 @@
 import importlib
 import json
-import shlex
 import sys
 import threading
 import time
@@ -283,10 +282,10 @@ class GlobalEnvRecoveryTests(unittest.TestCase):
 
     def test_actual_task_process_uses_saved_globals_with_task_override(self):
         with isolated_app() as (app, base):
-            from fls_manager import models
+            from fls_manager import command, models
             self.seed()
             code = "import os;print('env-proof:' + os.environ['SHARED'] + ':' + os.environ['IMPORTED'])"
-            models.save_tasks([sample_task("run", command=shlex.quote(sys.executable) + " -c " + shlex.quote(code), env={"SHARED": "task"})])
+            models.save_tasks([sample_task("run", command=command.command_list_to_shell([sys.executable, "-c", code]), env={"SHARED": "task"})])
             response = self.post(app.test_client(), self.values("replace", env_text='SHARED="global"\nIMPORTED="saved"'))
             self.assertEqual(response.status_code, 200)
             client = app.test_client()

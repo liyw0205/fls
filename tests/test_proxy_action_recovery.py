@@ -1,5 +1,4 @@
 import importlib
-import shlex
 import sys
 import threading
 import time
@@ -229,7 +228,7 @@ class ProxyActionRecoveryTests(unittest.TestCase):
     def test_task_api_fails_closed_then_actual_process_uses_restored_proxy(self):
         for state in ("missing", "disabled", "invalid"):
             with self.subTest(state=state), isolated_app() as (app, base):
-                from fls_manager import models, task_runner, proxy
+                from fls_manager import command, models, task_runner, proxy
                 self.seed()
                 proxies = models.load_proxies()
                 if state == "missing":
@@ -241,7 +240,7 @@ class ProxyActionRecoveryTests(unittest.TestCase):
                 models.save_proxies(proxies)
                 marker = base / "actual-proxy.txt"
                 code = "import os,pathlib;pathlib.Path(" + repr(str(marker)) + ").write_text(os.environ['HTTP_PROXY'])"
-                models.save_tasks([sample_task("run", proxy_id="p", command=shlex.quote(sys.executable) + " -c " + shlex.quote(code))])
+                models.save_tasks([sample_task("run", proxy_id="p", command=command.command_list_to_shell([sys.executable, "-c", code]))])
                 client = app.test_client()
                 with patch.object(task_runner.subprocess, "Popen") as process:
                     response = client.post("/api/task/action/run/run", json={"request_id": "b" * 32}, headers={"X-Token": TOKEN})
