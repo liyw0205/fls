@@ -122,7 +122,7 @@ class ManagerInstanceLockTests(unittest.TestCase):
             data_dir.mkdir()
             target = base_dir / "target"
             target.write_text("untouched", encoding="ascii")
-            (data_dir / "fls-manager.lock").symlink_to(target)
+            (base_dir / ".fls-manager.lock").symlink_to(target)
             env = os.environ.copy()
             env["FLS_BASE_DIR"] = str(base_dir)
 
@@ -154,7 +154,7 @@ class ManagerInstanceLockTests(unittest.TestCase):
                 self.assertIsNotNone(descriptor)
                 instance_lock.release_instance_lock(descriptor)
 
-            self.assertEqual((data_dir / "fls-manager.lock").read_bytes(), b"\0")
+            self.assertEqual((data_dir.parent / ".fls-manager.lock").read_bytes(), b"\0")
             self.assertEqual(calls, [(0, 1, 1), (0, 2, 1)])
 
             windows_lock.locking = Mock(side_effect=OSError(errno.EACCES, "locked"))

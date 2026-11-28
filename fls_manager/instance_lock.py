@@ -25,7 +25,6 @@ def _open_instance_lock(path, flags):
     api.GetFileInformationByHandleEx.restype = wintypes.BOOL
     api.CloseHandle.argtypes = [wintypes.HANDLE]
     api.CloseHandle.restype = wintypes.BOOL
-    # Keep the byte-range lock on the same object while restore moves data/.
     share = 0x1 | 0x2 | 0x4  # FILE_SHARE_READ, WRITE, DELETE
     disposition = 4 if flags & os.O_CREAT else 3  # OPEN_ALWAYS, OPEN_EXISTING
     handle = api.CreateFileW(str(path), 0xC0000000, share, None, disposition, 0x00200000, None)
@@ -49,15 +48,33 @@ def acquire_instance_lock():
 
 
 def _acquire_instance_lock():
-    path = DATA_DIR / "fls-manager.lock"
+    # An open descendant prevents directory renames on Windows.
+    descriptor = _acquire_lock_file(DATA_DIR.parent / ".fls-manager.lock", create=True)
+    if descriptor is None:
+        return None
+    legacy_busy = False
+    try:
+        legacy = DATA_DIR / "fls-manager.lock"
+        if legacy.exists() or legacy.is_symlink():
+            legacy_descriptor = _acquire_lock_file(legacy, create=False)
+            if legacy_descriptor is None:
+                legacy_busy = True
+            else:
+                release_instance_lock(legacy_descriptor)
+    except BaseException:
+        release_instance_lock(descriptor)
+        raise
+    if legacy_busy:
+        release_instance_lock(descriptor)
+        return None
+    return descriptor
+
+
+def _acquire_lock_file(path, *, create):
     if path.is_symlink():
         raise RuntimeError("FLS Manager 实例锁不能是符号链接")
 
-    flags = os.O_RDWR
-    if not path.exists():
-        with directory_access(DATA_DIR.parent, write=True):
-            DATA_DIR.mkdir(parents=True, exist_ok=True)
-        flags |= os.O_CREAT
+    flags = os.O_RDWR | (os.O_CREAT if create else 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
     descriptor = _open_instance_lock(path, flags)
     try:
@@ -67,9 +84,8 @@ def _acquire_instance_lock():
         if os.name == "nt":
             import msvcrt
 
-            if os.fstat(descriptor).st_size == 0:
-                with directory_access(DATA_DIR.parent, write=True):
-                    os.write(descriptor, b"\0")
+            if create and os.fstat(descriptor).st_size == 0:
+                os.write(descriptor, b"\0")
             os.lseek(descriptor, 0, os.SEEK_SET)
             try:
                 msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)

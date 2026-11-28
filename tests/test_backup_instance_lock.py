@@ -31,6 +31,7 @@ class BackupInstanceLockTests(unittest.TestCase):
                 data = base / "data"
                 data.mkdir()
                 (data / "original").write_bytes(b"original")
+                (data / "fls-manager.lock").write_bytes(b"legacy-lock")
                 workspace = Path(tempfile.mkdtemp(prefix=".data-restore-", dir=base))
                 staged = workspace / "replacement"
                 staged.mkdir()
@@ -46,8 +47,11 @@ class BackupInstanceLockTests(unittest.TestCase):
                         identity = os.fstat(descriptor)
                         self.contender(base, "locked")
                         write = backup_commit._write
+                        terminal_attempts = []
 
                         def fail_commit(base, row):
+                            if row["state"] == "committed":
+                                terminal_attempts.append(True)
                             if rollback and row["state"] == "committed":
                                 raise OSError("injected terminal publication failure")
                             return write(base, row)
@@ -59,7 +63,9 @@ class BackupInstanceLockTests(unittest.TestCase):
                                 self.assertTrue(raised.exception.live_state_unchanged)
                             else:
                                 backup_commit.commit(base, request_id, [entry], ["fls-manager.lock"])
-                        self.assertTrue(os.path.samestat(identity, (data / "fls-manager.lock").stat()))
+                        self.assertEqual(terminal_attempts, [True])
+                        self.assertTrue(os.path.samestat(identity, (base / ".fls-manager.lock").stat()))
+                        self.assertEqual((data / "fls-manager.lock").read_bytes(), b"legacy-lock")
                         self.assertEqual((data / ("original" if rollback else "restored")).read_bytes(),
                                          b"original" if rollback else b"restored")
                         self.contender(base, "locked")
@@ -68,4 +74,34 @@ class BackupInstanceLockTests(unittest.TestCase):
                     finally:
                         instance_lock.release_instance_lock(descriptor)
                     self.contender(base, "acquired")
+
+    def test_running_legacy_instance_blocks_new_startup_until_its_lock_is_released(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            data = base / "data"
+            data.mkdir()
+            path = data / "fls-manager.lock"
+            path.write_bytes(b"\0")
+            descriptor = os.open(path, os.O_RDWR)
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.contender(base, "locked")
+            finally:
+                instance_lock.release_instance_lock(descriptor)
+            self.contender(base, "acquired")
+
+    def test_legacy_probe_preserves_an_empty_unlocked_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            data = base / "data"
+            data.mkdir()
+            path = data / "fls-manager.lock"
+            path.touch()
+            self.contender(base, "acquired")
+            self.assertEqual(path.read_bytes(), b"")
 
