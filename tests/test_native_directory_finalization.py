@@ -205,7 +205,7 @@ class NativeDirectoryFinalizationTests(unittest.TestCase):
             entry, client, row = self.recovered(app, base)
             journal = base / backup_commit.JOURNAL_NAME / (self.request_id + ".json")
             original = journal.read_bytes()
-            with patch.object(directory_evidence, "publish_receipt", side_effect=OSError("disk full")):
+            with patch.object(backup_commit, "_replace", side_effect=OSError("disk full")):
                 response = self.finish(client, row["version"])
             self.assertEqual(response.status_code, 503, response.json)
             self.assertEqual(journal.read_bytes(), original)
@@ -215,6 +215,27 @@ class NativeDirectoryFinalizationTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 backup_commit.assert_data_accessible(base, write=True)
             self.assertEqual(self.finish(client, row["version"]).status_code, 200)
+
+    def test_intent_uses_durable_transaction_publication_before_releasing_gate(self):
+        with isolated_app() as (app, base):
+            from fls_manager import backup_commit
+
+            _, client, row = self.recovered(app, base)
+            replace = backup_commit._replace
+            publications = []
+
+            def observe(source, destination):
+                publications.append(destination.name)
+                if destination.name == "intent.json":
+                    self.assertEqual(backup_commit.pending(base), [self.request_id])
+                else:
+                    self.assertIn("intent.json", publications)
+                return replace(source, destination)
+
+            with patch.object(backup_commit, "_replace", side_effect=observe):
+                response = self.finish(client, row["version"])
+            self.assertEqual(response.status_code, 200, response.json)
+            self.assertEqual(publications, ["intent.json", "restore.json", "journal.json"])
 
     def test_archived_history_is_explicit_and_old_clients_only_read_pending_transactions(self):
         with isolated_app() as (app, base):

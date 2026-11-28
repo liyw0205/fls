@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 
 from ... import backup_commit
-from ...receipt_io import open_receipt, publish_receipt
+from ...receipt_io import open_receipt
 
 ARCHIVE_NAME = ".backup_native_directory_evidence"
 RECORD_LIMIT = 8192
@@ -166,7 +166,7 @@ def prepare(base, request_id, transaction, receipt_path, confirmation_version):
             stream.write(encoded)
             stream.flush()
             os.fsync(stream.fileno())
-        publish_receipt(temporary, archive / "intent.json")
+        backup_commit._replace(temporary, archive / "intent.json")
         backup_commit._sync_directory(archive)
     finally:
         temporary.unlink(missing_ok=True)
