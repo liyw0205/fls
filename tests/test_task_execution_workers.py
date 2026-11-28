@@ -254,7 +254,17 @@ class TaskExecutionWorkerTests(unittest.TestCase):
                 self.assertEqual(sorted(row[0] for row in responses), [200, 409], responses)
                 self.wait_for(lambda: (base / 'started').exists())
                 remote = b if responses[0][0] == 200 else a
-                detail = remote('get', '/api/task/a')[1]
+
+                def history_running():
+                    status, body = remote('get', '/api/task/a')
+                    self.assertEqual(status, 200, body)
+                    self.assertTrue(body['runtime']['running'])
+                    self.assertEqual(len(body['history']), 1)
+                    self.assertIn(body['history'][0]['status'], ('starting', 'running'))
+                    return body if body['history'][0]['status'] == 'running' else None
+
+                # The child marker can precede the owner's persisted history update.
+                detail = self.wait_for(history_running)
                 self.assertTrue(detail['runtime']['running'])
                 self.assertEqual(detail['history'][0]['status'], 'running')
                 log = remote('get', '/api/task/a/log')[1]['log']
