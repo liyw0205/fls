@@ -1182,23 +1182,37 @@ class NativeBackupApiTests(unittest.TestCase):
                 target = backup.backup_dir() / "verified.tar.gz"
                 target.write_bytes(b"verified archive")
                 client = self.client(app)
-                item = client.get("/api/backup/native/files", headers=self.headers()).json["items"][0]
+                listed = client.get("/api/backup/native/files", headers=self.headers())
+                self.assertEqual(listed.status_code, 200, listed.json)
+                item = next(item for item in listed.json["items"] if item["name"] == target.name)
                 opened = []
+                open_archive = backup.open_backup_entry
+
+                def verified_open(directory, filename):
+                    try:
+                        return open_archive(directory, filename)
+                    except (ValueError, OSError) as exc:
+                        self.fail(f"archive open failed before response creation: {exc!r}")
 
                 def fail(source, **_options):
                     opened.append(source)
                     raise error
 
                 app.config["PROPAGATE_EXCEPTIONS"] = True
-                with patch.object(native_api, "send_file", side_effect=fail):
+                with patch.object(backup, "open_backup_entry", side_effect=verified_open), \
+                        patch.object(native_api, "send_file", side_effect=fail):
                     path = f"/api/backup/native/files/{target.name}/download?version={item['version']}"
                     if isinstance(error, OSError):
                         response = client.get(path, headers=self.headers())
                         self.assertEqual(response.status_code, 409, response.json)
+                        self.assertEqual(response.json["code"], "file_unavailable", response.json)
                     else:
                         with self.assertRaises(RuntimeError):
                             client.get(path, headers=self.headers())
-                self.assertEqual(len(opened), 1)
+                self.assertEqual(len(opened), 1, {
+                    "listed": item,
+                    "current_version": backup.backup_file_version(target.stat()),
+                })
                 self.assertTrue(opened[0].closed)
                 target.unlink()
 
