@@ -2055,7 +2055,7 @@ def _directory_maintenance_payload(request_id, *, active=None):
 
 @bp.route(NATIVE_PREFIX + "/directory-maintenance")
 def api_backup_native_directory_maintenance():
-    args, error = _single_query({"limit", "offset"})
+    args, error = _single_query({"limit", "offset", "include_finalized"})
     if error:
         return error
     try:
@@ -2065,8 +2065,13 @@ def api_backup_native_directory_maintenance():
         return _error("invalid_page", "目录现场分页参数无效", 400)
     if not 1 <= limit <= 100 or not 0 <= offset <= 100000:
         return _error("invalid_page", "目录现场分页参数超出范围", 400)
+    if args.get("include_finalized", "0") not in ("0", "1"):
+        return _error("invalid_query", "归档现场查询选项无效", 400)
     try:
-        request_ids = sorted(set(backup_commit.pending(backup.BASE_DIR)) | set(directory_evidence.ids(backup.BASE_DIR)))
+        request_ids = set(backup_commit.pending(backup.BASE_DIR))
+        if args.get("include_finalized") == "1":
+            request_ids.update(directory_evidence.ids(backup.BASE_DIR))
+        request_ids = sorted(request_ids)
         if len(request_ids) > 1000:
             raise RuntimeError("too many directory maintenance records")
         active = _process_lease_held(RESTORE_PROCESS_LOCK_PATH, shared=True)

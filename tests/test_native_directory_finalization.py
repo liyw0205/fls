@@ -62,7 +62,8 @@ class NativeDirectoryFinalizationTests(unittest.TestCase):
                     backup_commit.assert_data_accessible(base, write=True)
                     with patch.object(backup_commit, "_rename", side_effect=AssertionError("read/replay mutated evidence")):
                         self.assertEqual(self.get(client, "/" + self.request_id).json["directory"], result)
-                        self.assertEqual(self.get(client).json["items"], [result])
+                        self.assertEqual(self.get(client, "?include_finalized=1").json["items"], [result])
+                        self.assertEqual(self.get(client).json["items"], [])
                         self.assertEqual(self.finish(client, row["version"]).json["directory"], result)
                         self.assertEqual(self.finish(client, result["version"]).status_code, 200)
                     self.assertNotIn(str(base), str(response.json))
@@ -214,3 +215,20 @@ class NativeDirectoryFinalizationTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 backup_commit.assert_data_accessible(base, write=True)
             self.assertEqual(self.finish(client, row["version"]).status_code, 200)
+
+    def test_archived_history_is_explicit_and_old_clients_only_read_pending_transactions(self):
+        with isolated_app() as (app, base):
+            _, client, row = self.recovered(app, base)
+            self.assertEqual(self.get(client, "?include_finalized=1").json["items"], [row])
+            self.assertEqual(self.get(client, "?include_finalized=true").status_code, 400)
+            self.assertEqual(self.get(client, "?include_finalized=1&include_finalized=1").status_code, 400)
+            self.assertEqual(self.finish(client, row["version"]).status_code, 200)
+            legacy = self.get(client)
+            self.assertEqual(legacy.status_code, 200, legacy.json)
+            self.assertEqual(legacy.json["items"], [])
+            self.assertEqual(legacy.json["total"], 0)
+            archived = self.get(client, "?include_finalized=1&limit=1&offset=0")
+            self.assertEqual(archived.json["items"][0]["state"], "finalized")
+            self.assertEqual(archived.json["total"], 1)
+            self.assertEqual(archived.json["limit"], 1)
+            self.assertEqual(self.get(client, "?include_finalized=1&offset=1").json["items"], [])
