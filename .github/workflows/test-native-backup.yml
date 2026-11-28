@@ -28,6 +28,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  dependency_cleanup:
+    name: ${{ matrix.os }} restore dependency cleanup across workers
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install test dependencies
+        run: python -m pip install Flask 'APScheduler<4' requests PySocks tzdata qrcode pytest pytest-subtests
+      - name: Verify original owner cleanup, failed receipts and worker crashes
+        env:
+          PYTHONPATH: .
+          PYTHONUTF8: '1'
+        run: >-
+          python -m pytest -q tests/test_backup_dependency_cleanup_workers.py
+          tests/test_native_backup_api.py tests/test_backup_dependency_process.py
+          tests/test_native_restore_identity.py
+          -W error::pytest.PytestUnhandledThreadExceptionWarning
   sqlite_wal:
     name: ${{ matrix.os }} SQLite WAL during restore
     runs-on: ${{ matrix.os }}

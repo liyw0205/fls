@@ -26,6 +26,7 @@ from ...sensitive import mask_sensitive_text
 from ... import backup_commit
 from ...data_access import directory_access
 from ...backup_lease import try_process_lease as _try_process_lease, release_process_lease as _release_process_lease
+from ...receipt_io import open_receipt, publish_receipt
 
 NATIVE_PREFIX = "/api/backup/native"
 NATIVE_BODY_LIMIT = 4096
@@ -104,8 +105,9 @@ def _restore_lease_matches(record, kind):
         if len(encoded) > 512:
             return False
         owner = json.loads(encoded)
+        operation_kind = "dependency" if kind == "dependency-cleanup" else kind
         return (owner.get("request_id") == record["request_id"] and owner.get("kind") == kind
-                and owner.get("operation_id") == (record.get(kind + "_operation_id", "") if kind != "restore" else ""))
+                and owner.get("operation_id") == (record.get(operation_kind + "_operation_id", "") if kind != "restore" else ""))
     except (OSError, ValueError, AttributeError):
         return False
 
@@ -1360,7 +1362,7 @@ def _write_native_restore(record):
             stream.write(encoded)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temp, path)
+        publish_receipt(temp, path)
         try:
             directory_fd = os.open(RESTORE_DIR, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
             try:
@@ -1378,17 +1380,14 @@ def _write_native_restore(record):
 def _read_native_restore(request_id):
     path = _native_restore_path(request_id)
     try:
-        info = path.lstat()
+        fd = open_receipt(path)
     except FileNotFoundError:
         return None
-    if not stat.S_ISREG(info.st_mode) or info.st_size > RESTORE_RECORD_BYTES:
-        raise RuntimeError("恢复作业回执无效")
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
         with os.fdopen(fd, "rb") as source:
             opened = os.fstat(source.fileno())
-            if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(info, opened):
-                raise RuntimeError("恢复作业回执已变化")
+            if not stat.S_ISREG(opened.st_mode) or opened.st_size > RESTORE_RECORD_BYTES:
+                raise RuntimeError("恢复作业回执无效")
             encoded = source.read(RESTORE_RECORD_BYTES + 1)
         if len(encoded) > RESTORE_RECORD_BYTES:
             raise RuntimeError("恢复作业回执超过安全大小")
@@ -2324,6 +2323,133 @@ def _cleanup_dependency_resources(entry):
         shutil.rmtree(work_dir)
 
 
+def _dependency_cleanup_intent_path(request_id):
+    return _native_restore_path(request_id).with_suffix(".cleanup")
+
+
+def _publish_dependency_cleanup_intent(request_id, operation_id):
+    _ensure_private_directory(RESTORE_DIR)
+    path = _dependency_cleanup_intent_path(request_id)
+    temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+    encoded = json.dumps({"request_id": request_id, "operation_id": operation_id,
+                          "intent_id": uuid.uuid4().hex}).encode("ascii")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    fd = os.open(temporary, flags, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        publish_receipt(temporary, path)
+        backup_commit._sync_directory(RESTORE_DIR)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _read_dependency_cleanup_intent(request_id, operation_id):
+    try:
+        fd = open_receipt(_dependency_cleanup_intent_path(request_id))
+    except FileNotFoundError:
+        return ""
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 1024:
+            raise RuntimeError("依赖清理请求无效")
+        encoded = stream.read(1025)
+    if len(encoded) > 1024:
+        raise RuntimeError("依赖清理请求超过安全大小")
+    row = json.loads(encoded, object_pairs_hook=_unique_object)
+    if (not isinstance(row, dict) or set(row) != {"request_id", "operation_id", "intent_id"}
+        or row.get("request_id") != request_id
+        or any(not isinstance(row.get(key), str) or not REQUEST_ID_RE.fullmatch(row[key])
+               for key in ("operation_id", "intent_id"))):
+        raise RuntimeError("依赖清理请求身份无效")
+    return row["intent_id"] if row["operation_id"] == operation_id else ""
+
+
+def _complete_dependency_cleanup(request_id, entry):
+    with RESTORE_LOCK:
+        record = _read_native_restore(request_id)
+        if record is None or record.get("dependency_operation_id") != entry["operation_id"]:
+            raise RuntimeError("原依赖操作已变化，未清理其他作业")
+    _cleanup_dependency_resources(entry)
+    with RESTORE_LOCK:
+        record = _restore_record_update(
+            request_id, dependency_state=entry["terminal_state"], dependency_error=entry["terminal_error"],
+            dependency_cleanup_pending=False, dependency_guard=None, dependency_workspace=None,
+        )
+        RESTORE_DEPENDENCY_CLEANUP.pop(request_id, None)
+        _release_process_lease(entry["lease_fd"])
+        entry["lease_fd"] = None
+        return record
+
+
+def _watch_dependency_cleanup_requests(app, request_id, entry):
+    with app.app_context():
+        with RESTORE_LOCK:
+            if RESTORE_DEPENDENCY_CLEANUP.get(request_id) is not entry:
+                return
+            # Old intents never authorize a fresh cleanup attempt after an owner restart.
+            try:
+                last_intent = _read_dependency_cleanup_intent(request_id, entry["operation_id"])
+            except Exception:
+                last_intent = ""
+            try:
+                _mark_restore_lease(entry["lease_fd"], request_id, "dependency-cleanup", entry["operation_id"])
+            except Exception:
+                return
+        while True:
+            with RESTORE_LOCK:
+                if RESTORE_DEPENDENCY_CLEANUP.get(request_id) is not entry:
+                    return
+                busy = request_id in RESTORE_DEPENDENCY_CLEANING
+            if not busy:
+                try:
+                    intent = _read_dependency_cleanup_intent(request_id, entry["operation_id"])
+                except Exception:
+                    intent = ""
+                if intent and intent != last_intent:
+                    with RESTORE_LOCK:
+                        if RESTORE_DEPENDENCY_CLEANUP.get(request_id) is not entry:
+                            return
+                        if request_id in RESTORE_DEPENDENCY_CLEANING:
+                            continue
+                        RESTORE_DEPENDENCY_CLEANING.add(request_id)
+                        last_intent = intent
+                    try:
+                        _complete_dependency_cleanup(request_id, entry)
+                        return
+                    except Exception as exc:
+                        try:
+                            _restore_record_update(
+                                request_id, dependency_state="unknown", dependency_cleanup_pending=True,
+                                dependency_error="依赖清理尚未确认：" + _bounded_text(str(exc), 900),
+                            )
+                        except Exception:
+                            pass
+                    finally:
+                        with RESTORE_LOCK:
+                            RESTORE_DEPENDENCY_CLEANING.discard(request_id)
+            time.sleep(0.1)
+
+
+def _start_dependency_cleanup_owner(app, request_id, entry):
+    with RESTORE_LOCK:
+        watcher = entry.get("watcher")
+        if watcher is not None and watcher.is_alive():
+            return
+        watcher = threading.Thread(
+            target=_watch_dependency_cleanup_requests, args=(app, request_id, entry),
+            name="backup-native-cleanup-owner-" + request_id[:8], daemon=True,
+        )
+        entry["watcher"] = watcher
+        try:
+            _mark_restore_lease(entry["lease_fd"], request_id, "dependency-cleanup-starting", entry["operation_id"])
+            watcher.start()
+        except Exception:
+            entry["watcher"] = None
+
+
 def _run_native_restore_dependencies(app, request_id, process_lease_fd=None):
     work_dir = None
     process = None
@@ -2437,6 +2563,8 @@ def _run_native_restore_dependencies(app, request_id, process_lease_fd=None):
                     RESTORE_DEPENDENCY_CLEANUP[request_id] = entry
             if cleanup_complete:
                 _release_process_lease(process_lease_fd)
+            else:
+                _start_dependency_cleanup_owner(app, request_id, entry)
 
 
 @bp.route(NATIVE_PREFIX + "/restores/<request_id>/dependencies/cleanup", methods=["POST"])
@@ -2464,6 +2592,13 @@ def api_backup_native_cleanup_restore_dependencies(request_id):
                     return _native_restore_response(record, replayed=True)
                 fd = _try_process_lease(RESTORE_PROCESS_LOCK_PATH)
                 if fd is None:
+                    if _restore_lease_matches(record, "dependency-cleanup"):
+                        _publish_dependency_cleanup_intent(request_id, operation_id)
+                        record = _read_native_restore(request_id)
+                        if record is None or record.get("dependency_operation_id") != operation_id:
+                            return _error("operation_id_conflict", "依赖操作已变化，请查询原请求", 409)
+                        return _response({"ok": True, "cleanup_requested": True,
+                                          "restore": _native_restore_payload(record)}, 202)
                     return _error("restore_busy", "依赖监管或其他恢复操作尚未退出，请稍后查询", 409)
                 try:
                     record = _read_native_restore(request_id)
@@ -2473,7 +2608,7 @@ def api_backup_native_cleanup_restore_dependencies(request_id):
                     if not record.get("dependency_cleanup_pending", False):
                         _release_process_lease(fd)
                         return _native_restore_response(record, replayed=True)
-                    _mark_restore_lease(fd, request_id, "dependency-cleanup", operation_id)
+                    _mark_restore_lease(fd, request_id, "dependency-cleanup-active", operation_id)
                 except Exception:
                     _release_process_lease(fd)
                     raise
@@ -2490,15 +2625,7 @@ def api_backup_native_cleanup_restore_dependencies(request_id):
         except Exception:
             return _error("dependency_cleanup_unavailable", "无法读取依赖清理身份，请查询原请求", 503)
     try:
-        _cleanup_dependency_resources(entry)
-        record = _restore_record_update(
-            request_id, dependency_state=entry["terminal_state"], dependency_error=entry["terminal_error"],
-            dependency_cleanup_pending=False, dependency_guard=None, dependency_workspace=None,
-        )
-        with RESTORE_LOCK:
-            RESTORE_DEPENDENCY_CLEANUP.pop(request_id, None)
-            _release_process_lease(entry["lease_fd"])
-            entry["lease_fd"] = None
+        record = _complete_dependency_cleanup(request_id, entry)
         return _native_restore_response(record)
     except Exception as exc:
         try:
@@ -2508,6 +2635,7 @@ def api_backup_native_cleanup_restore_dependencies(request_id):
             )
         except Exception:
             pass
+        _start_dependency_cleanup_owner(current_app._get_current_object(), request_id, entry)
         return _response({
             "ok": False, "code": "dependency_cleanup_incomplete", "msg": "清理尚未完成，保留原作业占用；可以查询后再次清理",
             "restore": _native_restore_payload(record),

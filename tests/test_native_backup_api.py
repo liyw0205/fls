@@ -715,7 +715,7 @@ class NativeBackupApiTests(unittest.TestCase):
             real_start = threading.Thread.start
 
             def start(thread):
-                return real_start(thread) if "-output-" in thread.name else thread.run()
+                return real_start(thread) if "-output-" in thread.name or "-cleanup-owner-" in thread.name else thread.run()
 
             class Process:
                 def __init__(self, *args, **kwargs):
@@ -804,7 +804,7 @@ class NativeBackupApiTests(unittest.TestCase):
             real_start = threading.Thread.start
 
             def start(thread):
-                return real_start(thread) if "-output-" in thread.name else thread.run()
+                return real_start(thread) if "-output-" in thread.name or "-cleanup-owner-" in thread.name else thread.run()
 
             class BrokenStream(io.BytesIO):
                 def read1(self, size):
@@ -849,7 +849,7 @@ class NativeBackupApiTests(unittest.TestCase):
             real_start, real_process = threading.Thread.start, native_api.DependencyProcess
 
             def start(thread):
-                return real_start(thread) if "-output-" in thread.name else thread.run()
+                return real_start(thread) if "-output-" in thread.name or "-cleanup-owner-" in thread.name else thread.run()
 
             def command(_command, **kwargs):
                 return real_process([sys.executable, "-c", "print('installation finished')"], **kwargs)

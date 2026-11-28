@@ -71,6 +71,7 @@ class BackupSqliteWalTests(unittest.TestCase):
     def test_real_orphaned_wal_survives_commit_and_rollback_and_read_only_access(self):
         for rollback in (False, True):
             with self.subTest(rollback=rollback), isolated_app() as (_, base):
+                base = base.resolve()
                 from fls_manager import backup_commit
                 from fls_manager.routes.backup import restore
 
@@ -107,6 +108,7 @@ class BackupSqliteWalTests(unittest.TestCase):
 
     def test_every_interrupted_wal_move_and_commit_publication_recover_before_database_access(self):
         with isolated_app() as (_, base):
+            base = base.resolve()
             from fls_manager import backup_commit
 
             entry, names, before = self.prepare(base)
@@ -120,6 +122,7 @@ class BackupSqliteWalTests(unittest.TestCase):
 
         for checkpoint in (*range(1, checkpoints + 1), "committed"):
             with self.subTest(checkpoint=checkpoint), isolated_app() as (_, base):
+                base = base.resolve()
                 from fls_manager import backup_commit
 
                 entry, names, before = self.prepare(base)
