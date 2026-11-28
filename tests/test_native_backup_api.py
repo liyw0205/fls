@@ -1154,8 +1154,13 @@ class NativeBackupApiTests(unittest.TestCase):
             send_file = backup_routes.native_api.send_file
 
             def replace_path_after_open(source, **kwargs):
-                targets[0].unlink()
-                targets[0].symlink_to(directory / "bravo.tar.gz")
+                if os.name == "nt":
+                    with self.assertRaises(PermissionError):
+                        targets[0].unlink()
+                    self.assertTrue(os.path.samestat(os.fstat(source.fileno()), targets[0].stat()))
+                else:
+                    targets[0].unlink()
+                    targets[0].symlink_to(directory / "bravo.tar.gz")
                 return send_file(source, **kwargs)
 
             with patch.object(backup_routes.native_api, "send_file", side_effect=replace_path_after_open):
@@ -1163,8 +1168,39 @@ class NativeBackupApiTests(unittest.TestCase):
                     f"/api/backup/native/files/alpha.tar.gz/download?version={item['version']}",
                     headers=self.headers(),
                 )
-            self.assertEqual(response.data, original)
-            response.close()
+            try:
+                self.assertEqual(response.status_code, 200, response.data)
+                self.assertEqual(response.data, original)
+            finally:
+                response.close()
+
+    def test_download_response_failure_closes_the_verified_archive(self):
+        for error in (OSError("response unavailable"), RuntimeError("response failed")):
+            with self.subTest(error=type(error).__name__), isolated_app() as (app, _):
+                from fls_manager.routes.backup import _common as backup, native_api
+
+                target = backup.backup_dir() / "verified.tar.gz"
+                target.write_bytes(b"verified archive")
+                client = self.client(app)
+                item = client.get("/api/backup/native/files", headers=self.headers()).json["items"][0]
+                opened = []
+
+                def fail(source, **_options):
+                    opened.append(source)
+                    raise error
+
+                app.config["PROPAGATE_EXCEPTIONS"] = True
+                with patch.object(native_api, "send_file", side_effect=fail):
+                    path = f"/api/backup/native/files/{target.name}/download?version={item['version']}"
+                    if isinstance(error, OSError):
+                        response = client.get(path, headers=self.headers())
+                        self.assertEqual(response.status_code, 409, response.json)
+                    else:
+                        with self.assertRaises(RuntimeError):
+                            client.get(path, headers=self.headers())
+                self.assertEqual(len(opened), 1)
+                self.assertTrue(opened[0].closed)
+                target.unlink()
 
     def test_native_job_get_does_not_normalize_restart_or_cleanup_staging(self):
         with isolated_app() as (app, base):

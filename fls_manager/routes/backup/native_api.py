@@ -1324,12 +1324,16 @@ def api_backup_native_download(filename):
             if backup.backup_file_version(current) != version:
                 return _error("stale_file", "备份文件已变化，请刷新列表后重新选择", 409)
             source = backup.open_backup_entry(directory, filename)
-        response = send_file(source, mimetype="application/gzip", as_attachment=True,
-                             download_name=filename, conditional=False)
-        response.content_length = os.fstat(source.fileno()).st_size
-        response.headers["Cache-Control"] = "no-store"
-        response.call_on_close(source.close)
-        return response
+        try:
+            response = send_file(source, mimetype="application/gzip", as_attachment=True,
+                                 download_name=filename, conditional=False)
+            response.content_length = os.fstat(source.fileno()).st_size
+            response.headers["Cache-Control"] = "no-store"
+            response.call_on_close(source.close)
+            return response
+        except BaseException:
+            source.close()
+            raise
     except FileNotFoundError:
         return _error("file_not_found", "备份文件不存在，请刷新列表", 404)
     except (ValueError, OSError):
