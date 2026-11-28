@@ -76,7 +76,8 @@ class TaskExecutionWorkerTests(unittest.TestCase):
                 errors.seek(0)
                 diagnostics['stderr'] = errors.read(8192).decode('utf-8', errors='replace')
                 errors.seek(0, os.SEEK_END)
-                paths = [base / 'executions', base / 'data' / 'task_history.json']
+                paths = [base / 'data' / 'task_history.json']
+                paths.extend(sorted((base / 'executions').glob('*.started')))
                 paths.extend(sorted((base / '.task_executions').glob('*.json')))
                 paths.extend(sorted((base / 'log').glob('*.log')))
                 for path in paths:
@@ -108,9 +109,10 @@ class TaskExecutionWorkerTests(unittest.TestCase):
 
     def seed(self, base, *, child=False, retry=False, delay=0):
         from fls_manager import models
-        code = ('import pathlib,time,os,signal,subprocess,sys\n'
+        code = ('import pathlib,time,os,signal,subprocess,sys,uuid\n'
                 f'base=pathlib.Path({str(base)!r})\n'
-                'with (base/"executions").open("a") as f:f.write("started\\n")\n')
+                '(base/"executions").mkdir(exist_ok=True)\n'
+                '(base/"executions"/(uuid.uuid4().hex+".started")).write_text("started\\n",encoding="utf-8")\n')
         if child:
             child_code = ('import pathlib,time,signal\n'
                           'signal.signal(signal.SIGTERM,signal.SIG_IGN)\n'
@@ -125,6 +127,10 @@ class TaskExecutionWorkerTests(unittest.TestCase):
         models.save_tasks([sample_task('a', command='task run.py',
                           retry={'attempts': 1 if retry else 0, 'interval_seconds': 5},
                           random_delay={'mode': 'custom' if delay else 'none', 'seconds': delay})])
+
+    def executions(self, base):
+        return [path.read_text(encoding='utf-8')
+                for path in sorted((base / 'executions').glob('*.started'))]
 
     def wait_for(self, predicate, timeout=15):
         deadline = time.monotonic() + timeout
@@ -275,7 +281,7 @@ class TaskExecutionWorkerTests(unittest.TestCase):
                 final = self.done(remote)
                 self.assertEqual(final['history'][0]['status'], 'stopped')
                 self.assertTrue(process_exited(int((base / 'child-pid').read_text())))
-                self.assertEqual((base / 'executions').read_text().splitlines(), ['started'])
+                self.assertEqual(self.executions(base), ['started\n'])
 
     def test_owner_crash_keeps_restore_excluded_until_command_tree_exits(self):
         with isolated_app() as (_, base):
@@ -308,7 +314,7 @@ class TaskExecutionWorkerTests(unittest.TestCase):
                 self.done(b)
                 fd = self.wait_for(lambda: try_process_lease(base / '.backup_native_restore.lock'))
                 release_process_lease(fd)
-                self.assertEqual((base / 'executions').read_text().splitlines(), ['started'])
+                self.assertEqual(self.executions(base), ['started\n'])
 
     def test_retry_executes_once_and_cron_uses_same_identity_admission(self):
         with isolated_app() as (_, base):
@@ -318,7 +324,7 @@ class TaskExecutionWorkerTests(unittest.TestCase):
                 final = self.done(b)
                 self.assertEqual(len(final['history']), 2)
                 self.assertEqual(final['history'][0]['source'], 'retry')
-                self.assertEqual((base / 'executions').read_text().splitlines(), ['started', 'started'])
+                self.assertEqual(self.executions(base), ['started\n'] * 2)
 
     def test_admission_failure_before_history_and_broken_receipt_never_launch(self):
         with isolated_app() as (_, base):
@@ -371,8 +377,7 @@ class TaskExecutionWorkerTests(unittest.TestCase):
                     responses = list(pool.map(lambda item: item[1]('post', '/api/task/action/run/' + item[0],
                         {'request_id': item[0] * 32}), [('a', a), ('b', b)]))
                 self.assertEqual([response[0] for response in responses], [200, 200], responses)
-                self.wait_for(lambda: (base / 'executions').exists() and
-                              len((base / 'executions').read_text().splitlines()) == 2)
+                self.wait_for(lambda: self.executions(base) == ['started\n'] * 2)
                 (base / 'release').touch()
                 self.done(a)
                 self.wait_for(lambda: not b('get', '/api/task/b')[1]['runtime']['running'])
@@ -380,6 +385,7 @@ class TaskExecutionWorkerTests(unittest.TestCase):
                 self.assertEqual({row['task_id'] for row in history}, {'a', 'b'})
                 self.assertEqual([row['status'] for row in history], ['success', 'success'])
                 self.assertEqual([task['run_count'] for task in models.load_tasks()], [1, 1])
+                self.assertEqual(self.executions(base), ['started\n'] * 2)
 
     def test_thread_handoff_and_failed_terminal_history_release_admission(self):
         for failed_history in (False, True):
@@ -426,7 +432,7 @@ class TaskExecutionWorkerTests(unittest.TestCase):
                 final = self.done(b)
                 self.assertEqual(len(final['history']), 3)
                 self.assertEqual([row['source'] for row in final['history']], ['retry', 'manual', 'manual'])
-                self.assertEqual((base / 'executions').read_text().splitlines(), ['started'] * 3)
+                self.assertEqual(self.executions(base), ['started\n'] * 3)
 
 
 if __name__ == '__main__':
