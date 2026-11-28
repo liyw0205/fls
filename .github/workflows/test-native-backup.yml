@@ -28,6 +28,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  sqlite_wal:
+    name: ${{ matrix.os }} SQLite WAL during restore
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install test dependencies
+        run: python -m pip install Flask 'APScheduler<4' requests PySocks tzdata qrcode pytest pytest-subtests
+      - name: Verify real WAL data, interrupted commits and startup recovery
+        env:
+          PYTHONPATH: .
+          PYTHONUTF8: '1'
+        run: >-
+          python -m pytest -q tests/test_backup_sqlite_wal.py
+          tests/test_backup_directory_commit.py tests/test_native_backup_directory_recovery.py
+          tests/test_backup_data_access.py
   instance_restore:
     name: ${{ matrix.os }} instance lock during restore
     runs-on: ${{ matrix.os }}
