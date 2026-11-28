@@ -6,6 +6,43 @@ from .paths import DATA_DIR
 from .data_access import directory_access
 
 
+def _open_instance_lock(path, flags):
+    if os.name != "nt":
+        return os.open(path, flags, 0o600)
+
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class AttributeTagInfo(ctypes.Structure):
+        _fields_ = [("attributes", wintypes.DWORD), ("tag", wintypes.DWORD)]
+
+    api = ctypes.WinDLL("kernel32", use_last_error=True)
+    api.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                               wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    api.CreateFileW.restype = wintypes.HANDLE
+    api.GetFileInformationByHandleEx.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+    api.GetFileInformationByHandleEx.restype = wintypes.BOOL
+    api.CloseHandle.argtypes = [wintypes.HANDLE]
+    api.CloseHandle.restype = wintypes.BOOL
+    # Keep the byte-range lock on the same object while restore moves data/.
+    share = 0x1 | 0x2 | 0x4  # FILE_SHARE_READ, WRITE, DELETE
+    disposition = 4 if flags & os.O_CREAT else 3  # OPEN_ALWAYS, OPEN_EXISTING
+    handle = api.CreateFileW(str(path), 0xC0000000, share, None, disposition, 0x00200000, None)
+    if handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        info = AttributeTagInfo()
+        if not api.GetFileInformationByHandleEx(handle, 9, ctypes.byref(info), ctypes.sizeof(info)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if info.attributes & (0x10 | 0x400):  # DIRECTORY, REPARSE_POINT
+            raise RuntimeError("FLS Manager 实例锁必须是普通文件")
+        return msvcrt.open_osfhandle(handle, os.O_RDWR | os.O_BINARY | os.O_NOINHERIT)
+    except BaseException:
+        api.CloseHandle(handle)
+        raise
+
+
 def acquire_instance_lock():
     with directory_access(DATA_DIR.parent):
         return _acquire_instance_lock()
@@ -22,7 +59,7 @@ def _acquire_instance_lock():
             DATA_DIR.mkdir(parents=True, exist_ok=True)
         flags |= os.O_CREAT
     flags |= getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags, 0o600)
+    descriptor = _open_instance_lock(path, flags)
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             raise RuntimeError("FLS Manager 实例锁必须是普通文件")

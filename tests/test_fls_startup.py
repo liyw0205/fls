@@ -147,6 +147,7 @@ class ManagerInstanceLockTests(unittest.TestCase):
             windows_lock.locking = Mock(side_effect=record_locking)
             with patch.object(instance_lock, "DATA_DIR", data_dir), \
                     patch.object(instance_lock, "directory_access", side_effect=lambda *args, **kwargs: nullcontext()), \
+                    patch.object(instance_lock, "_open_instance_lock", side_effect=lambda path, flags: os.open(path, flags, 0o600)), \
                     patch.object(instance_lock.os, "name", "nt"), \
                     patch.dict(sys.modules, {"msvcrt": windows_lock}):
                 descriptor = instance_lock.acquire_instance_lock()
@@ -159,6 +160,7 @@ class ManagerInstanceLockTests(unittest.TestCase):
             windows_lock.locking = Mock(side_effect=OSError(errno.EACCES, "locked"))
             with patch.object(instance_lock, "DATA_DIR", data_dir), \
                     patch.object(instance_lock, "directory_access", side_effect=lambda *args, **kwargs: nullcontext()), \
+                    patch.object(instance_lock, "_open_instance_lock", side_effect=lambda path, flags: os.open(path, flags, 0o600)), \
                     patch.object(instance_lock.os, "name", "nt"), \
                     patch.dict(sys.modules, {"msvcrt": windows_lock}), \
                     patch.object(instance_lock.os, "close", wraps=os.close) as close:
