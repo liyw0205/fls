@@ -11,6 +11,7 @@ import threading
 import time
 import unittest
 import zipfile
+from types import SimpleNamespace
 from unittest.mock import patch
 from pathlib import Path
 
@@ -1182,6 +1183,26 @@ class NativeBackupApiTests(unittest.TestCase):
                         self.assertEqual(response.content_length, len(content))
                     finally:
                         response.close()
+
+    def test_windows_archive_versions_compare_the_same_time_semantics(self):
+        with isolated_app():
+            from fls_manager.routes.backup import _common as backup
+
+            fields = dict(st_dev=1, st_ino=2, st_size=14, st_mtime_ns=200,
+                          st_birthtime_ns=100, st_ctime_ns=100)
+            path_info = SimpleNamespace(**fields)
+            handle_info = SimpleNamespace(**dict(fields, st_ctime_ns=300))
+            with patch.object(backup.os, "name", "nt"):
+                expected = backup.backup_file_version(path_info)
+                self.assertEqual(backup.backup_file_version(handle_info), expected)
+                for name in ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_birthtime_ns"):
+                    with self.subTest(changed=name):
+                        changed = SimpleNamespace(**dict(fields, **{name: fields[name] + 1}))
+                        self.assertNotEqual(backup.backup_file_version(changed), expected)
+                legacy = SimpleNamespace(**{key: value for key, value in fields.items() if key != "st_birthtime_ns"})
+                self.assertEqual(backup.backup_file_version(legacy), expected)
+            with patch.object(backup.os, "name", "posix"):
+                self.assertNotEqual(backup.backup_file_version(path_info), backup.backup_file_version(handle_info))
 
     def test_file_pagination_is_stable_and_download_keeps_the_verified_descriptor(self):
         with isolated_app() as (app, _):

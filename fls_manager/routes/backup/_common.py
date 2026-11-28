@@ -200,7 +200,11 @@ def backup_directory_fd():
 
 
 def backup_file_version(info):
-    identity = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    version_time_ns = info.st_ctime_ns
+    if os.name == "nt":
+        # Python 3.12 Windows stat/fstat use different ctime semantics.
+        version_time_ns = getattr(info, "st_birthtime_ns", version_time_ns)
+    identity = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, version_time_ns)
     return hashlib.sha256(repr(identity).encode("ascii")).hexdigest()
 
 
