@@ -21,6 +21,7 @@ from . import bp
 from . import _common as backup
 from .actions import submit_backup_creation, submit_backup_cancellation
 from .dependency_process import DependencyProcess, cleanup_previous_process
+from . import directory_evidence
 from ...storage import storage_transaction, write_json
 from ...sensitive import mask_sensitive_text
 from ... import backup_commit
@@ -844,6 +845,7 @@ def api_backup_native_capabilities():
         "preflight_ttl_seconds": PREFLIGHT_TTL_SECONDS,
         "restore_enabled": True,
         "directory_maintenance_enabled": True,
+        "directory_finalization_enabled": True,
     })
 
 
@@ -1703,6 +1705,8 @@ def api_backup_native_create_restore():
     restore_lease_fd = None
     try:
         with PREFLIGHT_LOCK, RESTORE_LOCK:
+            if directory_evidence.read(backup.BASE_DIR, request_id) is not None:
+                return _error("restore_id_archived", "该恢复请求已有独立维护回执，请查询原目录现场", 409)
             existing = _read_native_restore(request_id)
             if existing is not None:
                 if not _native_restore_identity_matches(existing, preflight_id, digest, items, restore_dependencies):
@@ -1986,6 +1990,20 @@ def api_backup_native_restore_history():
         return _error("restore_history_unavailable", "恢复历史无法完整读取，请修复回执后重试", 503)
 
 
+def _orphan_dependency_evidence(request_id):
+    if RESTORE_DEPENDENCY_CLEANUP or RESTORE_DEPENDENCY_ACTIVE or RESTORE_DEPENDENCY_CLEANING:
+        return True
+    if PREFLIGHT_WORK_DIR.is_symlink():
+        raise RuntimeError("invalid dependency evidence directory")
+    if PREFLIGHT_WORK_DIR.exists():
+        for index, path in enumerate(PREFLIGHT_WORK_DIR.iterdir()):
+            if index >= 10000:
+                raise RuntimeError("too many dependency evidence entries")
+            if path.name.startswith("deps-" + request_id[:8] + "-"):
+                return True
+    return False
+
+
 def _directory_maintenance_payload(request_id, *, active=None):
     if active is None:
         active = _process_lease_held(RESTORE_PROCESS_LOCK_PATH, shared=True)
@@ -1996,21 +2014,41 @@ def _directory_maintenance_payload(request_id, *, active=None):
     payload = {
         "request_id": request_id, "version": "", "state": "unavailable",
         "outcome": "unknown", "restore_items": [], "receipt_state": receipt_state,
-        "active": active, "recover_allowed": False, "evidence_retained": True,
+        "active": active, "recover_allowed": False, "finalize_allowed": False, "evidence_retained": True,
     }
     try:
+        archived = directory_evidence.status(backup.BASE_DIR, request_id, _native_restore_path(request_id))
+        if archived is not None:
+            record, complete = archived
+            encoded = json.dumps([record, complete], sort_keys=True, separators=(",", ":")).encode("ascii")
+            payload.update(
+                version=hashlib.sha256(encoded).hexdigest(),
+                state="finalized" if complete else "finalizing", outcome=record["outcome"],
+                restore_items=record["restore_items"],
+                receipt_state="missing" if record["receipt"] is None else "unavailable",
+                finalize_allowed=not complete and not active and not _orphan_dependency_evidence(request_id),
+            )
+            return payload
         transaction = backup_commit.read(backup.BASE_DIR, request_id)
     except (OSError, RuntimeError, ValueError):
         return payload
     if transaction is None:
         return None
-    # Bind confirmation to the durable transaction and current receipt status.
-    encoded = json.dumps([transaction, receipt_state], sort_keys=True, separators=(",", ":")).encode("ascii")
+    try:
+        receipt_snapshot = directory_evidence.snapshot(_native_restore_path(request_id))
+        finalize_allowed = not _orphan_dependency_evidence(request_id)
+    except (OSError, RuntimeError, ValueError):
+        receipt_snapshot = "unavailable"
+        finalize_allowed = False
+    # Include raw receipt identity and contents, even when JSON parsing failed.
+    encoded = json.dumps([transaction, receipt_state, receipt_snapshot], sort_keys=True, separators=(",", ":")).encode("ascii")
     payload.update(
         version=hashlib.sha256(encoded).hexdigest(),
         state=transaction["state"], outcome=transaction["outcome"],
         restore_items=sorted(entry["target"] for entry in transaction["entries"]),
         recover_allowed=not active and receipt_state != "available",
+        finalize_allowed=finalize_allowed and not active and receipt_state != "available"
+        and transaction["state"] in ("committed", "rolled_back"),
     )
     return payload
 
@@ -2028,7 +2066,9 @@ def api_backup_native_directory_maintenance():
     if not 1 <= limit <= 100 or not 0 <= offset <= 100000:
         return _error("invalid_page", "目录现场分页参数超出范围", 400)
     try:
-        request_ids = sorted(backup_commit.pending(backup.BASE_DIR))
+        request_ids = sorted(set(backup_commit.pending(backup.BASE_DIR)) | set(directory_evidence.ids(backup.BASE_DIR)))
+        if len(request_ids) > 1000:
+            raise RuntimeError("too many directory maintenance records")
         active = _process_lease_held(RESTORE_PROCESS_LOCK_PATH, shared=True)
         rows = [_directory_maintenance_payload(request_id, active=active) for request_id in request_ids[offset:offset + limit]]
         if any(row is None for row in rows):
@@ -2079,11 +2119,54 @@ def api_backup_native_recover_orphan_directory(request_id):
                     return _error("directory_evidence_changed", "目录现场或原回执已变化，请重新查询并确认", 409)
                 if payload["receipt_state"] == "available":
                     return _error("restore_receipt_available", "原恢复回执可读，请在原恢复请求中处理目录现场", 409)
+                if not payload["recover_allowed"]:
+                    return _error("directory_finalization_started", "目录现场已进入结束流程，请查询原现场", 409)
                 backup_commit.recover(backup.BASE_DIR, request_id)
                 # Receipt metadata is missing: keep all copies and the write gate.
                 return _response({"ok": True, "directory": _directory_maintenance_payload(request_id, active=False)})
         except (OSError, RuntimeError, ValueError):
             return _error("directory_recovery_unavailable", "目录现场尚未核对完成；记录和副本保留，请查询原现场", 503)
+        finally:
+            _release_process_lease(fd)
+
+
+@bp.route(NATIVE_PREFIX + "/directory-maintenance/<request_id>/finalize", methods=["POST"])
+def api_backup_native_finalize_orphan_directory(request_id):
+    if not REQUEST_ID_RE.fullmatch(request_id):
+        return _error("invalid_request_id", "目录现场标识无效", 400)
+    body, error = _json_body({"confirm", "version"}, {"confirm", "version"})
+    if error:
+        return error
+    if body["confirm"] is not True or not isinstance(body["version"], str) or not re.fullmatch(r"[a-f0-9]{64}", body["version"]):
+        return _error("invalid_confirmation", "必须确认当前版本的目录现场", 400)
+    fd = None
+    with RESTORE_LOCK:
+        try:
+            fd = _try_process_lease(RESTORE_PROCESS_LOCK_PATH)
+            if fd is None or request_id in RESTORE_ACTIVE:
+                return _error("restore_still_active", "恢复或后续处理仍在执行，请等待后查询", 409)
+            with directory_access(exclusive=True, recovery=True):
+                payload = _directory_maintenance_payload(request_id, active=False)
+                if payload is None:
+                    return _error("directory_evidence_not_found", "目录现场记录不存在，不能据此确认结束成功", 404)
+                if payload["state"] == "unavailable":
+                    return _error("directory_maintenance_unavailable", "目录事务证据无法验证，记录和副本保留", 503)
+                intent = directory_evidence.read(backup.BASE_DIR, request_id)
+                if body["version"] not in (payload["version"], intent["confirmation_version"] if intent else payload["version"]):
+                    return _error("directory_evidence_changed", "目录现场或原回执已变化，请重新查询并确认", 409)
+                if payload["state"] == "finalized":
+                    return _response({"ok": True, "directory": payload})
+                if not payload["finalize_allowed"]:
+                    return _error("directory_finalization_blocked", "须先核对目录结果，且原回执和依赖现场不能存在未处理冲突", 409)
+                receipt = _native_restore_path(request_id)
+                if intent is None:
+                    directory_evidence.prepare(
+                        backup.BASE_DIR, request_id, backup_commit.read(backup.BASE_DIR, request_id), receipt, body["version"],
+                    )
+                directory_evidence.finalize(backup.BASE_DIR, request_id, receipt)
+                return _response({"ok": True, "directory": _directory_maintenance_payload(request_id, active=False)})
+        except (OSError, RuntimeError, ValueError):
+            return _error("directory_finalization_unavailable", "现场结束尚未确认；原证据保留，请查询原现场", 503)
         finally:
             _release_process_lease(fd)
 
