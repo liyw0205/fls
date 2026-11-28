@@ -25,6 +25,31 @@ class NativeBackupApiTests(unittest.TestCase):
     def headers(self):
         return {"X-Token": TOKEN}
 
+    @contextlib.contextmanager
+    def file_identity_observations(self):
+        from fls_manager.routes.backup import _common as backup
+
+        observations = []
+        version, open_entry = backup.backup_file_version, backup.open_backup_entry
+
+        def observed_version(info):
+            observations.append({name: getattr(info, name, None) for name in (
+                "st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns", "st_birthtime_ns",
+            )})
+            return version(info)
+
+        def observed_open(*args, **kwargs):
+            try:
+                return open_entry(*args, **kwargs)
+            except Exception as exc:
+                observations.append({"open_error": repr(exc)})
+                raise
+
+        with patch.object(backup, "backup_file_version", side_effect=observed_version), patch.object(
+            backup, "open_backup_entry", side_effect=observed_open,
+        ):
+            yield observations
+
     def archive(self, members=None):
         members = members or {
             "fls/data/config.json": b'{"theme":"dark"}',
@@ -1120,8 +1145,9 @@ class NativeBackupApiTests(unittest.TestCase):
             self.assertEqual(item["name"], target.name)
             self.assertEqual(item["size_bytes"], len(b"native archive"))
             path = f"/api/backup/native/files/{target.name}/download?version={item['version']}"
-            response = client.get(path, headers=self.headers())
-            self.assertEqual(response.status_code, 200)
+            with self.file_identity_observations() as observations:
+                response = client.get(path, headers=self.headers())
+            self.assertEqual(response.status_code, 200, {"response": response.get_json(), "identity": observations})
             self.assertEqual(response.data, b"native archive")
             self.assertEqual(response.content_length, len(b"native archive"))
             self.assertEqual(response.headers["Cache-Control"], "no-store")
@@ -1130,6 +1156,32 @@ class NativeBackupApiTests(unittest.TestCase):
             stale = client.get(path, headers=self.headers())
             self.assertEqual(stale.status_code, 409)
             self.assertNotIn(b"replaced archive", stale.data)
+
+    def test_rapid_archive_writes_keep_listed_and_opened_download_identity(self):
+        with isolated_app() as (app, _):
+            from fls_manager.routes.backup import _common as backup
+
+            target = backup.backup_dir() / "rapid.tar.gz"
+            client = self.client(app)
+            for attempt in range(100):
+                with self.subTest(attempt=attempt), self.file_identity_observations() as observations:
+                    content = f"archive {attempt:03d}".encode("ascii")
+                    target.write_bytes(content)
+                    page = client.get("/api/backup/native/files", headers=self.headers())
+                    self.assertEqual(page.status_code, 200, page.json)
+                    item = next(item for item in page.json["items"] if item["name"] == target.name)
+                    response = client.get(
+                        f"/api/backup/native/files/{target.name}/download?version={item['version']}",
+                        headers=self.headers(),
+                    )
+                    try:
+                        self.assertEqual(response.status_code, 200, {
+                            "response": response.get_json(), "identity": observations,
+                        })
+                        self.assertEqual(response.data, content)
+                        self.assertEqual(response.content_length, len(content))
+                    finally:
+                        response.close()
 
     def test_file_pagination_is_stable_and_download_keeps_the_verified_descriptor(self):
         with isolated_app() as (app, _):
