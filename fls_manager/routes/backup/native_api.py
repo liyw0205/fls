@@ -21,7 +21,7 @@ from . import bp
 from . import _common as backup
 from .actions import submit_backup_creation, submit_backup_cancellation
 from .dependency_process import DependencyProcess, cleanup_previous_process
-from . import dependency_evidence, directory_evidence
+from . import dependency_evidence, dependency_maintenance, directory_evidence
 from ...storage import storage_transaction, write_json
 from ...sensitive import mask_sensitive_text
 from ... import backup_commit
@@ -846,6 +846,7 @@ def api_backup_native_capabilities():
         "restore_enabled": True,
         "directory_maintenance_enabled": True,
         "directory_finalization_enabled": True,
+        "dependency_maintenance_enabled": True,
     })
 
 
@@ -1716,6 +1717,8 @@ def api_backup_native_create_restore():
                     return _error("restore_id_conflict", "该恢复请求标识已绑定其他预检查或恢复范围", 409)
                 active = _native_restore_payload(existing)["active"]
                 return _native_restore_response(existing, 202 if active else 200, replayed=True)
+            if any(original_id == request_id for original_id, _ in dependency_evidence.ids(backup.BASE_DIR)):
+                return _error("restore_id_archived", "该恢复标识已有独立依赖证据，请查询原现场", 409)
 
             restore_lease_fd = _try_process_lease(RESTORE_PROCESS_LOCK_PATH)
             if restore_lease_fd is None:
@@ -1724,6 +1727,8 @@ def api_backup_native_create_restore():
 
             if backup_commit.pending(backup.BASE_DIR):
                 return _error("directory_recovery_required", "先完成原恢复请求的目录现场恢复", 409)
+            if _dependency_cleanup_pending():
+                return _error("dependency_cleanup_required", "先确认原依赖资源清理结果", 409)
 
             preflight = _read_preflight_record(preflight_id)
             if preflight is None:
@@ -2572,6 +2577,242 @@ def _read_dependency_cleanup_intent(request_id, operation_id):
     return row["intent_id"] if row["operation_id"] == operation_id else ""
 
 
+def _dependency_owner_kind(request_id, operation_id):
+    if not _process_lease_held(RESTORE_PROCESS_LOCK_PATH, shared=True):
+        return "idle"
+    try:
+        with os.fdopen(open_receipt(RESTORE_PROCESS_LOCK_PATH), "rb") as stream:
+            stream.seek(1)
+            encoded = stream.read(513)
+        if len(encoded) > 512:
+            return "other"
+        owner = json.loads(encoded, object_pairs_hook=_unique_object)
+        if owner.get("request_id") != request_id or owner.get("operation_id") != operation_id:
+            return "other"
+        return {"dependency": "installing", "dependency-cleanup-starting": "cleanup_starting",
+                "dependency-cleanup": "cleanup_owner",
+                "dependency-cleanup-active": "cleaning"}.get(owner.get("kind"), "other")
+    except (OSError, ValueError, AttributeError):
+        return "other"
+
+
+def _dependency_receipt_state(request_id):
+    try:
+        state = "available" if _read_native_restore(request_id) is not None else "missing"
+    except (OSError, RuntimeError, ValueError):
+        state = "unavailable"
+    return state, directory_evidence.snapshot(_native_restore_path(request_id))
+
+
+def _dependency_maintenance_payload(request_id, operation_id, *, owner_override=None):
+    payload = {
+        "request_id": request_id, "operation_id": operation_id, "version": "", "state": "unavailable",
+        "resource_state": "unknown", "original_result": "unknown", "receipt_state": "unavailable",
+        "owner_active": False, "cleanup_allowed": False, "evidence_retained": True,
+    }
+    try:
+        evidence = dependency_evidence.read(backup.BASE_DIR, request_id, operation_id)
+        if evidence is None:
+            return None
+        receipt_state, receipt = _dependency_receipt_state(request_id)
+        row = dependency_maintenance.read(backup.BASE_DIR, request_id, operation_id)
+        workspace = evidence["workspace"]
+        actual = backup_commit._identity(PREFLIGHT_WORK_DIR / workspace["name"])
+        expected = {"device": workspace["device"], "inode": workspace["inode"], "kind": stat.S_IFDIR}
+        if actual is not None and (actual != expected or evidence["state"] == "cleaned"):
+            raise RuntimeError("dependency workspace was replaced or reappeared")
+        owner = owner_override if owner_override is not None else _dependency_owner_kind(request_id, operation_id)
+        state = "active" if owner == "installing" else "cleaning" if owner == "cleaning" else "pending"
+        if row is not None:
+            complete = dependency_maintenance.archive_status(backup.BASE_DIR, row, _native_restore_path(request_id))
+            if row["status"] == "resources_cleaned":
+                if evidence != row["evidence"]:
+                    raise RuntimeError("dependency cleaned receipt changed")
+                state = "finalized" if complete and owner not in {"cleanup_owner", "cleanup_starting", "cleaning"} else "finalizing"
+            elif row["status"] == "requested" and owner == "cleanup_owner":
+                state = "requested"
+            elif row["status"] == "failed":
+                state = "cleanup_failed"
+        encoded = json.dumps([
+            evidence, directory_evidence.snapshot(dependency_evidence._path(backup.BASE_DIR, request_id, operation_id)),
+            receipt, row, owner, actual,
+        ], sort_keys=True, separators=(",", ":")).encode("ascii")
+        payload.update(
+            version=hashlib.sha256(encoded).hexdigest(), state=state,
+            resource_state="cleaned" if evidence["state"] == "cleaned" else "pending",
+            receipt_state=receipt_state, owner_active=owner != "idle",
+            cleanup_allowed=(receipt_state != "available" and owner in {"idle", "cleanup_owner"}
+                             and state not in {"requested", "finalized"}
+                             and request_id not in RESTORE_DEPENDENCY_CLEANING),
+        )
+    except (OSError, RuntimeError, ValueError):
+        pass
+    return payload
+
+
+@bp.route(NATIVE_PREFIX + "/dependency-maintenance")
+def api_backup_native_dependency_maintenance():
+    try:
+        if set(request.args) - {"limit", "offset"} or any(len(request.args.getlist(key)) != 1 for key in request.args):
+            raise ValueError("invalid dependency pagination")
+        limit, offset = int(request.args.get("limit", "25")), int(request.args.get("offset", "0"))
+        if not 1 <= limit <= 100 or not 0 <= offset <= 100000:
+            raise ValueError("invalid dependency pagination")
+    except ValueError:
+        return _error("invalid_pagination", "依赖现场分页参数无效", 400)
+    try:
+        ids = sorted(dependency_evidence.ids(backup.BASE_DIR))
+        rows = [_dependency_maintenance_payload(*identity) for identity in ids[offset:offset + limit]]
+        if any(row is None for row in rows):
+            raise RuntimeError("dependency evidence disappeared")
+        return _response({"ok": True, "items": rows, "total": len(ids), "limit": limit,
+                          "offset": offset, "has_more": offset + limit < len(ids)})
+    except (OSError, RuntimeError, ValueError):
+        return _error("dependency_maintenance_unavailable", "依赖现场无法完整读取，现有证据保留", 503)
+
+
+@bp.route(NATIVE_PREFIX + "/dependency-maintenance/<request_id>/<operation_id>")
+def api_backup_native_dependency_maintenance_item(request_id, operation_id):
+    if any(REQUEST_ID_RE.fullmatch(value) is None for value in (request_id, operation_id)):
+        return _error("invalid_request_id", "依赖现场标识无效", 400)
+    row = _dependency_maintenance_payload(request_id, operation_id)
+    if row is None:
+        return _error("dependency_evidence_not_found", "依赖现场不存在，不能据此确认清理完成", 404)
+    return _response({"ok": True, "dependency": row})
+
+
+def _execute_orphan_dependency_cleanup(app, request_id, entry, intent):
+    operation_id = entry["operation_id"]
+    with app.app_context():
+        try:
+            with RESTORE_LOCK, dependency_maintenance.transaction(backup.BASE_DIR):
+                current = dependency_maintenance.read(backup.BASE_DIR, request_id, operation_id)
+                if current != intent or intent["status"] != "requested":
+                    raise RuntimeError("original dependency maintenance request changed")
+                evidence = dependency_evidence.read(backup.BASE_DIR, request_id, operation_id)
+                receipt_state, receipt = _dependency_receipt_state(request_id)
+                if (receipt_state == "available" or receipt != intent["receipt"] or evidence != intent["evidence"]
+                    or evidence["workspace"] != entry.get("workspace") or evidence["guard"] != entry.get("guard")):
+                    raise RuntimeError("original dependency resources or receipt changed")
+                intent = dependency_maintenance.advance(backup.BASE_DIR, intent, "attempted")
+                _mark_restore_lease(entry["lease_fd"], request_id, "dependency-cleanup-active", operation_id)
+            if evidence["state"] != "cleaned":
+                _cleanup_dependency_resources(entry)
+            with RESTORE_LOCK, dependency_maintenance.transaction(backup.BASE_DIR):
+                evidence = dependency_evidence.advance(backup.BASE_DIR, evidence, "cleaned")
+                entry["evidence"] = evidence
+                intent = dependency_maintenance.advance(backup.BASE_DIR, intent, "resources_cleaned", evidence=evidence)
+                dependency_maintenance.finalize(backup.BASE_DIR, intent, _native_restore_path(request_id))
+                RESTORE_DEPENDENCY_CLEANUP.pop(request_id, None)
+                _release_process_lease(entry["lease_fd"])
+                entry["lease_fd"] = None
+            return True
+        except Exception:
+            try:
+                with RESTORE_LOCK, dependency_maintenance.transaction(backup.BASE_DIR):
+                    current = dependency_maintenance.read(backup.BASE_DIR, request_id, operation_id)
+                    if current is not None and current["attempt_id"] == intent["attempt_id"] and current["status"] in {"requested", "attempted"}:
+                        dependency_maintenance.advance(backup.BASE_DIR, current, "failed")
+            except (OSError, RuntimeError, ValueError):
+                pass
+            return False
+        finally:
+            with RESTORE_LOCK:
+                RESTORE_DEPENDENCY_CLEANING.discard(request_id)
+                if entry.get("lease_fd") is not None:
+                    try:
+                        _mark_restore_lease(entry["lease_fd"], request_id, "dependency-cleanup", operation_id)
+                        entry.pop("lease_mark_pending", None)
+                    except (OSError, RuntimeError):
+                        entry["lease_mark_pending"] = True
+
+
+def _run_orphan_dependency_cleanup(app, request_id, entry, intent):
+    if not _execute_orphan_dependency_cleanup(app, request_id, entry, intent):
+        _start_dependency_cleanup_owner(app, request_id, entry)
+
+
+@bp.route(NATIVE_PREFIX + "/dependency-maintenance/<request_id>/<operation_id>/cleanup", methods=["POST"])
+def api_backup_native_cleanup_orphan_dependency(request_id, operation_id):
+    if any(REQUEST_ID_RE.fullmatch(value) is None for value in (request_id, operation_id)):
+        return _error("invalid_request_id", "依赖现场标识无效", 400)
+    body, error = _json_body({"confirm", "version"}, {"confirm", "version"})
+    if error:
+        return error
+    if body["confirm"] is not True or not isinstance(body["version"], str) or re.fullmatch(r"[a-f0-9]{64}", body["version"]) is None:
+        return _error("invalid_confirmation", "必须明确确认当前版本的依赖现场", 400)
+    fd = None
+    entry = None
+    try:
+        with RESTORE_LOCK, dependency_maintenance.transaction(backup.BASE_DIR):
+            payload = _dependency_maintenance_payload(request_id, operation_id)
+            if payload is None:
+                return _error("dependency_evidence_not_found", "没有可核验的独立依赖证据", 404)
+            previous = dependency_maintenance.read(backup.BASE_DIR, request_id, operation_id)
+            if payload["state"] == "finalized" and body["version"] in (payload["version"], previous["confirmation_version"]):
+                return _response({"ok": True, "dependency": payload})
+            if payload["version"] != body["version"]:
+                return _error("dependency_evidence_changed", "依赖现场已变化，请重新查询并确认", 409)
+            if not payload["cleanup_allowed"]:
+                return _error("dependency_cleanup_blocked", "请等待活跃作业退出；原回执可读时通过原请求处理", 409)
+            evidence = dependency_evidence.read(backup.BASE_DIR, request_id, operation_id)
+            receipt_state, receipt = _dependency_receipt_state(request_id)
+            owner = _dependency_owner_kind(request_id, operation_id)
+            if previous is not None and previous["status"] == "resources_cleaned":
+                if previous["evidence"] != evidence or receipt_state == "available":
+                    raise RuntimeError("dependency finalization identity changed")
+            local_entry = RESTORE_DEPENDENCY_CLEANUP.get(request_id)
+            if owner == "idle":
+                fd = _try_process_lease(RESTORE_PROCESS_LOCK_PATH)
+                if fd is None:
+                    return _error("restore_busy", "其他恢复操作已受理，请查询原现场", 409)
+                if _dependency_maintenance_payload(request_id, operation_id, owner_override="idle")["version"] != body["version"]:
+                    return _error("dependency_evidence_changed", "依赖现场已变化，请重新确认", 409)
+                entry = {"operation_id": operation_id, "process": None, "reader": None,
+                         "workspace": evidence["workspace"], "guard": evidence["guard"],
+                         "evidence": evidence, "lease_fd": fd}
+            elif owner == "cleanup_owner" and local_entry is not None:
+                if local_entry["operation_id"] != operation_id:
+                    raise RuntimeError("dependency local operation changed")
+                entry = local_entry
+            if previous is not None and previous["status"] == "resources_cleaned" and entry is not None:
+                # Resume the same durable archival intent; never replace its raw snapshot.
+                dependency_maintenance.finalize(backup.BASE_DIR, previous, _native_restore_path(request_id))
+                RESTORE_DEPENDENCY_CLEANUP.pop(request_id, None)
+                _release_process_lease(entry["lease_fd"])
+                entry["lease_fd"] = None
+                fd = None
+                return _response({"ok": True, "dependency": _dependency_maintenance_payload(request_id, operation_id)})
+            intent = dependency_maintenance.request_cleanup(backup.BASE_DIR, evidence, receipt, body["version"])
+            if entry is None:
+                return _response({"ok": True, "dependency": _dependency_maintenance_payload(request_id, operation_id)}, 202)
+            _mark_restore_lease(entry["lease_fd"], request_id, "dependency-cleanup-active", operation_id)
+            RESTORE_DEPENDENCY_CLEANUP[request_id] = entry
+            RESTORE_DEPENDENCY_CLEANING.add(request_id)
+            fd = None
+        app = current_app._get_current_object()
+        try:
+            threading.Thread(target=_run_orphan_dependency_cleanup, args=(app, request_id, entry, intent),
+                             name="backup-native-orphan-deps-" + request_id[:8], daemon=True).start()
+        except Exception:
+            with RESTORE_LOCK:
+                RESTORE_DEPENDENCY_CLEANING.discard(request_id)
+                try:
+                    with dependency_maintenance.transaction(backup.BASE_DIR):
+                        current = dependency_maintenance.read(backup.BASE_DIR, request_id, operation_id)
+                        if current is not None and current["attempt_id"] == intent["attempt_id"] and current["status"] == "requested":
+                            dependency_maintenance.advance(backup.BASE_DIR, current, "failed")
+                except (OSError, RuntimeError, ValueError):
+                    pass
+            _start_dependency_cleanup_owner(app, request_id, entry)
+            return _error("dependency_cleanup_unavailable", "清理未启动；保留原占用，请查询原现场", 503)
+        return _response({"ok": True, "dependency": _dependency_maintenance_payload(request_id, operation_id)}, 202)
+    except (OSError, RuntimeError, ValueError):
+        return _error("dependency_cleanup_unavailable", "清理尚未确认，原证据与占用保留，请查询原现场", 503)
+    finally:
+        _release_process_lease(fd)
+
+
 def _complete_dependency_cleanup(request_id, entry):
     with RESTORE_LOCK:
         record = _read_native_restore(request_id)
@@ -2599,24 +2840,50 @@ def _complete_dependency_cleanup(request_id, entry):
 
 def _watch_dependency_cleanup_requests(app, request_id, entry):
     with app.app_context():
-        with RESTORE_LOCK:
-            if RESTORE_DEPENDENCY_CLEANUP.get(request_id) is not entry:
-                return
-            # Old intents never authorize a fresh cleanup attempt after an owner restart.
-            try:
-                last_intent = _read_dependency_cleanup_intent(request_id, entry["operation_id"])
-            except Exception:
-                last_intent = ""
-            try:
-                _mark_restore_lease(entry["lease_fd"], request_id, "dependency-cleanup", entry["operation_id"])
-            except Exception:
-                return
+        while True:
+            with RESTORE_LOCK:
+                if RESTORE_DEPENDENCY_CLEANUP.get(request_id) is not entry:
+                    return
+                # Never consume old intents when their initial snapshot is unreadable.
+                try:
+                    last_intent = _read_dependency_cleanup_intent(request_id, entry["operation_id"])
+                    with dependency_maintenance.transaction(backup.BASE_DIR):
+                        orphan = dependency_maintenance.read(backup.BASE_DIR, request_id, entry["operation_id"])
+                        last_orphan = orphan["attempt_id"] if orphan is not None else ""
+                        if orphan is not None and orphan["status"] == "requested":
+                            dependency_maintenance.advance(backup.BASE_DIR, orphan, "failed")
+                    _mark_restore_lease(entry["lease_fd"], request_id, "dependency-cleanup", entry["operation_id"])
+                    break
+                except (OSError, RuntimeError, ValueError):
+                    pass
+            time.sleep(0.1)
         while True:
             with RESTORE_LOCK:
                 if RESTORE_DEPENDENCY_CLEANUP.get(request_id) is not entry:
                     return
                 busy = request_id in RESTORE_DEPENDENCY_CLEANING
+                if not busy and entry.get("lease_mark_pending"):
+                    try:
+                        _mark_restore_lease(entry["lease_fd"], request_id, "dependency-cleanup", entry["operation_id"])
+                        entry.pop("lease_mark_pending", None)
+                    except (OSError, RuntimeError):
+                        busy = True
             if not busy:
+                try:
+                    orphan = dependency_maintenance.read(backup.BASE_DIR, request_id, entry["operation_id"])
+                except (OSError, RuntimeError, ValueError):
+                    orphan = None
+                if orphan is not None and orphan["status"] == "requested" and orphan["attempt_id"] != last_orphan:
+                    with RESTORE_LOCK:
+                        if RESTORE_DEPENDENCY_CLEANUP.get(request_id) is not entry:
+                            return
+                        if request_id in RESTORE_DEPENDENCY_CLEANING:
+                            continue
+                        RESTORE_DEPENDENCY_CLEANING.add(request_id)
+                        last_orphan = orphan["attempt_id"]
+                    if _execute_orphan_dependency_cleanup(app, request_id, entry, orphan):
+                        return
+                    continue
                 try:
                     intent = _read_dependency_cleanup_intent(request_id, entry["operation_id"])
                 except Exception:
@@ -2661,6 +2928,10 @@ def _start_dependency_cleanup_owner(app, request_id, entry):
             watcher.start()
         except Exception:
             entry["watcher"] = None
+            try:
+                _mark_restore_lease(entry["lease_fd"], request_id, "dependency-cleanup", entry["operation_id"])
+            except (OSError, RuntimeError):
+                entry["lease_mark_pending"] = True
 
 
 def _run_native_restore_dependencies(app, request_id, process_lease_fd=None):
