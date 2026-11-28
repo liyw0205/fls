@@ -229,6 +229,46 @@ class BackupDependencyCleanupWorkerTests(unittest.TestCase):
                 self.wait_cleaned(client, path, headers)
                 self.assert_available(api)
 
+    def test_independent_evidence_survives_corrupt_or_missing_original_without_get_cleanup(self):
+        for missing in (False, True):
+            with self.subTest(missing=missing), isolated_app() as (app, base):
+                from fls_manager.routes.backup import dependency_evidence as evidence, native_api as api
+
+                client, headers, path = self.prepare(app)
+                with self.owner(base):
+                    original = api._native_restore_path(self.request_id)
+                    saved = original.read_bytes()
+                    record = evidence.read(base, self.request_id, self.operation_id)
+                    self.assertEqual(record["state"], "cleanup_pending")
+                    self.assertEqual(record["guard"], api._read_native_restore(self.request_id)["dependency_guard"])
+                    independent_path = evidence._path(base, self.request_id, self.operation_id)
+                    independent_before = independent_path.read_bytes()
+                    attempts_before = (base / "cleanup-count").read_bytes()
+                    if missing:
+                        original.unlink()
+                    else:
+                        original.write_bytes(b"{original receipt damaged")
+                    for _ in range(3):
+                        queried = client.get(path, headers=headers)
+                        self.assertEqual(queried.status_code, 404 if missing else 503, queried.json)
+                        self.assertEqual(evidence.read(base, self.request_id, self.operation_id), record)
+                    rejected = client.post(path + "/dependencies/cleanup", json={
+                        "operation_id": self.operation_id,
+                    }, headers=headers)
+                    self.assertEqual(rejected.status_code, 404 if missing else 503, rejected.json)
+                    self.assertEqual(independent_path.read_bytes(), independent_before)
+                    self.assertEqual((base / "cleanup-count").read_bytes(), attempts_before)
+                    self.assertTrue((api.PREFLIGHT_WORK_DIR / record["workspace"]["name"]).is_dir())
+                    self.assertIsNone(api._try_process_lease(api.RESTORE_PROCESS_LOCK_PATH))
+                    original.write_bytes(saved)
+                    accepted = client.post(path + "/dependencies/cleanup", json={
+                        "operation_id": self.operation_id,
+                    }, headers=headers)
+                    self.assertEqual(accepted.status_code, 202, accepted.json)
+                    self.wait_cleaned(client, path, headers)
+                    self.assert_available(api)
+                    self.assertEqual(evidence.read(base, self.request_id, self.operation_id)["state"], "cleaned")
+
     def test_previous_intent_cannot_automatically_retry_a_new_cleanup_owner(self):
         with isolated_app() as (app, base):
             from fls_manager.routes.backup import native_api as api

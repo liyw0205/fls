@@ -21,7 +21,7 @@ from . import bp
 from . import _common as backup
 from .actions import submit_backup_creation, submit_backup_cancellation
 from .dependency_process import DependencyProcess, cleanup_previous_process
-from . import directory_evidence
+from . import dependency_evidence, directory_evidence
 from ...storage import storage_transaction, write_json
 from ...sensitive import mask_sensitive_text
 from ... import backup_commit
@@ -1494,6 +1494,9 @@ def _restore_retained_preflight_ids():
 def _dependency_cleanup_pending():
     return bool(RESTORE_DEPENDENCY_CLEANUP) or any(
         record.get("dependency_cleanup_pending", False) for record in _native_restore_records()
+    ) or any(
+        (dependency_evidence.read(backup.BASE_DIR, request_id, operation_id) or {}).get("state") != "cleaned"
+        for request_id, operation_id in dependency_evidence.ids(backup.BASE_DIR)
     )
 
 
@@ -1993,6 +1996,11 @@ def api_backup_native_restore_history():
 def _orphan_dependency_evidence(request_id):
     if RESTORE_DEPENDENCY_CLEANUP or RESTORE_DEPENDENCY_ACTIVE or RESTORE_DEPENDENCY_CLEANING:
         return True
+    for original_id, operation_id in dependency_evidence.ids(backup.BASE_DIR):
+        if original_id == request_id:
+            evidence = dependency_evidence.read(backup.BASE_DIR, request_id, operation_id)
+            if evidence is None or evidence["state"] != "cleaned":
+                return True
     if PREFLIGHT_WORK_DIR.is_symlink():
         raise RuntimeError("invalid dependency evidence directory")
     if PREFLIGHT_WORK_DIR.exists():
@@ -2512,10 +2520,12 @@ def _cleanup_dependency_resources(entry):
         try:
             current = _dependency_workspace_identity(work_dir)
         except FileNotFoundError:
+            backup_commit._sync_directory(PREFLIGHT_WORK_DIR)
             return
         if current != workspace:
             raise RuntimeError("依赖工作目录身份已变化，未删除替换目录")
         shutil.rmtree(work_dir)
+        backup_commit._sync_directory(PREFLIGHT_WORK_DIR)
 
 
 def _dependency_cleanup_intent_path(request_id):
@@ -2567,7 +2577,15 @@ def _complete_dependency_cleanup(request_id, entry):
         record = _read_native_restore(request_id)
         if record is None or record.get("dependency_operation_id") != entry["operation_id"]:
             raise RuntimeError("原依赖操作已变化，未清理其他作业")
+        evidence = dependency_evidence.read(backup.BASE_DIR, request_id, entry["operation_id"])
+        if (entry.get("evidence") is not None and evidence is None
+            or evidence is not None and (evidence["workspace"] != entry.get("workspace")
+                                         or evidence["guard"] not in (None, entry.get("guard")))):
+            raise RuntimeError("独立依赖监管证据已变化，未清理其他作业")
+        entry["evidence"] = evidence
     _cleanup_dependency_resources(entry)
+    if evidence is not None:
+        entry["evidence"] = dependency_evidence.advance(backup.BASE_DIR, evidence, "cleaned", guard=entry.get("guard"))
     with RESTORE_LOCK:
         record = _restore_record_update(
             request_id, dependency_state=entry["terminal_state"], dependency_error=entry["terminal_error"],
@@ -2652,6 +2670,7 @@ def _run_native_restore_dependencies(app, request_id, process_lease_fd=None):
     reader_started = False
     reader_errors = []
     workspace = None
+    evidence = None
     record = None
     output = bytearray()
     output_lock = threading.Lock()
@@ -2666,6 +2685,9 @@ def _run_native_restore_dependencies(app, request_id, process_lease_fd=None):
                 raise ValueError("preflight_archive_changed")
             work_dir = Path(tempfile.mkdtemp(prefix="deps-" + request_id[:8] + "-", dir=str(PREFLIGHT_WORK_DIR)))
             workspace = _dependency_workspace_identity(work_dir)
+            evidence = dependency_evidence.create(
+                backup.BASE_DIR, request_id, record["dependency_operation_id"], workspace,
+            )
             _restore_record_update(request_id, dependency_cleanup_pending=True, dependency_workspace=workspace)
             suffix = {"tar.gz": ".tar.gz", "tgz": ".tgz", "tar": ".tar", "zip": ".zip"}[preflight["archive_format"]]
             archive_path = work_dir / ("source" + suffix)
@@ -2683,10 +2705,12 @@ def _run_native_restore_dependencies(app, request_id, process_lease_fd=None):
                 env=os.environ.copy(),
                 lease_fd=process_lease_fd,
             )
+            evidence = dependency_evidence.advance(backup.BASE_DIR, evidence, "guarded", guard=process.identity)
             _restore_record_update(
                 request_id, dependency_cleanup_pending=True,
                 dependency_guard=process.identity, dependency_workspace=workspace,
             )
+            evidence = dependency_evidence.advance(backup.BASE_DIR, evidence, "start_requested")
             process.start()
             reader = threading.Thread(
                 target=_drain_restore_dependency_output,
@@ -2723,13 +2747,30 @@ def _run_native_restore_dependencies(app, request_id, process_lease_fd=None):
                 "process": process, "reader": reader if reader_started else None,
                 "workspace": workspace, "guard": process.identity if process is not None else None,
                 "lease_fd": process_lease_fd, "operation_id": (record or {}).get("dependency_operation_id", ""),
+                "evidence": evidence,
             }
             cleanup_complete = True
+            cleanup_error = ""
             try:
                 _cleanup_dependency_resources(entry)
             except Exception as exc:
                 cleanup_complete = False
                 cleanup_error = _bounded_text(str(exc), 1000)
+            try:
+                # A failed publication may already have replaced its destination.
+                if evidence is None and entry["operation_id"]:
+                    evidence = dependency_evidence.read(backup.BASE_DIR, request_id, entry["operation_id"])
+                if evidence is not None:
+                    if (evidence["workspace"] != workspace
+                        or evidence["guard"] not in (None, entry["guard"])):
+                        raise RuntimeError("independent dependency resource identity changed")
+                    entry["evidence"] = dependency_evidence.advance(
+                        backup.BASE_DIR, evidence, "cleaned" if cleanup_complete else "cleanup_pending",
+                        guard=entry["guard"],
+                    )
+            except Exception as exc:
+                cleanup_complete = False
+                cleanup_error = "独立依赖清理结果尚未持久确认：" + _bounded_text(str(exc), 900)
             if reader_errors:
                 error = reader_errors[0]
             entry.update(terminal_state="failed" if error else "succeeded", terminal_error=error)
