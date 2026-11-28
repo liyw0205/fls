@@ -17,6 +17,7 @@ from .paths import (
     COLLECTION_FILE,
 )
 from .storage import read_json, write_json, mutate_json, storage_transaction
+from .data_access import directory_access
 from .task_file_coordination import TASK_FILES_LOCK
 from .directory_jobs import DirectoryJobLock
 from .utils import now_str
@@ -377,7 +378,7 @@ def load_tasks_uncached():
 def load_tasks_for_read():
     global _TASKS_READ_CACHE
 
-    with TASKS_MUTATION_LOCK:
+    with TASKS_MUTATION_LOCK, directory_access():
         signature = _task_file_signature()
         with _TASKS_READ_CACHE_LOCK:
             cached = _TASKS_READ_CACHE

@@ -54,6 +54,9 @@ jobs:
           tests/test_global_env_recovery.py tests/test_proxy_action_recovery.py
           tests/test_notify_action_recovery.py tests/test_config_apply_recovery.py
           tests/test_native_proxy_checks.py tests/test_native_notify_deliveries.py
+          tests/test_scheduler_reload.py tests/test_task_bulk_recovery.py
+          tests/test_task_toggle_recovery.py tests/test_task_execution_recovery.py
+          tests/test_task_collection_recovery.py tests/test_collection_add_recovery.py
           -W error::pytest.PytestUnhandledThreadExceptionWarning
   dependency_cleanup:
     name: ${{ matrix.os }} restore dependency cleanup across workers

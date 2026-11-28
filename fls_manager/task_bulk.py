@@ -5,6 +5,7 @@ import threading
 import uuid
 
 from .models import TaskSchedulerReloadError
+from .data_access import directory_access
 from .paths import DATA_DIR
 from .storage import write_json
 from .utils import now_str
@@ -191,10 +192,11 @@ def execute_assign_collection(collection_id, data, *, get_collection, **operatio
 
 
 def _read_record(request_id):
-    try:
-        record = json.loads(_record_path(request_id).read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None
+    with directory_access():
+        try:
+            record = json.loads(_record_path(request_id).read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
     if not isinstance(record, dict) or record.get("request_id") != request_id or not isinstance(record.get("results"), list):
         raise RuntimeError("批量操作记录损坏，未重复执行，请修复记录后重试")
     ids = record.get("task_ids")

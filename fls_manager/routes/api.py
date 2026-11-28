@@ -4,6 +4,7 @@ import threading
 
 from flask import Blueprint, Response, jsonify, request
 
+from ..data_access import PanelStorageBusy
 from ..models import (
     get_task,
     load_tasks,
@@ -54,6 +55,8 @@ def api_notify_history():
 
     try:
         items = load_notify_history(limit=limit, status=status)
+    except PanelStorageBusy:
+        raise
     except Exception:
         return jsonify({"ok": False, "msg": "通知投递记录无法读取，请修复文件后重试", "items": []}), 500
     from ..notify_retry_actions import retry_request
@@ -218,6 +221,8 @@ def api_status():
                 "process_name": process_name,
             })
 
+    except PanelStorageBusy:
+        raise
     except Exception as e:
         return jsonify({
             "ok": False,
@@ -275,6 +280,8 @@ def api_scheduler_jobs():
 def api_scheduler_status():
     try:
         return jsonify({"ok": True, **get_scheduler_state()})
+    except PanelStorageBusy:
+        raise
     except Exception as exc:
         return jsonify({"ok": False, "status": "unknown", "error": str(exc)}), 500
 
@@ -283,6 +290,8 @@ def api_scheduler_status():
 def api_scheduler_reload():
     try:
         state = reload_scheduler()
+    except PanelStorageBusy:
+        raise
     except Exception as exc:
         try:
             state = get_scheduler_state()
@@ -453,6 +462,8 @@ def api_task_action(action, task_id):
 
         return jsonify({"ok": False, "msg": "未知操作"}), 400
 
+    except PanelStorageBusy:
+        raise
     except Exception as e:
         return jsonify({"ok": False, "msg": str(e)}), 500
 
@@ -514,6 +525,8 @@ def api_task_bulk_action():
                     payload["recovery_url"] = f"/scripts/rename-recovery/{pending['id']}"
                     break
         return jsonify(payload), status
+    except PanelStorageBusy:
+        raise
     except Exception as exc:
         return jsonify({"ok": False, "msg": str(exc), "action": action, "count": len(task_ids)}), 500
 
@@ -529,6 +542,8 @@ def api_collection_add_task(collection_id):
         payload, status = execute_assign_collection(collection_id, data, get_collection=get_collection,
                                                     load_tasks=load_tasks, mutate_tasks=mutate_tasks)
         return jsonify(payload), status
+    except PanelStorageBusy:
+        raise
     except Exception as exc:
         return jsonify(ok=False, msg=str(exc)), 500
 

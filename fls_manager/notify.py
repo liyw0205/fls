@@ -17,6 +17,7 @@ from email.utils import formataddr
 from .config import load_config, save_config
 from .paths import NOTIFY_HISTORY_FILE
 from .storage import write_json, storage_transaction
+from .data_access import directory_access
 from .utils import now_str, LazyModule
 
 requests = LazyModule("requests")
@@ -185,7 +186,7 @@ def _load_notify_history_rows():
 
 def load_notify_history(limit=None, status=""):
     """Return newest delivery rows and persist restart recovery when needed."""
-    with NOTIFY_HISTORY_LOCK:
+    with NOTIFY_HISTORY_LOCK, directory_access():
         rows = _load_notify_history_rows()
 
         status = _notify_text(status).strip()

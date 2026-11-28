@@ -10,6 +10,7 @@ from .task_runner import run_task_now
 from .logs import cleanup_logs
 from .paths import SCHEDULER_STATE_FILE
 from .storage import read_json, write_json
+from .data_access import directory_access, PanelStorageBusy
 from .config import (
     load_config,
     get_panel_timezone,
@@ -409,6 +410,8 @@ def _reload_scheduler_locked():
     print(f"[Scheduler] 开始重载 time={now_str()}")
     try:
         tasks = load_tasks()
+    except PanelStorageBusy:
+        raise
     except Exception as exc:
         error = f"任务文件读取失败，未更改现有调度：{exc}"
         try:
@@ -463,7 +466,7 @@ def _reload_scheduler_locked():
 def reload_scheduler():
     global SCHEDULER_RELOAD_ACTIVE
     # Task writes also reload while holding this lock; use the same lock order.
-    with TASKS_MUTATION_LOCK, SCHEDULER_RELOAD_LOCK:
+    with TASKS_MUTATION_LOCK, SCHEDULER_RELOAD_LOCK, directory_access(write=True):
         SCHEDULER_RELOAD_ACTIVE = True
         try:
             return _reload_scheduler_locked()
