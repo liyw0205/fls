@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 from flask import current_app, jsonify, request
 
 from .bp import bp
+from ...data_access import PanelStorageBusy
 from ...config import DEFAULT_CONFIG, THEME_OPTIONS, normalize_config_data, save_config
 from ...models import TASKS_MUTATION_LOCK
 from ...native_sessions import clear_native_session_cookie, delete_all_native_sessions
@@ -333,6 +334,8 @@ def native_config_settings():
     try:
         cfg, _revision = _config_snapshot()
         return _response(_settings_payload(cfg, reveal_source=reveal == "1"))
+    except PanelStorageBusy:
+        raise
     except Exception:
         return _error("配置读取失败", 500)
 
@@ -417,6 +420,8 @@ def native_config_save():
         return result, status
     except (ValueError, TypeError, KeyError):
         return _error("配置字段无效，请检查类型和范围", 400, saved=False)
+    except PanelStorageBusy:
+        raise
     except Exception:
         return _error("配置保存结果无法确认，请查询原提交状态", 503, saved=None)
 
@@ -455,6 +460,8 @@ def native_config_request(request_id):
             if record is None:
                 return _response({"ok": True, "request_id": request_id, "state": "missing", "saved": None})
             return _response(_receipt_payload(_resolve_prepared_save(record)))
+    except PanelStorageBusy:
+        raise
     except Exception:
         return _error("提交回执损坏或无法确认", 503, request_id=request_id, state="unknown", saved=None)
 
@@ -496,5 +503,7 @@ def apply_json_config():
             return _response(payload)
     except (ValueError, TypeError, KeyError):
         return _error("应用请求字段无效", 400, saved=True)
+    except PanelStorageBusy:
+        raise
     except Exception:
         return _error("配置应用结果无法确认，请查询原提交状态", 503, saved=None)

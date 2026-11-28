@@ -6,6 +6,7 @@ from urllib.parse import urlsplit
 from flask import current_app, jsonify, request
 
 from .bp import bp
+from ...data_access import PanelStorageBusy
 from ... import models
 from ...models import PROXY_TYPES, TASKS_MUTATION_LOCK, load_proxies, load_tasks
 from ...proxy_actions import mutate_proxy, proxy_references, proxy_version, read_proxy_receipt
@@ -91,6 +92,8 @@ def native_proxy_settings():
                               "page": page, "pages": pages, "total": total, "types": list(PROXY_TYPES)})
     except (ValueError, TypeError):
         return _error("代理搜索或分页参数无效")
+    except PanelStorageBusy:
+        raise
     except Exception:
         return _error("代理列表读取失败", 503)
 
@@ -111,6 +114,8 @@ def native_proxy_detail(proxy_id):
             return _response({"ok": True, "proxy": payload})
     except (ValueError, TypeError):
         return _error("代理参数无效")
+    except PanelStorageBusy:
+        raise
     except Exception:
         return _error("代理详情读取失败", 503)
 
@@ -150,6 +155,8 @@ def native_proxy_mutate():
         if "references" in payload:
             safe.update(references=_references(payload["references"]), reference_count=len(payload["references"]))
         return _response(safe, status)
+    except PanelStorageBusy:
+        raise
     except Exception:
         return _error("代理保存结果尚未确认，请查询原提交", 503, saved=None, resolved=False)
 
@@ -183,5 +190,7 @@ def native_proxy_request(request_id):
                               "resolved": saved is not None, "historical": saved is True,
                               "current_matches": matches, "retry_allowed": saved is False,
                               "confirm_required": saved is False and record["state"] == "prepared"})
+    except PanelStorageBusy:
+        raise
     except Exception:
         return _error("代理回执或存储无法读取，请修复后重新查询", 503, saved=None, resolved=False, state="unknown")

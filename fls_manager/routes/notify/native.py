@@ -4,6 +4,7 @@ import re
 from flask import current_app, request
 
 from .bp import bp
+from ...data_access import PanelStorageBusy
 from ... import config
 from ...models import TASKS_MUTATION_LOCK, load_tasks
 from ...notify import NOTIFY_CHANNELS, NOTIFY_LOG_MODES
@@ -88,6 +89,8 @@ def native_notify_list():
                              "total": total, "pages": pages, "page": page})
     except (ValueError, TypeError):
         return error("通知筛选或分页参数无效")
+    except PanelStorageBusy:
+        raise
     except Exception:
         return error("通知列表读取失败", 503)
 
@@ -104,6 +107,8 @@ def native_notify_defaults():
             return response({"ok": True, "default_ids": ids, "version": notification_version(cfg)})
     except ValueError:
         return error("默认通知参数无效")
+    except PanelStorageBusy:
+        raise
     except Exception:
         return error("默认通知读取失败", 503)
 
@@ -120,6 +125,8 @@ def native_notify_detail(item_id):
             return response({"ok": True, "item": item_payload(cfg, item, load_tasks(), detail=True)})
     except ValueError:
         return error("通知详情参数无效")
+    except PanelStorageBusy:
+        raise
     except Exception:
         return error("通知详情读取失败", 503)
 
@@ -160,6 +167,8 @@ def native_notify_save():
             safe.update(reference_count=len(payload["references"]), references=[
                 {"id": row["id"], "name": str(row["name"])[:200]} for row in payload["references"][:50]])
         return response(safe, status)
+    except PanelStorageBusy:
+        raise
     except Exception:
         return error("通知保存结果未知，请查询原提交", 503, saved=None, resolved=False)
 
@@ -187,5 +196,7 @@ def native_notify_receipt(request_id):
                              "state": state, "saved": saved, "resolved": saved is not None,
                              "current_matches": matches, "historical": saved is True,
                              "retry_allowed": saved is False, "confirm_required": saved is False and record["state"] == "prepared"})
+    except PanelStorageBusy:
+        raise
     except Exception:
         return error("通知回执或配置无法读取，请修复后查询", 503, saved=None, resolved=False, state="unknown")

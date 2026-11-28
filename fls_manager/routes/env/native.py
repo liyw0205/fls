@@ -4,6 +4,7 @@ import re
 from flask import jsonify, request
 
 from .bp import bp
+from ...data_access import PanelStorageBusy
 from ...global_env import env_version, mutate_global_env, validate_variable
 from ...models import TASKS_MUTATION_LOCK, load_global_env, save_global_env, load_tasks
 from ...paths import DATA_DIR
@@ -54,6 +55,8 @@ def native_env_variables():
             return paged(items, page, limit, env_version(env))
     except (ValueError, TypeError):
         return error("变量搜索或分页参数无效")
+    except PanelStorageBusy:
+        raise
     except Exception:
         return error("变量列表读取失败", 500)
 
@@ -76,6 +79,8 @@ def native_env_variable(key):
             return response(payload)
     except (ValueError, TypeError):
         return error("变量参数无效")
+    except PanelStorageBusy:
+        raise
     except Exception:
         return error("变量读取失败", 500)
 
@@ -91,6 +96,8 @@ def native_env_snapshot():
             if len(text.encode("utf-8")) > MAX_BYTES:
                 return error("变量文本超过 1 MiB 编辑限制", 413)
             return response({"ok": True, "env_text": text, "version": env_version(env)})
+    except PanelStorageBusy:
+        raise
     except Exception:
         return error("变量文本读取失败", 500)
 
@@ -113,6 +120,8 @@ def native_env_task_sources():
             return paged(items, page, limit, env_version(env))
     except (ValueError, TypeError):
         return error("任务变量搜索或分页参数无效")
+    except PanelStorageBusy:
+        raise
     except Exception:
         return error("任务变量读取失败", 500)
 
@@ -192,5 +201,7 @@ def native_env_request(request_id):
                              "state": "completed" if saved else "pending" if saved is False else "unknown",
                              "changed_count": record.get("changed_count", 0),
                              "skipped_count": record.get("skipped_count", 0)})
+    except PanelStorageBusy:
+        raise
     except Exception:
         return error("提交结果无法确认，请核对当前变量", 503)
