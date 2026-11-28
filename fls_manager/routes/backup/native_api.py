@@ -2721,7 +2721,9 @@ def _execute_orphan_dependency_cleanup(app, request_id, entry, intent):
                 RESTORE_DEPENDENCY_CLEANING.discard(request_id)
                 if entry.get("lease_fd") is not None:
                     try:
-                        _mark_restore_lease(entry["lease_fd"], request_id, "dependency-cleanup", operation_id)
+                        watcher = entry.get("watcher")
+                        kind = "dependency-cleanup" if watcher is not None and watcher.is_alive() else "dependency-cleanup-starting"
+                        _mark_restore_lease(entry["lease_fd"], request_id, kind, operation_id)
                         entry.pop("lease_mark_pending", None)
                     except (OSError, RuntimeError):
                         entry["lease_mark_pending"] = True

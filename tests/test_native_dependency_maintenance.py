@@ -213,6 +213,44 @@ class DependencyMaintenanceTests(unittest.TestCase):
                     api._release_process_lease(entry.get("lease_fd"))
                     entry["lease_fd"] = None
 
+    def test_failed_cleanup_blocks_confirmation_until_watcher_handoff_is_ready(self):
+        with isolated_app() as (app, base):
+            from fls_manager.routes.backup import dependency_maintenance as maintenance, native_api as api
+
+            helper, client, headers, _, workspace, _ = self.idle_orphan(app, base)
+            path = self.item(helper)
+            item = client.get(path, headers=headers).json["dependency"]
+            with patch.object(threading.Thread, "start", autospec=True):
+                accepted = client.post(path + "/cleanup", json={"confirm": True, "version": item["version"]}, headers=headers)
+            self.assertEqual(accepted.status_code, 202, accepted.json)
+            entry = api.RESTORE_DEPENDENCY_CLEANUP[helper.request_id]
+            intent = maintenance.read(base, helper.request_id, helper.operation_id)
+            try:
+                with patch.object(api, "_cleanup_dependency_resources", side_effect=OSError("resource temporarily busy")):
+                    self.assertFalse(api._execute_orphan_dependency_cleanup(app, helper.request_id, entry, intent))
+                current = client.get(path, headers=headers).json["dependency"]
+                self.assertEqual(current["state"], "cleanup_failed")
+                self.assertTrue(workspace.is_dir())
+                self.assertFalse(current["cleanup_allowed"])
+                denied = client.post(path + "/cleanup", json={"confirm": True, "version": current["version"]}, headers=headers)
+                self.assertEqual(denied.status_code, 409, denied.json)
+                self.assertEqual(maintenance.read(base, helper.request_id, helper.operation_id)["attempt_id"], intent["attempt_id"])
+                api._start_dependency_cleanup_owner(app, helper.request_id, entry)
+                helper.wait_for(lambda: client.get(path, headers=headers).json["dependency"]["cleanup_allowed"], "watcher never became ready")
+                current = client.get(path, headers=headers).json["dependency"]
+                retried = client.post(path + "/cleanup", json={"confirm": True, "version": current["version"]}, headers=headers)
+                self.assertEqual(retried.status_code, 202, retried.json)
+                self.wait_finalized(helper, client, path, headers)
+                helper.assert_available(api)
+            finally:
+                with api.RESTORE_LOCK:
+                    api.RESTORE_DEPENDENCY_CLEANUP.pop(helper.request_id, None)
+                    api._release_process_lease(entry.get("lease_fd"))
+                    entry["lease_fd"] = None
+                watcher = entry.get("watcher")
+                if watcher is not None and watcher.is_alive():
+                    watcher.join(timeout=5)
+
     def test_durable_resource_publication_failure_requires_new_confirmation_without_get_cleanup(self):
         for after_replace in (False, True):
             with self.subTest(after_replace=after_replace), isolated_app() as (app, base):
@@ -233,7 +271,11 @@ class DependencyMaintenanceTests(unittest.TestCase):
                     item = client.get(path, headers=headers).json["dependency"]
                     response = client.post(path + "/cleanup", json={"confirm": True, "version": item["version"]}, headers=headers)
                     self.assertEqual(response.status_code, 202, response.json)
-                    helper.wait_for(lambda: client.get(path, headers=headers).json["dependency"]["state"] == "cleanup_failed", "publication failure was not retained")
+                    def ready():
+                        current = client.get(path, headers=headers).json["dependency"]
+                        return current["state"] == "cleanup_failed" and current["cleanup_allowed"]
+
+                    helper.wait_for(ready, "publication failure was not retained or owner not ready")
                 self.assertFalse(workspace.exists())
                 original = api._native_restore_path(helper.request_id)
                 self.assertEqual(original.read_bytes(), b"{damaged original")
